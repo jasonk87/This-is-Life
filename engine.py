@@ -6,11 +6,14 @@ import tcod.noise
 import requests # Import requests
 import time # Import time for NPC speech timing
 from entities.base import NPC
-from entities.tree import Tree, OakTree, AppleTree, PearTree
+from entities.tree import Tree, OakTree, AppleTree, PearTree # Tree classes seem partially defined/used.
 from config import (
     WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
     NOISE_SCALE, NOISE_OCTAVES, NOISE_PERSISTENCE, NOISE_LACUNARITY,
     ELEVATION_DEEP_WATER, ELEVATION_WATER, ELEVATION_MOUNTAIN, ELEVATION_SNOW,
+    # NPC Scheduling Configs
+    USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
+    WORK_START_TIME_RATIO, WORK_END_TIME_RATIO,
 )
 from data.tiles import TILE_DEFINITIONS, COLORS
 from tile_types import Tile
@@ -19,6 +22,7 @@ from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
 
 import json # Import json for parsing LLM responses
+import uuid # For unique building IDs
 
 class WorldGenerator:
     """Handles the procedural generation of the world's macro-structure."""
@@ -59,13 +63,20 @@ class WorldGenerator:
         return None
 
 class Building:
-    def __init__(self, x, y, width, height, building_type="house"):
-        self.x = x
-        self.y = y
+    def __init__(self, x, y, width, height, building_type="house", category="residential", global_chunk_x_start=0, global_chunk_y_start=0):
+        self.id = str(uuid.uuid4()) # Unique ID for the building
+        self.x = x # Local x within chunk
+        self.y = y # Local y within chunk
         self.width = width
         self.height = height
         self.building_type = building_type
+        self.category = category # "residential", "commercial", "industrial", "civic", etc.
         self.interior_decorated = False # Flag for LLM decoration
+        self.occupants = [] # List of NPC objects that live/work here
+
+        # Global coordinates of the building's center
+        self.global_center_x = global_chunk_x_start + x + width // 2
+        self.global_center_y = global_chunk_y_start + y + height // 2
 
 class Village:
     def __init__(self):
@@ -108,13 +119,278 @@ class World:
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height)
         self.chunks = self._initialize_chunks()
-        self.npcs = [] # Initialize NPCs list
+        self.npcs = [] # Initialize NPCs list for general non-village NPCs (currently unused)
         self._find_starting_position()
-        self._populate_npcs()
+        # self._populate_npcs() # Commented out for now to focus on village NPCs
         self.village_npcs = [] # To store NPCs specific to villages
+        self.buildings_by_id = {} # For quick lookup of buildings by ID
         self.mouse_x = 0
         self.mouse_y = 0
         self.game_state = "PLAYING" # Initial game state
+        self.game_time = 0 # Simple game time counter
+
+    def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
+        """
+        Callback for tcod.path.AStar.
+        Returns movement cost from (old_x, old_y) to (new_x, new_y).
+        """
+        if not (0 <= new_x < WORLD_WIDTH and 0 <= new_y < WORLD_HEIGHT):
+            return 0  # Impassable (out of bounds)
+
+        tile = self.get_tile_at(new_x, new_y)
+        if not tile or not tile.passable:
+            return 0  # Impassable
+
+        # Diagonal movement cost can be higher if desired, e.g., sqrt(2) or 1.414
+        # For simplicity, we'll use 1 for cardinal and diagonal.
+        # tcod's AStar handles cardinal/diagonal based on graph/diagnal params.
+        return 1
+
+
+    def calculate_path(self, start_x: int, start_y: int, end_x: int, end_y: int) -> list[tuple[int, int]]:
+        """
+        Calculates a path from (start_x, start_y) to (end_x, end_y) using A*.
+        Returns a list of (x, y) tuples, or an empty list if no path is found.
+        The path includes the start point and end point.
+        """
+        # Ensure start and end are within bounds and passable (optional check, A* might handle it)
+        start_tile = self.get_tile_at(start_x, start_y)
+        end_tile = self.get_tile_at(end_x, end_y)
+
+        if not (start_tile and start_tile.passable):
+            # self.add_message_to_chat_log(f"Pathfinding: Start tile {start_x},{start_y} is not passable.")
+            return []
+        if not (end_tile and end_tile.passable):
+            # self.add_message_to_chat_log(f"Pathfinding: End tile {end_x},{end_y} is not passable.")
+            # Allow pathfinding to an impassable tile, character will stop before it.
+            pass
+
+
+        # Initialize AStar with the world dimensions and cost callback
+        # The tcod.path.CustomGraph is not strictly needed if using the simple cost callback with AStar directly
+        # for a grid, but it's good practice if more complex graph structures arise.
+        # For now, we can directly use the AStar with `cost` and `diagonal` parameters.
+
+        # Create a numpy array for pathfinding compatible with tcod.path functions
+        # Cost array: 0 for wall, 1 for floor.
+        cost = np.ones((WORLD_HEIGHT, WORLD_WIDTH), dtype=np.int8)
+        for y in range(WORLD_HEIGHT):
+            for x in range(WORLD_WIDTH):
+                tile = self.get_tile_at(x,y) # This will generate chunk if not generated.
+                if not tile or not tile.passable:
+                    cost[y,x] = 0 # Mark as wall/impassable for pathfinder
+
+        astar = tcod.path.AStar(cost=cost, diagonal=1.41) # Allow diagonal movement with cost sqrt(2)
+
+        try:
+            path_indices = astar.get_path(start_x, start_y, end_x, end_y)
+            # Convert list of [y,x] numpy arrays to list of (x,y) tuples
+            path_coords = [(int(p[1]), int(p[0])) for p in path_indices]
+            return path_coords
+        except IndexError: # tcod can raise this if start/end are identical or other issues
+            # self.add_message_to_chat_log(f"Pathfinding error or no path from ({start_x},{start_y}) to ({end_x},{end_y})")
+            return []
+
+    def _update_npc_movement(self):
+        """Updates the position of NPCs based on their current path."""
+        for npc in self.village_npcs: # Later might include self.npcs if they also use this system
+            if npc.current_path:
+                if not npc.current_destination_coords: # Should not happen if path exists
+                    npc.current_path = []
+                    continue
+
+                # Path includes the starting point, so if len > 1, there's a next step.
+                # If len == 1, it means current_path[0] is the destination itself.
+                if len(npc.current_path) > 1:
+                    next_x, next_y = npc.current_path[1] # Target the next step, not current
+
+                    # Check if the next step is passable (important if environment changes or path was to an impassable tile)
+                    # For now, assume path generated is valid. More checks can be added.
+                    # tile = self.get_tile_at(next_x, next_y)
+                    # if tile and tile.passable: # Or if it's the final destination itself.
+
+                    npc.x = next_x
+                    npc.y = next_y
+                    npc.current_path.pop(0) # Remove the point they were just on (original current_path[0])
+                                            # Effectively making current_path[1] the new current_path[0]
+
+                    # If only the destination remains in the path after moving
+                    if len(npc.current_path) == 1 and (npc.x, npc.y) == npc.current_destination_coords:
+                        # self.add_message_to_chat_log(f"{npc.name} reached destination {npc.current_destination_coords} for task {npc.current_task}")
+                        npc.current_path = []
+                        npc.current_destination_coords = None
+                        # Task update will be handled by the scheduler when it sees destination is reached.
+                        if npc.current_task == "going to work":
+                            npc.current_task = "at work"
+                        elif npc.current_task == "going home":
+                            npc.current_task = "at home"
+                        else:
+                            npc.current_task = "idle" # Or some other default task
+
+                elif len(npc.current_path) == 1 and (npc.x, npc.y) == npc.current_path[0] and (npc.x, npc.y) == npc.current_destination_coords :
+                    # Already at destination, path might have been just the destination itself.
+                    # self.add_message_to_chat_log(f"{npc.name} is already at destination {npc.current_destination_coords} for task {npc.current_task}")
+                    npc.current_path = []
+                    npc.current_destination_coords = None
+                    if npc.current_task == "going to work":
+                        npc.current_task = "at work"
+                    elif npc.current_task == "going home":
+                        npc.current_task = "at home"
+                    else:
+                        npc.current_task = "idle"
+
+                # Safety break if path somehow doesn't lead to destination
+                if not npc.current_path and (npc.x, npc.y) != npc.current_destination_coords and npc.current_destination_coords is not None:
+                    # self.add_message_to_chat_log(f"Warning: {npc.name} path ended but not at destination {npc.current_destination_coords}. At {(npc.x, npc.y)}")
+                    npc.current_destination_coords = None # Clear destination to avoid re-pathing to same failed spot immediately
+                    npc.current_task = "idle_confused" # Or some error state
+
+    def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
+        """Gets a building's global center coordinates using the buildings_by_id lookup."""
+        building = self.buildings_by_id.get(building_id)
+        if building:
+            return building.global_center_x, building.global_center_y
+        return None
+
+    def _get_time_of_day_str(self, game_time_tick: int, day_length: int) -> str:
+        """Converts a game tick to a descriptive time of day string."""
+        time_ratio = (game_time_tick % day_length) / day_length
+        if 0 <= time_ratio < 0.1: return "Dead of Night"
+        if 0.1 <= time_ratio < 0.25: return "Early Morning"
+        if 0.25 <= time_ratio < 0.45: return "Morning"
+        if 0.45 <= time_ratio < 0.60: return "Midday"
+        if 0.60 <= time_ratio < 0.75: return "Afternoon"
+        if 0.75 <= time_ratio < 0.90: return "Evening"
+        return "Night"
+
+    def _update_npc_schedules(self):
+        """Periodically updates NPC tasks based on game time and current state."""
+
+        # Using config values now
+        # Process NPCs that are due for a schedule update
+        for npc in self.village_npcs:
+            if self.game_time - npc.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
+                continue
+
+            npc.game_time_last_updated = self.game_time
+
+            if npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
+                current_time_in_day = self.game_time % DAY_LENGTH_TICKS
+                time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
+
+                new_task_label = None
+                llm_chosen_goal = None # e.g. "Go to work"
+                destination_coords = None
+
+                # --- Determine NPC's location status ---
+                is_at_home = False
+                if npc.home_building_id:
+                    home_coords = self._get_building_global_center_coords(npc.home_building_id)
+                    if home_coords and (npc.x, npc.y) == home_coords:
+                        is_at_home = True
+
+                is_at_work = False
+                job_type = "Unemployed"
+                if npc.work_building_id:
+                    work_building = self.buildings_by_id.get(npc.work_building_id)
+                    if work_building:
+                        job_type = work_building.building_type # Or a more specific job role if defined
+                        work_coords = (work_building.global_center_x, work_building.global_center_y)
+                        if work_coords and (npc.x, npc.y) == work_coords:
+                            is_at_work = True
+
+                # --- LLM-driven Goal Selection ---
+                if USE_LLM_FOR_SCHEDULES:
+                    prompt = LLM_PROMPTS["npc_daily_goal"].format(
+                        npc_name=npc.name,
+                        npc_personality=npc.personality,
+                        npc_current_task=npc.current_task,
+                        is_at_home=is_at_home,
+                        is_at_work=is_at_work,
+                        has_job=bool(npc.work_building_id),
+                        job_type=job_type,
+                        time_of_day_str=time_of_day_str
+                    )
+                    response_str = self._call_ollama(prompt)
+                    if response_str:
+                        try:
+                            response_json = json.loads(response_str)
+                            llm_chosen_goal = response_json.get("goal")
+                            # self.add_message_to_chat_log(f"LLM choice for {npc.name}: {llm_chosen_goal}")
+                        except json.JSONDecodeError:
+                            # self.add_message_to_chat_log(f"LLM schedule for {npc.name} - JSON decode error: {response_str}")
+                            llm_chosen_goal = "Stay put" # Fallback
+                    else:
+                        # self.add_message_to_chat_log(f"LLM schedule for {npc.name} - No response, defaulting to Stay put.")
+                        llm_chosen_goal = "Stay put" # Fallback if LLM fails
+
+                    # Map LLM goal to tasks and destinations
+                    if llm_chosen_goal == "Go to work" and npc.work_building_id and not is_at_work:
+                        dest_coords_temp = self._get_building_global_center_coords(npc.work_building_id)
+                        if dest_coords_temp:
+                            new_task_label = "going to work"
+                            destination_coords = dest_coords_temp
+                    elif llm_chosen_goal == "Go home" and npc.home_building_id and not is_at_home:
+                        dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
+                        if dest_coords_temp:
+                            new_task_label = "going home"
+                            destination_coords = dest_coords_temp
+                    elif llm_chosen_goal == "Wander the village":
+                        # Pick a random passable point in the current chunk or nearby for simplicity
+                        # This needs a robust implementation: find current chunk, pick random point
+                        # For now, let's make them stay put if they choose to wander.
+                        npc.current_task = "wandering" # No movement, just state change
+                        # self.add_message_to_chat_log(f"{npc.name} is now wandering (staying put).")
+                    elif llm_chosen_goal == "Stay put":
+                        npc.current_task = "idle" if npc.current_task not in ["at home", "at work"] else npc.current_task
+                        # self.add_message_to_chat_log(f"{npc.name} is staying put.")
+                    # Add other goals like Socialize, Seek food later
+
+                # --- Rule-based Goal Selection (Fallback or if USE_LLM_FOR_SCHEDULES is False) ---
+                else:
+                    # Using WORK_START_TIME_RATIO and WORK_END_TIME_RATIO from config
+                    work_start_tick = DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
+                    work_end_tick = DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
+
+                    if work_start_tick <= current_time_in_day < work_end_tick:
+                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work":
+                            dest_coords_temp = self._get_building_global_center_coords(npc.work_building_id)
+                            if dest_coords_temp:
+                                new_task_label = "going to work"
+                                destination_coords = dest_coords_temp
+                    else: # Outside work hours
+                        if npc.home_building_id and not is_at_home and npc.current_task != "going home":
+                            dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
+                            if dest_coords_temp:
+                                new_task_label = "going home"
+                                destination_coords = dest_coords_temp
+
+                # --- Assign Path if new task and destination found ---
+                if new_task and destination_coords:
+                    # Ensure destination is pathable (or path to nearest passable)
+                    # For now, assume center of building is generally inside and thus pathable floor.
+                    # Or path to door if we define doors explicitly as entry points.
+
+                    # Check if NPC is already at the destination
+                    if (npc.x, npc.y) == destination_coords:
+                        # self.add_message_to_chat_log(f"{npc.name} is already at {new_task} destination.")
+                        if new_task == "going to work": npc.current_task = "at work"
+                        elif new_task == "going home": npc.current_task = "at home"
+                        else: npc.current_task = "idle"
+                    else:
+                        path = self.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = destination_coords
+                            npc.current_task = new_task
+                            # self.add_message_to_chat_log(f"{npc.name} starting path for task: {new_task} to {destination_coords}. Path length: {len(path)}")
+                        else:
+                            # self.add_message_to_chat_log(f"Could not find path for {npc.name} for task {new_task} to {destination_coords}")
+                            npc.current_task = "idle_confused" # Cannot find path
+
+            # Update game time tracker for NPC (not strictly needed for this simple scheduler)
+            npc.game_time_last_updated = self.game_time
+
 
     def add_message_to_chat_log(self, message: str):
         self.chat_log.append(message)
@@ -184,6 +460,78 @@ class World:
             except json.JSONDecodeError as e:
                 self.add_message_to_chat_log(f"Error parsing LLM response for NPC: {e}")
                 self.add_message_to_chat_log(f"LLM Response: {llm_response}")
+
+    def _populate_village_npcs(self, chunk: Chunk, village: Village, chunk_coord_x: int, chunk_coord_y: int): # Added chunk_coord_x, chunk_coord_y
+        """Populates a village with NPCs, assigning them homes and potentially jobs."""
+        # chunk_global_start_x and chunk_global_start_y are now implicitly handled by Building.global_center_x/y
+        # No longer need to calculate chunk_global_start_x/y here from chunk_coord_x/y for NPC placement if using building centers.
+
+        num_npcs = random.randint(max(1, len(village.buildings) // 2), len(village.buildings))
+        if not village.buildings:
+            num_npcs = 0
+
+        residential_buildings = [b for b in village.buildings if b.category == "residential"]
+        workplace_buildings = [b for b in village.buildings if "workplace" in b.category] # e.g., "civic_workplace", "commercial_workplace"
+
+        available_homes = list(residential_buildings)
+        available_workplaces = list(workplace_buildings)
+        random.shuffle(available_homes)
+        random.shuffle(available_workplaces)
+
+        for i in range(num_npcs):
+            prompt = LLM_PROMPTS["npc_personality"] # Consider adding village context to prompt later
+            llm_response = self._call_ollama(prompt)
+            try:
+                npc_data = json.loads(llm_response)
+
+                # Assign home
+                if not available_homes:
+                    # self.add_message_to_chat_log("Warning: No available homes for new NPC.")
+                    # Create NPC without a home, or handle differently
+                    home_building = None
+                else:
+                    home_building = available_homes.pop(0)
+                    # Place NPC at the global center of their home building
+                    npc_x = home_building.global_center_x
+                    npc_y = home_building.global_center_y
+
+                    # Ensure NPC is within world bounds (still good practice)
+                    npc_x = max(0, min(WORLD_WIDTH - 1, npc_x))
+                    npc_y = max(0, min(WORLD_HEIGHT - 1, npc_y))
+                else:
+                    self.add_message_to_chat_log(f"Skipping NPC generation for {npc_data.get('name', 'Unknown')} due to no available home.")
+                    continue
+
+                # Assign workplace (optional)
+                work_building = None
+                if available_workplaces and random.random() < 0.7: # 70% chance to get a job if available
+                    work_building = available_workplaces.pop(0) # Assign and remove
+
+                npc = NPC(
+                    x=npc_x,
+                    y=npc_y,
+                    name=npc_data.get("name", f"Villager {i+1}"),
+                    dialogue=npc_data.get("dialogue", ["Greetings."]),
+                    personality=npc_data.get("personality", "commoner"),
+                    family_ties=npc_data.get("family_ties", "none"),
+                    attitude_to_player=npc_data.get("attitude_to_player", "neutral")
+                )
+                if home_building:
+                    npc.home_building_id = home_building.id
+                    home_building.occupants.append(npc) # Store NPC object, or ID if preferred
+                if work_building:
+                    npc.work_building_id = work_building.id
+                    work_building.occupants.append(npc)
+
+                self.village_npcs.append(npc) # Add to the world's list of village NPCs
+                self.add_message_to_chat_log(f"Generated Villager: {npc.name} in {village}. Home: {home_building.building_type if home_building else 'None'}. Work: {work_building.building_type if work_building else 'None'}")
+
+            except json.JSONDecodeError as e:
+                self.add_message_to_chat_log(f"Error parsing LLM response for Villager NPC: {e}")
+                self.add_message_to_chat_log(f"LLM Response: {llm_response}")
+            except IndexError: # Ran out of homes or workplaces
+                self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
+
 
     def _handle_npc_speech(self):
         current_time = time.time()
@@ -329,7 +677,7 @@ class World:
                         return
         print("Warning: No passable starting tile found. Player may be stuck.")
 
-    def _generate_chunk_detail(self, chunk: Chunk):
+    def _generate_chunk_detail(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the detailed tiles for a chunk based on its biome and POI."""
         if chunk.is_generated: return
 
@@ -338,12 +686,12 @@ class World:
             # Generate village lore
             prompt = LLM_PROMPTS["village_lore"]
             lore_response = self._call_ollama(prompt)
-            print(f"Village Lore: {lore_response}")
+            # print(f"Village Lore: {lore_response}") # Can be noisy
             # You might want to store this lore in the chunk.village object
             # chunk.village.lore = lore_response
             
             
-            tiles = self._generate_village_layout(chunk)
+            tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
         else:
             # Generate the base biome tiles
             tiles = [[Tile(TILE_DEFINITIONS[chunk.biome]["char"], TILE_DEFINITIONS[chunk.biome]["color"], TILE_DEFINITIONS[chunk.biome]["passable"], TILE_DEFINITIONS[chunk.biome]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
@@ -361,21 +709,22 @@ class World:
         chunk.tiles = tiles
         chunk.is_generated = True
 
-    def _generate_trees(self, tiles):
+    def _generate_trees(self, tiles): # This function seems unused after recent changes, consider removing or integrating.
         for y_local in range(CHUNK_SIZE):
             for x_local in range(CHUNK_SIZE):
                 if random.random() < 0.02: # 2% chance for a tree
                     tree_type = random.choice(["oak", "apple", "pear"])
-                    if tree_type == "oak":
-                        tree = OakTree(x_local, y_local)
-                    elif tree_type == "apple":
-                        tree = AppleTree(x_local, y_local)
-                    else:
-                        tree = PearTree(x_local, y_local)
-                    tiles[y_local][x_local] = tree
+                    # Tree classes like OakTree are not fully defined in provided snippets, assuming they exist or are simple.
+                    # For now, this part might not function as expected without full Tree entity definitions.
+                    # Placeholder:
+                    # tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tree"]["char"], ...) # Assuming a generic tree tile
+                    pass # Pass for now as Tree entities are not the focus
 
-    def _generate_village_layout(self, chunk: Chunk):
+    def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+
+        chunk_global_start_x = chunk_coord_x * CHUNK_SIZE
+        chunk_global_start_y = chunk_coord_y * CHUNK_SIZE
 
         # Generate a more structured road network
         # Main road down the middle
@@ -394,26 +743,35 @@ class World:
 
         # Generate Capital Hall
         capital_hall_w, capital_hall_h = 9, 7
-        capital_hall_x = road_x - capital_hall_w - 2 # To the left of the main road
+        capital_hall_x = road_x - capital_hall_w - 2
         capital_hall_y = road_y - capital_hall_h // 2
-        capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h, "capital_hall")
+        capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h,
+                                building_type="capital_hall", category="civic",
+                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(capital_hall)
+        self.buildings_by_id[capital_hall.id] = capital_hall
         self._draw_building(tiles, capital_hall, "capital_hall_wall")
 
         # Generate Jail
         jail_w, jail_h = 7, 5
-        jail_x = road_x + 2 # To the right of the main road
+        jail_x = road_x + 2
         jail_y = road_y - jail_h // 2
-        jail = Building(jail_x, jail_y, jail_w, jail_h, "jail")
+        jail = Building(jail_x, jail_y, jail_w, jail_h,
+                        building_type="jail", category="civic",
+                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(jail)
+        self.buildings_by_id[jail.id] = jail
         self._draw_building(tiles, jail, "jail_bars")
 
         # Generate Sheriff's Office
         sheriff_office_w, sheriff_office_h = 7, 5
-        sheriff_office_x = road_x + 2 # To the right of the main road, below jail
+        sheriff_office_x = road_x + 2
         sheriff_office_y = jail_y + jail_h + 2
-        sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h, "sheriff_office")
+        sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h,
+                                  building_type="sheriff_office", category="civic_workplace",
+                                  global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(sheriff_office)
+        self.buildings_by_id[sheriff_office.id] = sheriff_office
         self._draw_building(tiles, sheriff_office, "sheriff_office_wall")
 
         # Generate a few regular houses
@@ -424,33 +782,27 @@ class World:
             while attempts < 100:
                 bx = random.randint(1, CHUNK_SIZE - w - 1)
                 by = random.randint(1, CHUNK_SIZE - h - 1)
-
-                # Avoid placing on roads or existing buildings
                 overlap = False
                 for i in range(h):
                     for j in range(w):
                         if tiles[by + i][bx + j].char == TILE_DEFINITIONS["road"]["char"]:
-                            overlap = True
-                            break
+                            overlap = True; break
                     if overlap: break
-                
                 for existing_building in chunk.village.buildings:
-                    if not (bx + w < existing_building.x or bx > existing_building.x + existing_building.width or 
+                    if not (bx + w < existing_building.x or bx > existing_building.x + existing_building.width or
                             by + h < existing_building.y or by > existing_building.y + existing_building.height):
-                        overlap = True
-                        break
-                
-                if not overlap:
-                    break
+                        overlap = True; break
+                if not overlap: break
                 attempts += 1
-            
-            if attempts == 100:
-                continue
+            if attempts == 100: continue
 
-            house = Building(bx, by, w, h, "house")
+            house = Building(bx, by, w, h, building_type="house", category="residential",
+                             global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
             chunk.village.add_building(house)
+            self.buildings_by_id[house.id] = house
             self._draw_building(tiles, house, "wood_wall")
 
+        self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         return tiles
 
     def _draw_building(self, tiles, building, wall_tile_key):
@@ -484,7 +836,7 @@ class World:
 
         chunk = self.chunks[chunk_y][chunk_x]
         if not chunk.is_generated:
-            self._generate_chunk_detail(chunk)
+            self._generate_chunk_detail(chunk, chunk_x, chunk_y) # Pass chunk_x, chunk_y
         return chunk.tiles[local_y][local_x]
 
     def get_building_at(self, x, y):

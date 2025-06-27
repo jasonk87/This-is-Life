@@ -108,27 +108,90 @@ def draw_info_menu(main_console: tcod.console.Console, world) -> None:
         y=menu_y,
         width=menu_width,
         height=menu_height,
-        title="Inventory",
+        title="Info / Inspector", # Changed title
         clear=True,
-        fg=(255, 255, 0), # Yellow border
-        bg=(0, 0, 0) # Black background for the frame itself
+        fg=(255, 255, 0),
+        bg=(0, 0, 0)
     )
 
-    # Draw HP
-    ui_y = menu_y + 2
-    hp_text = f"HP: {world.player.hp} / {world.player.max_hp}"
-    main_console.print(x=menu_x + 2, y=ui_y, string=hp_text, fg=(255, 255, 255))
-    ui_y += 2
+    ui_y = menu_y + 2 # Starting y for content
 
-    # Draw Inventory
-    main_console.print(x=menu_x + 2, y=ui_y, string="Inventory:", fg=(255, 255, 255))
+    # --- Player Info ---
+    main_console.print(x=menu_x + 2, y=ui_y, string="--- Player ---", fg=(170,170,220))
     ui_y += 1
-
+    hp_text = f"HP: {world.player.hp} / {world.player.max_hp}"
+    main_console.print(x=menu_x + 3, y=ui_y, string=hp_text, fg=(255, 255, 255))
+    ui_y += 2
+    main_console.print(x=menu_x + 3, y=ui_y, string="Inventory:", fg=(255, 255, 255))
+    ui_y += 1
     if not world.player.inventory:
-        main_console.print(x=menu_x + 2, y=ui_y, string=" (Empty)", fg=(128, 128, 128))
+        main_console.print(x=menu_x + 4, y=ui_y, string="(Empty)", fg=(128, 128, 128))
+        ui_y += 1
     else:
         for item, quantity in world.player.inventory.items():
             item_name = ITEM_DEFINITIONS.get(item, {}).get("name", item)
             text = f" - {item_name}: {quantity}"
-            main_console.print(x=menu_x + 2, y=ui_y, string=text, fg=(255, 255, 255))
+            main_console.print(x=menu_x + 4, y=ui_y, string=text, fg=(255, 255, 255))
             ui_y += 1
+    ui_y += 1 # Spacer
+
+    # --- Cursor / NPC Info ---
+    main_console.print(x=menu_x + 2, y=ui_y, string="--- Cursor Target ---", fg=(170,170,220))
+    ui_y += 1
+
+    # Calculate world coordinates of the mouse cursor
+    # This needs the same start_x, start_y logic as in draw() if map is offset
+    # Assuming info_menu is full screen or mouse_x, mouse_y are screen coords
+    # For simplicity, let's assume world.mouse_x and world.mouse_y are already global world coords
+    # if they are tile coords from the event. If they are screen coords, conversion is needed.
+    # The main draw loop sets world.mouse_x/y to tile coordinates.
+    # However, those are screen tile coordinates. We need to map them to world coordinates.
+
+    # Re-calculate map offset to find true world coords of mouse
+    start_render_x = world.player.x - main_console.width // 2
+    start_render_y = world.player.y - main_console.height // 2
+    start_render_x = max(0, min(start_render_x, WORLD_WIDTH - main_console.width))
+    start_render_y = max(0, min(start_render_y, WORLD_HEIGHT - main_console.height))
+
+    cursor_world_x = start_render_x + world.mouse_x
+    cursor_world_y = start_render_y + world.mouse_y
+
+    cursor_world_x = max(0, min(cursor_world_x, WORLD_WIDTH - 1))
+    cursor_world_y = max(0, min(cursor_world_y, WORLD_HEIGHT - 1))
+
+    tile_at_cursor = world.get_tile_at(cursor_world_x, cursor_world_y)
+    tile_name = tile_at_cursor.name if tile_at_cursor else "Unknown"
+    main_console.print(x=menu_x + 3, y=ui_y, string=f"Tile: ({cursor_world_x},{cursor_world_y}) {tile_name}", fg=(200,200,200))
+    ui_y += 1
+
+    npc_at_cursor = None
+    for npc_list in [world.village_npcs, world.npcs]: # Check both lists
+        for npc_obj in npc_list:
+            if npc_obj.x == cursor_world_x and npc_obj.y == cursor_world_y:
+                npc_at_cursor = npc_obj
+                break
+        if npc_at_cursor: break
+
+    if npc_at_cursor:
+        main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
+        ui_y += 1
+        main_console.print(x=menu_x + 4, y=ui_y, string=f"Task: {npc_at_cursor.current_task}", fg=(200,200,200))
+        ui_y += 1
+        if npc_at_cursor.current_destination_coords:
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Dest: {npc_at_cursor.current_destination_coords}", fg=(200,200,200))
+            ui_y += 1
+        main_console.print(x=menu_x + 4, y=ui_y, string=f"Personality: {npc_at_cursor.personality}", fg=(200,200,200))
+        ui_y += 1
+        if npc_at_cursor.home_building_id:
+            home_b = world.buildings_by_id.get(npc_at_cursor.home_building_id)
+            home_type = home_b.building_type if home_b else "ID Unknown"
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Home: {home_type} ({npc_at_cursor.home_building_id[:6]}..)", fg=(200,200,200))
+            ui_y += 1
+        if npc_at_cursor.work_building_id:
+            work_b = world.buildings_by_id.get(npc_at_cursor.work_building_id)
+            work_type = work_b.building_type if work_b else "ID Unknown"
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Work: {work_type} ({npc_at_cursor.work_building_id[:6]}..)", fg=(200,200,200))
+            ui_y += 1
+    else:
+        main_console.print(x=menu_x + 3, y=ui_y, string="No NPC at cursor.", fg=(128,128,128))
+        ui_y +=1

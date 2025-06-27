@@ -11,5 +11,13 @@ class NPC:
         self.attitude_to_player = attitude_to_player
         self.last_speech_time = 0 # Timestamp of last speech
 
+        # --- New attributes for Phase 1 Plan ---
+        self.home_building_id = None
+        self.work_building_id = None
+        self.current_destination_coords = None  # (x, y) tuple
+        self.current_path = []  # List of (x, y) tuples
+        self.current_task = "idle"  # e.g., "idle", "going to work", "working", "going home"
+        self.game_time_last_updated = 0 # To track in-game time for scheduling
+
     def get_dialogue(self):
         return self.dialogue

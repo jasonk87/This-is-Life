@@ -9,4 +9,30 @@ LLM_PROMPTS = {
     "village_lore": "Generate a brief, atmospheric lore description for a fantasy village. Include its name, a unique characteristic, and a hint of its history or current struggles. Respond in a single paragraph.",
     "building_interior": "Generate a JSON object describing the interior decoration of a {building_type} of size {width}x{height}. Include items from the following list: {decoration_items}. For each item, specify its 'type', 'x' (relative to building origin), 'y' (relative to building origin). Ensure items do not overlap and fit within the {width}x{height} bounds. Example: {\"decorations\": [{\"type\": \"bed\", \"x\": 1, \"y\": 1}, {\"type\": \"table\", \"x\": 3, \"y\": 2}]}.",
     "npc_personality": "Generate a JSON object for a fantasy NPC. Include 'name', 'personality' (e.g., 'grumpy', 'jovial', 'shy'), 'family_ties' (e.g., 'married to John', 'orphan', 'sibling of Jane'), 'attitude_to_player' (e.g., 'friendly', 'suspicious', 'indifferent'), and 3-5 lines of 'dialogue' that reflect their personality and attitude. If a name_hint, personality_hint, family_ties_hint, or attitude_to_player_hint is provided, incorporate it into the generation. Example: {\"name\": \"Elara\", \"personality\": \"wise\", \"family_ties\": \"elder of the village\", \"attitude_to_player\": \"helpful\", \"dialogue\": [\"Welcome, traveler. May your path be clear.\", \"The ancient trees whisper secrets to those who listen.\"]}.",
+    "npc_daily_goal": """\
+You are an AI simulating the behavior of an NPC in a village.
+NPC Name: {npc_name}
+Personality: {npc_personality}
+Current Task/State: {npc_current_task}
+Current Location: Is the NPC at their home? {is_at_home}. Is the NPC at their workplace? {is_at_work}.
+Job: Does the NPC have a job? {has_job}. If so, what kind of job? (e.g., Sheriff, Blacksmith, Farmer, Unemployed) {job_type}.
+Time of Day: {time_of_day_str} (e.g., Early Morning, Morning, Midday, Afternoon, Evening, Night)
+Available Goals:
+1.  "Go to work" (If they have a job and are not there during work hours)
+2.  "Go home" (If it's late or they are done with work)
+3.  "Wander the village" (For leisure or if no specific task)
+4.  "Stay put" (If currently busy or content)
+5.  "Socialize" (If near other NPCs, future feature)
+6.  "Seek food/resources" (Future feature)
+
+Based on all this context, what is the MOST LIKELY high-level goal for {npc_name} right now?
+Respond with a JSON object containing the chosen goal, like: {"goal": "Chosen Goal"}
+Example: {"goal": "Go to work"}
+If the NPC should stay put or has no other pressing task, use "Stay put".
+If the NPC has a job and it's working hours, they should prioritize "Go to work" unless already there.
+If it's evening/night, they should prioritize "Go home" unless already there.
+Consider their personality: a lazy NPC might avoid work, a social one might wander more.
+---
+Chosen Goal JSON:
+""",
 }

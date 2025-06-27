@@ -21,3 +21,11 @@ ELEVATION_DEEP_WATER = 0.2
 ELEVATION_WATER = 0.35
 ELEVATION_MOUNTAIN = 0.8
 ELEVATION_SNOW = 0.9
+
+# --- NPC Scheduling Settings ---
+USE_LLM_FOR_SCHEDULES = True  # Set to False to use simple rule-based scheduler
+DAY_LENGTH_TICKS = 1500       # How many game ticks constitute a full day-night cycle
+NPC_SCHEDULE_UPDATE_INTERVAL = 50 # How often an NPC re-evaluates its schedule (in ticks)
+# Example time definitions within a day (as fraction of DAY_LENGTH_TICKS)
+WORK_START_TIME_RATIO = 0.25 # e.g., 25% into the day
+WORK_END_TIME_RATIO = 0.70   # e.g., 70% into the day

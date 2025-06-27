@@ -45,13 +45,22 @@ def main():
         vsync=True,
     ) as context:
         while True:
+            # --- Game Logic Updates ---
+            # Player actions are handled in event loop below
+            # NPC Updates
+            world.game_time += 1 # Increment game time
+            world._update_npc_schedules() # New: Update NPC schedules
+            world._update_npc_movement() # Update NPC movement
+            world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
+
             # --- Drawing ---
             draw(console, world)
-            # Handle NPC speech
-            world._handle_npc_speech()
             # Update the screen
             context.present(console)
+
             # --- Event Handling ---
+            # tcod.event.wait() will block until an event, which is fine for turn-based.
+            # If we want real-time, this structure needs to change.
             for event in tcod.event.wait():
                 context.convert_event(event)
                 if isinstance(event, tcod.event.Quit):

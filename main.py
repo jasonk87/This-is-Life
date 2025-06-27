@@ -96,6 +96,13 @@ def main():
                         elif event.sym == tcod.event.KeySym.J: # 'J' for Justice/Hero
                             world.player.adjust_reputation(REP_HERO, 10)
                             world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")
+                        elif event.sym == tcod.event.KeySym.E: # 'E' to interact / use / chop
+                            # Target tile player is facing
+                            target_x = world.player.x + world.player.last_dx
+                            target_y = world.player.y + world.player.last_dy
+                            # Attempt to chop if it's a tree
+                            # In future, this 'E' key could do other interactions based on target.
+                            world.player_attempt_chop_tree(target_x, target_y)
                     
                     if event.sym == tcod.event.KeySym.Q: # Quit
                         return

@@ -18,8 +18,10 @@ from config import (
     INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
     REP_CRIMINAL, REP_HERO,
 )
-from data.tiles import TILE_DEFINITIONS, COLORS
-from tile_types import Tile
+from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
+from tile_types import Tile # For Tile class
+from entities.tree import Tree # For isinstance check
+from data.items import ITEM_DEFINITIONS # For checking yielded resources
 from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
@@ -111,6 +113,8 @@ class Player:
             REP_CRIMINAL: INITIAL_CRIMINAL_POINTS,
             REP_HERO: INITIAL_HERO_POINTS,
         }
+        self.last_dx = 0 # For facing direction
+        self.last_dy = -1 # Default facing up
 
     def take_damage(self, amount: int):
         self.hp -= amount
@@ -407,6 +411,43 @@ class World:
 
             # Update game time tracker for NPC (not strictly needed for this simple scheduler)
             npc.game_time_last_updated = self.game_time
+
+    def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
+        """Handles the player's attempt to chop a tree at the given world coordinates."""
+        # Check if player has an axe
+        # For now, let's assume "axe_stone" is the only axe type.
+        # A more robust system would check for any item with property "tool_type": "axe".
+        if "axe_stone" not in self.player.inventory or self.player.inventory["axe_stone"] <= 0:
+            self.add_message_to_chat_log("You need an axe to chop trees.")
+            return
+
+        target_tile = self.get_tile_at(tree_x, tree_y)
+
+        if isinstance(target_tile, Tree) and target_tile.is_choppable:
+            yielded_resources = target_tile.chop() # This method also changes the tree's appearance/state
+
+            if yielded_resources:
+                self.add_message_to_chat_log(f"You chopped the {target_tile.original_name}!")
+                for resource_key, quantity in yielded_resources.items():
+                    if resource_key in ITEM_DEFINITIONS: # Only add defined items
+                        current_qty = self.player.inventory.get(resource_key, 0)
+                        self.player.inventory[resource_key] = current_qty + quantity
+                        self.add_message_to_chat_log(f"  + {quantity} {ITEM_DEFINITIONS[resource_key]['name']}")
+                    else:
+                        self.add_message_to_chat_log(f"  (Received undefined resource: {resource_key} x{quantity})")
+
+                # The tile itself (Tree object) has changed its char/color.
+                # No need to replace it in the self.chunks[...].tiles array if it's the same object.
+                # If chop() returned a new Stump Tile object, we would need to update the map:
+                # chunk_x, chunk_y = tree_x // CHUNK_SIZE, tree_y // CHUNK_SIZE
+                # local_x, local_y = tree_x % CHUNK_SIZE, tree_y % CHUNK_SIZE
+                # self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = new_stump_tile
+            else:
+                self.add_message_to_chat_log("Nothing was yielded from the tree.") # Should not happen if is_choppable was true
+        elif isinstance(target_tile, Tree) and not target_tile.is_choppable:
+            self.add_message_to_chat_log(f"This {target_tile.name} has already been chopped.")
+        else:
+            self.add_message_to_chat_log("There's nothing to chop there.")
 
 
     def add_message_to_chat_log(self, message: str):
@@ -898,6 +939,7 @@ class World:
 
         if destination_tile and destination_tile.passable:
             self.player.x, self.player.y = new_x, new_y
+            self.player.last_dx, self.player.last_dy = dx, dy # Store last move
 
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)

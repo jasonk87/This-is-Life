@@ -29,3 +29,16 @@ NPC_SCHEDULE_UPDATE_INTERVAL = 50 # How often an NPC re-evaluates its schedule (
 # Example time definitions within a day (as fraction of DAY_LENGTH_TICKS)
 WORK_START_TIME_RATIO = 0.25 # e.g., 25% into the day
 WORK_END_TIME_RATIO = 0.70   # e.g., 70% into the day
+
+# --- Reputation Settings ---
+# Initial values for player reputation
+INITIAL_CRIMINAL_POINTS = 0
+INITIAL_HERO_POINTS = 0
+
+# Define keys for reputation types for consistency
+REP_CRIMINAL = "criminal_points"
+REP_HERO = "hero_points"
+
+# Optional: Define ranges or thresholds, though enforcement is in game logic
+# REP_MIN_VALUE = -100
+# REP_MAX_VALUE = 100

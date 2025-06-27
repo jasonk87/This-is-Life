@@ -5,10 +5,13 @@ import tcod.event
 import tcod.tileset
 import os
 from engine import World
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
+from config import (
+    SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT,
+    REP_CRIMINAL, REP_HERO # Import reputation keys
+)
 from data.items import ITEM_DEFINITIONS
 from rendering.console_renderer import draw, draw_info_menu
-from rendering.console_renderer import draw, draw_info_menu
+
 
 def main():
     """Sets up the game and runs the main loop."""
@@ -82,11 +85,19 @@ def main():
                             world.use_item("healing_salve")
                         elif event.sym == tcod.event.KeySym.D:
                             world.player.take_damage(5)
+                            # world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}") # Better to use chat log
                             print(f"You took 5 damage! Current HP: {world.player.hp}")
                         elif event.sym == tcod.event.KeySym.T:
                             world.talk_to_npc()
+                        # --- Reputation Debug Keys ---
+                        elif event.sym == tcod.event.KeySym.K: # 'K' for Kriminal
+                            world.player.adjust_reputation(REP_CRIMINAL, 10)
+                            world.add_message_to_chat_log(f"Criminal points +10. Total: {world.player.reputation[REP_CRIMINAL]}")
+                        elif event.sym == tcod.event.KeySym.J: # 'J' for Justice/Hero
+                            world.player.adjust_reputation(REP_HERO, 10)
+                            world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")
                     
-                    if event.sym == tcod.event.KeySym.Q:
+                    if event.sym == tcod.event.KeySym.Q: # Quit
                         return
 
 if __name__ == "__main__":

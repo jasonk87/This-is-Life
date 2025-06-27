@@ -14,6 +14,9 @@ from config import (
     # NPC Scheduling Configs
     USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
     WORK_START_TIME_RATIO, WORK_END_TIME_RATIO,
+    # Reputation Configs
+    INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
+    REP_CRIMINAL, REP_HERO,
 )
 from data.tiles import TILE_DEFINITIONS, COLORS
 from tile_types import Tile
@@ -102,13 +105,28 @@ class Player:
         self.char = ord('@')
         self.color = COLORS["player_fg"]
         self.inventory = {}
-        self.max_hp = 30  # <-- ADD THIS
-        self.hp = self.max_hp # <-- ADD THIS
+        self.max_hp = 30
+        self.hp = self.max_hp
+        self.reputation = {
+            REP_CRIMINAL: INITIAL_CRIMINAL_POINTS,
+            REP_HERO: INITIAL_HERO_POINTS,
+        }
 
-    def take_damage(self, amount: int): # <-- ADD THIS METHOD
+    def take_damage(self, amount: int):
         self.hp -= amount
         if self.hp < 0:
             self.hp = 0
+
+    def adjust_reputation(self, rep_type: str, amount: int):
+        """Adjusts the player's reputation of a specific type."""
+        if rep_type in self.reputation:
+            self.reputation[rep_type] += amount
+            # Could add clamping here if REP_MIN/MAX_VALUE were used
+            # self.reputation[rep_type] = max(REP_MIN_VALUE, min(self.reputation[rep_type], REP_MAX_VALUE))
+            print(f"Player reputation updated: {rep_type} changed by {amount} to {self.reputation[rep_type]}") # For now, print to console
+        else:
+            print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+
 
 class World:
     """World class now uses a generator for a more complex map."""
@@ -119,15 +137,14 @@ class World:
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height)
         self.chunks = self._initialize_chunks()
-        self.npcs = [] # Initialize NPCs list for general non-village NPCs (currently unused)
+        self.npcs = []
         self._find_starting_position()
-        # self._populate_npcs() # Commented out for now to focus on village NPCs
-        self.village_npcs = [] # To store NPCs specific to villages
-        self.buildings_by_id = {} # For quick lookup of buildings by ID
+        self.village_npcs = []
+        self.buildings_by_id = {}
         self.mouse_x = 0
         self.mouse_y = 0
-        self.game_state = "PLAYING" # Initial game state
-        self.game_time = 0 # Simple game time counter
+        self.game_state = "PLAYING"
+        self.game_time = 0
 
     def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
         """
@@ -479,7 +496,14 @@ class World:
         random.shuffle(available_workplaces)
 
         for i in range(num_npcs):
-            prompt = LLM_PROMPTS["npc_personality"] # Consider adding village context to prompt later
+            # Fetch player reputation to pass to the prompt
+            player_rep = self.player.reputation
+            prompt = LLM_PROMPTS["npc_personality"].format(
+                player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+                player_hero_points=player_rep.get(REP_HERO, 0),
+                # Potentially add name_hint, personality_hint etc. if we want more specific NPC roles
+                name_hint="", personality_hint="", family_ties_hint="", attitude_to_player_hint=""
+            )
             llm_response = self._call_ollama(prompt)
             try:
                 npc_data = json.loads(llm_response)
@@ -535,9 +559,19 @@ class World:
 
     def _handle_npc_speech(self):
         current_time = time.time()
+        player_rep = self.player.reputation # Get player rep once
         for npc in self.npcs + self.village_npcs:
-            if current_time - npc.last_speech_time > random.randint(10, 30): # NPCs speak every 10-30 seconds
-                prompt = f"Generate a short, in-character dialogue response from {npc.name} to the player. {npc.name} is {npc.personality} and has {npc.attitude_to_player} attitude towards the player. Their family ties are {npc.family_ties}. Keep it concise and relevant to their personality and attitude."
+            if current_time - npc.last_speech_time > random.randint(10, 30):
+                # Ambient speech might be general, or react to player if nearby and reputation is notable
+                prompt = (
+                    f"NPC {npc.name} (Personality: {npc.personality}, Attitude to Player: {npc.attitude_to_player}, Family: {npc.family_ties}) "
+                    f"is going about their day. The player's reputation is: "
+                    f"Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}. "
+                    f"Generate a short, in-character ambient thought or statement from {npc.name}. "
+                    f"It could be about their current (unspecified) activity, the village, a general thought, "
+                    f"or a comment related to the player if their reputation is particularly high or low and the player is assumed to be generally known or nearby. "
+                    f"Keep it concise."
+                )
                 llm_dialogue = self._call_ollama(prompt)
                 if llm_dialogue:
                     self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue}")
@@ -609,10 +643,18 @@ class World:
 
         if closest_npc and min_dist <= 2: # Within 2 tiles
             # Use LLM for dynamic dialogue
-            prompt = f"The player approaches {closest_npc.name}. {closest_npc.name} is {closest_npc.personality} and has {closest_npc.attitude_to_player} attitude towards the player. Their family ties are {closest_npc.family_ties}. Generate a short, in-character dialogue response from {closest_npc.name} to the player. Keep it concise and relevant to their personality and attitude."
-                
+            player_rep = self.player.reputation
+            prompt = (
+                f"The player (Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}) "
+                f"approaches {closest_npc.name}. "
+                f"{closest_npc.name} is {closest_npc.personality}, their family ties are '{closest_npc.family_ties}', "
+                f"and their current attitude towards the player is '{closest_npc.attitude_to_player}'. "
+                f"Generate a short, in-character dialogue response from {closest_npc.name} to the player. "
+                f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
+            )
             llm_dialogue = self._call_ollama(prompt)
-            print("\n{}: {}".format(closest_npc.name, llm_dialogue))
+            # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
+            print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
         else:
             print("No one to talk to nearby.")
 

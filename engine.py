@@ -348,6 +348,45 @@ class World:
                         npc.current_task = "combat_action_hold_position" # Fallback if no path
                         # No 'continue' here, will fall through to standard path movement if a path was somehow set by other means.
 
+            elif npc.current_task == "combat_action_move_to_attack_player":
+                player = self.player
+                # Check if a path needs to be (re)calculated
+                # Condition: No current path, OR current path destination is not close to player's current position
+                # OR current path destination is None (should be covered by no current path)
+                needs_new_path = False
+                if not npc.current_path or not npc.current_destination_coords:
+                    needs_new_path = True
+                else:
+                    # If player moved too far from current path's target
+                    # (This is a simple check; more robust would be if path destination is not adjacent to player)
+                    dest_x, dest_y = npc.current_destination_coords
+                    # If current path destination is not adjacent to player's current position.
+                    # Adjacency check: Manhattan distance of 1 between (dest_x, dest_y) and (player.x, player.y)
+                    if abs(dest_x - player.x) + abs(dest_y - player.y) > npc.attack_range : # attack_range is usually 1
+                         needs_new_path = True
+
+
+                if needs_new_path:
+                    # Find a tile adjacent to the player to path to.
+                    # This will be implemented in _find_attack_position_near_target (next plan step)
+                    # For now, placeholder: target player's current position directly.
+                    # This will be refined to target an adjacent tile.
+                    attack_pos_x, attack_pos_y = self._find_best_adjacent_tile_for_attack(player.x, player.y, npc)
+
+                    if attack_pos_x is not None and attack_pos_y is not None:
+                        path = self.calculate_path(npc.x, npc.y, attack_pos_x, attack_pos_y)
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = (attack_pos_x, attack_pos_y)
+                            # self.add_message_to_chat_log(f"{npc.name} is moving to attack, heading towards ({attack_pos_x},{attack_pos_y}) near player.")
+                        else:
+                            # self.add_message_to_chat_log(f"{npc.name} wants to attack but cannot find a path to player.")
+                            # Fallback: if can't path, maybe hold or let AI decide something else next turn
+                            npc.current_task = "combat_action_hold_position"
+                    else:
+                        # self.add_message_to_chat_log(f"{npc.name} cannot find a suitable position to attack the player from.")
+                        npc.current_task = "combat_action_hold_position"
+
 
             # --- Standard Path-Based Movement ---
             if npc.current_path:
@@ -448,6 +487,54 @@ class World:
         if 0.60 <= time_ratio < 0.75: return "Afternoon"
         if 0.75 <= time_ratio < 0.90: return "Evening"
         return "Night"
+
+    def _find_best_adjacent_tile_for_attack(self, target_x: int, target_y: int, attacker_npc: NPC) -> tuple[int | None, int | None]:
+        """
+        Finds a passable, unoccupied, adjacent tile to the target for the attacker to move to.
+        Prefers tiles closer to the attacker if multiple are valid.
+        Returns (x, y) or (None, None) if no suitable tile is found.
+        """
+        potential_spots = []
+        # Order of adjacent tiles to check (N, S, E, W)
+        adj_offsets = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+
+        for dx, dy in adj_offsets:
+            adj_x, adj_y = target_x + dx, target_y + dy
+
+            if not (0 <= adj_x < WORLD_WIDTH and 0 <= adj_y < WORLD_HEIGHT):
+                continue # Out of bounds
+
+            tile = self.get_tile_at(adj_x, adj_y)
+            if not (tile and tile.passable):
+                continue # Not passable
+
+            # Check if occupied by another NPC (excluding the attacker itself)
+            occupied_by_other_npc = False
+            # Iterate over all relevant NPC lists
+            for npc_list_to_check in [self.village_npcs, self.npcs]:
+                for other_npc in npc_list_to_check:
+                    if other_npc.id != attacker_npc.id and other_npc.x == adj_x and other_npc.y == adj_y and not other_npc.is_dead:
+                        occupied_by_other_npc = True
+                        break
+                if occupied_by_other_npc:
+                    break
+            if occupied_by_other_npc:
+                continue
+
+            # Ensure the spot is not the attacker's current location if they are already next to target
+            # This prevents pathing to their own spot if they are already adjacent.
+            if adj_x == attacker_npc.x and adj_y == attacker_npc.y:
+                continue
+
+            dist_sq = (attacker_npc.x - adj_x)**2 + (attacker_npc.y - adj_y)**2
+            potential_spots.append({'x': adj_x, 'y': adj_y, 'dist_sq': dist_sq})
+
+        if not potential_spots:
+            return None, None
+
+        potential_spots.sort(key=lambda s: s['dist_sq'])
+
+        return potential_spots[0]['x'], potential_spots[0]['y']
 
     def _update_npc_schedules(self):
         """

@@ -40,9 +40,13 @@ DECORATION_ITEM_DEFINITIONS = {
         "color": tcod.constants.SADDLEBROWN, # (139, 69, 19)
         "passable": False,
         "properties": {
-            "potential_crafting_materials": {"log": 3}, # Alt: {"wooden_plank": 4}
-            "functional_type": "container",
-            "interaction_hint": "open"
+            "potential_crafting_materials": {"log": 3},
+            "functional_type": "container", # Hint that it can hold items
+            "interaction_hint": "open",     # General interaction
+            "is_lockable": True,            # Can it be locked?
+            "is_locked": True,              # Default state: locked
+            "lock_difficulty": 5,           # Example difficulty (1-10)
+            "unlocks_to_reveal": "building_inventory" # What it accesses (conceptual for now)
         }
     },
     "wall_shelf": {

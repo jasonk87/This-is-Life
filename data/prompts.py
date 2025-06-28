@@ -7,7 +7,6 @@ OLLAMA_MODEL = "llama3.2:latest"
 # --- LLM Prompts ---
 LLM_PROMPTS = {
     "village_lore": "Generate a brief, atmospheric lore description for a fantasy village. Include its name, a unique characteristic, and a hint of its history or current struggles. Respond in a single paragraph.",
-    # Updated list of decoration items for the building_interior prompt
     "building_interior": """\
 Generate a JSON object describing the interior decoration for a {building_type} of size {width}x{height} tiles.
 The building is located in a village with the following characteristics:
@@ -195,5 +194,47 @@ Example: "Say, you look like you could use some work. I need {quantity_needed} {
 Another Example (grumpy): "Don't just stand there. If you want to make yourself useful, fetch me {quantity_needed} {item_name_plural}. I'll give you {reward_amount}. Take it or leave it."
 
 Job Offer Dialogue:
+""",
+    "action_lockpick_check": """\
+You are an AI adjudicating a lockpicking attempt in a fantasy role-playing game.
+
+Player's Lockpicking Skill (1-10, higher is better): {player_lockpicking_skill}
+Lock's Difficulty (1-10, higher is harder): {lock_difficulty}
+
+Task:
+Determine if the lockpicking attempt is successful.
+- Higher player skill relative to lock difficulty increases success chance.
+- Lower player skill relative to lock difficulty decreases success chance.
+- A skill much lower than difficulty should likely fail. A skill much higher should likely succeed.
+- There should always be a small chance of failure even with high skill (e.g., a critical fumble, pick breaking) and a small chance of success even with low skill (beginner's luck), unless skill vs difficulty is extremely disparate.
+
+Output Format (JSON):
+Return a JSON object with the following fields:
+- "success": boolean (true if the lock is picked, false otherwise)
+- "narrative_feedback": string (A short, vivid description of the lockpicking attempt and its outcome. E.g., "With a soft *click*, the tumblers align and the lock springs open!", or "The tension is too much, and your lockpick snaps with a disheartening *twang*!", or "You jiggle the pick, but the lock remains stubbornly shut.")
+- "lockpick_broken": boolean (true if the lockpick used for the attempt breaks, false otherwise. A pick might break on failure, or rarely even on success if the lock was particularly stubborn/rusty.)
+
+Example Success:
+{
+  "success": true,
+  "narrative_feedback": "You carefully manipulate the tumblers, feeling them give way one by one. With a final satisfying *thunk*, the lock opens!",
+  "lockpick_broken": false
+}
+
+Example Failure (pick breaks):
+{
+  "success": false,
+  "narrative_feedback": "You apply a bit too much pressure, and the delicate lockpick snaps in two! The lock remains closed.",
+  "lockpick_broken": true
+}
+
+Example Failure (no break):
+{
+  "success": false,
+  "narrative_feedback": "Despite your efforts, the intricate mechanism of the lock resists your attempts. It remains firmly shut.",
+  "lockpick_broken": false
+}
+
+Adjudication:
 """,
 }

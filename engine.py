@@ -133,7 +133,8 @@ class Player:
         self.social_skill = 5
         self.money = 100
         self.active_contracts = {}
-        self.pending_contract_offer = None # To store details of a job just offered
+        self.pending_contract_offer = None
+        self.lockpicking_skill = 3 # Conceptual skill, scale 1-10, default slightly below average
 
     def take_damage(self, amount: int):
         self.hp -= amount
@@ -886,6 +887,81 @@ class World:
             error_msg = f"{npc_target.name} gives a non-committal grunt. (LLM response format error)"
             self.chat_ui_history.append(("System", error_msg))
             # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
+
+    def player_attempt_pick_lock(self, target_x: int, target_y: int) -> bool:
+        """Handles player's attempt to pick a lock."""
+        if self.player.inventory.get("lockpick", 0) <= 0:
+            self.add_message_to_chat_log("You don't have any lockpicks.")
+            return False
+
+        target_tile = self.get_tile_at(target_x, target_y)
+        if not (target_tile and target_tile.properties.get("is_lockable")):
+            self.add_message_to_chat_log("There's nothing to pick here.")
+            return False
+
+        if not target_tile.properties.get("is_locked"):
+            self.add_message_to_chat_log("It's already unlocked.")
+            return True # Considered "handled" as there's no lock to pick
+
+        lock_difficulty = target_tile.properties.get("lock_difficulty", 5)
+
+        prompt = LLM_PROMPTS["action_lockpick_check"].format(
+            player_lockpicking_skill=self.player.lockpicking_skill,
+            lock_difficulty=lock_difficulty
+        )
+        response_str = self._call_ollama(prompt)
+
+        if not response_str:
+            self.add_message_to_chat_log("You try the lock, but nothing happens. (LLM Error)")
+            return True # Attempt was made
+
+        try:
+            response_json = json.loads(response_str)
+            success = response_json.get("success", False)
+            narrative = response_json.get("narrative_feedback", "You try the lock...")
+            pick_broken = response_json.get("lockpick_broken", False)
+
+            self.add_message_to_chat_log(narrative)
+
+            if pick_broken:
+                self.player.inventory["lockpick"] -= 1
+                self.add_message_to_chat_log("Your lockpick broke!")
+                if self.player.inventory["lockpick"] <= 0:
+                    del self.player.inventory["lockpick"]
+                    self.add_message_to_chat_log("That was your last lockpick.")
+
+            if success:
+                target_tile.properties["is_locked"] = False
+                # For now, just message. Actual content access is next step.
+                # self.add_message_to_chat_log(f"The {target_tile.name} clicks open!")
+                # Try to find which building this chest is in to list its inventory as a placeholder
+                # This is a simplified way to get building inventory for a chest.
+                # A chest might have its own inventory in the future.
+                containing_building = self._get_building_by_tile_coords(target_x, target_y)
+                if containing_building and containing_building.building_inventory:
+                    item_list_str = ", ".join([f"{qty}x {ITEM_DEFINITIONS.get(key,{}).get('name',key)}" for key, qty in containing_building.building_inventory.items() if key != "money"])
+                    if not item_list_str : item_list_str = "nothing of note"
+                    self.add_message_to_chat_log(f"Inside the {target_tile.name} you find: {item_list_str}.")
+                elif containing_building:
+                    self.add_message_to_chat_log(f"The {target_tile.name} is empty.")
+
+            return True # Lockpicking attempt was made
+        except json.JSONDecodeError:
+            self.add_message_to_chat_log("Your attempt to pick the lock yields an odd result. (LLM Format Error)")
+            return True
+
+    def _get_building_by_tile_coords(self, world_x: int, world_y: int) -> Building | None:
+        """Helper to find which building a specific world tile is part of, if any."""
+        # This could be slow if called frequently.
+        # For now, it iterates all known buildings.
+        for building_id, building_obj in self.buildings_by_id.items():
+            # Check if (world_x, world_y) is within this building's footprint
+            # Building stores its origin global_origin_x/y and dimensions width/height
+            if (building_obj.global_origin_x <= world_x < building_obj.global_origin_x + building_obj.width and
+                building_obj.global_origin_y <= world_y < building_obj.global_origin_y + building_obj.height):
+                return building_obj
+        return None
+
 
     def npc_toggle_door(self, requesting_npc: NPC, door_x: int, door_y: int) -> bool:
         """Handles an NPC's attempt to open or close a door. NPCs currently only open doors."""

@@ -86,8 +86,22 @@ ITEM_DEFINITIONS = {
         },
         "crafting_recipe": {
             "stone_chunk": 2,
-            "log": 1 # Log for handle
+            "log": 1
         },
+    },
+    "lockpick": {
+        "name": "Lockpick",
+        "description": "A thin piece of metal used for picking locks. Fragile.",
+        "char": "~",
+        "color": tcod.constants.SILVER,
+        "value": 5,
+        "weight": 0.1,
+        "stackable": True, # Lockpicks often come in sets or are stackable
+        "type": ["tool"],
+        "properties": {
+            "tool_type": "lockpick",
+            "breaks_on_fail_chance": 0.25 # 25% chance to break on a failed lockpicking attempt
+        }
     },
 
     # --- Existing Items ---

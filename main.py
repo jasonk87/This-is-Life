@@ -205,6 +205,15 @@ def main():
                                     else:
                                         world.add_message_to_chat_log(f"{target_npc.name if target_npc else 'They'} are not a merchant.")
                                         world.interaction_menu_target_npc = None
+                                elif selected_option == "Attack":
+                                    if target_npc and not target_npc.is_dead:
+                                        world.player_attempt_attack(target_npc)
+                                        # Attacking consumes the turn and closes the menu.
+                                        # The player_attempt_attack method in world will add messages to chat log.
+                                    elif target_npc and target_npc.is_dead:
+                                        world.add_message_to_chat_log(f"{target_npc.name} is already defeated.")
+                                    else:
+                                        world.add_message_to_chat_log("Error: No valid target for attack.")
                                 elif selected_option.startswith("Complete:"): # Handle contract completion
                                     if target_npc:
                                         # Reconstruct contract_id based on current convention
@@ -269,7 +278,16 @@ def main():
 
                             if targeted_npc:
                                 world.interaction_menu_target_npc = targeted_npc
-                                menu_opts = ["Talk", "Persuade", "Trade"]
+                                menu_opts = ["Talk", "Persuade"] # Start with basic options
+
+                                # Add Trade if merchant
+                                if targeted_npc.profession == "Merchant":
+                                    menu_opts.append("Trade")
+
+                                # Add Attack if not dead
+                                if not targeted_npc.is_dead:
+                                    menu_opts.append("Attack")
+
                                 # Check for active contracts with this NPC for turn-in
                                 for contract_id, contract_details in world.player.active_contracts.items():
                                     if contract_details["turn_in_npc_id"] == targeted_npc.id:

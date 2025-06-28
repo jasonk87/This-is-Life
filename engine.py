@@ -888,6 +888,102 @@ class World:
             self.chat_ui_history.append(("System", error_msg))
             # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
 
+    def player_attempt_attack(self, target_npc: NPC):
+        if not target_npc:
+            self.add_message_to_chat_log("No target selected for attack.")
+            return
+
+        if target_npc.is_dead:
+            self.add_message_to_chat_log(f"{target_npc.name} is already defeated.")
+            return
+
+        player_weapon_name = "Fists"
+        if self.player.inventory.get("axe_stone", 0) > 0:
+            player_weapon_name = ITEM_DEFINITIONS["axe_stone"]["name"]
+
+        player_melee_skill = getattr(self.player, 'melee_skill', 5)
+
+        prompt = LLM_PROMPTS["adjudicate_player_attack"].format(
+            player_weapon_name=player_weapon_name,
+            player_melee_skill=player_melee_skill,
+            npc_name=target_npc.name,
+            npc_toughness=target_npc.toughness
+        )
+
+        response_str = self._call_ollama(prompt)
+
+        if not response_str:
+            self.add_message_to_chat_log("Your attack seems to have no effect (LLM Comms Error).")
+            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
+                target_npc.is_hostile_to_player = True
+                self.add_message_to_chat_log(f"{target_npc.name} becomes hostile due to your aggression!")
+            return
+
+        try:
+            response_json = json.loads(response_str)
+            hit = response_json.get("hit", False)
+            damage_dealt = int(response_json.get("damage_dealt", 0))
+            narrative = response_json.get("narrative_feedback", "The confrontation is tense.")
+
+            self.add_message_to_chat_log(narrative)
+
+            if hit and damage_dealt > 0:
+                target_npc.take_damage(damage_dealt, self)
+                if target_npc.is_dead:
+                    self.handle_npc_death(target_npc)
+            elif hit and damage_dealt <= 0: # A hit that does no damage
+                self.add_message_to_chat_log(f"Your attack hits but glances off {target_npc.name} harmlessly!")
+
+            # Ensure NPC becomes hostile if attacked and not already dead/hostile
+            # (take_damage also sets hostility, this is a fallback if no damage but was a hostile act)
+            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
+                 target_npc.is_hostile_to_player = True
+                 self.add_message_to_chat_log(f"{target_npc.name} becomes hostile!")
+
+        except json.JSONDecodeError:
+            self.add_message_to_chat_log(f"The outcome of your attack is unclear. (LLM Format Error: {response_str})")
+            if not target_npc.is_hostile_to_player and not target_npc.is_dead: # Still make hostile on error
+                target_npc.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
+        except ValueError: # For int(damage_dealt)
+            self.add_message_to_chat_log(f"The LLM provided an invalid damage amount: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
+            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
+                target_npc.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
+
+    def handle_npc_death(self, dead_npc: NPC):
+        self.add_message_to_chat_log(f"{dead_npc.name} has died!")
+
+        npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
+        npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
+
+        corpse_placed_on_map = False
+        if 0 <= npc_chunk_x < self.chunk_width and 0 <= npc_chunk_y < self.chunk_height:
+            chunk = self.chunks[npc_chunk_y][npc_chunk_x]
+            if chunk and chunk.tiles:
+                corpse_def = DECORATION_ITEM_DEFINITIONS.get("corpse_humanoid")
+                if corpse_def:
+                    chunk.tiles[npc_local_y][npc_local_x] = Tile(
+                        char=corpse_def["char"], color=corpse_def["color"],
+                        passable=corpse_def["passable"], name=corpse_def["name"],
+                        properties=corpse_def.get("properties", {})
+                    )
+                    corpse_placed_on_map = True
+
+        if not corpse_placed_on_map: self.add_message_to_chat_log(f"(Could not place corpse for {dead_npc.name} on map)")
+
+        self.village_npcs = [npc for npc in self.village_npcs if npc.id != dead_npc.id]
+        self.npcs = [npc for npc in self.npcs if npc.id != dead_npc.id]
+
+        for building_obj in self.buildings_by_id.values():
+            building_obj.residents = [res for res in building_obj.residents if res.id != dead_npc.id]
+            building_obj.occupants = [occ for occ in building_obj.occupants if occ.id != dead_npc.id]
+
+        # Clear NPC from UI states if they were targeted
+        if self.interaction_menu_target_npc == dead_npc: self.interaction_menu_target_npc, self.interaction_menu_active = None, False
+        if self.chat_ui_target_npc == dead_npc: self.chat_ui_target_npc, self.chat_ui_active = None, False # Main loop should handle context.stop_text_input()
+        if self.trade_ui_npc_target == dead_npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
+        if self.last_talked_to_npc == dead_npc: self.last_talked_to_npc = None
+
+
     def player_attempt_pick_lock(self, target_x: int, target_y: int) -> bool:
         """Handles player's attempt to pick a lock."""
         if self.player.inventory.get("lockpick", 0) <= 0:

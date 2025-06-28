@@ -237,4 +237,55 @@ Example Failure (no break):
 
 Adjudication:
 """,
+    "adjudicate_player_attack": """\
+You are an AI adjudicating a player's melee attack in a fantasy role-playing game.
+
+**Attacker (Player):**
+- Weapon Used: {player_weapon_name} (e.g., "Stone Axe", "Fists", "Dagger")
+- (Conceptual) Player's Melee Skill (1-10, higher is better): {player_melee_skill}
+
+**Target (NPC):**
+- Name: {npc_name}
+- Toughness: {npc_toughness} (e.g., "frail", "average", "sturdy", "armored", "tough as nails")
+
+**Task:**
+Based on the attacker's weapon, conceptual skill, and the target's toughness, determine the outcome of the attack.
+- A better weapon and higher skill should increase the chance to hit and the potential damage.
+- Higher NPC toughness should decrease the chance to hit (if it implies agility/defense) or reduce damage taken.
+- Fists should do minimal damage, a proper weapon more.
+- Consider a degree of randomness in outcomes.
+
+**Output Format (JSON):**
+Return a JSON object with the following fields:
+- "hit": boolean (true if the attack connects, false if it's a miss, dodge, or parry)
+- "damage_dealt": integer (The amount of HP damage dealt. Can be 0 even on a hit if, for example, armor absorbs it all or it's a glancing blow. Should be 0 if "hit" is false.)
+- "narrative_feedback": string (A short, vivid, in-character description of the attack action and its immediate result. Examples: "Your Stone Axe connects solidly with {npc_name}'s side, drawing a pained grunt!", "You swing your fists, but {npc_name} easily sidesteps the clumsy blow.", "The {player_weapon_name} glances off {npc_name}'s tough hide, doing little harm.")
+- "target_status_change": string (For now, usually "none". Future options: "staggered", "bleeding", "knocked_down")
+
+Example - Successful Hit:
+{
+  "hit": true,
+  "damage_dealt": 7,
+  "narrative_feedback": "Your Stone Axe bites deeply into {npc_name}'s shoulder!",
+  "target_status_change": "none"
+}
+
+Example - Miss:
+{
+  "hit": false,
+  "damage_dealt": 0,
+  "narrative_feedback": "{npc_name} nimbly dodges your wild swing with the {player_weapon_name}.",
+  "target_status_change": "none"
+}
+
+Example - Glancing Hit (low damage):
+{
+  "hit": true,
+  "damage_dealt": 1,
+  "narrative_feedback": "Your {player_weapon_name} skitters across {npc_name}'s defenses, barely scratching them.",
+  "target_status_change": "none"
+}
+
+Adjudication Output:
+""",
 }

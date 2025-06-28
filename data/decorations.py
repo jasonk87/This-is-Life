@@ -127,4 +127,16 @@ DECORATION_ITEM_DEFINITIONS = {
             "description": "An open wooden door."
         }
     },
+    # --- Combat Related ---
+    "corpse_humanoid": {
+        "name": "Lifeless Body",
+        "char": "%",
+        "color": tcod.constants.DARK_RED,
+        "passable": True, # Usually can walk over corpses
+        "properties": {
+            "is_corpse": True,
+            "description": "The still form of a humanoid."
+            # Future: could store original NPC ID or type for looting/identification
+        }
+    },
 }

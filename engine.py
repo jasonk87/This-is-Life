@@ -116,6 +116,12 @@ class Player:
         self.last_dx = 0 # For facing direction
         self.last_dy = -1 # Default facing up
 
+        # Interaction states
+        self.is_sitting = False
+        self.is_sleeping = False # Will be more of an instantaneous action for now
+        self.original_char = self.char # Store the original character for standing up
+        self.sitting_on_object_at = None # tuple (x,y) of the object player is sitting on
+
     def take_damage(self, amount: int):
         self.hp -= amount
         if self.hp < 0:
@@ -455,6 +461,79 @@ class World:
         # Keep chat log to a reasonable size
         if len(self.chat_log) > 100:
             self.chat_log.pop(0)
+
+    def player_attempt_sit(self, target_x: int, target_y: int):
+        """Handles the player's attempt to sit on an object."""
+        if self.player.is_sitting:
+            # If already sitting and trying to interact with the same spot, stand up.
+            if self.player.sitting_on_object_at == (target_x, target_y):
+                self.player_attempt_stand_up()
+            else:
+                self.add_message_to_chat_log("You are already sitting. Stand up first ('E' or move).")
+            return
+
+        target_tile = self.get_tile_at(target_x, target_y)
+        if target_tile and hasattr(target_tile, 'properties'):
+            interaction_hint = target_tile.properties.get("interaction_hint")
+            if interaction_hint == "sit":
+                self.player.is_sitting = True
+                self.player.char = ord('s') # Example sitting character
+                self.player.sitting_on_object_at = (target_x, target_y)
+                self.add_message_to_chat_log(f"You sit down on the {target_tile.name}.")
+            else:
+                # self.add_message_to_chat_log("You can't sit there.") # Only message if no other interaction found by 'E'
+                return False # Indicate sit failed, so 'E' can try other interactions like chop
+        else:
+            # self.add_message_to_chat_log("There's nothing to sit on there.")
+            return False # Indicate sit failed
+        return True # Indicate sit succeeded or an action related to sitting was taken
+
+    def player_attempt_stand_up(self):
+        """Handles the player standing up."""
+        if self.player.is_sitting:
+            self.player.is_sitting = False
+            self.player.char = self.player.original_char
+            self.add_message_to_chat_log("You stand up.")
+            self.player.sitting_on_object_at = None
+        # No message if not sitting, or handled by caller
+
+    def player_attempt_sleep(self, target_x: int, target_y: int):
+        """Handles the player's attempt to sleep in a bed."""
+        if self.player.is_sitting:
+            self.add_message_to_chat_log("You should stand up before trying to sleep.")
+            return False
+
+        target_tile = self.get_tile_at(target_x, target_y)
+        if target_tile and hasattr(target_tile, 'properties'):
+            interaction_hint = target_tile.properties.get("interaction_hint")
+            if interaction_hint == "sleep":
+                self.add_message_to_chat_log(f"You lie down on the {target_tile.name} to rest.")
+                self.player.is_sleeping = True # Brief state change
+
+                # --- Advance Game Time (Simplified) ---
+                # For a more complex simulation, this would involve a loop calling NPC updates.
+                # For now, a simple jump. NPCs will "catch up" on their next schedule check.
+                time_to_advance = DAY_LENGTH_TICKS // 3 # Sleep for 1/3 of a day (e.g., 8 hours)
+                self.game_time += time_to_advance
+                self.add_message_to_chat_log(f"Several hours pass...")
+
+                # Optional: Player benefits
+                heal_amount = self.player.max_hp // 4 # Heal 25% of max HP
+                self.player.hp = min(self.player.max_hp, self.player.hp + heal_amount)
+                if heal_amount > 0:
+                     self.add_message_to_chat_log(f"You feel somewhat rested and heal for {heal_amount} HP.")
+                else:
+                    self.add_message_to_chat_log("You feel somewhat rested.")
+
+                self.player.is_sleeping = False # Player wakes up
+                return True # Sleep action was successful
+            else:
+                # Not a bed
+                return False
+        else:
+            # No interactable tile
+            return False
+
 
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
@@ -934,6 +1013,11 @@ class World:
         return None
 
     def handle_player_movement(self, dx, dy):
+        if self.player.is_sitting:
+            self.player_attempt_stand_up()
+            # self.add_message_to_chat_log("You stand up to move.") # Optional message
+            return # Prevent movement in the same turn as standing up from a move key
+
         new_x, new_y = self.player.x + dx, self.player.y + dy
         destination_tile = self.get_tile_at(new_x, new_y)
 

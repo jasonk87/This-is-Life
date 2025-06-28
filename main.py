@@ -99,10 +99,31 @@ def main():
                         elif event.sym == tcod.event.KeySym.E: # 'E' to interact / use / chop
                             # Target tile player is facing
                             target_x = world.player.x + world.player.last_dx
+                            target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
-                            # Attempt to chop if it's a tree
-                            # In future, this 'E' key could do other interactions based on target.
-                            world.player_attempt_chop_tree(target_x, target_y)
+
+                            if world.player.is_sitting:
+                                # If sitting, 'E' on the same spot (or any 'E') makes you stand.
+                                # More precisely, if trying to interact with the chair player is on, stand up.
+                                # Or, any 'E' press while sitting could mean stand. For now, let's make it specific.
+                                if world.player.sitting_on_object_at == (target_x, target_y) or \
+                                   world.player.sitting_on_object_at is None: # Failsafe if sitting but not on specific spot
+                                    world.player_attempt_stand_up()
+                                else: # Trying to interact with something else while sitting
+                                    world.add_message_to_chat_log("You need to stand up first.")
+                            else:
+                                # Attempt to sit first
+                                # player_attempt_sit returns True if it handled the action (sat or stood from same spot)
+                                # or False if no sittable object was there.
+                                action_taken = world.player_attempt_sit(target_x, target_y)
+                                if not action_taken:
+                                    # If not sitting and sit action failed, try sleeping
+                                    action_taken = world.player_attempt_sleep(target_x, target_y)
+                                    if not action_taken:
+                                        # If sleep action failed, try chopping
+                                        world.player_attempt_chop_tree(target_x, target_y)
+                                        # Future: Add other 'E' interactions here
+                                        # else: world.add_message_to_chat_log("Nothing to interact with there.")
                     
                     if event.sym == tcod.event.KeySym.Q: # Quit
                         return

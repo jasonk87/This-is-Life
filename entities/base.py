@@ -22,7 +22,8 @@ class NPC:
         # Contextual attributes for Phase 6
         self.wealth_level = "average"
         self.profession = "unemployed"
-        self.original_char_before_sleep = self.char # Store original char for waking up
+        self.original_char_before_sleep = self.char
+        self.npc_inventory = {} # For items the NPC carries or produces personally
 
     def get_dialogue(self):
         return self.dialogue

@@ -180,4 +180,20 @@ If the conversation seems to be ending or the player says goodbye, you can also 
 
 Response:
 """,
+    "npc_job_offer_lumber": """\
+You are {npc_name}, the {npc_profession} of this village. Your personality is {npc_personality}.
+Your current attitude towards the player is: {npc_attitude}.
+Player Reputation: Criminal Points: {player_criminal_points}, Hero Points: {player_hero_points}.
+
+The player is talking to you, and you have a job opportunity for them.
+The job is to collect {quantity_needed} {item_name_plural}. You are offering {reward_amount} money for this task.
+
+Based on your personality and attitude to the player, generate a short, in-character dialogue line offering this job.
+Make it clear what is needed and what the reward is. End by asking if they accept (implicitly or explicitly).
+
+Example: "Say, you look like you could use some work. I need {quantity_needed} {item_name_plural}. Bring them to me, and I'll pay you {reward_amount} coins. What do you say?"
+Another Example (grumpy): "Don't just stand there. If you want to make yourself useful, fetch me {quantity_needed} {item_name_plural}. I'll give you {reward_amount}. Take it or leave it."
+
+Job Offer Dialogue:
+""",
 }

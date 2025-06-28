@@ -44,8 +44,11 @@ def draw(console: tcod.console.Console, world) -> None:
     draw_interaction_menu(console, world, start_x, start_y)
 
     # --- Chat UI (if active) ---
-    # Drawn very late to be on top of almost everything.
     draw_chat_ui(console, world)
+
+    # --- Trade UI (if active) ---
+    # Drawn after chat UI, potentially, or could be mutually exclusive in practice
+    draw_trade_ui(console, world)
 
 
     # --- Cursor Info (Top Left) - Always draw last to be on top ---
@@ -351,3 +354,56 @@ def draw_chat_ui(console: tcod.console.Console, world) -> None:
         cursor_x = history_display_x + len(input_prefix) + len(world.chat_ui_input_line)
         if cursor_x < history_display_x + history_display_width:
              console.print(x=cursor_x, y=input_line_y, string="_", fg=(255,255,255))
+
+def draw_trade_ui(console: tcod.console.Console, world) -> None:
+    """Draws the trade UI if active."""
+    if not world.trade_ui_active or not world.trade_ui_npc_target:
+        return
+
+    merchant_name = world.trade_ui_npc_target.name
+    title = f"Trading with {merchant_name}"
+
+    # Define overall UI box
+    box_width = console.width - 6
+    box_height = console.height - 6
+    box_x = 3
+    box_y = 3
+
+    console.draw_frame(x=box_x, y=box_y, width=box_width, height=box_height, title=title, clear=True, fg=(255,255,255), bg=(0,0,10))
+
+    # Column widths (approximate)
+    col_width = (box_width - 4) // 2 # -2 for box border, -2 for middle space
+
+    player_col_x = box_x + 1
+    merchant_col_x = box_x + 1 + col_width + 1 # +1 for a small gap
+
+    # Headers
+    console.print(x=player_col_x, y=box_y+1, string=f"Your Items (Money: {world.player.money})")
+    console.print(x=merchant_col_x, y=box_y+1, string=f"{merchant_name}'s Items") # Merchant money not shown directly here
+
+    # Display items
+    max_items_display = box_height - 5 # -2 for box border, -1 for header, -1 for instructions, -1 for bottom padding
+
+    # Player's items (for selling)
+    for i, (item_key, quantity, price) in enumerate(world.trade_ui_player_inventory_snapshot):
+        if i >= max_items_display: break
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+        display_text = f"{item_name} (x{quantity}) - Sell for {price}"
+        fg_color = (180,180,180)
+        if world.trade_ui_player_selling and i == world.trade_ui_player_item_index:
+            fg_color = (255,255,0) # Highlight yellow
+        console.print_box(player_col_x + 1, box_y + 3 + i, col_width -2 , 1, display_text, fg=fg_color)
+
+    # Merchant's items (for buying)
+    for i, (item_key, quantity, price) in enumerate(world.trade_ui_merchant_inventory_snapshot):
+        if i >= max_items_display: break
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+        display_text = f"{item_name} (x{quantity}) - Buy for {price}"
+        fg_color = (180,180,180)
+        if not world.trade_ui_player_selling and i == world.trade_ui_merchant_item_index:
+            fg_color = (255,255,0) # Highlight yellow
+        console.print_box(merchant_col_x + 1, box_y + 3 + i, col_width-2, 1, display_text, fg=fg_color)
+
+    # Instructions
+    instructions_y = box_y + box_height - 2
+    console.print(x=box_x + 1, y=instructions_y, string="[TAB] Switch View | [UP/DOWN] Select | [ENTER/E] Buy/Sell | [ESC] Close")

@@ -78,7 +78,8 @@ class Building:
         self.category = category
         self.interior_decorated = False
         self.occupants = [] # General list of NPCs associated (e.g. workers)
-        self.residents = [] # Specific list of NPCs who live here
+        self.residents = []
+        self.building_inventory = {} # For items produced or stored at this building
 
         # Global coordinates of the building's center
         self.global_center_x = global_chunk_x_start + x + width // 2
@@ -121,9 +122,12 @@ class Player:
         # Interaction states
         self.is_sitting = False
         self.is_sleeping = False # Will be more of an instantaneous action for now
-        self.original_char = self.char # Store the original character for standing up
-        self.sitting_on_object_at = None # tuple (x,y) of the object player is sitting on
-        self.social_skill = 5 # Conceptual skill, scale 1-10. Default average.
+        self.original_char = self.char
+        self.sitting_on_object_at = None
+        self.social_skill = 5
+        self.money = 100
+        self.active_contracts = {}
+        self.pending_contract_offer = None # To store details of a job just offered
 
     def take_damage(self, amount: int):
         self.hp -= amount
@@ -173,9 +177,18 @@ class World:
         self.chat_ui_target_npc = None
         self.chat_ui_history = [] # List of tuples: (speaker_name_or_type, text_string)
         self.chat_ui_input_line = ""
-        self.chat_ui_mode = "talk" # Possible modes: "talk", "persuade_goal_input"
-        self.chat_ui_scroll_offset = 0 # For viewing history that exceeds displayable lines
-        self.chat_ui_max_history = 50 # Max lines to keep in history
+        self.chat_ui_mode = "talk"
+        self.chat_ui_scroll_offset = 0
+        self.chat_ui_max_history = 50
+
+        # Trade UI State
+        self.trade_ui_active = False
+        self.trade_ui_npc_target = None # The NPC merchant
+        self.trade_ui_player_inventory_view = True # True if viewing player's items to sell, False for merchant's
+        self.trade_ui_player_item_index = 0
+        self.trade_ui_merchant_item_index = 0
+        self.trade_ui_player_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
+        self.trade_ui_merchant_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
 
 
     def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
@@ -406,12 +419,15 @@ class World:
 
                     # Priority: Go to work during work hours
                     if work_start_tick <= current_time_in_day < work_end_tick:
-                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work":
+                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work": # Not at work, needs to go
                             dest_coords_temp = self._get_building_global_center_coords(npc.work_building_id)
                             if dest_coords_temp:
                                 new_task_label = "going to work"
                                 destination_coords = dest_coords_temp
-                                npc.original_char_before_sleep = npc.char # Reset just in case
+                                if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep # Ensure char reset if was sleeping
+                        elif npc.work_building_id and is_at_work: # Already at work
+                             npc.current_task = f"Working ({npc.profession})" if npc.profession != "Unemployed" else "At Work (Idle)"
+                             if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
                     # Else, if it's night and they have a home and aren't already sleeping/going home
                     elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home"]:
                         home_building_obj = self.buildings_by_id.get(npc.home_building_id)
@@ -450,10 +466,12 @@ class World:
 
                     # Check if NPC is already at the destination
                     if (npc.x, npc.y) == destination_coords:
-                        # self.add_message_to_chat_log(f"{npc.name} is already at {new_task} destination.")
-                        if new_task == "going to work": npc.current_task = "at work"
-                        elif new_task == "going home": npc.current_task = "at home"
-                        else: npc.current_task = "idle"
+                        if new_task_label == "going to work":
+                            npc.current_task = f"Working ({npc.profession})" if npc.profession != "Unemployed" else "At Work (Idle)"
+                        elif new_task_label == "going home":
+                            npc.current_task = "at home" # Will check for bed next cycle if night
+                        else:
+                            npc.current_task = "idle"
                     else:
                         path = self.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
                         if path:
@@ -465,8 +483,117 @@ class World:
                             # self.add_message_to_chat_log(f"Could not find path for {npc.name} for task {new_task} to {destination_coords}")
                             npc.current_task = "idle_confused" # Cannot find path
 
-            # Update game time tracker for NPC (not strictly needed for this simple scheduler)
+            # After all task decisions and path assignments:
+            if npc.current_task == "at work":
+                self._handle_npc_production(npc)
+
+            if npc.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'):
+                if hasattr(npc, 'original_char_before_sleep'): # Ensure it exists before trying to access
+                    npc.char = npc.original_char_before_sleep
+
             npc.game_time_last_updated = self.game_time
+
+    def complete_contract_delivery(self, contract_id: str, turn_in_npc: NPC):
+        """Handles player attempting to turn in a contract delivery."""
+        if contract_id not in self.player.active_contracts:
+            self.add_message_to_chat_log("Error: Contract not found or already completed.")
+            if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
+                 self.chat_ui_history.append((turn_in_npc.name, "Hmm, I don't recall that arrangement."))
+            return
+
+        contract = self.player.active_contracts[contract_id]
+        # Ensure this is the correct NPC to turn into, using npc_id stored in contract
+        if contract.get("turn_in_npc_id") != turn_in_npc.id: # Check against NPC's actual ID
+            self.add_message_to_chat_log("This is not the right person for this delivery.")
+            if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
+                 self.chat_ui_history.append((turn_in_npc.name, "Are you sure you have that for me?"))
+            return
+
+        item_key = contract["item_key"]
+        qty_needed = contract["quantity_needed"]
+        player_has_qty = self.player.inventory.get(item_key, 0)
+
+        if player_has_qty >= qty_needed:
+            self.player.inventory[item_key] = player_has_qty - qty_needed
+            if self.player.inventory[item_key] <= 0:
+                del self.player.inventory[item_key]
+
+            self.player.money += contract["reward"]
+            completion_msg = f"Delivery complete! You gave {qty_needed} {item_key}(s) and received {contract['reward']} money."
+            self.add_message_to_chat_log(completion_msg) # Log to main game log
+
+            # Add to chat UI history if chat is active with this NPC
+            if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
+                self.chat_ui_history.append(("System", completion_msg))
+                self.chat_ui_history.append((turn_in_npc.name, f"Excellent work! Here's your {contract['reward']} coins."))
+                if len(self.chat_ui_history) > self.chat_ui_max_history:
+                    self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+                self.chat_ui_scroll_offset = 0
+
+
+            del self.player.active_contracts[contract_id]
+
+            # If chat UI was active, maybe close it or go back to general talk mode
+            if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
+                self.chat_ui_mode = "talk" # Or could close: self.chat_ui_active = False; context.stop_text_input()
+                                           # For now, let's keep it open in talk mode.
+                # Add a follow-up generic line from NPC after payment.
+                self.chat_ui_history.append((turn_in_npc.name, "Anything else I can help you with?"))
+
+
+        else:
+            needed_more = qty_needed - player_has_qty
+            short_msg = f"You don't have enough {item_key}s. You still need {needed_more} more."
+            self.add_message_to_chat_log(short_msg) # Log to main game log
+            if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
+                self.chat_ui_history.append(("System", short_msg))
+                self.chat_ui_history.append((turn_in_npc.name, f"Looks like you're still short on those. Come back when you have all {qty_needed}."))
+                if len(self.chat_ui_history) > self.chat_ui_max_history:
+                    self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+                self.chat_ui_scroll_offset = 0
+
+
+    def _handle_npc_production(self, npc: NPC):
+        """Handles abstract resource production for an NPC at their workplace."""
+        # Check if current task is "at work" OR starts with "Working ("
+        if not npc.work_building_id or not (npc.current_task == "at work" or npc.current_task.startswith("Working (")):
+            return
+
+        work_building = self.buildings_by_id.get(npc.work_building_id)
+        if not work_building:
+            return
+
+        # Production logic based on profession - simple chance per ~100 ticks
+        # This runs every NPC_SCHEDULE_UPDATE_INTERVAL if they are "at work".
+        # To make it less frequent, add another modulo check or a dedicated timer.
+        # For now, let's assume this is called when NPC is at work.
+        # We'll add a random chance to produce to simulate time passing / work being done.
+
+        produced_item_key = None
+        produced_quantity = 0
+        production_chance = 0.1 # 10% chance each time this is checked while "at work"
+
+        if npc.profession == "Woodcutter" or work_building.building_type == "lumber_mill": # Assuming a lumber_mill type
+            if random.random() < production_chance:
+                produced_item_key = "log"
+                produced_quantity = random.randint(1, 3)
+        elif npc.profession == "Farmer" or work_building.building_type == "farm": # Assuming a farm type
+             if random.random() < production_chance:
+                produced_item_key = "wheat"
+                produced_quantity = random.randint(2, 5)
+        elif npc.profession == "Miner" or work_building.building_type == "mine": # Assuming a mine type
+             if random.random() < production_chance:
+                produced_item_key = "iron_ore" # Could also be stone_chunk
+                produced_quantity = random.randint(1, 2)
+
+        if produced_item_key and produced_quantity > 0:
+            current_qty = work_building.building_inventory.get(produced_item_key, 0)
+            work_building.building_inventory[produced_item_key] = current_qty + produced_quantity
+            # self.add_message_to_chat_log(
+            #     f"{npc.name} ({npc.profession}) produced {produced_quantity} {ITEM_DEFINITIONS[produced_item_key]['name']} "
+            #     f"at {work_building.building_type}."
+            # ) # This can be very spammy, enable for debug
+
 
     def _get_chunk_from_building(self, building_to_find: Building) -> tuple[Chunk | None, int, int]:
         """Finds the chunk a building belongs to and its global starting coords."""
@@ -683,6 +810,104 @@ class World:
             self.chat_ui_history.append(("System", error_msg))
             # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
 
+    def initialize_trade_session(self):
+        """Populates snapshots of player and merchant inventories for the trade UI."""
+        if not self.trade_ui_active or not self.trade_ui_npc_target:
+            return
+
+        self.trade_ui_player_inventory_snapshot = []
+        self.trade_ui_merchant_inventory_snapshot = []
+        self.trade_ui_player_item_index = 0
+        self.trade_ui_merchant_item_index = 0
+        self.trade_ui_player_selling = True # Default to player selling view
+
+        # Player inventory snapshot: (item_key, quantity, price_to_sell_at)
+        for item_key, quantity in self.player.inventory.items():
+            item_def = ITEM_DEFINITIONS.get(item_key)
+            if item_def:
+                # Simple pricing: sell at base value (or slightly less)
+                price = item_def.get("value", 0)
+                self.trade_ui_player_inventory_snapshot.append((item_key, quantity, price))
+
+        # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
+        # Merchant inventory is likely in their work building
+        merchant_inventory_source = {}
+        merchant_building = self.buildings_by_id.get(self.trade_ui_npc_target.work_building_id)
+        if merchant_building and merchant_building.building_type == "general_store":
+            merchant_inventory_source = merchant_building.building_inventory
+        else: # Fallback to NPC's personal inventory if no store or not a store
+            merchant_inventory_source = self.trade_ui_npc_target.npc_inventory
+
+        for item_key, quantity in merchant_inventory_source.items():
+            if item_key == "money": continue # Don't list merchant's money as a sellable item
+            item_def = ITEM_DEFINITIONS.get(item_key)
+            if item_def:
+                # Simple pricing: buy at base value (or slightly more)
+                price = item_def.get("value", 0)
+                self.trade_ui_merchant_inventory_snapshot.append((item_key, quantity, price))
+
+        # Sort by name for consistent display
+        self.trade_ui_player_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
+        self.trade_ui_merchant_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
+
+    def handle_trade_action(self):
+        """Processes a buy or sell action from the trade UI."""
+        if not self.trade_ui_active or not self.trade_ui_npc_target:
+            return
+
+        merchant_npc = self.trade_ui_npc_target
+        merchant_building = self.buildings_by_id.get(merchant_npc.work_building_id)
+
+        # Determine merchant's actual inventory (store or personal)
+        merchant_true_inventory = {}
+        if merchant_building and merchant_building.building_type == "general_store":
+            merchant_true_inventory = merchant_building.building_inventory
+        else:
+            merchant_true_inventory = merchant_npc.npc_inventory
+
+        merchant_money = merchant_true_inventory.get("money", 0)
+
+        if self.trade_ui_player_selling: # Player is selling
+            if not self.trade_ui_player_inventory_snapshot: return
+            item_key, quantity, price = self.trade_ui_player_inventory_snapshot[self.trade_ui_player_item_index]
+
+            if self.player.inventory.get(item_key, 0) > 0:
+                if merchant_money >= price:
+                    # Player sells 1 unit of the item
+                    self.player.inventory[item_key] -= 1
+                    if self.player.inventory[item_key] <= 0:
+                        del self.player.inventory[item_key]
+                    self.player.money += price
+
+                    merchant_true_inventory[item_key] = merchant_true_inventory.get(item_key, 0) + 1
+                    merchant_true_inventory["money"] = merchant_money - price
+                    self.add_message_to_chat_log(f"You sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
+                else:
+                    self.add_message_to_chat_log(f"{merchant_npc.name} doesn't have enough money to buy that.")
+            else:
+                self.add_message_to_chat_log("Error: You don't have that item to sell (inventory mismatch).")
+
+        else: # Player is buying (viewing merchant's items)
+            if not self.trade_ui_merchant_inventory_snapshot: return
+            item_key, quantity, price = self.trade_ui_merchant_inventory_snapshot[self.trade_ui_merchant_item_index]
+
+            if merchant_true_inventory.get(item_key, 0) > 0:
+                if self.player.money >= price:
+                    # Player buys 1 unit
+                    merchant_true_inventory[item_key] -= 1
+                    if merchant_true_inventory[item_key] <= 0:
+                        del merchant_true_inventory[item_key]
+                    merchant_true_inventory["money"] = merchant_money + price # Merchant gains money
+
+                    self.player.inventory[item_key] = self.player.inventory.get(item_key, 0) + 1
+                    self.player.money -= price
+                    self.add_message_to_chat_log(f"You bought 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
+                else:
+                    self.add_message_to_chat_log("You don't have enough money for that.")
+            else:
+                self.add_message_to_chat_log(f"Error: {merchant_npc.name} doesn't have that item in stock (inventory mismatch).")
+
+
     def player_attempt_toggle_door(self, target_x: int, target_y: int) -> bool:
         """Handles the player's attempt to open or close a door."""
         target_tile = self.get_tile_at(target_x, target_y)
@@ -781,6 +1006,46 @@ class World:
             npc_response = "... (LLM failed to respond)"
 
         self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+
+        # After NPC response, check if this NPC should offer a job
+        if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.active_contracts:
+            # Check if player's response was affirmative to a previous implicit offer or just general talk
+            # This is tricky without more state. For now, let's assume if they talk to Foreman, job is offered.
+            # A better way: Foreman's initial greeting (start_npc_dialogue) could offer.
+            # Or, if player says "work" or "job".
+            # For simplicity now: if player just said something, and no active contract, Foreman offers.
+
+            # Define contract details
+            contract_id = f"lumber_delivery_{npc_target.id}"
+            item_needed = "log"
+            quantity_needed = 10
+            reward_amount = 50 # Example reward
+            item_name_plural = "logs" # For the prompt
+
+            offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
+                npc_name=npc_target.name,
+                npc_profession=npc_target.profession,
+                npc_personality=npc_target.personality,
+                npc_attitude=npc_target.attitude_to_player,
+                player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
+                player_hero_points=self.player.reputation.get(REP_HERO,0),
+                quantity_needed=quantity_needed,
+                item_name_plural=item_name_plural,
+                reward_amount=reward_amount
+            )
+            job_offer_dialogue = self._call_ollama(offer_prompt)
+            if not job_offer_dialogue:
+                job_offer_dialogue = f"I might have some work for you... if you're interested. Need {quantity_needed} {item_name_plural} for {reward_amount} coins."
+
+            self.chat_ui_history.append((npc_target.name, job_offer_dialogue.strip()))
+            # Store pending offer to be accepted on player's next input if affirmative
+            self.player.pending_contract_offer = {
+                "contract_id": contract_id, "npc_id": npc_target.id,
+                "item_key": item_needed, "quantity_needed": quantity_needed,
+                "reward": reward_amount, "npc_offerer_id": npc_target.id # Keep track of who offered
+            }
+            self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
+
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
@@ -922,19 +1187,48 @@ class World:
                     # Simple profession mapping
                     if work_building.building_type == "sheriff_office":
                         npc.profession = "Sheriff"
-                    elif work_building.building_type == "capital_hall": # Example, maybe "Clerk" or "Official"
+                    elif work_building.building_type == "capital_hall":
                         npc.profession = "Town Official"
-                    elif "shop" in work_building.building_type or "market" in work_building.building_type: # Future building types
+                    elif work_building.building_type == "general_store" or \
+                         "shop" in work_building.building_type or \
+                         "market" in work_building.building_type:
                         npc.profession = "Merchant"
+                    elif work_building.building_type == "lumber_mill":
+                        # Could have multiple roles at a lumber mill, e.g. Foreman and Woodcutter
+                        # For now, let's make the first NPC assigned to a lumber_mill the "Foreman" (quest giver)
+                        # and subsequent ones "Woodcutter" (producer). This is a simple heuristic.
+                        is_foreman_assigned_to_mill = any(
+                            other_npc.profession == "Lumber Mill Foreman" and other_npc.work_building_id == work_building.id
+                            for other_npc in self.village_npcs + self.npcs # Check all existing npcs
+                        )
+                        if not is_foreman_assigned_to_mill:
+                            npc.profession = "Lumber Mill Foreman"
+                        else:
+                            npc.profession = "Woodcutter"
+                    elif work_building.building_type == "farm": # Assuming farm type from production step
+                         npc.profession = "Farmer"
+                    elif work_building.building_type == "mine": # Assuming mine type
+                         npc.profession = "Miner"
                     else:
-                        npc.profession = work_building.building_type.replace("_", " ").title() # Generic profession
+                        npc.profession = work_building.building_type.replace("_", " ").title()
                 else:
-                    npc.profession = "Unemployed" # Or "Villager", "Commoner"
+                    npc.profession = "Unemployed"
+
+                # If NPC is a Merchant and assigned to a general store, pre-populate store inventory
+                if npc.profession == "Merchant" and work_building and work_building.building_type == "general_store":
+                    # Add some starting cash for the store to buy items
+                    work_building.building_inventory["money"] = random.randint(150, 500)
+                    # Add some items for sale
+                    work_building.building_inventory["axe_stone"] = random.randint(1, 3)
+                    work_building.building_inventory["healing_salve"] = random.randint(3, 8)
+                    work_building.building_inventory["wooden_plank"] = random.randint(10, 30)
+                    if random.random() < 0.5: # Chance to have some logs
+                        work_building.building_inventory["log"] = random.randint(5, 20)
+                    # self.add_message_to_chat_log(f"Stocked General Store ({work_building.id[:6]}) for Merchant {npc.name}.")
 
                 if home_building:
                     npc.home_building_id = home_building.id
-                    home_building.residents.append(npc) # Add to specific residents list
-                    # home_building.occupants.append(npc) # Optionally also add to general occupants if desired
+                    home_building.residents.append(npc)
 
                 self.village_npcs.append(npc)
                 self.add_message_to_chat_log(
@@ -1252,6 +1546,38 @@ class World:
         chunk.village.add_building(sheriff_office)
         self.buildings_by_id[sheriff_office.id] = sheriff_office
         self._draw_building(tiles, sheriff_office, "sheriff_office_wall")
+
+        # Generate General Store
+        store_w, store_h = 8, 6
+        store_x = road_x - store_w - 2 # To the left of the main road, below capital hall if space
+        store_y = capital_hall_y + capital_hall_h + 2
+        # Basic placement, ensure it's within bounds (0 to CHUNK_SIZE - size)
+        store_x = max(1, min(store_x, CHUNK_SIZE - store_w - 1))
+        store_y = max(1, min(store_y, CHUNK_SIZE - store_h - 1))
+
+        general_store = Building(store_x, store_y, store_w, store_h,
+                                 building_type="general_store", category="commercial_workplace", # Workplace for merchant
+                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(general_store)
+        self.buildings_by_id[general_store.id] = general_store
+        self._draw_building(tiles, general_store, "wood_wall")
+
+        # Generate Lumber Mill (example producer workplace)
+        lumber_mill_w, lumber_mill_h = 7, 7
+        # Try to place it somewhat out of the way, e.g., near an edge
+        lumber_mill_x = 1
+        lumber_mill_y = CHUNK_SIZE - lumber_mill_h - 1
+        # Basic check to avoid overlap with roads (very simple, could be improved)
+        if tiles[lumber_mill_y][lumber_mill_x].name == "road" or tiles[lumber_mill_y+lumber_mill_h-1][lumber_mill_x+lumber_mill_w-1].name == "road":
+            lumber_mill_x = CHUNK_SIZE - lumber_mill_w -1 # Try other side
+
+        lumber_mill = Building(lumber_mill_x, lumber_mill_y, lumber_mill_w, lumber_mill_h,
+                               building_type="lumber_mill", category="industrial_workplace",
+                               global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(lumber_mill)
+        self.buildings_by_id[lumber_mill.id] = lumber_mill
+        self._draw_building(tiles, lumber_mill, "wood_wall") # Using wood_wall for now
+
 
         # Generate a few regular houses
         num_houses = random.randint(3, 5)

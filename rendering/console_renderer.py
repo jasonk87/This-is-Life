@@ -43,6 +43,10 @@ def draw(console: tcod.console.Console, world) -> None:
     # Or drawn last to be on top of everything. Let's try drawing it quite late.
     draw_interaction_menu(console, world, start_x, start_y)
 
+    # --- Chat UI (if active) ---
+    # Drawn very late to be on top of almost everything.
+    draw_chat_ui(console, world)
+
 
     # --- Cursor Info (Top Left) - Always draw last to be on top ---
     cursor_world_x = start_x + world.mouse_x
@@ -269,3 +273,81 @@ def draw_interaction_menu(console: tcod.console.Console, world, start_render_x: 
             bg=bg_color,
             alignment=tcod.constants.LEFT
             )
+
+def draw_chat_ui(console: tcod.console.Console, world) -> None:
+    """Draws the dedicated pop-up chat UI if active."""
+    if not world.chat_ui_active:
+        return
+
+    # Define chat window dimensions and position
+    # Let's make it cover the bottom half of the screen for now
+    chat_width = console.width - 4 # Some padding
+    chat_height = console.height // 2 - 2
+    chat_x = 2
+    chat_y = console.height - chat_height - 1 # Positioned at the bottom
+
+    # Frame
+    title = f"Chat with: {world.chat_ui_target_npc.name if world.chat_ui_target_npc else 'System'}"
+    if world.chat_ui_mode == "persuade_goal_input":
+        title = f"Persuade {world.chat_ui_target_npc.name if world.chat_ui_target_npc else 'NPC'}: Enter Goal"
+
+    console.draw_frame(
+        x=chat_x, y=chat_y, width=chat_width, height=chat_height,
+        title=title,
+        clear=True, fg=(255, 255, 255), bg=(10, 10, 20) # Dark background
+    )
+
+    # History display area
+    history_display_x = chat_x + 1
+    history_display_y = chat_y + 1
+    history_display_width = chat_width - 2
+    history_display_height = chat_height - 4 # Reserve 1 for border, 1 for input line, 1 for top title/border
+
+    # Display chat history (newest at the bottom)
+    # Simple scrolling: show last N lines that fit. world.chat_ui_scroll_offset can be used later.
+    displayable_lines = history_display_height
+
+    # Get the relevant portion of history
+    # For now, no complex scrolling, just show the last `displayable_lines`
+    start_index = max(0, len(world.chat_ui_history) - displayable_lines)
+    visible_history = world.chat_ui_history[start_index:]
+
+    for i, (speaker, text) in enumerate(visible_history):
+        line_y = history_display_y + i
+        prefix = ""
+        line_color = (200, 200, 200) # Default
+
+        if speaker == "Player":
+            prefix = "You: "
+            line_color = (150, 255, 150) # Light green for player
+        elif speaker == "System":
+            prefix = "[System]: "
+            line_color = (255, 255, 100) # Yellow for system
+        else: # NPC
+            prefix = f"{speaker}: "
+            line_color = (150, 150, 255) # Light blue for NPC
+
+        full_line = prefix + text
+        # Simple wrap for long lines (manual)
+        wrapped_lines = tcod.console.wrap_rect(full_line, history_display_width, tcod. उठा हुआ) # Use tcod. उठा हुआ for default font
+
+        current_line_in_chunk = 0
+        for wrapped_segment in wrapped_lines:
+            if i + current_line_in_chunk < displayable_lines: # Check if still within visible area
+                 console.print(x=history_display_x, y=line_y + current_line_in_chunk, string=wrapped_segment, fg=line_color)
+            current_line_in_chunk +=1
+            if current_line_in_chunk > 1 and i + current_line_in_chunk -1 >= displayable_lines : # if wrapped text overflows
+                break
+        # This simple wrap assumes each original history entry fits or wraps without complex multi-line draw for single entry.
+        # A proper scrollable text box is more complex.
+
+    # Input line
+    input_line_y = chat_y + chat_height - 2 # Second to last line
+    input_prefix = "> "
+    console.print(x=history_display_x, y=input_line_y, string=input_prefix + world.chat_ui_input_line, fg=(255,255,255))
+
+    # Blinking cursor (simple version: just an underscore)
+    if int(world.game_time * 2) % 2 == 0: # Blink roughly every half second (assuming game_time increments often)
+        cursor_x = history_display_x + len(input_prefix) + len(world.chat_ui_input_line)
+        if cursor_x < history_display_x + history_display_width:
+             console.print(x=cursor_x, y=input_line_y, string="_", fg=(255,255,255))

@@ -163,8 +163,17 @@ class World:
         self.interaction_menu_options = []
         self.interaction_menu_selected_index = 0
         self.interaction_menu_target_npc = None
-        self.interaction_menu_x = 0 # For positioning the menu
-        self.interaction_menu_y = 0 # For positioning the menu
+        self.interaction_menu_x = 0
+        self.interaction_menu_y = 0
+
+        # Chat UI State
+        self.chat_ui_active = False
+        self.chat_ui_target_npc = None
+        self.chat_ui_history = [] # List of tuples: (speaker_name_or_type, text_string)
+        self.chat_ui_input_line = ""
+        self.chat_ui_mode = "talk" # Possible modes: "talk", "persuade_goal_input"
+        self.chat_ui_scroll_offset = 0 # For viewing history that exceeds displayable lines
+        self.chat_ui_max_history = 50 # Max lines to keep in history
 
 
     def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
@@ -573,22 +582,102 @@ class World:
             reaction_dialogue = response_json.get("reaction_dialogue", "...")
             new_attitude = response_json.get("new_attitude_to_player", npc_target.attitude_to_player)
 
-            self.add_message_to_chat_log(f"{npc_target.name}: \"{reaction_dialogue}\"")
+            # Add NPC's reaction dialogue to chat UI history
+            self.chat_ui_history.append((npc_target.name, reaction_dialogue))
 
             if new_attitude != npc_target.attitude_to_player:
-                self.add_message_to_chat_log(f"({npc_target.name}'s attitude towards you is now '{new_attitude}')")
+                attitude_msg = f"({npc_target.name}'s attitude towards you is now '{new_attitude}')"
+                self.chat_ui_history.append(("System", attitude_msg))
+                # Also log to main game log for now, as attitude change is significant
+                self.add_message_to_chat_log(attitude_msg)
                 npc_target.attitude_to_player = new_attitude
 
             if success:
-                self.add_message_to_chat_log("(Your persuasion attempt seems successful!)")
+                success_msg = "(Your persuasion attempt seems successful!)"
+                self.chat_ui_history.append(("System", success_msg))
+                self.add_message_to_chat_log(success_msg) # Also log globally
                 # Future: Implement actual game effect of success here
             else:
-                self.add_message_to_chat_log("(Your persuasion attempt seems to have failed.)")
+                failure_msg = "(Your persuasion attempt seems to have failed.)"
+                self.chat_ui_history.append(("System", failure_msg))
+                self.add_message_to_chat_log(failure_msg) # Also log globally
                 # Future: Implement actual game effect of failure here
 
+            # Ensure chat history doesn't exceed max and reset scroll
+            if len(self.chat_ui_history) > self.chat_ui_max_history:
+                self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+            self.chat_ui_scroll_offset = 0
+
+
         except json.JSONDecodeError:
-            self.add_message_to_chat_log(f"{npc_target.name} gives a non-committal grunt. (LLM response format error)")
-            self.add_message_to_chat_log(f"LLM Raw: {response_str}")
+            error_msg = f"{npc_target.name} gives a non-committal grunt. (LLM response format error)"
+            self.chat_ui_history.append(("System", error_msg))
+            # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
+
+    def start_npc_dialogue(self, npc_target: NPC):
+        """Initiates dialogue with an NPC, getting their first line."""
+        if not npc_target:
+            return
+
+        # Clear previous chat history for the new conversation
+        self.chat_ui_history.clear()
+        self.chat_ui_scroll_offset = 0
+        self.chat_ui_input_line = ""
+
+        player_rep = self.player.reputation
+        prompt = LLM_PROMPTS["npc_conversation_greeting"].format(
+            npc_name=npc_target.name,
+            npc_personality=npc_target.personality,
+            npc_attitude=npc_target.attitude_to_player,
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0)
+        )
+        greeting = self._call_ollama(prompt)
+        if not greeting:
+            greeting = f"Hello. (LLM failed to provide greeting)"
+
+        self.chat_ui_history.append((npc_target.name, greeting.strip()))
+
+        if len(self.chat_ui_history) > self.chat_ui_max_history:
+            self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+
+    def continue_npc_dialogue(self, npc_target: NPC, player_input_text: str):
+        """Continues dialogue with an NPC based on player input and history."""
+        if not npc_target:
+            return
+
+        # Format conversation history for the prompt
+        formatted_history = []
+        # Take last N messages for context window (e.g., last 10 lines, 5 exchanges)
+        history_context_limit = 10
+        recent_history = self.chat_ui_history[-(history_context_limit-1):] if len(self.chat_ui_history) > 1 else self.chat_ui_history
+
+        for speaker, text in recent_history:
+            if speaker == "Player": # Assuming "Player" is the key for player lines
+                formatted_history.append(f"Player: {text}")
+            else: # NPC lines
+                formatted_history.append(f"{speaker}: {text}")
+        history_str = "\n".join(formatted_history)
+
+        player_rep = self.player.reputation
+        prompt = LLM_PROMPTS["npc_conversation_continue"].format(
+            npc_name=npc_target.name,
+            npc_personality=npc_target.personality,
+            npc_attitude=npc_target.attitude_to_player,
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0),
+            conversation_history=history_str,
+            player_input=player_input_text
+        )
+
+        npc_response = self._call_ollama(prompt)
+        if not npc_response:
+            npc_response = "... (LLM failed to respond)"
+
+        self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+
+        if len(self.chat_ui_history) > self.chat_ui_max_history:
+            self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
 
 
     def _call_ollama(self, prompt: str) -> str:

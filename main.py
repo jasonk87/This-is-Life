@@ -71,65 +71,104 @@ def main():
                 if isinstance(event, tcod.event.MouseMotion):
                     world.mouse_x = int(event.tile.x)
                     world.mouse_y = int(event.tile.y)
-                if isinstance(event, tcod.event.KeyDown):
-                    if event.sym == tcod.event.KeySym.I: # Toggle Info Menu
-                        if not world.interaction_menu_active: # Don't toggle info if interaction menu is up
-                            world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
+                if isinstance(event, tcod.event.TextInput):
+                    if world.chat_ui_active: # Only process text input if chat UI is active
+                        world.chat_ui_input_line += event.text
+                        # print(f"TextInput: '{event.text}', current line: '{world.chat_ui_input_line}'") # Debug
+
+                elif isinstance(event, tcod.event.KeyDown):
+                    # --- UI Mode: Chat UI Active ---
+                    if world.chat_ui_active:
+                        if event.sym == tcod.event.KeySym.ESCAPE:
+                            context.stop_text_input()
+                            world.chat_ui_active = False
+                            world.add_message_to_chat_log(f"Ended interaction with {world.chat_ui_target_npc.name if world.chat_ui_target_npc else 'someone'}.")
+                            world.chat_ui_target_npc = None
+                            world.chat_ui_input_line = ""
+                        elif event.sym == tcod.event.KeySym.BACKSPACE:
+                            if world.chat_ui_input_line:
+                                world.chat_ui_input_line = world.chat_ui_input_line[:-1]
+                        elif event.sym == tcod.event.KeySym.RETURN:
+                            if world.chat_ui_input_line: # Process if there's input
+                                player_input = world.chat_ui_input_line
+                                world.chat_ui_history.append(("Player", player_input))
+                                world.chat_ui_input_line = "" # Clear input line
+
+                                if world.chat_ui_mode == "talk":
+                                    if world.chat_ui_target_npc:
+                                        world.continue_npc_dialogue(world.chat_ui_target_npc, player_input)
+                                    else: # Should not happen if chat_ui_active and mode is talk
+                                        world.add_message_to_chat_log("Error: No target NPC for dialogue continuation.")
+                                elif world.chat_ui_mode == "persuade_goal_input":
+                                    world.attempt_persuasion(world.chat_ui_target_npc, player_input)
+                                    # Persuasion results are added to chat_ui_history by attempt_persuasion
+                                    # Transition out of persuade_goal_input mode, perhaps to 'talk' or just end.
+                                    # For now, let's end the interaction after persuasion attempt.
+                                    context.stop_text_input()
+                                    world.chat_ui_active = False
+                                    world.add_message_to_chat_log(f"Persuasion attempt made with {world.chat_ui_target_npc.name}.")
+                                    world.chat_ui_target_npc = None
+
+                                # Keep chat history within limits
+                                if len(world.chat_ui_history) > world.chat_ui_max_history:
+                                    world.chat_ui_history = world.chat_ui_history[-world.chat_ui_max_history:]
+                                world.chat_ui_scroll_offset = 0 # Reset scroll to show latest
+                        # (Optional: PageUp/PageDown for scrolling history here)
                     
-                    # --- Interaction Menu Active Logic ---
+                    # --- UI Mode: Interaction Menu Active ---
                     elif world.interaction_menu_active:
                         if event.sym == tcod.event.KeySym.UP:
-                            world.interaction_menu_selected_index = (world.interaction_menu_selected_index - 1) % len(world.interaction_menu_options)
+                            if world.interaction_menu_options:
+                                world.interaction_menu_selected_index = \
+                                    (world.interaction_menu_selected_index - 1) % len(world.interaction_menu_options)
                         elif event.sym == tcod.event.KeySym.DOWN:
-                            world.interaction_menu_selected_index = (world.interaction_menu_selected_index + 1) % len(world.interaction_menu_options)
+                            if world.interaction_menu_options:
+                                world.interaction_menu_selected_index = \
+                                    (world.interaction_menu_selected_index + 1) % len(world.interaction_menu_options)
                         elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            selected_option = world.interaction_menu_options[world.interaction_menu_selected_index]
-                            # --- Stubbed actions for now ---
-                            if selected_option == "Talk":
-                                # world.talk_to_npc(world.interaction_menu_target_npc) # We need to pass the NPC
-                                # For now, use the existing world.talk_to_npc() which finds closest.
-                                # This needs refinement: talk_to_npc should accept a target.
-                                # Let's assume world.talk_to_npc() will be refactored or a new one created.
-                                if world.interaction_menu_target_npc:
-                                     world.add_message_to_chat_log(f"Selected [Talk] with {world.interaction_menu_target_npc.name}. (Implementation pending full chat UI)")
-                                     # world.talk_to_specific_npc(world.interaction_menu_target_npc) # Ideal
-                                     # For now, let's use the existing talk_to_npc and hope it targets correctly based on proximity
-                                     # or that we refactor talk_to_npc to take a target.
-                                     # The old talk_to_npc also set last_talked_to_npc, which is now interaction_menu_target_npc
-                                     # For this step, we just log. Actual call to LLM dialogue will be when chat UI is built.
-                                else:
-                                    world.add_message_to_chat_log("Error: No target NPC for talk.")
+                            if world.interaction_menu_options:
+                                selected_option = world.interaction_menu_options[world.interaction_menu_selected_index]
+                                target_npc = world.interaction_menu_target_npc
 
-                            elif selected_option == "Persuade":
-                                if world.interaction_menu_target_npc:
-                                    # Using console input for persuasion goal temporarily
-                                    context.present(console) # Refresh screen before input
-                                    print(f"\nAttempting to persuade {world.interaction_menu_target_npc.name}. What is your goal?")
-                                    goal_text = input("> ")
-                                    if goal_text:
-                                        world.attempt_persuasion(world.interaction_menu_target_npc, goal_text)
+                                world.interaction_menu_active = False # Close menu first
+
+                                if selected_option == "Talk":
+                                    if target_npc:
+                                        world.chat_ui_target_npc = target_npc
+                                        world.chat_ui_mode = "talk"
+                                        world.start_npc_dialogue(target_npc)
+                                        world.chat_ui_active = True
+                                        context.start_text_input() # Start text input when chat UI activates
                                     else:
-                                        world.add_message_to_chat_log("Persuasion cancelled (no goal entered).")
-                                else:
-                                    world.add_message_to_chat_log("Error: No target NPC for persuade.")
-
-                            elif selected_option == "Trade (Not Implemented)":
-                                world.add_message_to_chat_log("Trade system not yet implemented.")
-
-                            # For all options including "Cancel", close the menu
-                            world.interaction_menu_active = False
-                            world.interaction_menu_target_npc = None # Clear target
-                            if selected_option != "Cancel":
-                                world.add_message_to_chat_log(f"Action: {selected_option}")
-                            else:
-                                world.add_message_to_chat_log("Interaction cancelled.")
-
+                                        world.add_message_to_chat_log("Error: No target NPC for talk.")
+                                elif selected_option == "Persuade":
+                                    if target_npc:
+                                        world.chat_ui_target_npc = target_npc
+                                        world.chat_ui_mode = "persuade_goal_input"
+                                        world.chat_ui_history.clear()
+                                        world.chat_ui_scroll_offset = 0
+                                        world.chat_ui_input_line = ""
+                                        world.chat_ui_history.append(("System", f"Persuade {target_npc.name}: What is your goal?"))
+                                        world.chat_ui_active = True
+                                        context.start_text_input() # Start text input
+                                    else:
+                                        world.add_message_to_chat_log("Error: No target NPC for persuade.")
+                                elif selected_option == "Trade (Not Implemented)":
+                                    world.add_message_to_chat_log("Trade system is not yet implemented.")
+                                    world.interaction_menu_target_npc = None # Clear target
+                                elif selected_option == "Cancel":
+                                    world.add_message_to_chat_log("Interaction cancelled.")
+                                    world.interaction_menu_target_npc = None # Clear target
                         elif event.sym == tcod.event.KeySym.ESCAPE:
                             world.interaction_menu_active = False
                             world.interaction_menu_target_npc = None
                             world.add_message_to_chat_log("Interaction cancelled.")
 
-                    # --- Playing State Logic (Menu not active) ---
+                    # --- UI Mode: Info Menu Active (or toggling it) ---
+                    elif event.sym == tcod.event.KeySym.I:
+                        world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
+
+                    # --- Game State: Playing (No other UI is active) ---
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
                             dx, dy = move_keys[event.sym]
@@ -141,58 +180,47 @@ def main():
                         elif event.sym == tcod.event.KeySym.D: # Debug damage
                             world.player.take_damage(5)
                             print(f"You took 5 damage! Current HP: {world.player.hp}")
-                        # Old 'T' key for talk is removed.
-                        # --- Reputation Debug Keys ---
                         elif event.sym == tcod.event.KeySym.K:
                             world.player.adjust_reputation(REP_CRIMINAL, 10)
                             world.add_message_to_chat_log(f"Criminal points +10. Total: {world.player.reputation[REP_CRIMINAL]}")
                         elif event.sym == tcod.event.KeySym.J:
                             world.player.adjust_reputation(REP_HERO, 10)
                             world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")
-
                         elif event.sym == tcod.event.KeySym.E: # General Interact Key
                             target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
 
                             targeted_npc = None
-                            # Check for NPC at target location first
-                            # Combine NPC lists for checking
                             all_npcs = world.npcs + world.village_npcs
                             for npc_obj in all_npcs:
                                 if npc_obj.x == target_x and npc_obj.y == target_y:
                                     targeted_npc = npc_obj
                                     break
 
-                            if targeted_npc: # NPC found, open interaction menu
+                            if targeted_npc:
                                 world.interaction_menu_target_npc = targeted_npc
                                 world.interaction_menu_options = ["Talk", "Persuade", "Trade (Not Implemented)", "Cancel"]
                                 world.interaction_menu_selected_index = 0
-
-                                # Determine menu position (e.g., relative to player on screen)
-                                # This needs screen coordinates, not world. Renderer will handle final placement.
-                                # For now, store relative or placeholder values.
-                                world.interaction_menu_x = console.width // 2 # Example placeholder
+                                world.interaction_menu_x = console.width // 2
                                 world.interaction_menu_y = console.height // 2
                                 world.interaction_menu_active = True
-                                # world.add_message_to_chat_log(f"Interacting with {targeted_npc.name}...") # Redundant if menu opens
-
-                            # If no NPC targeted, fall back to other 'E' interactions
                             elif world.player.is_sitting:
                                 if world.player.sitting_on_object_at == (target_x, target_y) or \
                                    world.player.sitting_on_object_at is None:
                                     world.player_attempt_stand_up()
                                 else:
                                     world.add_message_to_chat_log("You need to stand up first to interact with that.")
-                            else: # Not sitting, no NPC targeted by 'E', try environment interactions
+                            else:
                                 action_taken = world.player_attempt_sit(target_x, target_y)
                                 if not action_taken:
                                     action_taken = world.player_attempt_sleep(target_x, target_y)
                                     if not action_taken:
                                         world.player_attempt_chop_tree(target_x, target_y)
-                                        # else: world.add_message_to_chat_log("Nothing to interact with there.")
-                    
-                    # --- Global Keys (processed regardless of most states, unless menu is active) ---
-                    if not world.interaction_menu_active and event.sym == tcod.event.KeySym.Q: # Quit Game
+                        elif event.sym == tcod.event.KeySym.Q: # Quit Game
+                            return
+
+                    # Fallback Quit, if somehow missed by other states (e.g. if in INFO_MENU)
+                    if event.sym == tcod.event.KeySym.Q:
                         return
 
 if __name__ == "__main__":

@@ -121,6 +121,7 @@ class Player:
         self.is_sleeping = False # Will be more of an instantaneous action for now
         self.original_char = self.char # Store the original character for standing up
         self.sitting_on_object_at = None # tuple (x,y) of the object player is sitting on
+        self.social_skill = 5 # Conceptual skill, scale 1-10. Default average.
 
     def take_damage(self, amount: int):
         self.hp -= amount
@@ -155,6 +156,16 @@ class World:
         self.mouse_y = 0
         self.game_state = "PLAYING"
         self.game_time = 0
+        self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
+
+        # Interaction Menu State
+        self.interaction_menu_active = False
+        self.interaction_menu_options = []
+        self.interaction_menu_selected_index = 0
+        self.interaction_menu_target_npc = None
+        self.interaction_menu_x = 0 # For positioning the menu
+        self.interaction_menu_y = 0 # For positioning the menu
+
 
     def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
         """
@@ -534,6 +545,51 @@ class World:
             # No interactable tile
             return False
 
+    def attempt_persuasion(self, npc_target: NPC, player_goal_text: str):
+        """Handles the player's attempt to persuade an NPC."""
+        if not npc_target:
+            self.add_message_to_chat_log("No one specific to persuade.")
+            return
+
+        player_rep = self.player.reputation
+        prompt = LLM_PROMPTS["npc_persuasion_check"].format(
+            npc_name=npc_target.name,
+            npc_personality=npc_target.personality,
+            npc_attitude=npc_target.attitude_to_player,
+            player_social_skill=self.player.social_skill,
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0),
+            player_persuasion_goal_text=player_goal_text
+        )
+
+        response_str = self._call_ollama(prompt)
+        if not response_str:
+            self.add_message_to_chat_log(f"{npc_target.name} doesn't seem to react to your attempt.")
+            return
+
+        try:
+            response_json = json.loads(response_str)
+            success = response_json.get("success", False)
+            reaction_dialogue = response_json.get("reaction_dialogue", "...")
+            new_attitude = response_json.get("new_attitude_to_player", npc_target.attitude_to_player)
+
+            self.add_message_to_chat_log(f"{npc_target.name}: \"{reaction_dialogue}\"")
+
+            if new_attitude != npc_target.attitude_to_player:
+                self.add_message_to_chat_log(f"({npc_target.name}'s attitude towards you is now '{new_attitude}')")
+                npc_target.attitude_to_player = new_attitude
+
+            if success:
+                self.add_message_to_chat_log("(Your persuasion attempt seems successful!)")
+                # Future: Implement actual game effect of success here
+            else:
+                self.add_message_to_chat_log("(Your persuasion attempt seems to have failed.)")
+                # Future: Implement actual game effect of failure here
+
+        except json.JSONDecodeError:
+            self.add_message_to_chat_log(f"{npc_target.name} gives a non-committal grunt. (LLM response format error)")
+            self.add_message_to_chat_log(f"LLM Raw: {response_str}")
+
 
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
@@ -775,8 +831,10 @@ class World:
             llm_dialogue = self._call_ollama(prompt)
             # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
             print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
+            self.last_talked_to_npc = closest_npc # Store for potential follow-up actions like persuasion
         else:
             print("No one to talk to nearby.")
+            self.last_talked_to_npc = None
 
     def _initialize_chunks(self):
         """Initializes chunk data based on the world generator's macro map."""

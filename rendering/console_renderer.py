@@ -36,7 +36,13 @@ def draw(console: tcod.console.Console, world) -> None:
     elif world.game_state == "INFO_MENU":
         draw_info_menu(console, world)
 
-    draw_chat_log(console, world)
+    draw_chat_log(console, world) # Draw chat log
+
+    # --- Interaction Menu (if active) ---
+    # Must be drawn after main map and entities, but before cursor info if we want cursor over it
+    # Or drawn last to be on top of everything. Let's try drawing it quite late.
+    draw_interaction_menu(console, world, start_x, start_y)
+
 
     # --- Cursor Info (Top Left) - Always draw last to be on top ---
     cursor_world_x = start_x + world.mouse_x
@@ -195,3 +201,71 @@ def draw_info_menu(main_console: tcod.console.Console, world) -> None:
     else:
         main_console.print(x=menu_x + 3, y=ui_y, string="No NPC at cursor.", fg=(128,128,128))
         ui_y +=1
+
+def draw_interaction_menu(console: tcod.console.Console, world, start_render_x: int, start_render_y: int) -> None:
+    """Draws the NPC interaction menu if active."""
+    if not world.interaction_menu_active:
+        return
+
+    menu_options = world.interaction_menu_options
+    if not menu_options:
+        return
+
+    # Determine menu width based on longest option
+    menu_title = f"Interact: {world.interaction_menu_target_npc.name if world.interaction_menu_target_npc else 'NPC'}"
+    max_option_width = len(menu_title)
+    for option in menu_options:
+        if len(option) > max_option_width:
+            max_option_width = len(option)
+
+    menu_width = max_option_width + 4  # Padding
+    menu_height = len(menu_options) + 4 # Padding + title
+
+    # Position the menu: Try to place it near the player on screen.
+    # Player's world coordinates: world.player.x, world.player.y
+    # Player's screen coordinates:
+    player_screen_x = world.player.x - start_render_x
+    player_screen_y = world.player.y - start_render_y
+
+    # Tentative menu screen position (top-left corner of the menu)
+    # Try to place it to the right of the player, or left if too close to edge.
+    menu_screen_x = player_screen_x + 2
+    menu_screen_y = player_screen_y - menu_height // 2
+
+    # Clamp menu position to be within console boundaries
+    if menu_screen_x + menu_width > console.width:
+        menu_screen_x = player_screen_x - menu_width - 1
+    if menu_screen_x < 0:
+        menu_screen_x = 0
+
+    menu_screen_y = max(0, min(menu_screen_y, console.height - menu_height))
+
+
+    console.draw_frame(
+        x=menu_screen_x,
+        y=menu_screen_y,
+        width=menu_width,
+        height=menu_height,
+        title=menu_title,
+        clear=True, # Clear background behind menu
+        fg=(255, 255, 255), # White border
+        bg=(20, 20, 40)    # Dark blue background
+    )
+
+    for i, option_text in enumerate(menu_options):
+        text_color = (200, 200, 200) # Default text color (greyish)
+        bg_color = (20, 20, 40) # Default background (same as menu frame)
+        if i == world.interaction_menu_selected_index:
+            text_color = (255, 255, 50) # Highlighted text color (yellow)
+            bg_color = (50, 50, 80)   # Highlighted background color (darker purple/blue)
+
+        console.print_box( # Use print_box for auto-wrap and alignment if needed, or simple print
+            x=menu_screen_x + 1,
+            y=menu_screen_y + 2 + i,
+            width=menu_width - 2,
+            height=1,
+            string=option_text,
+            fg=text_color,
+            bg=bg_color,
+            alignment=tcod.constants.LEFT
+            )

@@ -75,4 +75,51 @@ Consider their personality: a lazy NPC might avoid work, a social one might wand
 ---
 Chosen Goal JSON:
 """,
+    "npc_persuasion_check": """\
+You are an AI adjudicating a persuasion attempt in a fantasy role-playing game.
+
+**NPC Details:**
+- Name: {npc_name}
+- Personality: {npc_personality}
+- Current Attitude Towards Player: {npc_attitude}
+
+**Player Details:**
+- Social Skill (1-10, higher is better): {player_social_skill}
+- Criminal Reputation Points: {player_criminal_points} (Higher means more known for crimes)
+- Hero Reputation Points: {player_hero_points} (Higher means more known for good deeds)
+
+**Persuasion Attempt:**
+The player is attempting to persuade {npc_name}. The player's specific goal is:
+"{player_persuasion_goal_text}"
+
+**Task:**
+Based on all the above, determine if the persuasion attempt is successful.
+Consider:
+- A high social skill and positive reputation (high hero points, low criminal points) should increase chances of success, especially with friendly or neutral NPCs.
+- A low social skill or negative reputation (high criminal points) should decrease chances, especially with lawful or wary NPCs.
+- The NPC's personality: A 'greedy' NPC might be swayed by offers of money (if implied in goal), a 'timid' one by intimidation (if implied), a 'lawful' one less likely by criminal-like requests.
+- The nature of the request itself. Is it reasonable? Does it align with or go against the NPC's personality and current attitude?
+
+**Output Format (JSON):**
+Return a JSON object with the following fields:
+- "success": boolean (true if the persuasion attempt succeeds, false otherwise)
+- "reaction_dialogue": string (A short, in-character dialogue response from the NPC reacting to the player's attempt. This should reflect success or failure.)
+- "new_attitude_to_player": string (The NPC's new attitude towards the player after this interaction. Examples: "friendly", "neutral", "wary", "hostile", "impressed", "annoyed". This should reflect the outcome and the NPC's personality.)
+
+Example if successful:
+{
+  "success": true,
+  "reaction_dialogue": "Alright, alright, you've convinced me. I'll tell you what I know...",
+  "new_attitude_to_player": "neutral"
+}
+
+Example if failed:
+{
+  "success": false,
+  "reaction_dialogue": "I'm sorry, but I can't help you with that. And I don't like your tone.",
+  "new_attitude_to_player": "annoyed"
+}
+
+Adjudication:
+""",
 }

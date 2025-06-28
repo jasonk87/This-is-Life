@@ -79,16 +79,22 @@ class Building:
         self.interior_decorated = False
         self.occupants = [] # General list of NPCs associated (e.g. workers)
         self.residents = []
-        self.building_inventory = {} # For items produced or stored at this building
+        self.building_inventory = {}
+        self.interaction_points = {}
+
+        # Store global origin of the building (top-left tile)
+        self.global_origin_x = global_chunk_x_start + x
+        self.global_origin_y = global_chunk_y_start + y
 
         # Global coordinates of the building's center
-        self.global_center_x = global_chunk_x_start + x + width // 2
-        self.global_center_y = global_chunk_y_start + y + height // 2
+        self.global_center_x = self.global_origin_x + width // 2
+        self.global_center_y = self.global_origin_y + height // 2
 
 class Village:
     def __init__(self):
         self.buildings = []
-        self.lore = "No lore generated yet." # Default lore
+        self.lore = "No lore generated yet."
+        self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -264,16 +270,42 @@ class World:
                 # Path includes the starting point, so if len > 1, there's a next step.
                 # If len == 1, it means current_path[0] is the destination itself.
                 if len(npc.current_path) > 1:
-                    next_x, next_y = npc.current_path[1] # Target the next step, not current
+                    next_x, next_y = npc.current_path[1]
 
-                    # Check if the next step is passable (important if environment changes or path was to an impassable tile)
-                    # For now, assume path generated is valid. More checks can be added.
-                    # tile = self.get_tile_at(next_x, next_y)
-                    # if tile and tile.passable: # Or if it's the final destination itself.
+                    next_tile = self.get_tile_at(next_x, next_y)
 
-                    npc.x = next_x
-                    npc.y = next_y
-                    npc.current_path.pop(0) # Remove the point they were just on (original current_path[0])
+                    # Check for closed door in path
+                    if next_tile and next_tile.properties.get("is_door") and not next_tile.properties.get("is_open"):
+                        if self.npc_toggle_door(npc, next_x, next_y):
+                            # Door opened successfully. NPC waits a turn (door opening takes their action).
+                            # Path remains, they will attempt to move through next turn.
+                            # self.add_message_to_chat_log(f"{npc.name} opened a door, will move next turn.")
+                            # To make them move immediately, we would not return here, but then pathfinding
+                            # might need to be aware of the new passability instantly.
+                            # Simpler for now: opening door costs a turn of movement.
+                            return # End this NPC's movement update for this turn
+                        else:
+                            # Failed to open door, path is blocked. Clear path.
+                            # self.add_message_to_chat_log(f"{npc.name}'s path blocked by a stuck door at ({next_x},{next_y}). Path cleared.")
+                            npc.current_path = []
+                            npc.current_destination_coords = None
+                            npc.current_task = "idle_confused" # Or try to repath later
+                            return
+
+                    # If not a closed door, or door was opened, proceed with movement if tile is passable
+                    if next_tile and next_tile.passable:
+                        npc.x = next_x
+                        npc.y = next_y
+                        npc.current_path.pop(0)
+                    elif not next_tile or not next_tile.passable:
+                        # Path is blocked by something else (not a door they can open)
+                        # self.add_message_to_chat_log(f"{npc.name}'s path blocked at ({next_x},{next_y}). Path cleared.")
+                        npc.current_path = []
+                        npc.current_destination_coords = None
+                        npc.current_task = "idle_confused"
+                        return
+                    # If next_tile was None (out of bounds), this case is also handled by the above.
+
                                             # Effectively making current_path[1] the new current_path[0]
 
                     # If only the destination remains in the path after moving
@@ -284,20 +316,24 @@ class World:
                         # Task update will be handled by the scheduler when it sees destination is reached.
                         if npc.current_task == "going to work":
                             npc.current_task = "at work"
-                        elif npc.current_task == "going home":
-                            npc.current_task = "at home"
+                        elif npc.current_task == "going home" or npc.current_task == "going home to sleep" or npc.current_task == "going to bed":
+                            npc.current_task = "at home" # Scheduler will handle transition to sleeping if appropriate
+                        elif npc.current_task == "fetching water":
+                            npc.current_task = "at the well"
+                            # NPC will stay "at the well" until scheduler gives a new task (e.g. "going home")
                         else:
-                            npc.current_task = "idle" # Or some other default task
+                            npc.current_task = "idle"
 
                 elif len(npc.current_path) == 1 and (npc.x, npc.y) == npc.current_path[0] and (npc.x, npc.y) == npc.current_destination_coords :
-                    # Already at destination, path might have been just the destination itself.
-                    # self.add_message_to_chat_log(f"{npc.name} is already at destination {npc.current_destination_coords} for task {npc.current_task}")
                     npc.current_path = []
                     npc.current_destination_coords = None
+                    # Similar logic for task update on immediate arrival
                     if npc.current_task == "going to work":
                         npc.current_task = "at work"
-                    elif npc.current_task == "going home":
+                    elif npc.current_task == "going home" or npc.current_task == "going home to sleep" or npc.current_task == "going to bed":
                         npc.current_task = "at home"
+                    elif npc.current_task == "fetching water":
+                        npc.current_task = "at the well"
                     else:
                         npc.current_task = "idle"
 
@@ -419,32 +455,51 @@ class World:
 
                     # Priority: Go to work during work hours
                     if work_start_tick <= current_time_in_day < work_end_tick:
-                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work": # Not at work, needs to go
+                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work":
+                            work_building_obj = self.buildings_by_id.get(npc.work_building_id)
+                            # Future: Check for specific workstation in work_building_obj.interaction_points
+                            # For now, path to building center for work.
                             dest_coords_temp = self._get_building_global_center_coords(npc.work_building_id)
                             if dest_coords_temp:
                                 new_task_label = "going to work"
                                 destination_coords = dest_coords_temp
-                                if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep # Ensure char reset if was sleeping
-                        elif npc.work_building_id and is_at_work: # Already at work
+                                if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
+                        elif npc.work_building_id and is_at_work:
                              npc.current_task = f"Working ({npc.profession})" if npc.profession != "Unemployed" else "At Work (Idle)"
                              if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
-                    # Else, if it's night and they have a home and aren't already sleeping/going home
-                    elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home"]:
+
+                    # Else, if it's night and they have a home
+                    elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home to sleep"]:
                         home_building_obj = self.buildings_by_id.get(npc.home_building_id)
-                        if is_at_home: # Already at home
-                            if self._building_contains_item_with_interaction(home_building_obj, "sleep"):
-                                npc.current_task = "sleeping"
-                                npc.original_char_before_sleep = npc.char # Store char before changing to 'z'
-                                npc.char = ord('z')
-                                # self.add_message_to_chat_log(f"{npc.name} is now sleeping at home.")
-                            # else: npc stays "at home" if no bed
-                        else: # Not at home, but it's night
-                            dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
-                            if dest_coords_temp:
-                                new_task_label = "going home" # Will sleep upon arrival if conditions met
-                                destination_coords = dest_coords_temp
-                    # Else (daytime, not work hours, or already finished work), go home if not there
-                    elif npc.home_building_id and not is_at_home and npc.current_task not in ["going home", "sleeping"]:
+                        if home_building_obj:
+                            sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
+                            if is_at_home: # Already at home
+                                if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords: # At the bed
+                                    npc.current_task = "sleeping"
+                                    npc.original_char_before_sleep = npc.char
+                                    npc.char = ord('z')
+                                elif sleep_spot_coords and (npc.x, npc.y) != sleep_spot_coords: # At home, but not at bed
+                                    new_task_label = "going to bed"
+                                    destination_coords = sleep_spot_coords
+                                elif not sleep_spot_coords and self._building_contains_item_with_interaction(home_building_obj, "sleep"):
+                                    # Fallback if sleep_spot not recorded but bed exists (should not happen if decoration works)
+                                    # For now, just mark as sleeping if at home center and bed exists broadly.
+                                    npc.current_task = "sleeping"
+                                    npc.original_char_before_sleep = npc.char
+                                    npc.char = ord('z')
+                                # else: npc stays "at home" if no bed / no specific sleep spot
+                            else: # Not at home, but it's night -> go to bed if possible, else home center
+                                if sleep_spot_coords:
+                                    new_task_label = "going home to sleep" # Specific task
+                                    destination_coords = sleep_spot_coords
+                                else: # No specific bed location, just go to building center
+                                    dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
+                                    if dest_coords_temp:
+                                        new_task_label = "going home"
+                                        destination_coords = dest_coords_temp
+
+                    # Else (daytime, not work hours, or already finished work), go home (to building center) if not there
+                    elif npc.home_building_id and not is_at_home and npc.current_task not in ["going home", "going home to sleep", "sleeping"]:
                         dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
                         if dest_coords_temp:
                             new_task_label = "going home"
@@ -453,13 +508,35 @@ class World:
                     # Wake up logic: If sleeping and it's no longer night
                     if npc.current_task == "sleeping" and not is_night_time:
                         npc.current_task = "at home" # Or "idle"
-                        if hasattr(npc, 'original_char_before_sleep'):
+                        if hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'): # only restore if actually 'z'
                              npc.char = npc.original_char_before_sleep
                         # self.add_message_to_chat_log(f"{npc.name} woke up.")
 
+                    # New Task: Fetching Water (example, low priority, during day, if not working/going to work)
+                    # Only if not night time and not during work hours
+                    is_day_leisure_time = not is_night_time and not (work_start_tick <= current_time_in_day < work_end_tick)
+                    if not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
+                        # Find the NPC's village to get well location
+                        npc_village = None
+                        for y_idx, row in enumerate(self.chunks):
+                            for x_idx, chk in enumerate(row):
+                                if chk.village: # Assuming NPC is in a village chunk that has a village object
+                                    # Check if this NPC belongs to this village (e.g. home is here)
+                                    if npc.home_building_id and self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
+                                        npc_village = chk.village
+                                        break
+                            if npc_village: break
+
+                        if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
+                            well_coords = random.choice(npc_village.interaction_points["well"]) # Pick one if multiple wells
+                            if (npc.x, npc.y) != well_coords:
+                                new_task_label = "fetching water"
+                                destination_coords = well_coords
+                            else:
+                                npc.current_task = "at the well" # Already there
 
                 # --- Assign Path if new task and destination found ---
-                if new_task_label and destination_coords: # Changed from new_task to new_task_label
+                if new_task_label and destination_coords:
                     # Ensure destination is pathable (or path to nearest passable)
                     # For now, assume center of building is generally inside and thus pathable floor.
                     # Or path to door if we define doors explicitly as entry points.
@@ -809,6 +886,40 @@ class World:
             error_msg = f"{npc_target.name} gives a non-committal grunt. (LLM response format error)"
             self.chat_ui_history.append(("System", error_msg))
             # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
+
+    def npc_toggle_door(self, requesting_npc: NPC, door_x: int, door_y: int) -> bool:
+        """Handles an NPC's attempt to open or close a door. NPCs currently only open doors."""
+        target_tile = self.get_tile_at(door_x, door_y)
+
+        if target_tile and target_tile.properties.get("is_door"):
+            is_open = target_tile.properties.get("is_open", False)
+
+            if is_open: # NPCs currently don't try to close doors they pass through
+                return True # Door is already open, action considered successful for pathing
+
+            # Door is closed, NPC tries to open it
+            new_state_key = target_tile.properties.get("opens_to")
+            action_message = f"{requesting_npc.name} opens the {target_tile.name}."
+
+            if new_state_key and new_state_key in DECORATION_ITEM_DEFINITIONS:
+                new_door_def = DECORATION_ITEM_DEFINITIONS[new_state_key]
+
+                chunk_x, chunk_y = door_x // CHUNK_SIZE, door_y // CHUNK_SIZE
+                local_x, local_y = door_x % CHUNK_SIZE, door_y % CHUNK_SIZE
+
+                self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
+                    char=new_door_def["char"],
+                    color=new_door_def["color"],
+                    passable=new_door_def["passable"],
+                    name=new_door_def["name"],
+                    properties=new_door_def["properties"]
+                )
+                # self.add_message_to_chat_log(action_message) # Can be spammy
+                return True
+            else:
+                # self.add_message_to_chat_log(f"The {target_tile.name} seems stuck for {requesting_npc.name}.")
+                return False
+        return False # Not a door
 
     def initialize_trade_session(self):
         """Populates snapshots of player and merchant inventories for the trade UI."""
@@ -1332,22 +1443,35 @@ class World:
                         decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
                         if decoration_tile_def:
                             # Apply the decoration to the tile
-                            chunk_x, chunk_y = global_x // CHUNK_SIZE, global_y // CHUNK_SIZE
-                            local_x, local_y = global_x % CHUNK_SIZE, global_y % CHUNK_SIZE
+                            # global_x, global_y are the world coordinates of the item.
+                            # building.x, building.y are the building's origin, local to its chunk.
+                            # item_x, item_y are the item's origin, local to the building.
                             
-                            # Ensure the chunk is generated before trying to modify its tiles
-                            chunk = self.chunks[chunk_y][chunk_x]
-                            if not chunk.is_generated:
-                                self._generate_chunk_detail(chunk)
+                            # The tile we want to change is in `chunk.tiles`
+                            # Its local-to-chunk coordinates are:
+                            tile_in_chunk_x = building.x + item_x
+                            tile_in_chunk_y = building.y + item_y
 
-                            self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
-                                char=decoration_tile_def["char"],
-                                color=decoration_tile_def["color"],
-                                passable=decoration_tile_def["passable"],
-                                name=decoration_tile_def.get("name", item_type), # Use defined name or item_type as fallback
-                                properties=decoration_tile_def.get("properties", {}) # Pass properties
-                            )
-                            # print(f"Placed {item_type} at ({global_x}, {global_y})") # Can be noisy
+                            # Ensure these are valid chunk tile coordinates
+                            if 0 <= tile_in_chunk_x < CHUNK_SIZE and 0 <= tile_in_chunk_y < CHUNK_SIZE:
+                                chunk.tiles[tile_in_chunk_y][tile_in_chunk_x] = Tile(
+                                    char=decoration_tile_def["char"],
+                                    color=decoration_tile_def["color"],
+                                    passable=decoration_tile_def["passable"],
+                                    name=decoration_tile_def.get("name", item_type),
+                                    properties=decoration_tile_def.get("properties", {})
+                                )
+                                # print(f"Placed {item_type} at G({global_x},{global_y}), local_to_chunk({tile_in_chunk_x},{tile_in_chunk_y})")
+
+                                # Store interaction points using their GLOBAL world coordinates
+                                interaction_hint = decoration_tile_def.get("properties", {}).get("interaction_hint")
+                                if interaction_hint == "sleep": # This is for beds
+                                    if "sleep_spot" not in building.interaction_points: # Store first one found
+                                        building.interaction_points["sleep_spot"] = (global_x, global_y)
+                                        # self.add_message_to_chat_log(f"Bed ('sleep_spot') recorded for building {building.id[:6]} at G({global_x},{global_y})")
+                                # Add other interaction points like "cook_spot", "craft_spot" here later
+                            else:
+                                print(f"Error: Calculated tile coords ({tile_in_chunk_x},{tile_in_chunk_y}) for item '{item_type}' are out of chunk bounds.")
                         else:
                             print(f"Unknown decoration item type: {item_type}")
                     else:
@@ -1511,8 +1635,17 @@ class World:
             tiles[y][road_x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
 
         # Place well at the center intersection
-        well_x, well_y = road_x, road_y
-        tiles[well_y][well_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
+        well_local_x, well_local_y = road_x, road_y # These are local to chunk grid
+        tiles[well_local_y][well_local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
+
+        # Store global coordinates of the well
+        global_well_x = chunk_global_start_x + well_local_x
+        global_well_y = chunk_global_start_y + well_local_y
+        if "well" not in chunk.village.interaction_points:
+            chunk.village.interaction_points["well"] = []
+        chunk.village.interaction_points["well"].append((global_well_x, global_well_y))
+        # self.add_message_to_chat_log(f"Village well registered at G({global_well_x},{global_well_y})")
+
 
         # Generate Capital Hall
         capital_hall_w, capital_hall_h = 9, 7

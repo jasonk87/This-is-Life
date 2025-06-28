@@ -75,10 +75,46 @@ Example Output:
     "We've heard tales of your deeds, traveler. Some good, some... less so.",
     "Justice always finds its course.",
     "May your path be clear, provided it aligns with the village's well-being."
-  ]
+  ],
+  "combat_behavior": "defensive",
+  "base_attack_name": "fists"
 }
 
 NPC Data:
+Provide the following fields for the NPC:
+- 'name'
+- 'personality' (e.g., 'grumpy', 'jovial', 'shy', 'lawful', 'greedy')
+- 'family_ties' (e.g., 'married to John', 'orphan', 'sibling of Jane')
+- 'attitude_to_player' (e.g., 'friendly', 'suspicious', 'indifferent', 'hostile', 'admiring') - this should be influenced by player reputation.
+- 'dialogue' (3-5 lines reflecting personality, attitude, and possibly reacting to player reputation)
+- 'combat_behavior' (How they generally act in a fight: 'aggressive', 'defensive', 'cowardly', 'opportunist', 'avoids_combat') - should be consistent with personality.
+- 'base_attack_name' (Their primary unarmed or simple attack name if forced into combat: e.g., 'fists', 'teeth', 'claws', 'kick', 'old rusty dagger', 'farming tool')
+
+The player's current reputation is:
+- Criminal Points: {player_criminal_points}
+- Hero Points: {player_hero_points}
+
+Hints for generation (use if provided, otherwise generate freely):
+- Name Hint: {name_hint}
+- Personality Hint: {personality_hint}
+- Family Ties Hint: {family_ties_hint}
+- Attitude Hint: {attitude_to_player_hint}
+
+Make sure the entire output is a single JSON object.
+Example of a full JSON structure to output (after filling in the values):
+{
+  "name": "Borin",
+  "personality": "gruff but fair",
+  "family_ties": "widower",
+  "attitude_to_player": "neutral",
+  "dialogue": [
+    "What do you want?",
+    "This village has seen better days, and worse.",
+    "Don't cause trouble, and we'll get along fine."
+  ],
+  "combat_behavior": "defensive",
+  "base_attack_name": "work hammer"
+}
 """,
     "npc_daily_goal": """\
 You are an AI simulating the behavior of an NPC in a village.
@@ -288,4 +324,90 @@ Example - Glancing Hit (low damage):
 
 Adjudication Output:
 """,
+    "npc_combat_decision": """\
+You are an AI determining an NPC's combat action in a fantasy game.
+
+**NPC State:**
+- Name: {npc_name}
+- Personality: {npc_personality} (e.g., brave, cowardly, aggressive, defensive, tactical)
+- Combat Behavior Trait: {npc_combat_behavior} (e.g., aggressive, defensive, cowardly, opportunist)
+- Current Health: {npc_hp} out of {npc_max_hp} (e.g., 5/20)
+- Current Task/Status: {npc_current_task}
+- Base Attack Name: {npc_attack_name} (e.g., fists, rusty dagger, claws)
+- Attack Range: {npc_attack_range} (e.g., 1 for melee)
+
+**Target (Player) State:**
+- Player is at ({player_x}, {player_y}). NPC is at ({npc_x}, {npc_y}).
+- Distance to Player: {distance_to_player} (Manhattan distance for simplicity)
+- Is Player within NPC's attack range? {player_in_attack_range} (boolean)
+- Player's Last Known Action (optional, if available): {player_last_action_desc} (e.g., "attacked me", "approached", "used item")
+
+**Available Actions for NPC:**
+1.  "attack_player": If player is in range and NPC intends to fight.
+2.  "move_to_attack_player": If player is not in range, but NPC intends to engage.
+3.  "flee_from_player": If NPC wants to disengage and run away.
+4.  "hold_position": If NPC is waiting, assessing, or being defensive without immediate action. (e.g., a guard holding a chokepoint, or a cautious NPC waiting for an opening).
+5.  "use_ability": (Future placeholder - e.g., "use_healing_salve", "cast_defensive_spell") - For now, default to other actions.
+
+**Task:**
+Based on the NPC's personality, combat behavior, health, current situation relative to the player, and their attack capabilities, decide the MOST appropriate combat action.
+- **Cowardly/Low Health:** More likely to "flee_from_player".
+- **Aggressive/Brave:** More likely to "attack_player" or "move_to_attack_player".
+- **Defensive:** Might "hold_position" or "attack_player" if a good opportunity arises.
+- **Opportunist:** Might "flee_from_player" if outnumbered or low health, or "attack_player" if player is weak or distracted.
+- If "attack_player" is chosen, the NPC must be able to make an attack (e.g., player in range).
+- If "move_to_attack_player" is chosen, the NPC should not already be in attack range.
+- If "flee_from_player", distance should ideally increase.
+
+Respond with a JSON object containing the chosen action and a brief narrative for the NPC's thought process or intent.
+Example: {"action": "move_to_attack_player", "narrative": "{npc_name} growls and charges towards the player!"}
+Example: {"action": "flee_from_player", "narrative": "Seeing their injuries, {npc_name} decides to retreat!"}
+Example: {"action": "attack_player", "narrative": "{npc_name} lashes out with their {npc_attack_name}!"}
+
+JSON Output:
+"""
+,
+    "adjudicate_npc_attack": """\
+You are an AI adjudicating an NPC's melee attack against the player in a fantasy role-playing game.
+
+**Attacker (NPC):**
+- Name: {npc_name}
+- Base Attack Name: {npc_attack_name} (e.g., "Fists", "Claws", "Rusty Dagger")
+- (Conceptual) NPC's Melee Skill/Ferocity (1-10, higher is better, derived from personality/role): {npc_melee_skill}
+
+**Target (Player):**
+- Player Health: {player_hp}/{player_max_hp}
+- (Conceptual) Player's Defensive Capability (e.g., armor, agility - simplified as a general toughness for now): {player_toughness_desc} (e.g., "unarmored", "wearing leather", "heavily armored", "agile")
+
+**Task:**
+Based on the NPC's attack type, conceptual skill, and the player's current state/defense, determine the outcome of the attack.
+- A more dangerous attack type and higher NPC skill should increase the chance to hit and potential damage.
+- Higher player defense/toughness should decrease the chance to be hit or reduce damage taken.
+- Consider a degree of randomness in outcomes.
+
+**Output Format (JSON):**
+Return a JSON object with the following fields:
+- "hit": boolean (true if the attack connects, false if it's a miss, dodge, or parry by the player)
+- "damage_dealt": integer (The amount of HP damage dealt to the player. Can be 0 even on a hit. Should be 0 if "hit" is false.)
+- "narrative_feedback": string (A short, vivid, in-character description of the NPC's attack action and its immediate result on the player. Examples: "{npc_name} lunges with their {npc_attack_name}, landing a solid blow on you!", "You deftly sidestep {npc_name}'s clumsy swing.", "The {npc_attack_name} from {npc_name} scrapes against your armor, doing minimal damage.")
+- "attacker_status_change": string (For now, usually "none". Future options for NPC: "overextended", "enraged")
+
+Example - Successful Hit:
+{
+  "hit": true,
+  "damage_dealt": 5,
+  "narrative_feedback": "{npc_name} strikes you hard with their {npc_attack_name}!",
+  "attacker_status_change": "none"
+}
+
+Example - Miss:
+{
+  "hit": false,
+  "damage_dealt": 0,
+  "narrative_feedback": "You manage to avoid {npc_name}'s telegraphed attack with their {npc_attack_name}.",
+  "attacker_status_change": "none"
+}
+
+Adjudication Output:
+"""
 }

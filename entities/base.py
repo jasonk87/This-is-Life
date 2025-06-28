@@ -33,6 +33,14 @@ class NPC:
         self.is_dead = False
         self.id = id(self) # Simple unique ID for now, can be replaced by uuid later if needed
 
+        # Combat AI Attributes (Extending from Phase 5.3)
+        self.combat_behavior = "defensive" # e.g., 'aggressive', 'defensive', 'cowardly', 'opportunist'
+        self.base_attack_name = "fists"    # e.g., "claws", "bite", "rusty dagger"
+        self.base_attack_damage_dice = "1d3" # e.g., "1d4", "1d6+1" (simple for now, can expand parsing later)
+        self.attack_range = 1              # Typically 1 for melee
+        self.target_entity_id = None       # ID of the entity this NPC is currently targeting (e.g., player's ID)
+        # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
+
     def get_dialogue(self):
         return self.dialogue
 

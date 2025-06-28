@@ -135,6 +135,7 @@ class Player:
         self.active_contracts = {}
         self.pending_contract_offer = None
         self.lockpicking_skill = 3 # Conceptual skill, scale 1-10, default slightly below average
+        self.id = id(self) # Simple unique ID for player
 
     def take_damage(self, amount: int):
         self.hp -= amount
@@ -261,8 +262,94 @@ class World:
             return []
 
     def _update_npc_movement(self):
-        """Updates the position of NPCs based on their current path."""
+        """Updates the position of NPCs based on their current path AND handles execution of some combat actions."""
         for npc in self.village_npcs: # Later might include self.npcs if they also use this system
+            if npc.is_dead:
+                continue
+
+            # --- Handle Combat Action Execution ---
+            if npc.current_task == "combat_action_attack_player":
+                player = self.player
+                distance_x = abs(npc.x - player.x)
+                distance_y = abs(npc.y - player.y)
+                manhattan_distance = distance_x + distance_y
+
+                if manhattan_distance <= npc.attack_range:
+                    self.npc_attempt_attack_player(npc, player)
+                    # After attacking, the NPC's turn for movement/further action is done for this tick.
+                    # Their AI will decide next action on the next AI tick.
+                    # Clear path to prevent residual movement if any was set.
+                    npc.current_path = []
+                    npc.current_destination_coords = None
+                    continue # Move to next NPC
+                else:
+                    # NPC wants to attack but player is not in range.
+                    # The AI decision (_handle_npc_combat_turn) should ideally have set
+                    # current_task to "combat_action_move_to_attack_player".
+                    # If this state is reached, it's a slight desync. We can force a move task.
+                    # self.add_message_to_chat_log(f"{npc.name} wants to attack but player moved out of range. Will try to close in.")
+                    npc.current_task = "combat_action_move_to_attack_player"
+                    # Pathing for this will be handled below if no current_path exists or needs recalculation.
+                    npc.current_path = [] # Clear any old path
+                    npc.current_destination_coords = None
+
+            # --- Handle Pathing for Combat Movement Tasks (Move to Attack, Flee) ---
+            # These tasks require a path to be calculated if not already present or if target (player) moved.
+            # Fleeing: Calculate path away from player if task is flee and no current valid path.
+            elif npc.current_task == "combat_action_flee_from_player":
+                if not npc.current_path or npc.current_destination_coords is None: # Needs a new flee path
+                    player_x, player_y = self.player.x, self.player.y
+                    flee_distance = 15 # How far to try and flee
+
+                    # Calculate direction away from player
+                    dx = npc.x - player_x
+                    dy = npc.y - player_y
+
+                    # Normalize (roughly) and scale for flee distance
+                    len_flee_vec = math.sqrt(dx*dx + dy*dy)
+                    if len_flee_vec > 0:
+                        flee_target_x = npc.x + int( (dx / len_flee_vec) * flee_distance )
+                        flee_target_y = npc.y + int( (dy / len_flee_vec) * flee_distance )
+                    else: # NPC is on same tile as player, flee randomly
+                        flee_target_x = npc.x + random.randint(-flee_distance, flee_distance)
+                        flee_target_y = npc.y + random.randint(-flee_distance, flee_distance)
+
+                    # Clamp to world bounds
+                    flee_target_x = max(0, min(WORLD_WIDTH - 1, flee_target_x))
+                    flee_target_y = max(0, min(WORLD_HEIGHT - 1, flee_target_y))
+
+                    # Check if target is passable, if not, try to find a nearby one (simplified for now)
+                    flee_tile = self.get_tile_at(flee_target_x, flee_target_y)
+                    if not (flee_tile and flee_tile.passable):
+                        # Basic fallback: try a few random nearby spots around the ideal flee target
+                        found_alt_flee = False
+                        for _ in range(5): # Try 5 alternatives
+                            alt_x = flee_target_x + random.randint(-3,3)
+                            alt_y = flee_target_y + random.randint(-3,3)
+                            alt_x = max(0, min(WORLD_WIDTH - 1, alt_x))
+                            alt_y = max(0, min(WORLD_HEIGHT - 1, alt_y))
+                            alt_tile = self.get_tile_at(alt_x, alt_y)
+                            if alt_tile and alt_tile.passable:
+                                flee_target_x, flee_target_y = alt_x, alt_y
+                                found_alt_flee = True
+                                break
+                        if not found_alt_flee:
+                            # self.add_message_to_chat_log(f"{npc.name} is cornered and cannot find a good flee path!")
+                            npc.current_task = "combat_action_hold_position" # Or fight if aggressive
+                            continue # Skip pathing for this turn
+
+                    path = self.calculate_path(npc.x, npc.y, flee_target_x, flee_target_y)
+                    if path:
+                        npc.current_path = path
+                        npc.current_destination_coords = (flee_target_x, flee_target_y)
+                        # self.add_message_to_chat_log(f"{npc.name} is fleeing towards ({flee_target_x},{flee_target_y}).")
+                    else:
+                        # self.add_message_to_chat_log(f"{npc.name} tries to flee but sees no escape path!")
+                        npc.current_task = "combat_action_hold_position" # Fallback if no path
+                        # No 'continue' here, will fall through to standard path movement if a path was somehow set by other means.
+
+
+            # --- Standard Path-Based Movement ---
             if npc.current_path:
                 if not npc.current_destination_coords: # Should not happen if path exists
                     npc.current_path = []
@@ -363,19 +450,40 @@ class World:
         return "Night"
 
     def _update_npc_schedules(self):
-        """Periodically updates NPC tasks based on game time and current state."""
-
-        # Using config values now
-        # Process NPCs that are due for a schedule update
-        for npc in self.village_npcs:
-            if self.game_time - npc.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
+        """
+        Periodically updates NPC tasks based on game time and current state.
+        Also handles routing to combat AI if NPC is hostile.
+        """
+        for npc in self.village_npcs: # Consider self.npcs as well if they become more dynamic
+            if npc.is_dead:
                 continue
+
+            if self.game_time - npc.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
+                # Even if not due for a full schedule update, hostile NPCs should still get a combat AI tick
+                if npc.is_hostile_to_player:
+                    # Potentially add a smaller interval check here for combat responsiveness
+                    # For now, combat decisions happen on their schedule update tick too.
+                    # This could be refined for faster combat reactions.
+                    pass # Will be handled below if interval met.
+                else:
+                    continue # Skip non-hostile NPC if not their update interval
 
             npc.game_time_last_updated = self.game_time
 
-            if npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
-                current_time_in_day = self.game_time % DAY_LENGTH_TICKS
-                time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
+            if npc.is_hostile_to_player:
+                self._handle_npc_combat_turn(npc) # New method for combat decision making
+                # After combat turn, NPC might have a new task like "attacking_player" or "fleeing"
+                # Pathing/movement for these tasks will be handled by _update_npc_movement
+
+            # Standard scheduling logic if not hostile or if combat AI didn't set a pathing task
+            # (e.g., if combat AI decided to "hold_position" or an attack was immediate)
+            # We also need to ensure that combat tasks aren't immediately overridden by scheduling.
+            # A simple way is to only run scheduling if the NPC is not currently in a combat-related task.
+            elif npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player", "holding_position_combat"]:
+                # Original scheduling logic starts here, for non-hostile NPCs or those not actively in combat tasks
+                if npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
+                    current_time_in_day = self.game_time % DAY_LENGTH_TICKS
+                    time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
                 new_task_label = None
                 llm_chosen_goal = None # e.g. "Go to work"
@@ -570,6 +678,159 @@ class World:
                     npc.char = npc.original_char_before_sleep
 
             npc.game_time_last_updated = self.game_time
+
+    def _handle_npc_combat_turn(self, npc: NPC):
+        """Handles an NPC's decision-making process during their combat turn."""
+        if not npc.is_hostile_to_player or npc.is_dead:
+            return
+
+        # Gather context for LLM
+        player = self.player
+        distance_x = abs(npc.x - player.x)
+        distance_y = abs(npc.y - player.y)
+        manhattan_distance = distance_x + distance_y # Simple distance metric
+
+        # Check if player is in attack range (Manhattan distance for melee)
+        # Assumes npc.attack_range = 1 for standard melee.
+        # For ranged, this needs to be more sophisticated (e.g. Euclidean, line of sight)
+        player_in_attack_range = (manhattan_distance <= npc.attack_range)
+
+        # Placeholder for player's last action description (could be stored in world or player object)
+        player_last_action_desc = "player is nearby"
+        # More specific: if npc.target_entity_id == player.id and npc just took damage:
+        # player_last_action_desc = "just attacked me"
+
+        prompt = LLM_PROMPTS["npc_combat_decision"].format(
+            npc_name=npc.name,
+            npc_personality=npc.personality,
+            npc_combat_behavior=npc.combat_behavior,
+            npc_hp=npc.hp,
+            npc_max_hp=npc.max_hp,
+            npc_current_task=npc.current_task,
+            npc_attack_name=npc.base_attack_name,
+            npc_attack_range=npc.attack_range,
+            player_x=player.x,
+            player_y=player.y,
+            npc_x=npc.x,
+            npc_y=npc.y,
+            distance_to_player=manhattan_distance,
+            player_in_attack_range=player_in_attack_range,
+            player_last_action_desc=player_last_action_desc
+        )
+
+        response_str = self._call_ollama(prompt)
+        if not response_str:
+            # Fallback: if LLM fails, NPC might just try to attack if player is close, or do nothing
+            if player_in_attack_range:
+                npc.current_task = "combat_action_attack_player"
+                self.add_message_to_chat_log(f"{npc.name} hesitates then glares menacingly (LLM Error).")
+            else:
+                npc.current_task = "combat_action_hold_position" # Or move towards if aggressive
+                self.add_message_to_chat_log(f"{npc.name} seems confused by the situation (LLM Error).")
+            npc.target_entity_id = player.id
+            return
+
+        try:
+            response_json = json.loads(response_str)
+            chosen_action = response_json.get("action")
+            narrative = response_json.get("narrative", f"{npc.name} considers what to do...")
+
+            self.add_message_to_chat_log(narrative) # Log NPC's thought/intent
+
+            # Update NPC task based on LLM decision
+            # The actual execution of these tasks (attack, pathfinding) will be handled
+            # by other systems checking current_task.
+            if chosen_action == "attack_player":
+                if player_in_attack_range:
+                    npc.current_task = "combat_action_attack_player"
+                else:
+                    # LLM chose attack but player not in range, so move to attack
+                    npc.current_task = "combat_action_move_to_attack_player"
+                    # self.add_message_to_chat_log(f"({npc.name} wants to attack but needs to get closer.)")
+            elif chosen_action == "move_to_attack_player":
+                if not player_in_attack_range:
+                    npc.current_task = "combat_action_move_to_attack_player"
+                else:
+                    # LLM chose move but player is already in range, so attack
+                    npc.current_task = "combat_action_attack_player"
+                    # self.add_message_to_chat_log(f"({npc.name} decides to attack immediately as player is in range.)")
+            elif chosen_action == "flee_from_player":
+                npc.current_task = "combat_action_flee_from_player"
+            elif chosen_action == "hold_position":
+                npc.current_task = "combat_action_hold_position"
+            else: # Unknown action or "use_ability" for now defaults to hold
+                npc.current_task = "combat_action_hold_position"
+                self.add_message_to_chat_log(f"({npc.name} considers an unknown action: {chosen_action}, defaults to holding position.)")
+
+            npc.target_entity_id = player.id # All combat actions currently target the player
+            npc.current_path = [] # Clear any previous non-combat path
+
+        except json.JSONDecodeError:
+            self.add_message_to_chat_log(f"{npc.name} seems indecisive. (LLM Format Error: {response_str})")
+            # Fallback on format error
+            npc.current_task = "combat_action_hold_position"
+            npc.target_entity_id = player.id
+
+    def npc_attempt_attack_player(self, npc: NPC, player: Player):
+        """Handles an NPC's attempt to attack the player."""
+        if npc.is_dead or player.hp <= 0: # Player HP check can be for game over state later
+            return
+
+        # Conceptual NPC melee skill (can be derived from profession, combat_behavior, etc.)
+        npc_melee_skill = 5 # Default average
+        if npc.combat_behavior == "aggressive":
+            npc_melee_skill += 2
+        if npc.profession in ["Guard", "Sheriff"]: # Example professions that might be better fighters
+            npc_melee_skill += 2
+        npc_melee_skill = max(1, min(10, npc_melee_skill)) # Clamp between 1-10
+
+        # Conceptual player toughness description (can be derived from equipped items later)
+        player_toughness_desc = "average" # Placeholder
+        # if player.has_armor(): player_toughness_desc = "armored"
+
+        prompt = LLM_PROMPTS["adjudicate_npc_attack"].format(
+            npc_name=npc.name,
+            npc_attack_name=npc.base_attack_name,
+            npc_melee_skill=npc_melee_skill,
+            player_hp=player.hp,
+            player_max_hp=player.max_hp,
+            player_toughness_desc=player_toughness_desc
+        )
+
+        response_str = self._call_ollama(prompt)
+        if not response_str:
+            self.add_message_to_chat_log(f"{npc.name} swings wildly but misses! (LLM Comms Error)")
+            return
+
+        try:
+            response_json = json.loads(response_str)
+            hit = response_json.get("hit", False)
+            damage_dealt = int(response_json.get("damage_dealt", 0))
+            narrative = response_json.get("narrative_feedback", f"{npc.name} attacks!")
+            # attacker_status_change = response_json.get("attacker_status_change", "none") # For future use
+
+            self.add_message_to_chat_log(narrative)
+
+            if hit and damage_dealt > 0:
+                player.take_damage(damage_dealt)
+                self.add_message_to_chat_log(f"You take {damage_dealt} damage! Your HP is now {player.hp}/{player.max_hp}.")
+                if player.hp <= 0:
+                    self.add_message_to_chat_log("You have been defeated!")
+                    # Handle player death/game over state here
+                    # For now, just a message. Could set a game_state like "GAME_OVER"
+                    self.game_state = "PLAYER_DEAD" # Example, handle in main loop
+            elif hit and damage_dealt <= 0:
+                self.add_message_to_chat_log(f"{npc.name}'s attack hits you but deals no damage.")
+
+            # After an attack, NPC might re-evaluate or just be ready for next turn's decision
+            # For now, we assume their combat turn is "done" after this attack action.
+            # The _handle_npc_combat_turn will be called again on their next AI tick.
+
+        except json.JSONDecodeError:
+            self.add_message_to_chat_log(f"{npc.name}'s attack is confusing. (LLM Format Error: {response_str})")
+        except ValueError: # For int(damage_dealt)
+             self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
+
 
     def complete_contract_delivery(self, contract_id: str, turn_in_npc: NPC):
         """Handles player attempting to turn in a contract delivery."""
@@ -1460,8 +1721,34 @@ class World:
                     attitude_to_player=npc_data.get("attitude_to_player", "neutral")
                 )
 
-                # Assign wealth (randomly for now)
-                npc.wealth_level = random.choice(["poor", "average", "wealthy"])
+                # Assign wealth (randomly for now) - This is now part of LLM prompt for personality
+                npc.wealth_level = npc_data.get("wealth_level", random.choice(["poor", "average", "wealthy"]))
+
+                # Combat AI attributes from LLM
+                npc.combat_behavior = npc_data.get("combat_behavior", "defensive")
+                npc.base_attack_name = npc_data.get("base_attack_name", "fists")
+
+                # Basic logic for damage dice based on attack name or behavior
+                # More sophisticated logic could be added here, e.g., guards get better defaults
+                if "knife" in npc.base_attack_name.lower() or \
+                   "dagger" in npc.base_attack_name.lower() or \
+                   "tool" in npc.base_attack_name.lower() or \
+                   "hammer" in npc.base_attack_name.lower() or \
+                   "claws" in npc.base_attack_name.lower() or \
+                   "teeth" in npc.base_attack_name.lower() or \
+                   "spear" in npc.base_attack_name.lower():
+                    npc.base_attack_damage_dice = "1d4"
+                elif "sword" in npc.base_attack_name.lower() or \
+                     "axe" in npc.base_attack_name.lower() or \
+                     "mace" in npc.base_attack_name.lower():
+                    npc.base_attack_damage_dice = "1d6"
+                else: # fists, kick, staff, etc.
+                    npc.base_attack_damage_dice = "1d3"
+
+                if npc.combat_behavior == "aggressive" and npc.base_attack_damage_dice == "1d3":
+                    npc.base_attack_damage_dice = "1d4" # Aggressive NPCs might hit a bit harder by default
+
+                npc.attack_range = 1 # Default melee
 
                 # Assign profession based on work building
                 if work_building:

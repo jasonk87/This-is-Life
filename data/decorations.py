@@ -97,4 +97,30 @@ DECORATION_ITEM_DEFINITIONS = {
     },
     # Removed generic "bed", "table", "chair", "chest" if they are superseded by specific types like "wooden_chair"
     # The LLM prompt will use the new keys.
+
+    # --- Doors ---
+    "wooden_door_closed": {
+        "name": "Wooden Door (Closed)", # Name for LLM if it ever places doors explicitly
+        "char": "D",
+        "color": tcod.constants.SADDLEBROWN,
+        "passable": False,
+        "properties": {
+            "is_door": True,
+            "is_open": False,
+            "opens_to": "wooden_door_open", # Key of the open state
+            "description": "A closed wooden door."
+        }
+    },
+    "wooden_door_open": {
+        "name": "Wooden Door (Open)",
+        "char": "/",
+        "color": tcod.constants.SADDLEBROWN,
+        "passable": True,
+        "properties": {
+            "is_door": True,
+            "is_open": True,
+            "closes_to": "wooden_door_closed", # Key of the closed state
+            "description": "An open wooden door."
+        }
+    },
 }

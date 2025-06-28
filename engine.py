@@ -75,9 +75,10 @@ class Building:
         self.width = width
         self.height = height
         self.building_type = building_type
-        self.category = category # "residential", "commercial", "industrial", "civic", etc.
-        self.interior_decorated = False # Flag for LLM decoration
-        self.occupants = [] # List of NPC objects that live/work here
+        self.category = category
+        self.interior_decorated = False
+        self.occupants = [] # General list of NPCs associated (e.g. workers)
+        self.residents = [] # Specific list of NPCs who live here
 
         # Global coordinates of the building's center
         self.global_center_x = global_chunk_x_start + x + width // 2
@@ -86,6 +87,7 @@ class Building:
 class Village:
     def __init__(self):
         self.buildings = []
+        self.lore = "No lore generated yet." # Default lore
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -395,25 +397,53 @@ class World:
 
                 # --- Rule-based Goal Selection (Fallback or if USE_LLM_FOR_SCHEDULES is False) ---
                 else:
-                    # Using WORK_START_TIME_RATIO and WORK_END_TIME_RATIO from config
                     work_start_tick = DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
                     work_end_tick = DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
+                    # Define "night" for sleeping (e.g., last 20% of day or first 10%)
+                    sleep_start_tick = DAY_LENGTH_TICKS * 0.85
+                    sleep_end_tick = DAY_LENGTH_TICKS * 0.15 # Next day
+                    is_night_time = current_time_in_day >= sleep_start_tick or current_time_in_day < sleep_end_tick
 
+                    # Priority: Go to work during work hours
                     if work_start_tick <= current_time_in_day < work_end_tick:
                         if npc.work_building_id and not is_at_work and npc.current_task != "going to work":
                             dest_coords_temp = self._get_building_global_center_coords(npc.work_building_id)
                             if dest_coords_temp:
                                 new_task_label = "going to work"
                                 destination_coords = dest_coords_temp
-                    else: # Outside work hours
-                        if npc.home_building_id and not is_at_home and npc.current_task != "going home":
+                                npc.original_char_before_sleep = npc.char # Reset just in case
+                    # Else, if it's night and they have a home and aren't already sleeping/going home
+                    elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home"]:
+                        home_building_obj = self.buildings_by_id.get(npc.home_building_id)
+                        if is_at_home: # Already at home
+                            if self._building_contains_item_with_interaction(home_building_obj, "sleep"):
+                                npc.current_task = "sleeping"
+                                npc.original_char_before_sleep = npc.char # Store char before changing to 'z'
+                                npc.char = ord('z')
+                                # self.add_message_to_chat_log(f"{npc.name} is now sleeping at home.")
+                            # else: npc stays "at home" if no bed
+                        else: # Not at home, but it's night
                             dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
                             if dest_coords_temp:
-                                new_task_label = "going home"
+                                new_task_label = "going home" # Will sleep upon arrival if conditions met
                                 destination_coords = dest_coords_temp
+                    # Else (daytime, not work hours, or already finished work), go home if not there
+                    elif npc.home_building_id and not is_at_home and npc.current_task not in ["going home", "sleeping"]:
+                        dest_coords_temp = self._get_building_global_center_coords(npc.home_building_id)
+                        if dest_coords_temp:
+                            new_task_label = "going home"
+                            destination_coords = dest_coords_temp
+
+                    # Wake up logic: If sleeping and it's no longer night
+                    if npc.current_task == "sleeping" and not is_night_time:
+                        npc.current_task = "at home" # Or "idle"
+                        if hasattr(npc, 'original_char_before_sleep'):
+                             npc.char = npc.original_char_before_sleep
+                        # self.add_message_to_chat_log(f"{npc.name} woke up.")
+
 
                 # --- Assign Path if new task and destination found ---
-                if new_task and destination_coords:
+                if new_task_label and destination_coords: # Changed from new_task to new_task_label
                     # Ensure destination is pathable (or path to nearest passable)
                     # For now, assume center of building is generally inside and thus pathable floor.
                     # Or path to door if we define doors explicitly as entry points.
@@ -437,6 +467,45 @@ class World:
 
             # Update game time tracker for NPC (not strictly needed for this simple scheduler)
             npc.game_time_last_updated = self.game_time
+
+    def _get_chunk_from_building(self, building_to_find: Building) -> tuple[Chunk | None, int, int]:
+        """Finds the chunk a building belongs to and its global starting coords."""
+        # This is inefficient. Ideally, Building objects would store their parent chunk's coords or reference.
+        for y_idx, chunk_row in enumerate(self.chunks):
+            for x_idx, chunk in enumerate(chunk_row):
+                if chunk and chunk.village and building_to_find in chunk.village.buildings:
+                    return chunk, x_idx * CHUNK_SIZE, y_idx * CHUNK_SIZE
+        return None, 0, 0
+
+    def _building_contains_item_with_interaction(self, building: Building, interaction_hint: str) -> bool:
+        """Checks if a building contains a decoration with a specific interaction_hint."""
+        if not building:
+            return False
+
+        building_chunk, chunk_start_x, chunk_start_y = self._get_chunk_from_building(building)
+
+        if not building_chunk or not building_chunk.is_generated or not building_chunk.tiles:
+            # self.add_message_to_chat_log(f"Debug: Bed check - Building chunk {building_chunk.biome if building_chunk else 'N/A'} not generated or no tiles for building {building.id[:6]}")
+            return False
+
+        # Building.x and .y are local to the chunk's tile grid.
+        # Iterate through the tiles *within the building's footprint on the chunk's tile grid*.
+        for y_offset in range(building.height):
+            for x_offset in range(building.width):
+                # Don't check border walls of the building itself as locations for items like beds
+                if x_offset == 0 or x_offset == building.width -1 or y_offset == 0 or y_offset == building.height -1:
+                    continue
+
+                tile_in_chunk_x = building.x + x_offset
+                tile_in_chunk_y = building.y + y_offset
+
+                if 0 <= tile_in_chunk_x < CHUNK_SIZE and 0 <= tile_in_chunk_y < CHUNK_SIZE:
+                    tile = building_chunk.tiles[tile_in_chunk_y][tile_in_chunk_x]
+                    if tile and hasattr(tile, 'properties') and tile.properties.get("interaction_hint") == interaction_hint:
+                        # self.add_message_to_chat_log(f"Debug: Found '{interaction_hint}' in building {building.id[:6]} at {tile_in_chunk_x},{tile_in_chunk_y} (local)")
+                        return True
+        # self.add_message_to_chat_log(f"Debug: No '{interaction_hint}' found in building {building.id[:6]}")
+        return False
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
@@ -614,6 +683,43 @@ class World:
             self.chat_ui_history.append(("System", error_msg))
             # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
 
+    def player_attempt_toggle_door(self, target_x: int, target_y: int) -> bool:
+        """Handles the player's attempt to open or close a door."""
+        target_tile = self.get_tile_at(target_x, target_y)
+
+        if target_tile and target_tile.properties.get("is_door"):
+            is_open = target_tile.properties.get("is_open", False)
+            new_state_key = None
+            action_message = ""
+
+            if is_open: # Door is open, try to close it
+                new_state_key = target_tile.properties.get("closes_to")
+                action_message = f"You close the {target_tile.name}."
+            else: # Door is closed, try to open it
+                new_state_key = target_tile.properties.get("opens_to")
+                action_message = f"You open the {target_tile.name}."
+
+            if new_state_key and new_state_key in DECORATION_ITEM_DEFINITIONS:
+                new_door_def = DECORATION_ITEM_DEFINITIONS[new_state_key]
+
+                # Get chunk and local coords to update the tile in the chunk's grid
+                chunk_x, chunk_y = target_x // CHUNK_SIZE, target_y // CHUNK_SIZE
+                local_x, local_y = target_x % CHUNK_SIZE, target_y % CHUNK_SIZE
+
+                self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
+                    char=new_door_def["char"],
+                    color=new_door_def["color"],
+                    passable=new_door_def["passable"],
+                    name=new_door_def["name"],
+                    properties=new_door_def["properties"]
+                )
+                self.add_message_to_chat_log(action_message)
+                return True # Action taken
+            else:
+                self.add_message_to_chat_log(f"The {target_tile.name} seems stuck or improperly defined.")
+                return False # Action failed
+        return False # Not a door or no tile
+
     def start_npc_dialogue(self, npc_target: NPC):
         """Initiates dialogue with an NPC, getting their first line."""
         if not npc_target:
@@ -789,7 +895,7 @@ class World:
                     npc_y = max(0, min(WORLD_HEIGHT - 1, npc_y))
                 else:
                     self.add_message_to_chat_log(f"Skipping NPC generation for {npc_data.get('name', 'Unknown')} due to no available home.")
-                    continue
+                    continue # Skip this NPC if no home can be assigned
 
                 # Assign workplace (optional)
                 work_building = None
@@ -805,15 +911,37 @@ class World:
                     family_ties=npc_data.get("family_ties", "none"),
                     attitude_to_player=npc_data.get("attitude_to_player", "neutral")
                 )
-                if home_building:
-                    npc.home_building_id = home_building.id
-                    home_building.occupants.append(npc) # Store NPC object, or ID if preferred
+
+                # Assign wealth (randomly for now)
+                npc.wealth_level = random.choice(["poor", "average", "wealthy"])
+
+                # Assign profession based on work building
                 if work_building:
                     npc.work_building_id = work_building.id
-                    work_building.occupants.append(npc)
+                    work_building.occupants.append(npc) # Store NPC object for now
+                    # Simple profession mapping
+                    if work_building.building_type == "sheriff_office":
+                        npc.profession = "Sheriff"
+                    elif work_building.building_type == "capital_hall": # Example, maybe "Clerk" or "Official"
+                        npc.profession = "Town Official"
+                    elif "shop" in work_building.building_type or "market" in work_building.building_type: # Future building types
+                        npc.profession = "Merchant"
+                    else:
+                        npc.profession = work_building.building_type.replace("_", " ").title() # Generic profession
+                else:
+                    npc.profession = "Unemployed" # Or "Villager", "Commoner"
 
-                self.village_npcs.append(npc) # Add to the world's list of village NPCs
-                self.add_message_to_chat_log(f"Generated Villager: {npc.name} in {village}. Home: {home_building.building_type if home_building else 'None'}. Work: {work_building.building_type if work_building else 'None'}")
+                if home_building:
+                    npc.home_building_id = home_building.id
+                    home_building.residents.append(npc) # Add to specific residents list
+                    # home_building.occupants.append(npc) # Optionally also add to general occupants if desired
+
+                self.village_npcs.append(npc)
+                self.add_message_to_chat_log(
+                    f"Generated Villager: {npc.name} (Wealth: {npc.wealth_level}, Prof: {npc.profession}). "
+                    f"Home: {home_building.building_type if home_building else 'N/A'}. "
+                    f"Work: {work_building.building_type if work_building else 'N/A'}."
+                )
 
             except json.JSONDecodeError as e:
                 self.add_message_to_chat_log(f"Error parsing LLM response for Villager NPC: {e}")
@@ -842,16 +970,55 @@ class World:
                     self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue}")
                     npc.last_speech_time = current_time
 
-    def decorate_building_interior(self, building):
-        print(f"Decorating building at {building.x}, {building.y}")
-        # Generate interior decoration using LLM
+    def decorate_building_interior(self, building: Building, chunk: Chunk): # Added chunk to access village lore
+        # Ensure we have the village object if the building is in a village POI
+        village = None
+        if chunk and chunk.poi_type == "village" and chunk.village:
+            village = chunk.village
+
+        # self.add_message_to_chat_log(f"Decorating {building.building_type} ({building.id[:6]}) in village (Lore: {'Yes' if village and village.lore else 'No'}). Residents: {len(building.residents)}")
+
+        # --- Gather Context for LLM ---
+        village_lore_summary = "This building stands alone, its story yet unwritten."
+        if village and village.lore:
+            # Summarize lore if too long, or use as is if short.
+            # For now, using first 150 chars as a simple summary.
+            village_lore_summary = village.lore[:150].strip() + "..." if len(village.lore) > 150 else village.lore.strip()
+            if not village_lore_summary: village_lore_summary = "A quiet, unassuming village."
+
+
+        inhabitant_details_parts = []
+        if building.residents:
+            for i, resident_npc in enumerate(building.residents):
+                detail = (
+                    f"Inhabitant {i+1}: Name: {resident_npc.name}, "
+                    f"Personality: {resident_npc.personality}, "
+                    f"Wealth: {resident_npc.wealth_level}, "
+                    f"Profession: {resident_npc.profession}."
+                )
+                inhabitant_details_parts.append(detail)
+
+        if not inhabitant_details_parts:
+            inhabitant_details = "This building is currently unoccupied or its inhabitants are unknown."
+            # Potentially assign a default "generic poor family" if building type implies residence but no one is assigned
+            if building.category == "residential":
+                 inhabitant_details = "A simple family of modest means is presumed to live here."
+        else:
+            inhabitant_details = "\n".join(inhabitant_details_parts)
+
         decoration_items_list = ", ".join(DECORATION_ITEM_DEFINITIONS.keys())
+
         prompt = LLM_PROMPTS["building_interior"].format(
             building_type=building.building_type,
             width=building.width,
             height=building.height,
+            village_lore_summary=village_lore_summary,
+            inhabitant_details=inhabitant_details,
             decoration_items=decoration_items_list
         )
+
+        # self.add_message_to_chat_log(f"Decorating prompt for {building.id[:6]}:\n{prompt}") # For debugging the full prompt
+
         llm_response = self._call_ollama(prompt)
 
         try:
@@ -880,12 +1047,13 @@ class World:
                                 self._generate_chunk_detail(chunk)
 
                             self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
-                                decoration_tile_def["char"],
-                                decoration_tile_def["color"],
-                                decoration_tile_def["passable"],
-                                decoration_tile_def["name"]
+                                char=decoration_tile_def["char"],
+                                color=decoration_tile_def["color"],
+                                passable=decoration_tile_def["passable"],
+                                name=decoration_tile_def.get("name", item_type), # Use defined name or item_type as fallback
+                                properties=decoration_tile_def.get("properties", {}) # Pass properties
                             )
-                            print(f"Placed {item_type} at ({global_x}, {global_y})")
+                            # print(f"Placed {item_type} at ({global_x}, {global_y})") # Can be noisy
                         else:
                             print(f"Unknown decoration item type: {item_type}")
                     else:
@@ -995,15 +1163,17 @@ class World:
             # Generate village lore
             prompt = LLM_PROMPTS["village_lore"]
             lore_response = self._call_ollama(prompt)
-            # print(f"Village Lore: {lore_response}") # Can be noisy
-            # You might want to store this lore in the chunk.village object
-            # chunk.village.lore = lore_response
-            
+            if lore_response:
+                chunk.village.lore = lore_response.strip()
+                # self.add_message_to_chat_log(f"Village Lore for {chunk_coord_x},{chunk_coord_y}: {chunk.village.lore[:50]}...") # Log snippet
+            else:
+                chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             
             tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
         else:
             # Generate the base biome tiles
-            tiles = [[Tile(TILE_DEFINITIONS[chunk.biome]["char"], TILE_DEFINITIONS[chunk.biome]["color"], TILE_DEFINITIONS[chunk.biome]["passable"], TILE_DEFINITIONS[chunk.biome]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+            biome_def = TILE_DEFINITIONS[chunk.biome]
+            tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
             # If the biome is plains, add some detail
             if chunk.biome == "plains":
@@ -1132,7 +1302,15 @@ class World:
         if building.building_type in ["house", "capital_hall", "sheriff_office", "jail"]:
             door_x = building.x + building.width // 2
             door_y = building.y + building.height - 1 # Bottom wall
-            tiles[door_y][door_x] = Tile(TILE_DEFINITIONS["door"]["char"], TILE_DEFINITIONS["door"]["color"], TILE_DEFINITIONS["door"]["passable"], TILE_DEFINITIONS["door"]["name"])
+
+            door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"] # Default to closed door
+            tiles[door_y][door_x] = Tile(
+                char=door_def["char"],
+                color=door_def["color"],
+                passable=door_def["passable"],
+                name=door_def["name"],
+                properties=door_def["properties"] # Store door properties on the tile
+            )
 
     def get_tile_at(self, x, y):
         if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
@@ -1175,7 +1353,16 @@ class World:
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)
             if building and not building.interior_decorated:
-                self.decorate_building_interior(building)
+                # Get the chunk the building is in to pass to decoration method
+                current_chunk_x = new_x // CHUNK_SIZE
+                current_chunk_y = new_y // CHUNK_SIZE
+                if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
+                    chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
+                    self.decorate_building_interior(building, chunk_of_building)
+                else:
+                    # This should ideally not happen if get_building_at found a building
+                    self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
+
 
             # Check if the player moved onto a flower
             if destination_tile.char == ord('*'):

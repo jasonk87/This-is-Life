@@ -215,7 +215,9 @@ def main():
                                 if not action_taken:
                                     action_taken = world.player_attempt_sleep(target_x, target_y)
                                     if not action_taken:
-                                        world.player_attempt_chop_tree(target_x, target_y)
+                                        action_taken = world.player_attempt_toggle_door(target_x, target_y)
+                                        if not action_taken:
+                                            world.player_attempt_chop_tree(target_x, target_y)
                         elif event.sym == tcod.event.KeySym.Q: # Quit Game
                             return
 

@@ -9,15 +9,20 @@ class NPC:
         self.personality = personality
         self.family_ties = family_ties
         self.attitude_to_player = attitude_to_player
-        self.last_speech_time = 0 # Timestamp of last speech
+        self.last_speech_time = 0
 
-        # --- New attributes for Phase 1 Plan ---
+        # Scheduling attributes from Phase 1
         self.home_building_id = None
         self.work_building_id = None
-        self.current_destination_coords = None  # (x, y) tuple
-        self.current_path = []  # List of (x, y) tuples
-        self.current_task = "idle"  # e.g., "idle", "going to work", "working", "going home"
-        self.game_time_last_updated = 0 # To track in-game time for scheduling
+        self.current_destination_coords = None
+        self.current_path = []
+        self.current_task = "idle"
+        self.game_time_last_updated = 0
+
+        # Contextual attributes for Phase 6
+        self.wealth_level = "average"
+        self.profession = "unemployed"
+        self.original_char_before_sleep = self.char # Store original char for waking up
 
     def get_dialogue(self):
         return self.dialogue

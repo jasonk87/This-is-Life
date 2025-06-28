@@ -8,14 +8,46 @@ OLLAMA_MODEL = "llama3.2:latest"
 LLM_PROMPTS = {
     "village_lore": "Generate a brief, atmospheric lore description for a fantasy village. Include its name, a unique characteristic, and a hint of its history or current struggles. Respond in a single paragraph.",
     # Updated list of decoration items for the building_interior prompt
-    "building_interior": "Generate a JSON object describing the interior decoration of a {building_type} of size {width}x{height}. "
-                         "Include items from the following list: {decoration_items}. "
-                         "For each item, specify its 'type' (which must be one of the provided item names), "
-                         "'x' (relative to building origin, 0 to width-1), "
-                         "'y' (relative to building origin, 0 to height-1). "
-                         "Ensure items do not overlap and fit within the {width}x{height} bounds. "
-                         "Focus on common items appropriate for the building type. "
-                         "Example: {\"decorations\": [{\"type\": \"wooden_chair\", \"x\": 1, \"y\": 1}, {\"type\": \"wooden_table\", \"x\": 3, \"y\": 2}]}.",
+    "building_interior": """\
+Generate a JSON object describing the interior decoration for a {building_type} of size {width}x{height} tiles.
+The building is located in a village with the following characteristics:
+Village Lore Summary: {village_lore_summary}
+
+The primary inhabitants of this building are:
+{inhabitant_details}
+(Note: Inhabitant details include name, personality, wealth level (poor, average, wealthy), and profession.)
+
+Available decoration items (choose from this list for the 'type' field): {decoration_items}.
+
+Task:
+Based on the building type, village lore, and especially the inhabitants' wealth, profession, and personality, generate a list of decorations.
+- Wealth: 'Poor' inhabitants should have sparse, simple, possibly worn items. 'Wealthy' inhabitants can have more numerous, finer, or specialized items. 'Average' is in between.
+- Profession: A blacksmith might have a small anvil or tool rack, a farmer might have sacks of grain or farming tools stored, a scholar might have more bookshelves.
+- Personality: A 'grumpy' NPC might have a spartan, unkempt interior. A 'jovial' one might have a more welcoming, perhaps slightly cluttered space. A 'vain' one might have a mirror.
+- Village Lore: If the lore mentions specific local crafts, dangers, or beliefs, try to subtly reflect that if an appropriate item exists (e.g., extra sturdy doors if lore mentions monsters, specific religious symbols if relevant and items exist).
+
+For each decoration item, specify its:
+- 'type': (must be one of the item names from the provided list)
+- 'x': (integer, x-coordinate relative to building origin, from 0 to width-1)
+- 'y': (integer, y-coordinate relative to building origin, from 0 to height-1)
+
+Constraints:
+- Ensure items do not overlap (occupy the same x,y coordinate).
+- Ensure all item coordinates fit within the {width}x{height} bounds of the building's interior.
+- Be realistic. A small hut for a poor farmer shouldn't be filled with lavish furniture.
+- Do not place items on the exact border (x=0, x=width-1, y=0, y=height-1) if these are typically walls, unless the item is explicitly a wall-mounted item like a 'Wall Shelf' (which can be on y=1 to height-2, and x=1 to width-2, assuming it's not on the direct edge). Generally, keep items within the inner area.
+
+Example Output:
+{
+  "decorations": [
+    {"type": "bed_simple", "x": 1, "y": 1},
+    {"type": "wooden_table", "x": 3, "y": 2},
+    {"type": "wooden_chair", "x": 2, "y": 2}
+  ]
+}
+
+JSON Output:
+""",
     "npc_personality": """\
 Generate a JSON object for a fantasy NPC.
 The NPC should have:

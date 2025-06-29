@@ -58,7 +58,8 @@ TILE_DEFINITIONS = {
         "char": "o",
         "color": (173, 216, 230), # Light Blue
         "passable": False,
-        "name": "Window"
+        "name": "Window",
+        "properties": {"blocks_fov": False} # Windows don't block FOV
     },
     "water": {
         "char": "~",

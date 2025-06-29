@@ -16,11 +16,25 @@ def draw(console: tcod.console.Console, world) -> None:
         for y_offset in range(console.height):
             for x_offset in range(console.width):
                 map_x, map_y = start_x + x_offset, start_y + y_offset
-                tile = world.get_tile_at(map_x, map_y)
-                if tile:
-                    console.rgb[x_offset, y_offset] = (tile.char, tile.color, (0, 0, 0))
+
+                # FOV Check
+                is_visible = world.player_fov_map[map_x, map_y]
+                is_explored = world.explored_map[map_x, map_y]
+
+                if is_visible:
+                    tile = world.get_tile_at(map_x, map_y)
+                    if tile:
+                        console.rgb[x_offset, y_offset] = (tile.char, tile.color, (0,0,0))
+                elif is_explored:
+                    tile = world.get_tile_at(map_x, map_y)
+                    if tile:
+                        # Draw explored but not visible tiles with a dimmed color
+                        dim_color = tuple(c // 3 for c in tile.color) # Example: 1/3 brightness
+                        console.rgb[x_offset, y_offset] = (tile.char, dim_color, (0,0,0))
+                # Else: not visible and not explored, leave as black (cleared console)
 
         # --- PLAYER DRAWING ---
+        # Player is always drawn at their position, regardless of FOV (they see themselves)
         player_screen_x = world.player.x - start_x
         player_screen_y = world.player.y - start_y
         if 0 <= player_screen_x < console.width and 0 <= player_screen_y < console.height:
@@ -28,10 +42,12 @@ def draw(console: tcod.console.Console, world) -> None:
 
         # --- NPC DRAWING ---
         for npc in world.npcs + world.village_npcs:
-            npc_screen_x = npc.x - start_x
-            npc_screen_y = npc.y - start_y
-            if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:
-                console.rgb[npc_screen_x, npc_screen_y] = (npc.char, npc.color, (0, 0, 0))
+            # Only draw NPC if they are in player's FOV
+            if world.player_fov_map[npc.x, npc.y]:
+                npc_screen_x = npc.x - start_x
+                npc_screen_y = npc.y - start_y
+                if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:
+                    console.rgb[npc_screen_x, npc_screen_y] = (npc.char, npc.color, (0, 0, 0))
 
     elif world.game_state == "INFO_MENU":
         draw_info_menu(console, world)
@@ -186,25 +202,27 @@ def draw_info_menu(main_console: tcod.console.Console, world) -> None:
         if npc_at_cursor: break
 
     if npc_at_cursor:
-        main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
-        ui_y += 1
-        main_console.print(x=menu_x + 4, y=ui_y, string=f"Task: {npc_at_cursor.current_task}", fg=(200,200,200))
-        ui_y += 1
-        if npc_at_cursor.current_destination_coords:
-            main_console.print(x=menu_x + 4, y=ui_y, string=f"Dest: {npc_at_cursor.current_destination_coords}", fg=(200,200,200))
+        if world.player_fov_map[npc_at_cursor.x, npc_at_cursor.y]: # Check if NPC is visible
+            main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
             ui_y += 1
-        main_console.print(x=menu_x + 4, y=ui_y, string=f"Personality: {npc_at_cursor.personality}", fg=(200,200,200))
-        ui_y += 1
-        if npc_at_cursor.home_building_id:
-            home_b = world.buildings_by_id.get(npc_at_cursor.home_building_id)
-            home_type = home_b.building_type if home_b else "ID Unknown"
-            main_console.print(x=menu_x + 4, y=ui_y, string=f"Home: {home_type} ({npc_at_cursor.home_building_id[:6]}..)", fg=(200,200,200))
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"HP: {npc_at_cursor.hp}/{npc_at_cursor.max_hp}", fg=(200,200,200))
             ui_y += 1
-        if npc_at_cursor.work_building_id:
-            work_b = world.buildings_by_id.get(npc_at_cursor.work_building_id)
-            work_type = work_b.building_type if work_b else "ID Unknown"
-            main_console.print(x=menu_x + 4, y=ui_y, string=f"Work: {work_type} ({npc_at_cursor.work_building_id[:6]}..)", fg=(200,200,200))
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Task: {npc_at_cursor.current_task}", fg=(200,200,200))
             ui_y += 1
+            if npc_at_cursor.current_destination_coords:
+                main_console.print(x=menu_x + 4, y=ui_y, string=f"Dest: {npc_at_cursor.current_destination_coords}", fg=(200,200,200))
+                ui_y += 1
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Attitude: {npc_at_cursor.attitude_to_player}", fg=(200,200,200))
+            ui_y += 1
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Behavior: {npc_at_cursor.combat_behavior}", fg=(200,200,200))
+            ui_y += 1
+            # Add more details if needed, like personality, home/work if relevant and space permits
+        elif world.explored_map[npc_at_cursor.x, npc_at_cursor.y]:
+             main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: You remember seeing {npc_at_cursor.name} here.", fg=(128,128,128))
+             ui_y += 1
+        else: # Not visible and not explored (shouldn't typically happen if npc_at_cursor is found by coords)
+            main_console.print(x=menu_x + 3, y=ui_y, string="NPC: ??? (Not visible)", fg=(128,128,128))
+            ui_y +=1
     else:
         main_console.print(x=menu_x + 3, y=ui_y, string="No NPC at cursor.", fg=(128,128,128))
         ui_y +=1

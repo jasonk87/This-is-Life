@@ -12,3 +12,4 @@ class Tile:
         self.is_hazard: bool = bool(self.properties.get("is_hazard", False))
         self.hazard_type: str | None = self.properties.get("hazard_type", None)
         self.hazard_damage: int = int(self.properties.get("hazard_damage", 0))
+        self.blocks_fov: bool = bool(self.properties.get("blocks_fov", not self.passable)) # By default, non-passable tiles block FOV

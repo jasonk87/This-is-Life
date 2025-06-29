@@ -17,6 +17,9 @@ from config import (
     # Reputation Configs
     INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
     REP_CRIMINAL, REP_HERO,
+    # FOV and Light Level Configs
+    DAY_LENGTH_TICKS, LIGHT_LEVEL_PERIODS,
+    FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
@@ -197,6 +200,96 @@ class World:
         self.trade_ui_merchant_item_index = 0
         self.trade_ui_player_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
         self.trade_ui_merchant_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
+
+        # FOV and Light Level state
+        self.current_light_level_name = "DAY" # Default
+        self.current_fov_radius = FOV_RADIUS_DAY # Default
+
+        # Initialize FOV related maps
+        self.player_fov_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F") # Or use WORLD_HEIGHT, WORLD_WIDTH if row-major
+        self.npc_fov_maps: dict[int, np.ndarray] = {}
+        self.explored_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F")
+
+        # Build transparency map - this is expensive on init as it forces all chunks to generate.
+        # Consider dynamic updates or pre-generation if performance becomes an issue.
+        self.transparency_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=True, order="F")
+        for x_map in range(WORLD_WIDTH):
+            for y_map in range(WORLD_HEIGHT):
+                tile = self.get_tile_at(x_map, y_map) # Forces chunk generation
+                if tile and tile.blocks_fov:
+                    self.transparency_map[x_map, y_map] = False
+
+        self._update_light_level_and_fov() # Initialize based on game time 0
+        self.update_fov() # Initial FOV calculation
+
+    def update_fov(self) -> None:
+        """
+        Updates the player's field of view map and explored tiles.
+        Also updates FOV for all NPCs.
+        """
+        # Player FOV
+        self.player_fov_map = tcod.map.compute_fov(
+            self.transparency_map,
+            (self.player.x, self.player.y),
+            radius=self.current_fov_radius,
+            algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST # A common algorithm
+        )
+        # Update explored map
+        self.explored_map |= self.player_fov_map
+
+        # NPC FOVs
+        self.npc_fov_maps.clear() # Clear previous NPC FOV maps
+        for npc in self.village_npcs + self.npcs: # Iterate all relevant NPCs
+            if npc.is_dead:
+                continue
+            # NPCs use the same global FOV radius for now, can be customized later
+            npc_fov_radius = self.current_fov_radius # Or npc.perception_radius if defined
+            self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
+                self.transparency_map,
+                (npc.x, npc.y),
+                radius=npc_fov_radius,
+                algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST
+            )
+
+
+    def _update_light_level_and_fov(self):
+        """Updates the current light level and FOV radius based on game time."""
+        time_ratio = (self.game_time % DAY_LENGTH_TICKS) / DAY_LENGTH_TICKS
+
+        current_period = None
+        # LIGHT_LEVEL_PERIODS is sorted by start_ratio. Find the current period.
+        for i in range(len(LIGHT_LEVEL_PERIODS)):
+            period = LIGHT_LEVEL_PERIODS[i]
+            next_period_start_ratio = LIGHT_LEVEL_PERIODS[i+1]["start_ratio"] if (i+1) < len(LIGHT_LEVEL_PERIODS) else 1.0
+
+            if period["start_ratio"] <= time_ratio < next_period_start_ratio:
+                current_period = period
+                break
+
+        if not current_period: # Should always find one, default to last if somehow not.
+            current_period = LIGHT_LEVEL_PERIODS[-1]
+            # Or if time_ratio is 1.0, it should use the first period (midnight)
+            if time_ratio == 1.0: # Exactly end of day, loop to first period
+                 current_period = LIGHT_LEVEL_PERIODS[0]
+
+
+        self.current_light_level_name = current_period["name"]
+
+        # Map fov_config_key string to actual config variable
+        if current_period["fov_config_key"] == "FOV_RADIUS_DAY":
+            self.current_fov_radius = FOV_RADIUS_DAY
+        elif current_period["fov_config_key"] == "FOV_RADIUS_DUSK_DAWN":
+            self.current_fov_radius = FOV_RADIUS_DUSK_DAWN
+        elif current_period["fov_config_key"] == "FOV_RADIUS_NIGHT":
+            self.current_fov_radius = FOV_RADIUS_NIGHT
+        elif current_period["fov_config_key"] == "FOV_RADIUS_PITCH_BLACK":
+            self.current_fov_radius = FOV_RADIUS_PITCH_BLACK
+        else: # Fallback
+            self.current_fov_radius = FOV_RADIUS_DAY
+
+        # Optional: Log change for debugging
+        # if self.game_time % 10 == 0: # Log less frequently
+        #     print(f"Time: {self.game_time}, Ratio: {time_ratio:.2f}, Light: {self.current_light_level_name}, FOV: {self.current_fov_radius}")
 
 
     def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
@@ -2512,6 +2605,8 @@ class World:
                 else:
                     # This should ideally not happen if get_building_at found a building
                     self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
+
+            self.update_fov() # Player moved, so update FOV
 
 
             # Check if the player moved onto a flower

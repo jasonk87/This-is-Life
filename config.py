@@ -42,3 +42,37 @@ REP_HERO = "hero_points"
 # Optional: Define ranges or thresholds, though enforcement is in game logic
 # REP_MIN_VALUE = -100
 # REP_MAX_VALUE = 100
+
+# --- Field of View & Light Levels ---
+FOV_RADIUS_DAY = 20
+FOV_RADIUS_DUSK_DAWN = 12
+FOV_RADIUS_NIGHT = 7
+FOV_RADIUS_PITCH_BLACK = 4 # For very dark conditions, like unlit caves or deep night
+
+# Define periods of the day based on DAY_LENGTH_TICKS ratio
+# These are start ratios for each period. Order matters for lookup.
+# The values are the FOV radius config key string to be used for this period.
+# A function in engine.py will determine current period based on these.
+# Example: DAY_LENGTH_TICKS = 1500
+#   0.0 - 0.20 (0-299): NIGHT (uses FOV_RADIUS_NIGHT)
+#   0.20 - 0.25 (300-374): DAWN (uses FOV_RADIUS_DUSK_DAWN)
+#   0.25 - 0.75 (375-1124): DAY (uses FOV_RADIUS_DAY)
+#   0.75 - 0.85 (1125-1274): DUSK (uses FOV_RADIUS_DUSK_DAWN)
+#   0.85 - 1.0 (1275-1499): NIGHT (uses FOV_RADIUS_NIGHT)
+
+LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
+    {"start_ratio": 0.0,  "name": "DEEP_NIGHT", "fov_config_key": "FOV_RADIUS_NIGHT"}, # Until dawn's first light
+    {"start_ratio": 0.22, "name": "DAWN",       "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
+    {"start_ratio": 0.28, "name": "DAY",        "fov_config_key": "FOV_RADIUS_DAY"},
+    {"start_ratio": 0.72, "name": "DUSK",       "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
+    {"start_ratio": 0.78, "name": "NIGHT",      "fov_config_key": "FOV_RADIUS_NIGHT"} # Evening fading to night
+    # The period from last entry (0.78) to 1.0 will use FOV_RADIUS_NIGHT
+]
+
+# Make sure DAY_LENGTH_TICKS is defined (it's in NPC Scheduling Settings, imported above)
+# For example, if DAY_LENGTH_TICKS = 1000:
+# DEEP_NIGHT: 0-219
+# DAWN: 220-279
+# DAY: 280-719
+# DUSK: 720-779
+# NIGHT: 780-999

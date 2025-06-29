@@ -52,8 +52,10 @@ def main():
             # Player actions are handled in event loop below
             # NPC Updates
             world.game_time += 1 # Increment game time
-            world._update_npc_schedules() # New: Update NPC schedules
-            world._update_npc_movement() # Update NPC movement
+            world._update_light_level_and_fov() # Update light level and FOV radius
+            world.update_fov() # Update FOV maps for player and NPCs
+            world._update_npc_schedules() # New: Update NPC schedules (includes combat AI decisions)
+            world._update_npc_movement() # Update NPC movement (includes combat movement/action execution)
             world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
 
             # --- Drawing ---
@@ -276,7 +278,7 @@ def main():
                                     targeted_npc = npc_obj
                                     break
 
-                            if targeted_npc:
+                            if targeted_npc and world.player_fov_map[target_x, target_y]: # Check if NPC is in FOV
                                 world.interaction_menu_target_npc = targeted_npc
                                 menu_opts = ["Talk", "Persuade"] # Start with basic options
 

@@ -1070,13 +1070,14 @@ class World:
             npc_current_task=npc.current_task,
             npc_attack_name=npc.base_attack_name,
             npc_attack_range=npc.attack_range,
+            has_healing_item = npc.npc_inventory.get("healing_salve", 0) > 0, # Add healing item check
             player_x=player.x,
             player_y=player.y,
             npc_x=npc.x,
             npc_y=npc.y,
             distance_to_player=manhattan_distance,
             player_in_attack_range=player_in_attack_range,
-            player_last_action_desc=player_last_action_desc
+            player_last_action_desc=player_last_action_desc,
         )
 
         response_str = self._call_ollama(prompt)
@@ -1131,6 +1132,13 @@ class World:
                         # self.add_message_to_chat_log(f"({npc.name} couldn't find cover and decides to flee instead!)")
                     else:
                         npc.current_task = "combat_action_hold_position"
+            elif chosen_action == "use_healing_item":
+                if npc.npc_inventory.get("healing_salve", 0) > 0:
+                    npc.current_task = "combat_action_use_healing_item"
+                else:
+                    # LLM hallucinated or NPC used its last salve since context was gathered. Fallback.
+                    self.add_message_to_chat_log(f"({npc.name} wanted to heal but has no salve. Holding position.)")
+                    npc.current_task = "combat_action_hold_position"
             elif chosen_action == "hold_position":
                 npc.current_task = "combat_action_hold_position"
             else: # Unknown action or "use_ability" for now defaults to hold
@@ -1139,8 +1147,8 @@ class World:
 
             npc.target_entity_id = player.id # All combat actions currently target the player
 
-            # Clear path for any new movement decision, except if just attacking or holding
-            if chosen_action not in ["attack_player", "hold_position"]:
+            # Clear path for any new movement decision, except if just attacking or holding or using item
+            if chosen_action not in ["attack_player", "hold_position", "use_healing_item"]:
                 npc.current_path = []
 
             # Clear specific task target coords if not moving to cover
@@ -2182,6 +2190,12 @@ class World:
                 if home_building:
                     npc.home_building_id = home_building.id
                     home_building.residents.append(npc)
+
+                # Chance to give NPC a healing salve
+                if random.random() < 0.33: # 33% chance
+                    npc.npc_inventory["healing_salve"] = npc.npc_inventory.get("healing_salve", 0) + 1
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} received a healing salve.")
+
 
                 self.village_npcs.append(npc)
                 self.add_message_to_chat_log(

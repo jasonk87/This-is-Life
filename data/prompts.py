@@ -334,6 +334,7 @@ You are an AI determining an NPC's combat action in a fantasy game.
 - Personality: {npc_personality} (e.g., brave, cowardly, aggressive, defensive, tactical)
 - Combat Behavior Trait: {npc_combat_behavior} (e.g., aggressive, defensive, cowardly, opportunist)
 - Current Health: {npc_hp} out of {npc_max_hp} (e.g., 5/20)
+- Has Healing Item: {has_healing_item} (boolean, e.g., true if has 'healing_salve')
 - Current Task/Status: {npc_current_task}
 - Base Attack Name: {npc_attack_name} (e.g., fists, rusty dagger, claws)
 - Attack Range: {npc_attack_range} (e.g., 1 for melee)
@@ -351,10 +352,11 @@ You are an AI determining an NPC's combat action in a fantasy game.
 3.  "flee_from_player": If NPC wants to disengage and run away.
 4.  "hold_position": If NPC is waiting, assessing, or being defensive without immediate action. (e.g., a guard holding a chokepoint, or a cautious NPC waiting for an opening).
 5.  "move_to_cover": If NPC wants to find and move to a nearby position that offers better protection from the player.
-6.  "use_ability": (Future placeholder - e.g., "use_healing_salve", "cast_defensive_spell") - For now, default to other actions.
+6.  "use_healing_item": If NPC health is low and they possess a healing item.
+7.  "use_ability": (Future placeholder - e.g., "cast_defensive_spell") - For now, default to other actions.
 
 **Task:**
-Based on the NPC's personality, combat behavior, health, current situation relative to the player, and their attack capabilities, decide the MOST appropriate combat action.
+Based on the NPC's personality, combat behavior, health, possession of healing items, current situation relative to the player, and their attack capabilities, decide the MOST appropriate combat action.
 - **Cowardly/Low Health:** More likely to "flee_from_player".
 - **Aggressive/Brave:** More likely to "attack_player" or "move_to_attack_player".
 - **Defensive:** Might "hold_position" or "attack_player" if a good opportunity arises.
@@ -363,6 +365,7 @@ Based on the NPC's personality, combat behavior, health, current situation relat
 - If "move_to_attack_player" is chosen, the NPC should not already be in attack range AND can_see_player is true. If can_see_player is false, consider "hold_position" or "move_to_last_known_position" (if LKP available) or "search_area".
 - If "flee_from_player", distance should ideally increase. This can be chosen even if player is not visible but threat is perceived.
 - If "move_to_cover" is chosen, it implies the NPC is aware of potential cover (game will verify actual spots).
+- If `has_healing_item` is true and NPC health is low (e.g., <40% of max_hp), "use_healing_item" is a strong candidate unless immediate danger prevents it (e.g., player right next to a frail NPC). It might be preferable to "move_to_cover" first, then "use_healing_item".
 - If can_see_player is false, and the NPC is not fleeing or taking cover, "hold_position" or "search_area" (if available) are good defaults. An aggressive NPC might move towards where they last saw the player.
 
 Respond with a JSON object containing the chosen action and a brief narrative for the NPC's thought process or intent.

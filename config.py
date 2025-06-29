@@ -76,3 +76,8 @@ LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
 # DAY: 280-719
 # DUSK: 720-779
 # NIGHT: 780-999
+
+# --- Auditory Perception Settings ---
+DEFAULT_HEARING_RADIUS = 12 # How far the player can hear standard volume speech.
+DEFAULT_SPEECH_VOLUME = 10  # How far standard NPC speech travels.
+# Speech is heard if distance <= player.hearing_radius AND distance <= npc.speech_volume.

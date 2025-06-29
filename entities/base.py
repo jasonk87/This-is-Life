@@ -1,3 +1,5 @@
+from config import DEFAULT_SPEECH_VOLUME # Import for NPC speech volume
+
 class NPC:
     def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent"):
         self.x = x
@@ -39,6 +41,10 @@ class NPC:
         self.base_attack_damage_dice = "1d3" # e.g., "1d4", "1d6+1" (simple for now, can expand parsing later)
         self.attack_range = 1              # Typically 1 for melee
         self.target_entity_id = None       # ID of the entity this NPC is currently targeting (e.g., player's ID)
+
+        # Auditory property
+        self.speech_volume: int = DEFAULT_SPEECH_VOLUME # How far this NPC's speech travels
+
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
 
     def get_dialogue(self):

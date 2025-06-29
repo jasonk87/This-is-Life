@@ -19,7 +19,9 @@ from config import (
     REP_CRIMINAL, REP_HERO,
     # FOV and Light Level Configs
     DAY_LENGTH_TICKS, LIGHT_LEVEL_PERIODS,
-    FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK
+    FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK,
+    # Auditory Perception Configs
+    DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
@@ -142,6 +144,7 @@ class Player:
 
         # Light Source State
         self.equipped_light_item_key: str | None = None # e.g., "torch_lit"
+        self.hearing_radius: int = DEFAULT_HEARING_RADIUS # Auditory perception
         self.light_source_active_until_tick: int = -1   # Game tick for burnout, -1 if no duration/not active
         self.current_personal_light_radius: int = 0     # Actual radius from equipped item
 
@@ -2211,8 +2214,21 @@ class World:
                 )
                 llm_dialogue = self._call_ollama(prompt)
                 if llm_dialogue:
-                    self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue}")
-                    npc.last_speech_time = current_time
+                    # Check if player can hear this NPC
+                    distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y) # Manhattan distance
+
+                    can_hear = False
+                    if distance_to_player <= self.player.hearing_radius and \
+                       distance_to_player <= npc.speech_volume:
+                        can_hear = True
+
+                    if can_hear:
+                        # For now, keep existing message format.
+                        # Could later add "(you overhear)" or similar if NPC not visible.
+                        self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue.strip()}")
+                    # Else, player doesn't hear it, so don't add to log.
+
+                    npc.last_speech_time = current_time # Update speech time regardless of player hearing
 
     def decorate_building_interior(self, building: Building, chunk: Chunk): # Added chunk to access village lore
         # Ensure we have the village object if the building is in a village POI

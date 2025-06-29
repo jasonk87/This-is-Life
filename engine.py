@@ -1041,36 +1041,42 @@ class World:
         manhattan_distance = distance_x + distance_y # Simple distance metric
 
         # Check if player is in attack range (Manhattan distance for melee)
-        # Assumes npc.attack_range = 1 for standard melee.
-        # For ranged, this needs to be more sophisticated (e.g. Euclidean, line of sight)
-        player_in_attack_range = (manhattan_distance <= npc.attack_range)
+        # Determine effective attack range and name based on equipped weapon
+        effective_attack_range = npc.attack_range # Default to base
+        effective_attack_name = npc.base_attack_name # Default to base
 
-        # Placeholder for player's last action description (could be stored in world or player object)
+        if npc.equipped_weapon and npc.equipped_weapon in ITEM_DEFINITIONS:
+            weapon_def = ITEM_DEFINITIONS[npc.equipped_weapon]
+            effective_attack_range = weapon_def.get("properties", {}).get("attack_range", npc.attack_range)
+            effective_attack_name = weapon_def.get("name", npc.base_attack_name)
+
+        player_in_attack_range = (manhattan_distance <= effective_attack_range)
+
+        # Placeholder for player's last action description
         player_last_action_desc = "player is nearby"
-        # More specific: if npc.target_entity_id == player.id and npc just took damage:
-        # player_last_action_desc = "just attacked me"
 
         # Determine if NPC can see the player
         can_see_player = False
         if npc.id in self.npc_fov_maps and \
-           0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT: # Ensure player coords are valid indices
+           0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT:
             can_see_player = self.npc_fov_maps[npc.id][player.x, player.y]
 
         if not can_see_player:
             player_last_action_desc = "player disappeared from sight"
 
+        has_healing_item = npc.npc_inventory.get("healing_salve", 0) > 0
 
         prompt = LLM_PROMPTS["npc_combat_decision"].format(
             npc_name=npc.name,
             npc_personality=npc.personality,
-            can_see_player=can_see_player, # Pass this to the prompt
+            can_see_player=can_see_player,
             npc_combat_behavior=npc.combat_behavior,
             npc_hp=npc.hp,
             npc_max_hp=npc.max_hp,
             npc_current_task=npc.current_task,
-            npc_attack_name=npc.base_attack_name,
-            npc_attack_range=npc.attack_range,
-            has_healing_item = npc.npc_inventory.get("healing_salve", 0) > 0, # Add healing item check
+            npc_attack_name=effective_attack_name, # Use effective name
+            npc_attack_range=effective_attack_range, # Use effective range
+            has_healing_item=has_healing_item,
             player_x=player.x,
             player_y=player.y,
             npc_x=npc.x,
@@ -1164,24 +1170,39 @@ class World:
 
     def npc_attempt_attack_player(self, npc: NPC, player: Player):
         """Handles an NPC's attempt to attack the player."""
-        if npc.is_dead or player.hp <= 0: # Player HP check can be for game over state later
+        if npc.is_dead or player.hp <= 0:
             return
 
-        # Conceptual NPC melee skill (can be derived from profession, combat_behavior, etc.)
-        npc_melee_skill = 5 # Default average
-        if npc.combat_behavior == "aggressive":
-            npc_melee_skill += 2
-        if npc.profession in ["Guard", "Sheriff"]: # Example professions that might be better fighters
-            npc_melee_skill += 2
-        npc_melee_skill = max(1, min(10, npc_melee_skill)) # Clamp between 1-10
+        # Determine weapon details for the attack
+        weapon_name = npc.base_attack_name
+        weapon_damage_description = npc.base_attack_damage_dice
 
-        # Conceptual player toughness description (can be derived from equipped items later)
-        player_toughness_desc = "average" # Placeholder
-        # if player.has_armor(): player_toughness_desc = "armored"
+        if npc.equipped_weapon and npc.equipped_weapon in ITEM_DEFINITIONS:
+            weapon_def = ITEM_DEFINITIONS[npc.equipped_weapon]
+            weapon_name = weapon_def.get("name", npc.base_attack_name)
+            dice = weapon_def.get("properties", {}).get("damage_dice", npc.base_attack_damage_dice)
+            bonus = weapon_def.get("properties", {}).get("damage_bonus", 0)
+            weapon_damage_description = f"{dice}"
+            if bonus > 0:
+                weapon_damage_description += f"+{bonus}"
+            elif bonus < 0:
+                weapon_damage_description += f"{bonus}"
+
+
+        # Conceptual NPC melee skill
+        npc_melee_skill = 5
+        if npc.combat_behavior == "aggressive": npc_melee_skill += 2
+        if npc.profession in ["Guard", "Sheriff"]: npc_melee_skill += 2
+        npc_melee_skill = max(1, min(10, npc_melee_skill))
+
+        # Conceptual player toughness
+        player_toughness_desc = "average"
+        # TODO: Update player_toughness_desc based on player's equipped armor
 
         prompt = LLM_PROMPTS["adjudicate_npc_attack"].format(
             npc_name=npc.name,
-            npc_attack_name=npc.base_attack_name,
+            weapon_name=weapon_name, # Use determined weapon name
+            weapon_damage_description=weapon_damage_description, # Use determined damage description
             npc_melee_skill=npc_melee_skill,
             player_hp=player.hp,
             player_max_hp=player.max_hp,
@@ -2195,6 +2216,21 @@ class World:
                 if random.random() < 0.33: # 33% chance
                     npc.npc_inventory["healing_salve"] = npc.npc_inventory.get("healing_salve", 0) + 1
                     # self.add_message_to_chat_log(f"Debug: {npc.name} received a healing salve.")
+
+                # Assign starting equipment based on role/behavior
+                if npc.profession in ["Sheriff", "Guard"] or npc.combat_behavior == "aggressive":
+                    if "rusty_sword" in ITEM_DEFINITIONS:
+                        npc.npc_inventory["rusty_sword"] = npc.npc_inventory.get("rusty_sword", 0) + 1
+                        npc.equipped_weapon = "rusty_sword"
+                        # self.add_message_to_chat_log(f"Debug: {npc.name} equipped a rusty_sword.")
+                    if "leather_jerkin" in ITEM_DEFINITIONS:
+                        npc.npc_inventory["leather_jerkin"] = npc.npc_inventory.get("leather_jerkin", 0) + 1
+                        npc.equipped_armor_body = "leather_jerkin"
+                        # self.add_message_to_chat_log(f"Debug: {npc.name} equipped a leather_jerkin.")
+                    # Optionally, add a helmet too
+                    if random.random() < 0.5 and "iron_helmet" in ITEM_DEFINITIONS: # 50% chance for guards/aggressive to also have helmet
+                        npc.npc_inventory["iron_helmet"] = npc.npc_inventory.get("iron_helmet", 0) + 1
+                        npc.equipped_armor_head = "iron_helmet"
 
 
                 self.village_npcs.append(npc)

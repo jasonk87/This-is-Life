@@ -381,7 +381,8 @@ You are an AI adjudicating an NPC's melee attack against the player in a fantasy
 
 **Attacker (NPC):**
 - Name: {npc_name}
-- Base Attack Name: {npc_attack_name} (e.g., "Fists", "Claws", "Rusty Dagger")
+- Weapon Used: {weapon_name} (e.g., "Rusty Sword", "Fists", "Claws")
+- Weapon Damage Info: {weapon_damage_description} (e.g., "1d6+1", "1d3")
 - (Conceptual) NPC's Melee Skill/Ferocity (1-10, higher is better, derived from personality/role): {npc_melee_skill}
 
 **Target (Player):**
@@ -390,22 +391,23 @@ You are an AI adjudicating an NPC's melee attack against the player in a fantasy
 
 **Task:**
 Based on the NPC's attack type, conceptual skill, and the player's current state/defense, determine the outcome of the attack.
-- A more dangerous attack type and higher NPC skill should increase the chance to hit and potential damage.
-- Higher player defense/toughness should decrease the chance to be hit or reduce damage taken.
+- The specific {weapon_name} and its {weapon_damage_description} should heavily influence damage if the attack hits.
+- Higher NPC skill/ferocity ({npc_melee_skill}) should increase hit chance and potentially damage.
+- Higher player defense/toughness ({player_toughness_desc}) should decrease hit chance or reduce damage.
 - Consider a degree of randomness in outcomes.
 
 **Output Format (JSON):**
 Return a JSON object with the following fields:
 - "hit": boolean (true if the attack connects, false if it's a miss, dodge, or parry by the player)
 - "damage_dealt": integer (The amount of HP damage dealt to the player. Can be 0 even on a hit. Should be 0 if "hit" is false.)
-- "narrative_feedback": string (A short, vivid, in-character description of the NPC's attack action and its immediate result on the player. Examples: "{npc_name} lunges with their {npc_attack_name}, landing a solid blow on you!", "You deftly sidestep {npc_name}'s clumsy swing.", "The {npc_attack_name} from {npc_name} scrapes against your armor, doing minimal damage.")
+- "narrative_feedback": string (A short, vivid, in-character description of the NPC's attack action using {weapon_name} and its immediate result on the player. Examples: "{npc_name} lunges with their {weapon_name}, landing a solid blow on you!", "You deftly sidestep {npc_name}'s clumsy swing with their {weapon_name}.", "The {weapon_name} from {npc_name} scrapes against your armor, doing minimal damage.")
 - "attacker_status_change": string (For now, usually "none". Future options for NPC: "overextended", "enraged")
 
 Example - Successful Hit:
 {
   "hit": true,
   "damage_dealt": 5,
-  "narrative_feedback": "{npc_name} strikes you hard with their {npc_attack_name}!",
+  "narrative_feedback": "{npc_name} strikes you hard with their {weapon_name}!",
   "attacker_status_change": "none"
 }
 
@@ -413,7 +415,7 @@ Example - Miss:
 {
   "hit": false,
   "damage_dealt": 0,
-  "narrative_feedback": "You manage to avoid {npc_name}'s telegraphed attack with their {npc_attack_name}.",
+  "narrative_feedback": "You manage to avoid {npc_name}'s telegraphed attack with their {weapon_name}.",
   "attacker_status_change": "none"
 }
 

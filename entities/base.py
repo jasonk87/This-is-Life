@@ -1,4 +1,5 @@
-from config import DEFAULT_SPEECH_VOLUME # Import for NPC speech volume
+from config import DEFAULT_SPEECH_VOLUME
+from data.items import ITEM_DEFINITIONS # For accessing armor properties
 
 class NPC:
     def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent"):
@@ -45,6 +46,11 @@ class NPC:
         # Auditory property
         self.speech_volume: int = DEFAULT_SPEECH_VOLUME # How far this NPC's speech travels
 
+        # Equipment Slots
+        self.equipped_weapon: str | None = None
+        self.equipped_armor_body: str | None = None
+        self.equipped_armor_head: str | None = None
+
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
 
     def get_dialogue(self):
@@ -54,8 +60,22 @@ class NPC:
         if self.is_dead:
             return
 
-        self.hp -= amount
-        # world.add_message_to_chat_log(f"{self.name} takes {amount} damage.") # This will be in the LLM narrative
+        total_defense_bonus = 0
+        # Check body armor
+        if self.equipped_armor_body and self.equipped_armor_body in ITEM_DEFINITIONS:
+            armor_def = ITEM_DEFINITIONS[self.equipped_armor_body]
+            total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
+
+        # Check head armor
+        if self.equipped_armor_head and self.equipped_armor_head in ITEM_DEFINITIONS:
+            armor_def = ITEM_DEFINITIONS[self.equipped_armor_head]
+            total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
+
+        effective_damage = max(0, amount - total_defense_bonus) # Ensure damage doesn't go below 0
+
+        # world.add_message_to_chat_log(f"Debug: {self.name} incoming damage {amount}, defense {total_defense_bonus}, effective {effective_damage}")
+
+        self.hp -= effective_damage
 
         if self.hp <= 0:
             self.hp = 0

@@ -163,6 +163,116 @@ ITEM_DEFINITIONS = {
         "value": 0,
         "weight": 0.5,
         "stackable": True,
-        "type": ["trash"]
+        "type": ["trash"] # Changed from list to single string for consistency with others
+    },
+
+    # --- Weapons ---
+    "rusty_sword": {
+        "name": "Rusty Sword",
+        "description": "A worn, but still somewhat sharp sword.",
+        "char": "|",
+        "color": tcod.constants.SILVER,
+        "value": 30,
+        "weight": 4,
+        "stackable": False,
+        "item_type_tags": ["weapon", "melee", "sword"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "damage_dice": "1d6",
+            "damage_bonus": 0,
+            "attack_range": 1
+        }
+    },
+    "short_bow": {
+        "name": "Short Bow",
+        "description": "A simple wooden short bow.",
+        "char": ")",
+        "color": tcod.constants.DARK_SEPIA,
+        "value": 25,
+        "weight": 2,
+        "stackable": False,
+        "item_type_tags": ["weapon", "ranged", "bow"],
+        "equip_slot": "main_hand", # Or "ranged_weapon" slot if we add more
+        "properties": {
+            "damage_dice": "1d6",
+            "damage_bonus": 0,
+            "attack_range": 12,
+            "requires_ammo": "arrow" # Placeholder for future ammo system
+        }
+    },
+    # Ammunition example (not fully used yet)
+    "arrow": {
+        "name": "Arrow",
+        "description": "A standard arrow for a bow.",
+        "char": "-",
+        "color": tcod.constants.LIGHT_SEPIA,
+        "value": 1,
+        "weight": 0.1,
+        "stackable": True,
+        "item_type_tags": ["ammunition", "arrow"]
+    },
+
+    # --- Armor ---
+    "leather_jerkin": {
+        "name": "Leather Jerkin",
+        "description": "A tough leather vest offering basic protection.",
+        "char": "[",
+        "color": tcod.constants.DARK_AMBER,
+        "value": 40,
+        "weight": 5,
+        "stackable": False,
+        "item_type_tags": ["armor", "body"],
+        "equip_slot": "body_armor",
+        "properties": {
+            "defense_bonus": 1
+        }
+    },
+    "iron_helmet": {
+        "name": "Iron Helmet",
+        "description": "A sturdy iron helmet.",
+        "char": "^", # Using existing mountain char, might need unique
+        "color": tcod.constants.DARK_SLATE_GREY,
+        "value": 35,
+        "weight": 3,
+        "stackable": False,
+        "item_type_tags": ["armor", "head"],
+        "equip_slot": "head_armor",
+        "properties": {
+            "defense_bonus": 1
+        }
     }
 }
+
+# Update existing Stone Axe to conform to new weapon properties
+if "axe_stone" in ITEM_DEFINITIONS:
+    ITEM_DEFINITIONS["axe_stone"]["item_type_tags"] = ITEM_DEFINITIONS["axe_stone"].get("item_type_tags", [])
+    if "weapon" not in ITEM_DEFINITIONS["axe_stone"]["item_type_tags"]:
+        ITEM_DEFINITIONS["axe_stone"]["item_type_tags"].append("weapon")
+    if "melee" not in ITEM_DEFINITIONS["axe_stone"]["item_type_tags"]:
+        ITEM_DEFINITIONS["axe_stone"]["item_type_tags"].append("melee")
+    if "axe" not in ITEM_DEFINITIONS["axe_stone"]["item_type_tags"]:
+        ITEM_DEFINITIONS["axe_stone"]["item_type_tags"].append("axe")
+
+    ITEM_DEFINITIONS["axe_stone"]["equip_slot"] = "main_hand"
+
+    if "properties" not in ITEM_DEFINITIONS["axe_stone"]:
+        ITEM_DEFINITIONS["axe_stone"]["properties"] = {}
+
+    ITEM_DEFINITIONS["axe_stone"]["properties"]["damage_dice"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("damage_dice", "1d4") # Default if not set
+    ITEM_DEFINITIONS["axe_stone"]["properties"]["damage_bonus"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("damage_bonus", 0)
+    ITEM_DEFINITIONS["axe_stone"]["properties"]["attack_range"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("attack_range", 1)
+    # Keep existing tool_type and chop_power
+    ITEM_DEFINITIONS["axe_stone"]["properties"]["tool_type"] = "axe"
+    ITEM_DEFINITIONS["axe_stone"]["properties"]["chop_power"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("chop_power",1)
+
+
+# Standardize 'type' to 'item_type_tags' for older items for consistency, if they don't have it
+for item_key, item_data in ITEM_DEFINITIONS.items():
+    if "type" in item_data and "item_type_tags" not in item_data:
+        if isinstance(item_data["type"], list):
+            item_data["item_type_tags"] = item_data["type"]
+        else: # If it's a single string
+            item_data["item_type_tags"] = [item_data["type"]]
+        # del item_data["type"] # Optionally remove old 'type' key after migration
+    elif "item_type_tags" not in item_data: # Ensure all items have the key, even if empty
+        item_data["item_type_tags"] = []

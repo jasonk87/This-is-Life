@@ -140,6 +140,11 @@ class Player:
         self.lockpicking_skill = 3 # Conceptual skill, scale 1-10, default slightly below average
         self.id = id(self) # Simple unique ID for player
 
+        # Light Source State
+        self.equipped_light_item_key: str | None = None # e.g., "torch_lit"
+        self.light_source_active_until_tick: int = -1   # Game tick for burnout, -1 if no duration/not active
+        self.current_personal_light_radius: int = 0     # Actual radius from equipped item
+
     def take_damage(self, amount: int):
         self.hp -= amount
         if self.hp < 0:
@@ -222,16 +227,52 @@ class World:
         self._update_light_level_and_fov() # Initialize based on game time 0
         self.update_fov() # Initial FOV calculation
 
+    def _handle_player_light_source_burnout(self):
+        """Checks and handles burnout of player's active light source."""
+        if self.player.equipped_light_item_key and \
+           self.player.light_source_active_until_tick != -1 and \
+           self.game_time >= self.player.light_source_active_until_tick:
+
+            burnt_item_def = ITEM_DEFINITIONS.get(self.player.equipped_light_item_key)
+            item_name = burnt_item_def.get("name", "light source") if burnt_item_def else "light source"
+            self.add_message_to_chat_log(f"Your {item_name} has burnt out!")
+
+            becomes_item_key = burnt_item_def.get("properties", {}).get("on_burnout_becomes")
+            if becomes_item_key:
+                self.player.inventory[becomes_item_key] = self.player.inventory.get(becomes_item_key, 0) + 1
+                # Could also remove 1 of the original item if it was stackable and not fully consumed by "lighting" it
+                # For now, lighting "unlit_torch" consumes it, and burnout creates "burnt_out_torch".
+
+            self.player.equipped_light_item_key = None
+            self.player.current_personal_light_radius = 0
+            self.player.light_source_active_until_tick = -1
+            # No need to call self.update_fov() here, as _update_light_level_and_fov (which calls this)
+            # is followed by update_fov() in the main loop.
+
     def update_fov(self) -> None:
         """
         Updates the player's field of view map and explored tiles.
         Also updates FOV for all NPCs.
         """
         # Player FOV
+        base_ambient_fov_radius = self.current_fov_radius
+        effective_player_fov_radius = base_ambient_fov_radius
+
+        if self.player.equipped_light_item_key and self.player.current_personal_light_radius > 0:
+            # Check for burnout if it has a duration
+            is_active = True
+            if self.player.light_source_active_until_tick != -1 and \
+               self.game_time >= self.player.light_source_active_until_tick:
+                is_active = False # Burnt out, specific burnout logic is handled elsewhere
+                                  # but for FOV calc, it's not providing light now.
+
+            if is_active:
+                effective_player_fov_radius = max(base_ambient_fov_radius, self.player.current_personal_light_radius)
+
         self.player_fov_map = tcod.map.compute_fov(
             self.transparency_map,
             (self.player.x, self.player.y),
-            radius=self.current_fov_radius,
+            radius=effective_player_fov_radius, # Use the effective radius
             algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST # A common algorithm
         )
         # Update explored map
@@ -253,7 +294,9 @@ class World:
 
 
     def _update_light_level_and_fov(self):
-        """Updates the current light level and FOV radius based on game time."""
+        """Updates the current light level and FOV radius based on game time, handles torch burnout."""
+        self._handle_player_light_source_burnout() # Check for burnout first
+
         time_ratio = (self.game_time % DAY_LENGTH_TICKS) / DAY_LENGTH_TICKS
 
         current_period = None
@@ -2661,24 +2704,70 @@ class World:
 
     def use_item(self, item_key: str):
         """Uses an item from the player's inventory."""
-        if self.player.inventory.get(item_key, 0) > 0:
-            item_def = ITEM_DEFINITIONS.get(item_key)
-            if not item_def or "on_use" not in item_def:
-                print(f"You can't use the {item_key}.")
+        item_def = ITEM_DEFINITIONS.get(item_key)
+        if not item_def:
+            self.add_message_to_chat_log(f"You don't know how to use '{item_key}'.")
+            return
+
+        # Check if trying to use (extinguish) an active light source by "using" its lit state key
+        if self.player.equipped_light_item_key == item_key and item_def.get("properties", {}).get("emits_light"):
+            # This means player is trying to "use" their currently lit torch, so extinguish it.
+            extinguish_becomes_key = item_def.get("properties", {}).get("on_extinguish_becomes")
+            if extinguish_becomes_key:
+                self.player.inventory[extinguish_becomes_key] = self.player.inventory.get(extinguish_becomes_key, 0) + 1
+
+            self.add_message_to_chat_log(f"You extinguish your {self.player.equipped_light_item_key}.")
+            self.player.equipped_light_item_key = None
+            self.player.current_personal_light_radius = 0
+            self.player.light_source_active_until_tick = -1
+            self.update_fov()
+            return
+
+        # Standard item usage from inventory
+        if self.player.inventory.get(item_key, 0) <= 0:
+            self.add_message_to_chat_log(f"You don't have any {item_def.get('name', item_key)} to use.")
+            return
+
+        on_use_effect = item_def.get("on_use_effect")
+
+        if on_use_effect == "light_torch":
+            if self.player.equipped_light_item_key: # Already has a light source active
+                self.add_message_to_chat_log(f"You already have a {self.player.equipped_light_item_key} lit.")
                 return
 
-            # Handle healing
-            heal_amount = item_def["on_use"].get("heal_amount")
+            # Consume the unlit_torch
+            self.player.inventory[item_key] -= 1
+            if self.player.inventory[item_key] <= 0:
+                del self.player.inventory[item_key]
+
+            # Activate "torch_lit" state
+            lit_torch_def = ITEM_DEFINITIONS.get("torch_lit", {})
+            self.player.equipped_light_item_key = "torch_lit" # Use the key for the lit definition
+            self.player.current_personal_light_radius = lit_torch_def.get("properties", {}).get("light_radius", 0)
+            duration = lit_torch_def.get("properties", {}).get("duration_ticks", -1)
+            if duration > 0:
+                self.player.light_source_active_until_tick = self.game_time + duration
+            else:
+                self.player.light_source_active_until_tick = -1 # Infinite or not applicable
+
+            self.add_message_to_chat_log(f"You light the {item_def.get('name', item_key)}. It casts a warm glow.")
+            self.update_fov()
+            return
+
+        # Existing healing logic (or other on_use dictionary based effects)
+        on_use_dict = item_def.get("on_use")
+        if on_use_dict:
+            heal_amount = on_use_dict.get("heal_amount")
             if heal_amount:
                 if self.player.hp >= self.player.max_hp:
-                    print("You are already at full health!")
+                    self.add_message_to_chat_log("You are already at full health!")
                 else:
                     self.player.hp = min(self.player.max_hp, self.player.hp + heal_amount)
-                    self.player.inventory[item_key] -= 1
+                    self.player.inventory[item_key] -= 1 # Consume item
                     if self.player.inventory[item_key] <= 0:
                         del self.player.inventory[item_key]
-                    print(f"You used a {item_def['name']} and healed {heal_amount} HP. Current HP: {self.player.hp}")
-            else:
-                print(f"You can't use the {item_key} in that way.")
-        else:
-            print(f"You don't have any {item_def['name']} to use.")
+                    self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP. Current HP: {self.player.hp}")
+                return # Action taken
+
+        # Fallback if no specific use effect handled
+        self.add_message_to_chat_log(f"You can't figure out how to use the {item_def.get('name', item_key)} right now.")

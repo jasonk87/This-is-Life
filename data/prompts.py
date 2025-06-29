@@ -347,7 +347,8 @@ You are an AI determining an NPC's combat action in a fantasy game.
 2.  "move_to_attack_player": If player is not in range, but NPC intends to engage.
 3.  "flee_from_player": If NPC wants to disengage and run away.
 4.  "hold_position": If NPC is waiting, assessing, or being defensive without immediate action. (e.g., a guard holding a chokepoint, or a cautious NPC waiting for an opening).
-5.  "use_ability": (Future placeholder - e.g., "use_healing_salve", "cast_defensive_spell") - For now, default to other actions.
+5.  "move_to_cover": If NPC wants to find and move to a nearby position that offers better protection from the player.
+6.  "use_ability": (Future placeholder - e.g., "use_healing_salve", "cast_defensive_spell") - For now, default to other actions.
 
 **Task:**
 Based on the NPC's personality, combat behavior, health, current situation relative to the player, and their attack capabilities, decide the MOST appropriate combat action.

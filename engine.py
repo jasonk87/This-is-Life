@@ -244,11 +244,22 @@ class World:
         # Create a numpy array for pathfinding compatible with tcod.path functions
         # Cost array: 0 for wall, 1 for floor.
         cost = np.ones((WORLD_HEIGHT, WORLD_WIDTH), dtype=np.int8)
-        for y in range(WORLD_HEIGHT):
-            for x in range(WORLD_WIDTH):
-                tile = self.get_tile_at(x,y) # This will generate chunk if not generated.
+        for y_coord in range(WORLD_HEIGHT):
+            for x_coord in range(WORLD_WIDTH):
+                tile = self.get_tile_at(x_coord,y_coord)
                 if not tile or not tile.passable:
-                    cost[y,x] = 0 # Mark as wall/impassable for pathfinder
+                    cost[y_coord,x_coord] = 0 # Wall (0 means impassable for tcod.path)
+                elif tile.is_hazard:
+                    hazard_cost_value = 50 # Default high cost for generic hazard
+                    if tile.hazard_type == "fire_trap_active":
+                        hazard_cost_value = 100 # Fire is very undesirable
+                    elif tile.hazard_type == "water_deep":
+                        hazard_cost_value = 75 # Deep water also very undesirable
+                    # Ensure cost fits within int8 if tcod expects signed, typically positive costs are fine.
+                    # tcod path cost array: 0 for wall, >0 for walkable. Higher is more costly.
+                    cost[y_coord,x_coord] = np.int8(min(hazard_cost_value, 127)) # Max for signed int8 if needed, else 255 for unsigned. Let's keep it reasonable.
+                else:
+                    cost[y_coord,x_coord] = 1 # Standard floor cost
 
         astar = tcod.path.AStar(cost=cost, diagonal=1.41) # Allow diagonal movement with cost sqrt(2)
 
@@ -386,6 +397,33 @@ class World:
                     else:
                         # self.add_message_to_chat_log(f"{npc.name} cannot find a suitable position to attack the player from.")
                         npc.current_task = "combat_action_hold_position"
+
+            elif npc.current_task == "combat_action_move_to_cover":
+                # Path to the cover spot stored in npc.task_target_coords
+                if npc.task_target_coords and (not npc.current_path or npc.current_destination_coords != npc.task_target_coords):
+                    cover_x, cover_y = npc.task_target_coords
+                    # Check if already at the cover spot
+                    if npc.x == cover_x and npc.y == cover_y:
+                        # self.add_message_to_chat_log(f"{npc.name} reached cover at ({cover_x},{cover_y}).")
+                        npc.current_task = "combat_action_hold_position" # Or a specific "in_cover" task
+                        npc.current_path = []
+                        npc.current_destination_coords = None
+                        npc.task_target_coords = None # Clear the target
+                    else:
+                        path = self.calculate_path(npc.x, npc.y, cover_x, cover_y)
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = (cover_x, cover_y)
+                            # self.add_message_to_chat_log(f"{npc.name} is moving to cover at ({cover_x},{cover_y}). Path length: {len(path)}")
+                        else:
+                            # self.add_message_to_chat_log(f"{npc.name} couldn't find a path to cover at ({cover_x},{cover_y}). Holding position.")
+                            npc.current_task = "combat_action_hold_position"
+                            npc.current_path = []
+                            npc.current_destination_coords = None
+                            npc.task_target_coords = None # Clear target if path fails
+                elif not npc.task_target_coords: # Should have been set by AI, but as a fallback:
+                    # self.add_message_to_chat_log(f"{npc.name} wants to move to cover but has no specific target. Holding.")
+                    npc.current_task = "combat_action_hold_position"
 
 
             # --- Standard Path-Based Movement ---
@@ -535,6 +573,91 @@ class World:
         potential_spots.sort(key=lambda s: s['dist_sq'])
 
         return potential_spots[0]['x'], potential_spots[0]['y']
+
+    def _find_best_cover_spot(self, npc: NPC, threat_x: int, threat_y: int, max_radius: int = 7) -> tuple[int | None, int | None]:
+        """
+        Finds a passable, unoccupied tile that offers cover from the threat.
+        Cover is defined by being adjacent to a tile with provides_cover_value > 0,
+        where that cover-providing tile is between the spot and the threat,
+        OR the spot itself provides cover.
+        Prioritizes higher cover value, then closer distance to the NPC.
+        """
+        candidate_spots = []
+
+        for r_loop in range(1, max_radius + 1):  # Iterate radius from 1 up to max_radius
+            perimeter_offsets_this_radius = set()
+            for i_loop in range(r_loop + 1):
+                j_loop = r_loop - i_loop
+                if i_loop == 0 and j_loop == 0 : continue
+
+                points_to_add_from_ij = []
+                if i_loop == 0:
+                    points_to_add_from_ij.extend([(0,j_loop), (0,-j_loop), (j_loop,0), (-j_loop,0)])
+                elif j_loop == 0:
+                     points_to_add_from_ij.extend([(i_loop,0), (-i_loop,0), (0,i_loop), (0,-i_loop)])
+                else:
+                    points_to_add_from_ij.extend([(i_loop,j_loop), (-i_loop,j_loop), (i_loop,-j_loop), (-i_loop,-j_loop)])
+                    if i_loop != j_loop:
+                         points_to_add_from_ij.extend([(j_loop,i_loop), (-j_loop,i_loop), (j_loop,-i_loop), (-j_loop,-i_loop)])
+
+                for p_dx, p_dy in points_to_add_from_ij:
+                    if abs(p_dx) + abs(p_dy) == r_loop:
+                        perimeter_offsets_this_radius.add((p_dx, p_dy))
+
+            for spot_dx, spot_dy in perimeter_offsets_this_radius:
+                spot_x, spot_y = npc.x + spot_dx, npc.y + spot_dy
+
+                if not (0 <= spot_x < WORLD_WIDTH and 0 <= spot_y < WORLD_HEIGHT):
+                    continue
+
+                spot_tile = self.get_tile_at(spot_x, spot_y)
+                if not (spot_tile and spot_tile.passable):
+                    continue
+
+                occupied = False
+                for other_npc_list_to_check in [self.village_npcs, self.npcs]:
+                    for other_npc in other_npc_list_to_check:
+                        if other_npc.id != npc.id and other_npc.x == spot_x and other_npc.y == spot_y and not other_npc.is_dead:
+                            occupied = True; break
+                    if occupied: break
+                if occupied: continue
+
+                current_max_cover_value_for_spot = 0.0
+                if spot_tile.provides_cover_value > 0:
+                     current_max_cover_value_for_spot = max(current_max_cover_value_for_spot, spot_tile.provides_cover_value)
+
+                for adj_dx_neighbor in range(-1, 2):
+                    for adj_dy_neighbor in range(-1, 2):
+                        if adj_dx_neighbor == 0 and adj_dy_neighbor == 0: continue
+
+                        cover_obj_x, cover_obj_y = spot_x + adj_dx_neighbor, spot_y + adj_dy_neighbor
+                        if not (0 <= cover_obj_x < WORLD_WIDTH and 0 <= cover_obj_y < WORLD_HEIGHT): continue
+
+                        cover_obj_tile = self.get_tile_at(cover_obj_x, cover_obj_y)
+                        if not cover_obj_tile: continue
+
+                        tile_cover_value = cover_obj_tile.provides_cover_value
+                        if tile_cover_value > 0:
+                            dist_sq_threat_to_spot = (spot_x - threat_x)**2 + (spot_y - threat_y)**2
+                            dist_sq_threat_to_cover_obj = (cover_obj_x - threat_x)**2 + (cover_obj_y - threat_y)**2
+
+                            if dist_sq_threat_to_cover_obj < dist_sq_threat_to_spot:
+                                current_max_cover_value_for_spot = max(current_max_cover_value_for_spot, tile_cover_value)
+
+                if current_max_cover_value_for_spot > 0:
+                    euclidean_dist_sq_to_npc = spot_dx*spot_dx + spot_dy*spot_dy
+                    candidate_spots.append({
+                        'x': spot_x, 'y': spot_y,
+                        'cover': current_max_cover_value_for_spot,
+                        'dist_sq': euclidean_dist_sq_to_npc
+                    })
+
+        if not candidate_spots:
+            return None, None
+
+        candidate_spots.sort(key=lambda s: (-s['cover'], s['dist_sq']))
+
+        return candidate_spots[0]['x'], candidate_spots[0]['y']
 
     def _update_npc_schedules(self):
         """
@@ -843,6 +966,20 @@ class World:
                     # self.add_message_to_chat_log(f"({npc.name} decides to attack immediately as player is in range.)")
             elif chosen_action == "flee_from_player":
                 npc.current_task = "combat_action_flee_from_player"
+            elif chosen_action == "move_to_cover":
+                cover_spot_x, cover_spot_y = self._find_best_cover_spot(npc, player.x, player.y)
+                if cover_spot_x is not None:
+                    npc.current_task = "combat_action_move_to_cover"
+                    npc.task_target_coords = (cover_spot_x, cover_spot_y) # Store the specific cover spot
+                    # self.add_message_to_chat_log(f"({npc.name} is heading to cover at ({cover_spot_x},{cover_spot_y}))")
+                else:
+                    # No cover found, default to holding position or another fallback
+                    # self.add_message_to_chat_log(f"({npc.name} looked for cover but found none.)")
+                    if npc.hp < npc.max_hp * 0.3 and npc.combat_behavior == "cowardly": # If low health and cowardly, flee instead
+                        npc.current_task = "combat_action_flee_from_player"
+                        # self.add_message_to_chat_log(f"({npc.name} couldn't find cover and decides to flee instead!)")
+                    else:
+                        npc.current_task = "combat_action_hold_position"
             elif chosen_action == "hold_position":
                 npc.current_task = "combat_action_hold_position"
             else: # Unknown action or "use_ability" for now defaults to hold
@@ -850,7 +987,15 @@ class World:
                 self.add_message_to_chat_log(f"({npc.name} considers an unknown action: {chosen_action}, defaults to holding position.)")
 
             npc.target_entity_id = player.id # All combat actions currently target the player
-            npc.current_path = [] # Clear any previous non-combat path
+
+            # Clear path for any new movement decision, except if just attacking or holding
+            if chosen_action not in ["attack_player", "hold_position"]:
+                npc.current_path = []
+
+            # Clear specific task target coords if not moving to cover
+            if chosen_action != "move_to_cover":
+                npc.task_target_coords = None
+
 
         except json.JSONDecodeError:
             self.add_message_to_chat_log(f"{npc.name} seems indecisive. (LLM Format Error: {response_str})")

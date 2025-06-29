@@ -819,7 +819,8 @@ class World:
                         is_at_work=is_at_work,
                         has_job=bool(npc.work_building_id),
                         job_type=job_type,
-                        time_of_day_str=time_of_day_str
+                        time_of_day_str=time_of_day_str,
+                        current_light_level_name=self.current_light_level_name # Pass light level
                     )
                     response_str = self._call_ollama(prompt)
                     if response_str:
@@ -1003,9 +1004,20 @@ class World:
         # More specific: if npc.target_entity_id == player.id and npc just took damage:
         # player_last_action_desc = "just attacked me"
 
+        # Determine if NPC can see the player
+        can_see_player = False
+        if npc.id in self.npc_fov_maps and \
+           0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT: # Ensure player coords are valid indices
+            can_see_player = self.npc_fov_maps[npc.id][player.x, player.y]
+
+        if not can_see_player:
+            player_last_action_desc = "player disappeared from sight"
+
+
         prompt = LLM_PROMPTS["npc_combat_decision"].format(
             npc_name=npc.name,
             npc_personality=npc.personality,
+            can_see_player=can_see_player, # Pass this to the prompt
             npc_combat_behavior=npc.combat_behavior,
             npc_hp=npc.hp,
             npc_max_hp=npc.max_hp,

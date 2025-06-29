@@ -124,6 +124,7 @@ Current Task/State: {npc_current_task}
 Current Location: Is the NPC at their home? {is_at_home}. Is the NPC at their workplace? {is_at_work}.
 Job: Does the NPC have a job? {has_job}. If so, what kind of job? (e.g., Sheriff, Blacksmith, Farmer, Unemployed) {job_type}.
 Time of Day: {time_of_day_str} (e.g., Early Morning, Morning, Midday, Afternoon, Evening, Night)
+Current Light Level: {current_light_level_name} (e.g., DAY, NIGHT, DUSK, DAWN, DEEP_NIGHT)
 Available Goals:
 1.  "Go to work" (If they have a job and are not there during work hours)
 2.  "Go home" (If it's late or they are done with work)
@@ -136,9 +137,10 @@ Based on all this context, what is the MOST LIKELY high-level goal for {npc_name
 Respond with a JSON object containing the chosen goal, like: {"goal": "Chosen Goal"}
 Example: {"goal": "Go to work"}
 If the NPC should stay put or has no other pressing task, use "Stay put".
-If the NPC has a job and it's working hours, they should prioritize "Go to work" unless already there.
-If it's evening/night, they should prioritize "Go home" unless already there.
-Consider their personality: a lazy NPC might avoid work, a social one might wander more.
+If the NPC has a job and it's working hours (typically during DAY or DAWN/DUSK), they should prioritize "Go to work" unless already there.
+If it's evening/night (especially DEEP_NIGHT or NIGHT light levels), they should prioritize "Go home" unless already there.
+During dark light levels (NIGHT, DEEP_NIGHT), NPCs might be less inclined to "Wander the village" unless their job (e.g., Guard) or personality (e.g., restless, nefarious) suggests it. They might prefer "Stay put" if at a safe location like home.
+Consider their personality: a lazy NPC might avoid work, a social one might wander more (but perhaps less so in pitch darkness).
 ---
 Chosen Goal JSON:
 """,
@@ -340,7 +342,8 @@ You are an AI determining an NPC's combat action in a fantasy game.
 - Player is at ({player_x}, {player_y}). NPC is at ({npc_x}, {npc_y}).
 - Distance to Player: {distance_to_player} (Manhattan distance for simplicity)
 - Is Player within NPC's attack range? {player_in_attack_range} (boolean)
-- Player's Last Known Action (optional, if available): {player_last_action_desc} (e.g., "attacked me", "approached", "used item")
+- Can the NPC currently see the Player? {can_see_player} (boolean)
+- Player's Last Known Action (optional, if available): {player_last_action_desc} (e.g., "attacked me", "approached", "used item", "disappeared from sight")
 
 **Available Actions for NPC:**
 1.  "attack_player": If player is in range and NPC intends to fight.
@@ -356,9 +359,11 @@ Based on the NPC's personality, combat behavior, health, current situation relat
 - **Aggressive/Brave:** More likely to "attack_player" or "move_to_attack_player".
 - **Defensive:** Might "hold_position" or "attack_player" if a good opportunity arises.
 - **Opportunist:** Might "flee_from_player" if outnumbered or low health, or "attack_player" if player is weak or distracted.
-- If "attack_player" is chosen, the NPC must be able to make an attack (e.g., player in range).
-- If "move_to_attack_player" is chosen, the NPC should not already be in attack range.
-- If "flee_from_player", distance should ideally increase.
+- If "attack_player" is chosen, the NPC must be able to make an attack (e.g., player in range AND can_see_player is true).
+- If "move_to_attack_player" is chosen, the NPC should not already be in attack range AND can_see_player is true. If can_see_player is false, consider "hold_position" or "move_to_last_known_position" (if LKP available) or "search_area".
+- If "flee_from_player", distance should ideally increase. This can be chosen even if player is not visible but threat is perceived.
+- If "move_to_cover" is chosen, it implies the NPC is aware of potential cover (game will verify actual spots).
+- If can_see_player is false, and the NPC is not fleeing or taking cover, "hold_position" or "search_area" (if available) are good defaults. An aggressive NPC might move towards where they last saw the player.
 
 Respond with a JSON object containing the chosen action and a brief narrative for the NPC's thought process or intent.
 Example: {"action": "move_to_attack_player", "narrative": "{npc_name} growls and charges towards the player!"}

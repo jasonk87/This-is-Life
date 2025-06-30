@@ -471,4 +471,57 @@ Example - Ignore:
 
 JSON Decision:
 """
+,
+    "npc_equipment_decision": """\
+You are an AI determining if an NPC should change their equipment.
+
+**NPC State:**
+- Name: {npc_name}
+- Personality/Role: {npc_personality_role} (e.g., "aggressive warrior", "cautious villager", "greedy scavenger")
+- Current Health: {npc_hp} out of {npc_max_hp}
+- Current Situation: {npc_situation} (e.g., "in combat", "idle in village", "just picked up an item")
+
+**Current Equipment:**
+- Main Hand: {current_main_hand_name} (Damage: {current_main_hand_dmg_desc})
+- Body Armor: {current_body_armor_name} (Defense: {current_body_armor_def_desc})
+- Head Armor: {current_head_armor_name} (Defense: {current_head_armor_def_desc})
+(Note: "None" or "0" indicates slot is empty or no bonus)
+
+**Equippable Items in Inventory (potential upgrades):**
+A list of items the NPC has that could be equipped. Each item is a dictionary:
+{equippable_inventory_items_list_str}
+Example for one item in the list:
+  {{ "item_key": "steel_sword", "name": "Steel Sword", "equip_slot": "main_hand", "stats_desc": "Damage: 1d8+1" }}
+  {{ "item_key": "leather_jerkin", "name": "Leather Jerkin", "equip_slot": "body_armor", "stats_desc": "Defense: 1" }}
+  {{ "item_key": "unlit_torch", "name": "Unlit Torch", "equip_slot": "main_hand", "stats_desc": "Utility, no combat stats" }}
+
+**Task:**
+Based on your current equipment and the equippable items in your inventory, should you equip ONE item to improve your combat readiness, utility, or suitability for your role?
+- Compare an inventory item's stats (damage for weapons, defense for armor) to what's currently equipped in that slot.
+- If a slot is empty, equipping any suitable item is usually a good idea, especially for weapons/armor.
+- Consider your personality/role: A warrior prioritizes better weapons/armor. A villager might only equip a weapon if threatened.
+- If multiple upgrades are available, choose the most impactful one for this decision cycle.
+- If an item offers utility (like a torch) and the situation warrants (e.g. it's dark and current light source is poor), consider equipping it if the slot is free or current item is less critical.
+
+**Output Format (JSON):**
+If deciding to equip an item:
+  {{"action": "equip", "item_key_to_equip": "item_key_string", "equip_slot": "main_hand|body_armor|head_armor", "reasoning": "brief in-character thought why this item is chosen"}}
+If deciding to do nothing with equipment for now:
+  {{"action": "do_nothing", "reasoning": "brief in-character thought why no change is made"}}
+
+Example - Equip Weapon:
+{
+  "action": "equip",
+  "item_key_to_equip": "steel_sword",
+  "equip_slot": "main_hand",
+  "reasoning": "{npc_name} hefts the steel sword. 'Much better than that rusty piece of junk!'"
+}
+Example - Do Nothing:
+{
+  "action": "do_nothing",
+  "reasoning": "{npc_name} checks their gear. 'My current setup is fine for now.'"
+}
+
+JSON Decision:
+"""
 }

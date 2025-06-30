@@ -421,4 +421,54 @@ Example - Miss:
 
 Adjudication Output:
 """
+,
+    "npc_item_pickup_decision": """\
+You are an AI determining if an NPC should pick up a nearby item.
+
+**NPC State:**
+- Name: {npc_name}
+- Personality: {npc_personality} (e.g., greedy, practical, curious, cautious, indifferent)
+- Current Task: {npc_current_task}
+- Current Inventory (summary): {npc_inventory_summary} (e.g., "Rusty Sword, 2 Healing Salves, 5 Gold")
+- Currently Equipped Weapon: {npc_equipped_weapon_name}
+- Currently Equipped Armor: {npc_equipped_armor_name}
+
+**Perceived Items Nearby:**
+A list of items the NPC can see on the ground. Each item is a dictionary:
+{perceived_items_list_str}
+Example for one item in the list:
+  {{ "item_key": "rusty_sword", "name": "Rusty Sword", "quantity": 1, "distance": 3, "coords": [x,y] }}
+  {{ "item_key": "healing_salve", "name": "Healing Salve", "quantity": 1, "distance": 2, "coords": [x,y] }}
+
+**Task:**
+Based on the NPC's personality, current inventory/equipment, and the perceived items, decide if the NPC should attempt to pick up ONE of the items.
+- **Greedy/Opportunistic:** More likely to pick up valuable items or any usable gear.
+- **Practical/Resourceful:** Might pick up useful tools, weapons if unarmed/under-equipped, or resources they need (if needs were tracked).
+- **Cautious:** Might ignore items in dangerous areas or if already well-equipped.
+- **Well-Equipped:** Less likely to pick up items worse than what they have.
+- **Needs:** If the NPC needs a healing item (low health) and sees one, they should strongly consider it. (Assume low health implies a need for healing items if not directly stated).
+- Prioritize items that are better than current equipment, or useful items like healing salves if low on them or injured.
+- For now, the NPC will only decide to pick up *one item per decision cycle*. Choose the most compelling one if multiple are good.
+
+**Output Format (JSON):**
+If deciding to pick up an item:
+  {{"action": "pickup_item", "target_coords": [x, y], "item_key_to_pickup": "item_key_string", "reasoning": "brief in-character thought"}}
+If deciding to ignore all items for now:
+  {{"action": "ignore_items", "reasoning": "brief in-character thought"}}
+
+Example - Pickup:
+{
+  "action": "pickup_item",
+  "target_coords": [15, 22],
+  "item_key_to_pickup": "rusty_sword",
+  "reasoning": "{npc_name} spots a sword. 'This could be useful,' they think."
+}
+Example - Ignore:
+{
+  "action": "ignore_items",
+  "reasoning": "{npc_name} glances at the items but decides they have no need for them right now."
+}
+
+JSON Decision:
+"""
 }

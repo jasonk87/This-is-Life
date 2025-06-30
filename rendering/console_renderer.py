@@ -47,7 +47,47 @@ def draw(console: tcod.console.Console, world) -> None:
                 npc_screen_x = npc.x - start_x
                 npc_screen_y = npc.y - start_y
                 if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:
+                    # Ensure NPC is drawn on top of items if they share a tile
                     console.rgb[npc_screen_x, npc_screen_y] = (npc.char, npc.color, (0, 0, 0))
+
+        # --- ITEM DRAWING (after tiles, before player/NPCs or with careful layering) ---
+        # Iterate through screen tiles again to draw items potentially on top of floor tiles
+        # but under player/NPCs if they are on the same tile.
+        # For simplicity, items are drawn first, then entities like player/NPCs overwrite if on same tile.
+        # This means if an NPC is on an item, the NPC char is shown.
+        # This loop is inside the "if world.game_state == "PLAYING":" block.
+
+        # Re-loop for items after map tiles are drawn, but before player/NPCs for correct layering.
+        # This requires drawing map tiles first, then items, then entities.
+        # The current structure draws map, then player, then NPCs.
+        # Let's insert item drawing after map tiles and before player/NPCs.
+        # The previous map drawing loop:
+        # for y_offset in range(console.height):
+        #     for x_offset in range(console.width):
+        #         map_x, map_y = start_x + x_offset, start_y + y_offset
+        #         ... (tile drawing logic) ...
+        # We need to ensure items are drawn on their map_x, map_y if visible.
+        # The existing loop for map tiles already handles visibility. We can augment it.
+
+        # The map tile drawing loop needs to be restructured slightly or items drawn in a separate pass.
+        # A separate pass for items is cleaner:
+        for y_offset_item in range(console.height):
+            for x_offset_item in range(console.width):
+                map_x_item, map_y_item = start_x + x_offset_item, start_y + y_offset_item
+                if world.player_fov_map[map_x_item, map_y_item]: # Only draw items in FOV
+                    if (map_x_item, map_y_item) in world.items_on_map:
+                        items_at_loc = world.items_on_map[(map_x_item, map_y_item)]
+                        if items_at_loc:
+                            # Draw the top item in the list at this location
+                            top_item_key = items_at_loc[0]["item_key"] # Draw first item in list
+                            item_def = ITEM_DEFINITIONS.get(top_item_key)
+                            if item_def:
+                                # Ensure item char and color are valid before drawing
+                                item_char = ord(str(item_def.get("char", "?"))) # Default char
+                                item_color = item_def.get("color", (255,0,255)) # Default magenta
+                                console.rgb[x_offset_item, y_offset_item]["char"] = item_char
+                                console.rgb[x_offset_item, y_offset_item]["fg"] = item_color
+                                # Background color is already set by floor tile, or can be transparent
 
     elif world.game_state == "INFO_MENU":
         draw_info_menu(console, world)

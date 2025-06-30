@@ -209,6 +209,9 @@ class World:
         self.trade_ui_player_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
         self.trade_ui_merchant_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
 
+        # Items on the ground
+        self.items_on_map: dict[tuple[int, int], list[dict]] = {} # Key: (x,y), Value: list of {"item_key": str, "quantity": int}
+
         # FOV and Light Level state
         self.current_light_level_name = "DAY" # Default
         self.current_fov_radius = FOV_RADIUS_DAY # Default
@@ -294,6 +297,18 @@ class World:
                 radius=npc_fov_radius,
                 algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST
             )
+
+            # NPC Item Perception within their FOV
+            npc.perceived_item_tiles.clear()
+            if npc.id in self.npc_fov_maps: # Should always be true if just computed
+                fov_map_for_npc = self.npc_fov_maps[npc.id]
+                # Iterate through coordinates that are visible to the NPC
+                # np.where returns a tuple of arrays, one for each dimension
+                visible_y_coords, visible_x_coords = np.where(fov_map_for_npc)
+                for i in range(len(visible_x_coords)):
+                    vx, vy = visible_x_coords[i], visible_y_coords[i]
+                    if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
+                        npc.perceived_item_tiles.append((vx,vy))
 
 
     def _update_light_level_and_fov(self):
@@ -564,6 +579,63 @@ class World:
                     # self.add_message_to_chat_log(f"{npc.name} wants to move to cover but has no specific target. Holding.")
                     npc.current_task = "combat_action_hold_position"
 
+            elif npc.current_task == "task_going_to_pickup_item":
+                if npc.task_target_coords and npc.task_target_item_details:
+                    target_x, target_y = npc.task_target_coords
+                    item_key_to_pickup = npc.task_target_item_details["item_key"]
+
+                    if npc.x == target_x and npc.y == target_y: # Arrived at item location
+                        # Attempt to remove item from map
+                        if self.remove_item_from_map(item_key_to_pickup, 1, target_x, target_y):
+                            # Add to NPC inventory
+                            npc.npc_inventory[item_key_to_pickup] = npc.npc_inventory.get(item_key_to_pickup, 0) + 1
+                            item_name = ITEM_DEFINITIONS.get(item_key_to_pickup, {}).get("name", item_key_to_pickup)
+
+                            # Log pickup if player can perceive it
+                            dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+                            can_player_see_pickup = (npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]) or \
+                                                    (self.player_fov_map[npc.x, npc.y]) # If player sees NPC or NPC sees player (simplified)
+
+                            if dist_to_player <= self.player.hearing_radius or can_player_see_pickup:
+                                self.add_message_to_chat_log(f"{npc.name} picks up a {item_name}.")
+
+                            # TODO: Trigger equipment decision logic here if item is equippable
+                            # For now, just go idle.
+                            npc.current_task = "idle"
+                        else:
+                            # Item might have been picked up by someone else or disappeared
+                            # self.add_message_to_chat_log(f"{npc.name} reached for an item at ({target_x},{target_y}), but it was gone.")
+                            npc.current_task = "idle" # Or "confused_item_gone"
+
+                        npc.task_target_coords = None
+                        npc.task_target_item_details = None
+                        npc.current_path = []
+                        npc.current_destination_coords = None
+                        continue # Action complete for this tick
+
+                    else: # Not at item location, need to path/continue pathing
+                        if not npc.current_path or npc.current_destination_coords != (target_x, target_y):
+                            path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                            if path:
+                                npc.current_path = path
+                                npc.current_destination_coords = (target_x, target_y)
+                            else:
+                                # Cannot path to item, give up for now
+                                # self.add_message_to_chat_log(f"{npc.name} can't find a path to the item at ({target_x},{target_y}).")
+                                npc.current_task = "idle"
+                                npc.task_target_coords = None
+                                npc.task_target_item_details = None
+                                npc.current_path = []
+                                npc.current_destination_coords = None
+                                continue # Stop processing this NPC for this tick
+                else: # Task was set but target info is missing, error state
+                    npc.current_task = "idle_confused"
+                    npc.task_target_coords = None
+                    npc.task_target_item_details = None
+                    npc.current_path = []
+                    npc.current_destination_coords = None
+                    continue
+
 
             # --- Standard Path-Based Movement ---
             if npc.current_path:
@@ -828,9 +900,81 @@ class World:
             # (e.g., if combat AI decided to "hold_position" or an attack was immediate)
             # We also need to ensure that combat tasks aren't immediately overridden by scheduling.
             # A simple way is to only run scheduling if the NPC is not currently in a combat-related task.
-            elif npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player", "holding_position_combat"]:
-                # Original scheduling logic starts here, for non-hostile NPCs or those not actively in combat tasks
-                if npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
+            elif npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player", "holding_position_combat", "combat_action_use_healing_item", "combat_action_move_to_cover"]:
+
+                # --- NPC Item Pickup Decision (New) ---
+                # If NPC is idle/wandering and sees items, they might try to pick one up.
+                # This decision should happen before regular scheduling if items are perceived.
+                made_item_decision = False
+                if npc.perceived_item_tiles and npc.current_task in ["idle", "wandering", "at home", "at work"]: # Can decide to pickup even at work/home if item is compelling
+                    perceived_items_list = []
+                    for item_x, item_y in npc.perceived_item_tiles:
+                        if (item_x, item_y) in self.items_on_map and self.items_on_map[(item_x, item_y)]:
+                            # For simplicity, consider the first item on the tile for the prompt
+                            # A more complex NPC might evaluate all items on a tile.
+                            item_on_tile = self.items_on_map[(item_x, item_y)][0]
+                            item_def = ITEM_DEFINITIONS.get(item_on_tile["item_key"])
+                            if item_def:
+                                perceived_items_list.append({
+                                    "item_key": item_on_tile["item_key"],
+                                    "name": item_def.get("name", item_on_tile["item_key"]),
+                                    "quantity": item_on_tile["quantity"],
+                                    "distance": abs(npc.x - item_x) + abs(npc.y - item_y), # Manhattan
+                                    "coords": [item_x, item_y]
+                                })
+
+                    if perceived_items_list:
+                        # Summarize inventory for the prompt (e.g., first 3-5 item names)
+                        inventory_summary_parts = []
+                        count = 0
+                        for key, quant in npc.npc_inventory.items():
+                            if count < 5:
+                                inventory_summary_parts.append(f"{quant}x {ITEM_DEFINITIONS.get(key, {}).get('name', key)}")
+                                count +=1
+                            else:
+                                inventory_summary_parts.append("...")
+                                break
+                        inventory_summary = ", ".join(inventory_summary_parts) if inventory_summary_parts else "empty"
+
+                        pickup_prompt = LLM_PROMPTS["npc_item_pickup_decision"].format(
+                            npc_name=npc.name,
+                            npc_personality=npc.personality,
+                            npc_current_task=npc.current_task,
+                            npc_inventory_summary=inventory_summary,
+                            npc_equipped_weapon_name=ITEM_DEFINITIONS.get(npc.equipped_weapon, {}).get("name", "None") if npc.equipped_weapon else "None",
+                            npc_equipped_armor_name=ITEM_DEFINITIONS.get(npc.equipped_armor_body, {}).get("name", "None") if npc.equipped_armor_body else "None",
+                            perceived_items_list_str=json.dumps(perceived_items_list, indent=2) # Pretty print for LLM
+                        )
+                        pickup_response_str = self._call_ollama(pickup_prompt)
+                        if pickup_response_str:
+                            try:
+                                pickup_decision = json.loads(pickup_response_str)
+                                action = pickup_decision.get("action")
+                                reasoning = pickup_decision.get("reasoning", f"{npc.name} considers the items.")
+
+                                # Log reasoning if player can hear/see (simplified check)
+                                dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+                                if dist_to_player <= self.player.hearing_radius and dist_to_player <= npc.speech_volume and \
+                                   (npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]): # visible
+                                    self.add_message_to_chat_log(f"({reasoning})")
+
+
+                                if action == "pickup_item":
+                                    target_coords_list = pickup_decision.get("target_coords")
+                                    item_key_to_pickup = pickup_decision.get("item_key_to_pickup")
+                                    if target_coords_list and item_key_to_pickup:
+                                        npc.current_task = "task_going_to_pickup_item"
+                                        npc.task_target_coords = tuple(target_coords_list)
+                                        npc.task_target_item_details = {"item_key": item_key_to_pickup}
+                                        npc.current_path = [] # Clear path for new task
+                                        made_item_decision = True
+                                        # self.add_message_to_chat_log(f"Debug: {npc.name} decided to pick up {item_key_to_pickup} at {target_coords_list}.")
+                            except json.JSONDecodeError:
+                                # self.add_message_to_chat_log(f"Error decoding item pickup decision for {npc.name}: {pickup_response_str}")
+                                pass # Fall through to regular scheduling
+
+                # Original scheduling logic starts here, only if no item pickup decision was made
+                if not made_item_decision and npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
                     current_time_in_day = self.game_time % DAY_LENGTH_TICKS
                     time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
@@ -2837,3 +2981,51 @@ class World:
 
         # Fallback if no specific use effect handled
         self.add_message_to_chat_log(f"You can't figure out how to use the {item_def.get('name', item_key)} right now.")
+
+    def drop_item_on_map(self, item_key: str, quantity: int, x: int, y: int):
+        """Drops an item or stack of items onto the map at specified coordinates."""
+        if quantity <= 0:
+            return
+
+        if (x, y) not in self.items_on_map:
+            self.items_on_map[(x, y)] = []
+
+        # Check if item of same key already exists at location to stack
+        item_found_for_stacking = False
+        for item_on_tile in self.items_on_map[(x, y)]:
+            if item_on_tile["item_key"] == item_key:
+                item_def = ITEM_DEFINITIONS.get(item_key, {})
+                if item_def.get("stackable", False):
+                    item_on_tile["quantity"] += quantity
+                    item_found_for_stacking = True
+                    break
+
+        if not item_found_for_stacking:
+            self.items_on_map[(x, y)].append({"item_key": item_key, "quantity": quantity})
+
+        # self.add_message_to_chat_log(f"Dropped {quantity} {ITEM_DEFINITIONS.get(item_key,{}).get('name',item_key)} at ({x},{y}).") # Optional debug
+
+    def remove_item_from_map(self, item_key: str, quantity: int, x: int, y: int) -> bool:
+        """Removes a specified quantity of an item from the map at coordinates. Returns True if successful."""
+        if quantity <= 0:
+            return False
+
+        if (x, y) in self.items_on_map:
+            items_at_loc = self.items_on_map[(x, y)]
+            for i, item_on_tile in enumerate(items_at_loc):
+                if item_on_tile["item_key"] == item_key:
+                    if item_on_tile["quantity"] >= quantity:
+                        item_on_tile["quantity"] -= quantity
+                        if item_on_tile["quantity"] <= 0:
+                            items_at_loc.pop(i)
+                            if not items_at_loc: # If list is empty, remove key from dict
+                                del self.items_on_map[(x,y)]
+                        # self.add_message_to_chat_log(f"Picked up {quantity} {ITEM_DEFINITIONS.get(item_key,{}).get('name',item_key)} from ({x},{y}).") # Optional debug
+                        return True
+                    else:
+                        # Not enough quantity in this specific stack
+                        # self.add_message_to_chat_log(f"Tried to pick up {quantity} of {item_key}, but only found {item_on_tile['quantity']}.")
+                        return False
+            # Item key not found in the list at this location
+            return False
+        return False # No items at this location

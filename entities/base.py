@@ -51,6 +51,10 @@ class NPC:
         self.equipped_armor_body: str | None = None
         self.equipped_armor_head: str | None = None
 
+        # Perception
+        self.perceived_item_tiles: list[tuple[int,int]] = [] # Coords of tiles with items seen this tick
+        self.task_target_item_details: dict | None = None # For tasks like picking up a specific item
+
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
 
     def get_dialogue(self):

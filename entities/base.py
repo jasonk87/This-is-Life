@@ -55,6 +55,13 @@ class NPC:
         self.perceived_item_tiles: list[tuple[int,int]] = [] # Coords of tiles with items seen this tick
         self.task_target_item_details: dict | None = None # For tasks like picking up a specific item
 
+        # Sub-Task State (for multi-step actions like professions)
+        self.current_sub_task: str | None = None # e.g., "chop_trees", "haul_logs"
+        self.sub_task_target_coords: tuple[int, int] | None = None # Specific global coords for the sub-task action
+        self.sub_task_timer: int = 0 # Ticks remaining for the current sub-task's action phase
+        self.sub_task_zone_target: str | None = None # General zone tag for pathing, e.g., "log_pile_area"
+        self.current_sub_task_sequence_index: int = 0 # Index for current profession's sub-task sequence
+
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
 
     def get_dialogue(self):

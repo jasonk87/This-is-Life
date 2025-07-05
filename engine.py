@@ -30,6 +30,7 @@ from data.items import ITEM_DEFINITIONS # For checking yielded resources
 from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
+from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data # Profession and sub-task data
 
 import json # Import json for parsing LLM responses
 import uuid # For unique building IDs
@@ -86,6 +87,8 @@ class Building:
         self.residents = []
         self.building_inventory = {}
         self.interaction_points = {}
+        # Work zones: keys are zone_tags (e.g., "log_pile_area"), values are lists of global (x,y) coordinates
+        self.work_zone_tiles: dict[str, list[tuple[int, int]]] = {}
 
         # Store global origin of the building (top-left tile)
         self.global_origin_x = global_chunk_x_start + x
@@ -1157,21 +1160,256 @@ class World:
                         if path:
                             npc.current_path = path
                             npc.current_destination_coords = destination_coords
-                            npc.current_task = new_task
-                            # self.add_message_to_chat_log(f"{npc.name} starting path for task: {new_task} to {destination_coords}. Path length: {len(path)}")
+                            npc.current_task = new_task_label # Use new_task_label here
+                            # Clear sub-task state if the new main task is not work-related or is a pathing task to work
+                            if new_task_label not in ["going to work", "at work"] and not new_task_label.startswith("Working ("):
+                                npc.current_sub_task = None
+                                npc.sub_task_target_coords = None
+                                npc.sub_task_zone_target = None
+                                npc.sub_task_timer = 0
+                                npc.current_sub_task_sequence_index = 0
+                            # self.add_message_to_chat_log(f"{npc.name} starting path for task: {new_task_label} to {destination_coords}. Path length: {len(path)}")
                         else:
-                            # self.add_message_to_chat_log(f"Could not find path for {npc.name} for task {new_task} to {destination_coords}")
+                            # self.add_message_to_chat_log(f"Could not find path for {npc.name} for task {new_task_label} to {destination_coords}")
                             npc.current_task = "idle_confused" # Cannot find path
 
             # After all task decisions and path assignments:
-            if npc.current_task == "at work":
-                self._handle_npc_production(npc)
+            # If NPC is at work, handle specific work sub-tasks or general production.
+            # This is also where NPCs who have arrived at work ("at work") will start their sub-task logic.
+            if npc.current_task == "at work" or npc.current_task.startswith("Working ("): # Check both generic and specific working tasks
+                # Attempt to handle detailed sub-tasks first
+                if self._handle_npc_work_sub_tasks(npc):
+                    pass # Sub-task logic handled it, potentially setting a more specific task display
+                else: # Fallback to general production if no sub-tasks defined or applicable for this NPC/profession
+                    self._handle_npc_production(npc)
 
             if npc.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'):
                 if hasattr(npc, 'original_char_before_sleep'): # Ensure it exists before trying to access
                     npc.char = npc.original_char_before_sleep
 
             npc.game_time_last_updated = self.game_time
+
+    def _find_nearest_tree_for_chopping(self, npc: NPC, work_building: Building, search_radius: int = 15) -> tuple[int, int] | None:
+        """
+        Finds the nearest choppable tree to the work_building's center for the NPC.
+        Returns global (x,y) coordinates or None.
+        """
+        center_x, center_y = work_building.global_center_x, work_building.global_center_y
+        closest_tree_coords = None
+        min_dist_sq = float('inf')
+
+        # Iterate in expanding square rings around the building's center
+        for r in range(search_radius + 1): # r=0 is the center point itself
+            coords_in_ring = []
+            if r == 0:
+                coords_in_ring.append((center_x, center_y))
+            else:
+                # Top and bottom edges of the square ring
+                for i in range(-r, r + 1):
+                    coords_in_ring.append((center_x + i, center_y + r))
+                    if r != 0: # Avoid double adding center row if r=0 was part of this loop
+                        coords_in_ring.append((center_x + i, center_y - r))
+                # Left and right edges (excluding corners already covered)
+                for i in range(-r + 1, r):
+                    coords_in_ring.append((center_x + r, center_y + i))
+                    if r != 0: # Avoid double adding center column
+                        coords_in_ring.append((center_x - r, center_y + i))
+
+            current_ring_closest_tree = None
+            current_ring_min_dist_sq = float('inf')
+
+            for x, y in list(set(coords_in_ring)): # Use set to remove duplicates from ring generation
+                if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
+                    continue
+
+                tile = self.get_tile_at(x, y)
+                if isinstance(tile, Tree) and tile.is_choppable:
+                    # Check if this tree is targeted by another NPC for chopping
+                    is_targeted = False
+                    for other_npc in self.village_npcs: # Check against all village NPCs
+                        if other_npc.id != npc.id and \
+                           other_npc.current_sub_task == "chop_trees" and \
+                           other_npc.sub_task_target_coords == (x,y):
+                            is_targeted = True
+                            break
+                    if is_targeted:
+                        continue # Skip this tree as it's already targeted
+
+                    dist_sq_from_npc = (npc.x - x)**2 + (npc.y - y)**2 # Distance from current NPC
+                    if dist_sq_from_npc < current_ring_min_dist_sq:
+                        current_ring_min_dist_sq = dist_sq_from_npc
+                        current_ring_closest_tree = (x, y)
+
+            if current_ring_closest_tree:
+                # If we found a tree in this ring, it's the closest overall because we search radially.
+                return current_ring_closest_tree
+
+        return None # No choppable, untargeted tree found within search_radius
+
+    def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
+        """Determines the global target coordinates for a given sub-task."""
+        target_zone_tag = sub_task_data.get("target_zone_tag")
+        if not target_zone_tag:
+            # self.add_message_to_chat_log(f"Error: Sub-task {sub_task_data.get('id')} for {npc.name} has no target_zone_tag.")
+            return None
+
+        if target_zone_tag == "chopping_area":
+            # For chopping, we find a dynamic tree target near the building.
+            # The work_building itself is passed to help center the search.
+            return self._find_nearest_tree_for_chopping(npc, work_building)
+        else:
+            # For other zones, use pre-defined coordinates in work_building.work_zone_tiles
+            zone_coords_list = work_building.work_zone_tiles.get(target_zone_tag)
+            if zone_coords_list:
+                # Pick a random available coordinate from the list for now.
+                # Could be smarter (e.g., closest, or one not currently targeted by another NPC).
+                return random.choice(zone_coords_list)
+            else:
+                # self.add_message_to_chat_log(f"Warning: No coordinates defined for work zone '{target_zone_tag}' in building {work_building.id} for {npc.name}.")
+                return None
+
+    def _produce_sub_task_output(self, npc: NPC, work_building: Building, sub_task_data: dict):
+        """Handles item production or consumption for a completed sub-task."""
+        # Item Consumption
+        consumes_def = sub_task_data.get("consumes_item_from_workplace")
+        if consumes_def:
+            for item_key, quantity_needed in consumes_def.items():
+                current_qty_in_building = work_building.building_inventory.get(item_key, 0)
+                if current_qty_in_building >= quantity_needed:
+                    work_building.building_inventory[item_key] = current_qty_in_building - quantity_needed
+                    if work_building.building_inventory[item_key] <= 0:
+                        del work_building.building_inventory[item_key]
+                    # self.add_message_to_chat_log(f"Debug: {npc.name}'s task consumed {quantity_needed} {item_key} from {work_building.building_type}")
+                else:
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} needed {quantity_needed} {item_key} for task, but {work_building.building_type} only had {current_qty_in_building}.")
+                    # TODO: How to handle if inputs are missing? NPC gets stuck? Task fails?
+                    # For now, production might still happen if inputs are short, or it might make partial.
+                    # Let's assume for now production is blocked if inputs not met.
+                    return # Block production if inputs not met
+
+        # Item Production
+        produces_def = sub_task_data.get("produces_item_at_workplace")
+        if produces_def:
+            for item_key, quantity_produced in produces_def.items():
+                current_qty = work_building.building_inventory.get(item_key, 0)
+                work_building.building_inventory[item_key] = current_qty + quantity_produced
+
+                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                # Optional: Log production for player if they can see/hear the NPC
+                # dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+                # if dist_to_player <= 10: # Arbitrary observation distance
+                #    self.add_message_to_chat_log(f"{npc.name} finishes working and produces {quantity_produced} {item_name} at the {work_building.building_type}.")
+
+
+    def _handle_npc_work_sub_tasks(self, npc: NPC) -> bool:
+        """
+        Manages an NPC's progression through defined work sub-tasks for their profession.
+        Returns True if sub-task logic was applied (even if just pathing or waiting),
+        False if no sub-tasks are applicable or defined for this NPC's current state/profession.
+        """
+        if not npc.work_building_id or not npc.profession:
+            return False
+
+        profession_data = get_profession_data(npc.profession)
+        if not profession_data or not profession_data.get("sub_tasks") or not profession_data.get("default_sub_task_sequence"):
+            return False # No sub-tasks defined for this profession
+
+        work_building = self.buildings_by_id.get(npc.work_building_id)
+        if not work_building:
+            # self.add_message_to_chat_log(f"Error: {npc.name} has work_building_id {npc.work_building_id} but building not found.")
+            npc.current_task = "idle_confused"
+            return True # Handled this confusion
+
+        sub_task_sequence = profession_data["default_sub_task_sequence"]
+        if not sub_task_sequence:
+            return False # Empty sequence
+
+        # If current sub-task is done (timer ran out or just finished one)
+        if not npc.current_sub_task or (npc.sub_task_target_coords and (npc.x, npc.y) == npc.sub_task_target_coords and npc.sub_task_timer <= 0):
+
+            # If a sub-task was just completed (timer is 0 or less, and was at target)
+            if npc.current_sub_task and npc.sub_task_timer <= 0:
+                # Handle output/consumption of the completed sub-task
+                completed_sub_task_data = get_sub_task_data(npc.profession, npc.current_sub_task)
+                if completed_sub_task_data:
+                    self._produce_sub_task_output(npc, work_building, completed_sub_task_data)
+
+                # Move to next sub-task in sequence
+                npc.current_sub_task_sequence_index = (npc.current_sub_task_sequence_index + 1) % len(sub_task_sequence)
+
+            # Set up the new sub-task
+            next_sub_task_id = sub_task_sequence[npc.current_sub_task_sequence_index]
+            current_sub_task_data = get_sub_task_data(npc.profession, next_sub_task_id)
+
+            if not current_sub_task_data:
+                # self.add_message_to_chat_log(f"Error: Could not find sub_task_data for {next_sub_task_id} in {npc.profession}")
+                npc.current_task = "idle_confused"
+                return True
+
+            npc.current_sub_task = next_sub_task_id
+            npc.sub_task_zone_target = current_sub_task_data.get("target_zone_tag")
+            npc.sub_task_target_coords = self._find_target_coords_for_sub_task(npc, work_building, current_sub_task_data)
+
+            if not npc.sub_task_target_coords:
+                # self.add_message_to_chat_log(f"{npc.name} could not find a location for sub-task: {npc.current_sub_task}.")
+                # NPC might be stuck for this cycle. Clear sub-task to retry finding location next schedule update.
+                npc.current_sub_task = None
+                npc.sub_task_zone_target = None
+                npc.current_task = f"Working ({npc.profession} - stalled)" # Or some other indicator
+                return True
+
+            npc.current_path = [] # Clear path for new sub-task target
+            npc.sub_task_timer = current_sub_task_data.get("duration_ticks", 10) # Reset timer for the action phase
+            # self.add_message_to_chat_log(f"Debug: {npc.name} starting sub-task {npc.current_sub_task}, target {npc.sub_task_target_coords}, zone {npc.sub_task_zone_target}")
+
+
+        # If NPC has a sub-task and a target location for it
+        if npc.current_sub_task and npc.sub_task_target_coords:
+            sub_task_disp_name = get_sub_task_data(npc.profession, npc.current_sub_task).get("display_name", npc.current_sub_task)
+
+            if (npc.x, npc.y) != npc.sub_task_target_coords:
+                # Path to target if not already there
+                if not npc.current_path:
+                    path = self.calculate_path(npc.x, npc.y, npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+                    if path:
+                        npc.current_path = path
+                        npc.current_destination_coords = npc.sub_task_target_coords # For _update_npc_movement
+                        # Update task display for pathing to sub-task action
+                        npc.current_task = f"Working ({npc.profession} - {sub_task_disp_name} - Pathing)"
+                    else:
+                        # self.add_message_to_chat_log(f"{npc.name} cannot find path to {npc.sub_task_target_coords} for {npc.current_sub_task}.")
+                        # Clear current sub-task details to retry finding location / path next time
+                        npc.current_sub_task = None
+                        npc.sub_task_target_coords = None
+                        npc.sub_task_zone_target = None
+                        npc.current_path = []
+                        npc.current_destination_coords = None
+                        npc.current_task = f"Working ({npc.profession} - Pathing Failed)"
+                else:
+                     # Already pathing, ensure task display reflects this. _update_npc_movement handles the move.
+                     npc.current_task = f"Working ({npc.profession} - {sub_task_disp_name} - Pathing)"
+
+            else: # NPC is at the sub-task target coordinates
+                npc.current_path = [] # Clear path as arrived
+                npc.current_destination_coords = None
+
+                # Perform the action (decrement timer)
+                npc.sub_task_timer -= 1
+
+                # Update task display for performing action
+                action_verb = get_sub_task_data(npc.profession, npc.current_sub_task).get("action_verb", "working on")
+                total_duration = get_sub_task_data(npc.profession, npc.current_sub_task).get("duration_ticks", 10)
+                progress = max(0, total_duration - npc.sub_task_timer)
+                npc.current_task = f"Working ({npc.profession} - {action_verb} {sub_task_disp_name} [{progress}/{total_duration}])"
+
+                if npc.sub_task_timer <= 0:
+                    # Action complete, output handled at start of next cycle. Current_sub_task will be cleared.
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} finished action for sub-task {npc.current_sub_task}.")
+                    # The loop will pick this up at the top of the function next call.
+                    pass
+            return True # Sub-task logic was processed
+
+        return False # No current sub-task or target to act upon
 
     def _handle_npc_combat_turn(self, npc: NPC):
         """Handles an NPC's decision-making process during their combat turn."""
@@ -2758,7 +2996,54 @@ class World:
                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(lumber_mill)
         self.buildings_by_id[lumber_mill.id] = lumber_mill
-        self._draw_building(tiles, lumber_mill, "wood_wall") # Using wood_wall for now
+        self._draw_building(tiles, lumber_mill, "wood_wall")
+
+        # Define work zones for the lumber mill after it's drawn
+        # These coordinates are GLOBAL world coordinates
+        # Chopping area is conceptual (nearby trees), so we mark it as existing but don't define specific tiles here.
+        lumber_mill.work_zone_tiles["chopping_area"] = [] # Placeholder, logic will find trees
+
+        # Log pile area: a 2x2 area inside or next to the mill.
+        # Example: Place it near the bottom-left of the building interior (adjusting for walls)
+        # Building.x and .y are local to chunk. Building.global_origin_x/y are world coords.
+        log_pile_coords_global = []
+        # Try to place it 1 tile in from the left wall, 1 tile up from the bottom wall.
+        # Ensure it's within the building's actual floor space.
+        # (building.width - 2) and (building.height - 2) give inner dimensions.
+        # We need to place it relative to building.global_origin_x and building.global_origin_y
+        if building.width > 3 and building.height > 3: # Ensure mill is large enough
+            # Relative local coords for the start of the 2x2 log pile area
+            local_pile_start_x = 1
+            local_pile_start_y = building.height - 3 # 1 up from bottom floor, then 1 more for 2x2
+
+            for i in range(2): # y_offset
+                for j in range(2): # x_offset
+                    gx = lumber_mill.global_origin_x + local_pile_start_x + j
+                    gy = lumber_mill.global_origin_y + local_pile_start_y + i
+                    log_pile_coords_global.append((gx, gy))
+            lumber_mill.work_zone_tiles["log_pile_area"] = log_pile_coords_global
+            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Log Pile at {log_pile_coords_global}")
+
+
+        # Splitting area: another 2x2 area, perhaps near the log pile or another side.
+        # Example: Place it near the bottom-right.
+        splitting_area_coords_global = []
+        if building.width > 5 and building.height > 3: # Need more width to avoid overlap if simple placement
+            local_split_start_x = building.width - 3
+            local_split_start_y = building.height - 3
+
+            for i in range(2): # y_offset
+                for j in range(2): # x_offset
+                    gx = lumber_mill.global_origin_x + local_split_start_x + j
+                    gy = lumber_mill.global_origin_y + local_split_start_y + i
+                    splitting_area_coords_global.append((gx, gy))
+            lumber_mill.work_zone_tiles["splitting_area"] = splitting_area_coords_global
+            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area at {splitting_area_coords_global}")
+        elif "log_pile_area" in lumber_mill.work_zone_tiles: # Fallback if not wide enough, use same as log pile
+            lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
+            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area (fallback) at {lumber_mill.work_zone_tiles['splitting_area']}")
+        else: # If no log pile area either, mark as empty
+            lumber_mill.work_zone_tiles["splitting_area"] = []
 
 
         # Generate a few regular houses

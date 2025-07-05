@@ -247,10 +247,20 @@ def draw_info_menu(main_console: tcod.console.Console, world) -> None:
             ui_y += 1
             main_console.print(x=menu_x + 4, y=ui_y, string=f"HP: {npc_at_cursor.hp}/{npc_at_cursor.max_hp}", fg=(200,200,200))
             ui_y += 1
-            main_console.print(x=menu_x + 4, y=ui_y, string=f"Task: {npc_at_cursor.current_task}", fg=(200,200,200))
+
+            task_str = npc_at_cursor.current_task
+            available_width_for_task = menu_width - (4 + 1 + 6) # menu_x + 4, 1 for border/padding, "Task: " prefix
+            if len(task_str) > available_width_for_task:
+                task_str = task_str[:available_width_for_task-3] + "..."
+            main_console.print(x=menu_x + 4, y=ui_y, string=f"Task: {task_str}", fg=(200,200,200))
             ui_y += 1
+
             if npc_at_cursor.current_destination_coords:
-                main_console.print(x=menu_x + 4, y=ui_y, string=f"Dest: {npc_at_cursor.current_destination_coords}", fg=(200,200,200))
+                dest_str = str(npc_at_cursor.current_destination_coords)
+                available_width_for_dest = menu_width - (4 + 1 + 6) # Similar for "Dest: "
+                if len(dest_str) > available_width_for_dest:
+                    dest_str = dest_str[:available_width_for_dest-3] + "..."
+                main_console.print(x=menu_x + 4, y=ui_y, string=f"Dest: {dest_str}", fg=(200,200,200))
                 ui_y += 1
             main_console.print(x=menu_x + 4, y=ui_y, string=f"Attitude: {npc_at_cursor.attitude_to_player}", fg=(200,200,200))
             ui_y += 1

@@ -16,20 +16,20 @@ class Tree(Tile):
 
         self.is_choppable = True
         self.resource_yield = {"log": 1} # Default yield, matches item key "log"
-        self.chopped_char = ord('t')
-        self.chopped_color = (139, 69, 19) # Brown for stump
-        self.original_name = self.name # Store original name
+        # self.chopped_char = ord('t') # No longer needed here, stump definition handles appearance
+        # self.chopped_color = (139, 69, 19) # No longer needed here
+        self.original_name = self.name # Store original name, might be useful for messages
+        self.becomes_on_chop_key = "stump_generic" # Key for TILE_DEFINITIONS for the stump
 
     def chop(self):
+        """
+        Marks the tree as chopped and returns its resource yield.
+        The actual tile transformation to a stump is handled by the engine.
+        """
         if self.is_choppable:
             self.is_choppable = False
-            self.char = self.chopped_char
-            self.color = self.chopped_color
-            self.name = f"Chopped {self.original_name}" # More descriptive than just "Stump"
-            # self.passable = True # A stump could be passable
-            # self.blocks_sight = False # A stump might not block sight (Tile class doesn't have this)
-
-            # Return a copy of the yield dictionary
+            # The tree object itself doesn't change its appearance here.
+            # The engine will replace this Tree tile object with a new Tile object (the stump).
             return dict(self.resource_yield)
         return {}
 

@@ -1269,36 +1269,75 @@ class World:
                 return None
 
     def _produce_sub_task_output(self, npc: NPC, work_building: Building, sub_task_data: dict):
-        """Handles item production or consumption for a completed sub-task."""
-        # Item Consumption
-        consumes_def = sub_task_data.get("consumes_item_from_workplace")
-        if consumes_def:
-            for item_key, quantity_needed in consumes_def.items():
-                current_qty_in_building = work_building.building_inventory.get(item_key, 0)
-                if current_qty_in_building >= quantity_needed:
-                    work_building.building_inventory[item_key] = current_qty_in_building - quantity_needed
-                    if work_building.building_inventory[item_key] <= 0:
-                        del work_building.building_inventory[item_key]
-                    # self.add_message_to_chat_log(f"Debug: {npc.name}'s task consumed {quantity_needed} {item_key} from {work_building.building_type}")
+        """
+        Handles item production or consumption for a completed sub-task.
+        This now also handles transfers from NPC inventory to building inventory.
+        """
+        consumption_successful = True # Assume success unless specific consumption fails
+
+        # 1. Consume from NPC inventory (if defined)
+        consumes_from_npc_def = sub_task_data.get("consumes_item_from_npc_inventory")
+        if consumes_from_npc_def:
+            for item_key, quantity_needed in consumes_from_npc_def.items():
+                current_npc_qty = npc.npc_inventory.get(item_key, 0)
+                if current_npc_qty >= quantity_needed:
+                    npc.npc_inventory[item_key] = current_npc_qty - quantity_needed
+                    if npc.npc_inventory[item_key] <= 0:
+                        del npc.npc_inventory[item_key]
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} consumed {quantity_needed} {item_key} from personal inventory.")
                 else:
-                    # self.add_message_to_chat_log(f"Debug: {npc.name} needed {quantity_needed} {item_key} for task, but {work_building.building_type} only had {current_qty_in_building}.")
-                    # TODO: How to handle if inputs are missing? NPC gets stuck? Task fails?
-                    # For now, production might still happen if inputs are short, or it might make partial.
-                    # Let's assume for now production is blocked if inputs not met.
-                    return # Block production if inputs not met
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} needed {quantity_needed} {item_key} from inventory for task, but only had {current_npc_qty}.")
+                    consumption_successful = False
+                    break # Stop further processing for this sub-task if NPC consumption fails
+            if not consumption_successful:
+                return # Early exit if NPC couldn't provide required items from its inventory
 
-        # Item Production
-        produces_def = sub_task_data.get("produces_item_at_workplace")
-        if produces_def:
-            for item_key, quantity_produced in produces_def.items():
-                current_qty = work_building.building_inventory.get(item_key, 0)
-                work_building.building_inventory[item_key] = current_qty + quantity_produced
+        # 2. Consume from Workplace inventory (if defined)
+        # This should only happen if NPC consumption (if any) was successful
+        if consumption_successful:
+            consumes_from_building_def = sub_task_data.get("consumes_item_from_workplace")
+            if consumes_from_building_def:
+                for item_key, quantity_needed in consumes_from_building_def.items():
+                    current_building_qty = work_building.building_inventory.get(item_key, 0)
+                    if current_building_qty >= quantity_needed:
+                        work_building.building_inventory[item_key] = current_building_qty - quantity_needed
+                        if work_building.building_inventory[item_key] <= 0:
+                            del work_building.building_inventory[item_key]
+                        # self.add_message_to_chat_log(f"Debug: Task consumed {quantity_needed} {item_key} from {work_building.building_type}.")
+                    else:
+                        # self.add_message_to_chat_log(f"Debug: {work_building.building_type} needed {quantity_needed} {item_key} for task, but only had {current_building_qty}.")
+                        consumption_successful = False
+                        break # Stop further processing if building consumption fails
+                if not consumption_successful:
+                    # TODO: What if NPC items were consumed but building items were not? Rollback NPC consumption?
+                    # For now, if building consumption fails, the process stops, potentially leaving NPC items consumed.
+                    # This implies sub-tasks should be designed carefully (e.g., consume from NPC then deposit to building is one flow,
+                    # consume from building to produce to building is another).
+                    return
 
-                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                # Optional: Log production for player if they can see/hear the NPC
-                # dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
-                # if dist_to_player <= 10: # Arbitrary observation distance
-                #    self.add_message_to_chat_log(f"{npc.name} finishes working and produces {quantity_produced} {item_name} at the {work_building.building_type}.")
+        # 3. Deposit items to Workplace (if defined, and all consumptions were successful)
+        if consumption_successful:
+            deposits_to_building_def = sub_task_data.get("deposits_item_to_workplace")
+            if deposits_to_building_def:
+                for item_key, quantity_deposited in deposits_to_building_def.items():
+                    current_building_qty = work_building.building_inventory.get(item_key, 0)
+                    work_building.building_inventory[item_key] = current_building_qty + quantity_deposited
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} deposited {quantity_deposited} {item_name} to {work_building.building_type}.")
+
+        # 4. Produce items at Workplace (if defined, and all consumptions were successful)
+        # This is for direct production, not transfers from NPC.
+        if consumption_successful:
+            produces_at_building_def = sub_task_data.get("produces_item_at_workplace")
+            if produces_at_building_def:
+                for item_key, quantity_produced in produces_at_building_def.items():
+                    current_building_qty = work_building.building_inventory.get(item_key, 0)
+                    work_building.building_inventory[item_key] = current_building_qty + quantity_produced
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    # Optional: Log production for player if they can see/hear the NPC
+                    # dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+                    # if dist_to_player <= 10:
+                    #    self.add_message_to_chat_log(f"{npc.name} finishes working and produces {quantity_produced} {item_name} at the {work_building.building_type}.")
 
 
     def _handle_npc_work_sub_tasks(self, npc: NPC) -> bool:
@@ -1328,17 +1367,54 @@ class World:
         if not npc.current_sub_task or (npc.sub_task_target_coords and (npc.x, npc.y) == npc.sub_task_target_coords and npc.sub_task_timer <= 0):
 
             # If a sub-task was just completed (timer is 0 or less, and was at target)
-            if npc.current_sub_task and npc.sub_task_timer <= 0:
-                # Handle output/consumption of the completed sub-task
-                completed_sub_task_data = get_sub_task_data(npc.profession, npc.current_sub_task)
+            if npc.current_sub_task and npc.sub_task_timer <= 0 and npc.sub_task_target_coords and (npc.x, npc.y) == npc.sub_task_target_coords:
+                completed_sub_task_id = npc.current_sub_task
+                completed_sub_task_data = get_sub_task_data(npc.profession, completed_sub_task_id)
+
                 if completed_sub_task_data:
-                    self._produce_sub_task_output(npc, work_building, completed_sub_task_data)
+                    if completed_sub_task_id == "chop_trees":
+                        # Special handling for chopping trees: transform tile, add logs to NPC inventory
+                        tree_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+                        if isinstance(tree_tile_obj, Tree) and tree_tile_obj.is_choppable:
+                            yielded_resources = tree_tile_obj.chop() # Marks tree as not choppable
+                            logs_collected = yielded_resources.get("log", 0)
+
+                            stump_key = tree_tile_obj.becomes_on_chop_key
+                            stump_def = TILE_DEFINITIONS.get(stump_key)
+
+                            if stump_def:
+                                cx, cy = npc.sub_task_target_coords[0] // CHUNK_SIZE, npc.sub_task_target_coords[1] // CHUNK_SIZE
+                                lx, ly = npc.sub_task_target_coords[0] % CHUNK_SIZE, npc.sub_task_target_coords[1] % CHUNK_SIZE
+                                if 0 <= cx < self.chunk_width and 0 <= cy < self.chunk_height:
+                                    self.chunks[cy][cx].tiles[ly][lx] = Tile(
+                                        char=stump_def["char"], color=stump_def["color"],
+                                        passable=stump_def["passable"], name=stump_def["name"],
+                                        properties=stump_def.get("properties", {})
+                                    )
+                                    # self.add_message_to_chat_log(f"Debug: {npc.name} felled a tree, now a {stump_def['name']}.")
+                                    # Update transparency map if the tree blocked FOV and stump doesn't (or vice-versa)
+                                    # This is a simplified update; a full rebuild might be safer or targeted update needed.
+                                    new_blocks_fov = stump_def.get("properties", {}).get("blocks_fov", False)
+                                    if self.transparency_map[npc.sub_task_target_coords[0], npc.sub_task_target_coords[1]] == new_blocks_fov:
+                                         self.transparency_map[npc.sub_task_target_coords[0], npc.sub_task_target_coords[1]] = not new_blocks_fov
+                                         self.update_fov() # FOV potentially changed
+
+                            if logs_collected > 0:
+                                npc.npc_inventory["raw_log"] = npc.npc_inventory.get("raw_log", 0) + logs_collected
+                                # self.add_message_to_chat_log(f"Debug: {npc.name} collected {logs_collected} raw_log(s). Inv: {npc.npc_inventory['raw_log']}")
+                        # else:
+                            # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
+                    else:
+                        # Handle output/consumption for other sub-tasks via the helper
+                        self._produce_sub_task_output(npc, work_building, completed_sub_task_data)
 
                 # Move to next sub-task in sequence
                 npc.current_sub_task_sequence_index = (npc.current_sub_task_sequence_index + 1) % len(sub_task_sequence)
+                npc.current_sub_task = None # Force selection of the new sub-task logic below
 
-            # Set up the new sub-task
-            next_sub_task_id = sub_task_sequence[npc.current_sub_task_sequence_index]
+            # Set up the new sub-task (or re-setup if current_sub_task was cleared above)
+            if not npc.current_sub_task: # Ensures we select a new task if one was just completed.
+                next_sub_task_id = sub_task_sequence[npc.current_sub_task_sequence_index]
             current_sub_task_data = get_sub_task_data(npc.profession, next_sub_task_id)
 
             if not current_sub_task_data:

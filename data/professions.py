@@ -15,10 +15,11 @@ PROFESSIONS = {
             {
                 "id": "haul_logs",
                 "display_name": "Hauling Logs",
-                "duration_ticks": 20, # Ticks for the action of dropping off, travel time is separate
+                "duration_ticks": 20, # Ticks for the action of dropping off logs at the pile
                 "target_zone_tag": "log_pile_area", # A designated spot at the lumber mill building
-                "action_verb": "hauling logs",
-                "produces_item_at_workplace": {"log_raw": 1} # Item key and quantity
+                "action_verb": "depositing logs",
+                "consumes_item_from_npc_inventory": {"raw_log": 1}, # Assumes NPC carries 1 log's worth
+                "deposits_item_to_workplace": {"raw_log": 1}
             },
             {
                 "id": "split_stack_wood",

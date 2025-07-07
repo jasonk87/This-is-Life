@@ -187,3 +187,14 @@ for key in wall_keys:
 
 TILE_DEFINITIONS["tall_grass"]["properties"] = TILE_DEFINITIONS["tall_grass"].get("properties", {})
 TILE_DEFINITIONS["tall_grass"]["properties"]["provides_cover_value"] = 0.2 # Light cover
+
+TILE_DEFINITIONS["stump_generic"] = {
+    "char": "o",
+    "color": (101, 67, 33),  # Brownish, like a cut log
+    "passable": True,
+    "name": "Tree Stump",
+    "properties": {
+        "is_choppable": False, # Can't chop a stump further by default
+        "provides_cover_value": 0.1 # Very minor cover
+    }
+}

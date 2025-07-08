@@ -3052,17 +3052,6 @@ class World:
         chunk.tiles = tiles
         chunk.is_generated = True
 
-    def _generate_trees(self, tiles): # This function seems unused after recent changes, consider removing or integrating.
-        for y_local in range(CHUNK_SIZE):
-            for x_local in range(CHUNK_SIZE):
-                if random.random() < 0.02: # 2% chance for a tree
-                    tree_type = random.choice(["oak", "apple", "pear"])
-                    # Tree classes like OakTree are not fully defined in provided snippets, assuming they exist or are simple.
-                    # For now, this part might not function as expected without full Tree entity definitions.
-                    # Placeholder:
-                    # tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tree"]["char"], ...) # Assuming a generic tree tile
-                    pass # Pass for now as Tree entities are not the focus
-
     def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 

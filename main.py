@@ -59,9 +59,31 @@ def main():
             world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
 
             # --- Drawing ---
-            draw(console, world)
-            # Update the screen
-            context.present(console)
+            if world.game_state == "PLAYER_DEAD":
+                console.clear()
+                tcod.console_print_box(
+                    console,
+                    x=console.width // 2 - 10,
+                    y=console.height // 2 - 2,
+                    width=20,
+                    height=4,
+                    string="GAME OVER",
+                    fg=tcod.white,
+                    bg=tcod.black,
+                    alignment=tcod.CENTER
+                )
+                context.present(console)
+                # Wait for a key press or quit event before exiting
+                for event_deep_loop in tcod.event.wait(): # Inner loop for game over
+                    context.convert_event(event_deep_loop)
+                    if isinstance(event_deep_loop, tcod.event.Quit):
+                        return
+                    if isinstance(event_deep_loop, tcod.event.KeyDown):
+                        return # Exit on any key press
+            else:
+                draw(console, world)
+                # Update the screen
+                context.present(console)
 
             # --- Event Handling ---
             # tcod.event.wait() will block until an event, which is fine for turn-based.

@@ -190,7 +190,13 @@ def draw_info_menu(main_console: tcod.console.Console, world) -> None:
     ui_y += 1
     hp_text = f"HP: {world.player.hp} / {world.player.max_hp}"
     main_console.print(x=menu_x + 3, y=ui_y, string=hp_text, fg=(255, 255, 255))
-    ui_y += 2
+    ui_y +=1
+    hunger_text = f"Hunger: {world.player.hunger}/{world.player.max_hunger} {world.player.hunger_level_msg}"
+    main_console.print(x=menu_x + 3, y=ui_y, string=hunger_text, fg=(255,165,0) if world.player.hunger_level_msg else (200,200,200))
+    ui_y +=1
+    thirst_text = f"Thirst: {world.player.thirst}/{world.player.max_thirst} {world.player.thirst_level_msg}"
+    main_console.print(x=menu_x + 3, y=ui_y, string=thirst_text, fg=(100,149,237) if world.player.thirst_level_msg else (200,200,200))
+    ui_y += 2 # Extra space after vitals
     main_console.print(x=menu_x + 3, y=ui_y, string="Inventory:", fg=(255, 255, 255))
     ui_y += 1
     if not world.player.inventory:

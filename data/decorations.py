@@ -139,4 +139,15 @@ DECORATION_ITEM_DEFINITIONS = {
             # Future: could store original NPC ID or type for looting/identification
         }
     },
+    "fire_pit_simple": {
+        "name": "Simple Fire Pit",
+        "char": "F", # Using existing fireplace char, can differentiate later
+        "color": tcod.constants.DARK_ORANGE, # Ashy/ember color
+        "passable": False, # Don't walk into the fire pit
+        "properties": {
+            "is_heat_source": True,
+            "interaction_hint": "cook_here", # For conceptual crafting station
+            "description": "A ring of stones containing embers. Good for cooking."
+        }
+    }
 }

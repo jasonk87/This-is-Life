@@ -62,6 +62,9 @@ class NPC:
         self.sub_task_zone_target: str | None = None # General zone tag for pathing, e.g., "log_pile_area"
         self.current_sub_task_sequence_index: int = 0 # Index for current profession's sub-task sequence
 
+        # Auditory Perception
+        self.hearing_radius: int = DEFAULT_HEARING_RADIUS # Standard hearing range for NPCs
+
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
 
     def get_dialogue(self):

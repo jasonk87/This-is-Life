@@ -97,6 +97,7 @@ class Building:
         # Global coordinates of the building's center
         self.global_center_x = self.global_origin_x + width // 2
         self.global_center_y = self.global_origin_y + height // 2
+        self.player_owned: bool = False # New attribute for player housing
 
 class Village:
     def __init__(self):
@@ -151,10 +152,22 @@ class Player:
         self.light_source_active_until_tick: int = -1   # Game tick for burnout, -1 if no duration/not active
         self.current_personal_light_radius: int = 0     # Actual radius from equipped item
 
+        # Hunger and Thirst
+        self.hunger: int = 0
+        self.max_hunger: int = 100
+        self.thirst: int = 0
+        self.max_thirst: int = 100
+        self.hunger_level_msg: str = "" # To store message like "Hungry"
+        self.thirst_level_msg: str = "" # To store message like "Thirsty"
+
+
     def take_damage(self, amount: int):
         self.hp -= amount
         if self.hp < 0:
             self.hp = 0
+        if self.hp <=0 and hasattr(self, 'world_ref') and self.world_ref: # Check if world_ref exists
+             self.world_ref.game_state = "PLAYER_DEAD"
+
 
     def adjust_reputation(self, rep_type: str, amount: int):
         """Adjusts the player's reputation of a specific type."""
@@ -174,6 +187,7 @@ class World:
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
+        self.player.world_ref = self # Give player a reference to the world for game state changes
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height)
         self.chunks = self._initialize_chunks()
         self.npcs = []
@@ -191,6 +205,7 @@ class World:
         self.interaction_menu_options = []
         self.interaction_menu_selected_index = 0
         self.interaction_menu_target_npc = None
+        self.interaction_menu_target_building = None # For interacting with buildings (e.g. claiming)
         self.interaction_menu_x = 0
         self.interaction_menu_y = 0
 
@@ -224,6 +239,10 @@ class World:
         self.npc_fov_maps: dict[int, np.ndarray] = {}
         self.explored_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F")
 
+        # Sound events list for the current tick
+        self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
+
+
         # Build transparency map - this is expensive on init as it forces all chunks to generate.
         # Consider dynamic updates or pre-generation if performance becomes an issue.
         self.transparency_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=True, order="F")
@@ -235,6 +254,49 @@ class World:
 
         self._update_light_level_and_fov() # Initialize based on game time 0
         self.update_fov() # Initial FOV calculation
+        self._update_player_hunger_thirst(initial_setup=True) # Initial status update
+
+    def _update_player_hunger_thirst(self, initial_setup=False):
+        """Updates player hunger and thirst, applies effects, and sets status messages."""
+        player = self.player
+        ticks_for_hunger_increase = DAY_LENGTH_TICKS // 10 # Hunger increases 10 times a day
+        ticks_for_thirst_increase = DAY_LENGTH_TICKS // 15 # Thirst increases 15 times a day
+        ticks_for_starvation_damage = DAY_LENGTH_TICKS // 20 # Damage if critical for this long
+
+        if not initial_setup:
+            if self.game_time % ticks_for_hunger_increase == 0:
+                player.hunger = min(player.max_hunger, player.hunger + 5) # Increase by 5
+            if self.game_time % ticks_for_thirst_increase == 0:
+                player.thirst = min(player.max_thirst, player.thirst + 7) # Increase by 7 (thirst grows faster)
+
+        # Hunger status messages
+        if player.hunger >= player.max_hunger * 0.9:
+            player.hunger_level_msg = "Starving"
+            if not initial_setup and self.game_time % ticks_for_starvation_damage == 0 :
+                self.add_message_to_chat_log("You are weak from starvation!")
+                player.take_damage(1)
+        elif player.hunger >= player.max_hunger * 0.7:
+            player.hunger_level_msg = "Very Hungry"
+        elif player.hunger >= player.max_hunger * 0.5:
+            player.hunger_level_msg = "Hungry"
+        elif player.hunger >= player.max_hunger * 0.25:
+            player.hunger_level_msg = "Peckish"
+        else:
+            player.hunger_level_msg = ""
+
+        # Thirst status messages
+        if player.thirst >= player.max_thirst * 0.9:
+            player.thirst_level_msg = "Dehydrated"
+            if not initial_setup and self.game_time % ticks_for_starvation_damage == 0: # Same tick for damage
+                self.add_message_to_chat_log("You are faint from thirst!")
+                player.take_damage(1)
+        elif player.thirst >= player.max_thirst * 0.7:
+            player.thirst_level_msg = "Very Thirsty"
+        elif player.thirst >= player.max_thirst * 0.5:
+            player.thirst_level_msg = "Thirsty"
+        else:
+            player.thirst_level_msg = ""
+
 
     def _handle_player_light_source_burnout(self):
         """Checks and handles burnout of player's active light source."""
@@ -639,6 +701,32 @@ class World:
                     npc.current_destination_coords = None
                     continue
 
+            elif npc.current_task == "combat_action_use_healing_item":
+                healing_item_key = "healing_salve" # Define the item key
+                if npc.npc_inventory.get(healing_item_key, 0) > 0:
+                    npc.npc_inventory[healing_item_key] -= 1
+                    if npc.npc_inventory[healing_item_key] <= 0:
+                        del npc.npc_inventory[healing_item_key]
+
+                    heal_amount = ITEM_DEFINITIONS.get(healing_item_key, {}).get("on_use", {}).get("heal_amount", 10)
+                    npc.hp = min(npc.max_hp, npc.hp + heal_amount)
+                    self.add_message_to_chat_log(f"{npc.name} uses a {ITEM_DEFINITIONS[healing_item_key]['name']} and looks reinvigorated! (HP: {npc.hp}/{npc.max_hp})")
+
+                    # Action consumed for this tick
+                    npc.current_path = []
+                    npc.current_destination_coords = None
+                    # NPC might re-evaluate next turn based on new health
+                    npc.current_task = "combat_action_hold_position" # Or let AI decide next tick by setting to idle/eval
+                    continue # Move to next NPC
+                else:
+                    self.add_message_to_chat_log(f"{npc.name} fumbles for a salve but finds none!")
+                    # Fallback: if can't heal, maybe hold position or let AI decide again
+                    npc.current_task = "combat_action_hold_position"
+                    # No continue, will fall through to standard pathing if any was set by a previous state.
+                    # Or, more cleanly, ensure path is also cleared here if task changes.
+                    npc.current_path = []
+                    npc.current_destination_coords = None
+
 
             # --- Standard Path-Based Movement ---
             if npc.current_path:
@@ -895,16 +983,42 @@ class World:
             npc.game_time_last_updated = self.game_time
 
             if npc.is_hostile_to_player:
-                self._handle_npc_combat_turn(npc) # New method for combat decision making
-                # After combat turn, NPC might have a new task like "attacking_player" or "fleeing"
-                # Pathing/movement for these tasks will be handled by _update_npc_movement
+                self._handle_npc_combat_turn(npc)
+            # --- Sound Perception (runs even if hostile, might override combat task if sound is compelling enough or changes context) ---
+            # This is a simplified first pass. More complex logic would involve NPC state, personality, and sound type.
+            heard_compelling_sound = False
+            if self.sound_events: # Only process if there are sounds
+                for sound in self.sound_events:
+                    # Skip sound if NPC itself made it
+                    if sound.get("source_id") and sound["source_id"] == npc.id:
+                        continue
 
-            # Standard scheduling logic if not hostile or if combat AI didn't set a pathing task
-            # (e.g., if combat AI decided to "hold_position" or an attack was immediate)
-            # We also need to ensure that combat tasks aren't immediately overridden by scheduling.
-            # A simple way is to only run scheduling if the NPC is not currently in a combat-related task.
-            elif npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player", "holding_position_combat", "combat_action_use_healing_item", "combat_action_move_to_cover"]:
+                    dist_to_sound = math.sqrt((npc.x - sound["x"])**2 + (npc.y - sound["y"])**2)
+                    if dist_to_sound <= npc.hearing_radius and dist_to_sound <= sound["volume"]:
+                        # NPC hears the sound
+                        if npc.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]: # Don't interrupt critical combat/investigation for now
+                            sound_type = sound["type"]
+                            # Simple reaction: investigate combat or tree fall sounds
+                            if sound_type in ["combat_attack", "tree_fall"]:
+                                npc.current_task = "investigating_sound"
+                                npc.current_destination_coords = (sound["x"], sound["y"])
+                                npc.current_path = [] # Force repath
+                                self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
+                                heard_compelling_sound = True
+                                break # React to first compelling sound heard
 
+            if heard_compelling_sound:
+                # If NPC decided to investigate a sound, skip other scheduling for this tick
+                # Movement for "investigating_sound" will be handled by _update_npc_movement if path is set
+                if npc.current_task == "investigating_sound" and npc.current_destination_coords and not npc.current_path:
+                    path = self.calculate_path(npc.x, npc.y, npc.current_destination_coords[0], npc.current_destination_coords[1])
+                    if path:
+                        npc.current_path = path
+                    else: # Cannot path to sound, revert to idle or previous
+                        npc.current_task = "idle_confused"
+                        npc.current_destination_coords = None
+            elif not npc.is_hostile_to_player and npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player", "holding_position_combat", "combat_action_use_healing_item", "combat_action_move_to_cover", "investigating_sound"]:
+                # Original scheduling logic for non-hostile, non-combat, non-investigating NPCs
                 # --- NPC Item Pickup Decision (New) ---
                 # If NPC is idle/wandering and sees items, they might try to pick one up.
                 # This decision should happen before regular scheduling if items are perceived.
@@ -1652,6 +1766,7 @@ class World:
             if chosen_action == "attack_player":
                 if player_in_attack_range:
                     npc.current_task = "combat_action_attack_player"
+                    # Sound emitted by npc_attempt_attack_player
                 else:
                     # LLM chose attack but player not in range, so move to attack
                     npc.current_task = "combat_action_move_to_attack_player"
@@ -1662,6 +1777,7 @@ class World:
                 else:
                     # LLM chose move but player is already in range, so attack
                     npc.current_task = "combat_action_attack_player"
+                    # Sound emitted by npc_attempt_attack_player
                     # self.add_message_to_chat_log(f"({npc.name} decides to attack immediately as player is in range.)")
             elif chosen_action == "flee_from_player":
                 npc.current_task = "combat_action_flee_from_player"
@@ -1763,26 +1879,23 @@ class World:
             # attacker_status_change = response_json.get("attacker_status_change", "none") # For future use
 
             self.add_message_to_chat_log(narrative)
+            self.emit_sound(npc.x, npc.y, "combat_attack", volume=10, source_entity_id=npc.id) # Emit attack sound
 
             if hit and damage_dealt > 0:
                 player.take_damage(damage_dealt)
                 self.add_message_to_chat_log(f"You take {damage_dealt} damage! Your HP is now {player.hp}/{player.max_hp}.")
                 if player.hp <= 0:
                     self.add_message_to_chat_log("You have been defeated!")
-                    # Handle player death/game over state here
-                    # For now, just a message. Could set a game_state like "GAME_OVER"
-                    self.game_state = "PLAYER_DEAD" # Example, handle in main loop
+                    self.game_state = "PLAYER_DEAD"
             elif hit and damage_dealt <= 0:
                 self.add_message_to_chat_log(f"{npc.name}'s attack hits you but deals no damage.")
 
-            # After an attack, NPC might re-evaluate or just be ready for next turn's decision
-            # For now, we assume their combat turn is "done" after this attack action.
-            # The _handle_npc_combat_turn will be called again on their next AI tick.
-
         except json.JSONDecodeError:
             self.add_message_to_chat_log(f"{npc.name}'s attack is confusing. (LLM Format Error: {response_str})")
+            self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id) # Still emit sound on error
         except ValueError: # For int(damage_dealt)
              self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
+             self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
 
     def complete_contract_delivery(self, contract_id: str, turn_in_npc: NPC):
@@ -1931,33 +2044,44 @@ class World:
         # Check if player has an axe
         # For now, let's assume "axe_stone" is the only axe type.
         # A more robust system would check for any item with property "tool_type": "axe".
-        if "axe_stone" not in self.player.inventory or self.player.inventory["axe_stone"] <= 0:
+        # For now, only "axe_stone" is considered. A more robust system would check for any item with "tool_type": "axe".
+        axe_item_key = "axe_stone"
+        if self.player.inventory.get(axe_item_key, 0) <= 0:
             self.add_message_to_chat_log("You need an axe to chop trees.")
             return
 
         target_tile = self.get_tile_at(tree_x, tree_y)
 
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
-            yielded_resources = target_tile.chop() # This method also changes the tree's appearance/state
+            yielded_resources = target_tile.chop()
 
             if yielded_resources:
                 self.add_message_to_chat_log(f"You chopped the {target_tile.original_name}!")
+                self.emit_sound(tree_x, tree_y, "tree_fall", volume=15, source_entity_id=self.player.id) # Emit sound
                 for resource_key, quantity in yielded_resources.items():
-                    if resource_key in ITEM_DEFINITIONS: # Only add defined items
+                    if resource_key in ITEM_DEFINITIONS:
                         current_qty = self.player.inventory.get(resource_key, 0)
                         self.player.inventory[resource_key] = current_qty + quantity
                         self.add_message_to_chat_log(f"  + {quantity} {ITEM_DEFINITIONS[resource_key]['name']}")
                     else:
                         self.add_message_to_chat_log(f"  (Received undefined resource: {resource_key} x{quantity})")
 
-                # The tile itself (Tree object) has changed its char/color.
-                # No need to replace it in the self.chunks[...].tiles array if it's the same object.
-                # If chop() returned a new Stump Tile object, we would need to update the map:
-                # chunk_x, chunk_y = tree_x // CHUNK_SIZE, tree_y // CHUNK_SIZE
-                # local_x, local_y = tree_x % CHUNK_SIZE, tree_y % CHUNK_SIZE
-                # self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = new_stump_tile
+                # Handle axe degradation/breaking
+                axe_def = ITEM_DEFINITIONS.get(axe_item_key)
+                if axe_def:
+                    degrade_chance = axe_def.get("properties", {}).get("durability_chance_to_degrade", 0.0)
+                    if random.random() < degrade_chance:
+                        self.player.inventory[axe_item_key] -= 1
+                        self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
+                        if self.player.inventory[axe_item_key] <= 0:
+                            del self.player.inventory[axe_item_key]
+                            self.add_message_to_chat_log("That was your last one.")
+                        # Optionally, give back a "broken_tool_handle"
+                        if "broken_tool_handle" in ITEM_DEFINITIONS:
+                            self.player.inventory["broken_tool_handle"] = self.player.inventory.get("broken_tool_handle", 0) + 1
+                            self.add_message_to_chat_log("You salvaged a broken tool handle.")
             else:
-                self.add_message_to_chat_log("Nothing was yielded from the tree.") # Should not happen if is_choppable was true
+                self.add_message_to_chat_log("Nothing was yielded from the tree.")
         elif isinstance(target_tile, Tree) and not target_tile.is_choppable:
             self.add_message_to_chat_log(f"This {target_tile.name} has already been chopped.")
         else:
@@ -2140,6 +2264,7 @@ class World:
             narrative = response_json.get("narrative_feedback", "The confrontation is tense.")
 
             self.add_message_to_chat_log(narrative)
+            self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=10, source_entity_id=self.player.id) # Emit attack sound
 
             if hit and damage_dealt > 0:
                 target_npc.take_damage(damage_dealt, self)
@@ -2148,18 +2273,18 @@ class World:
             elif hit and damage_dealt <= 0: # A hit that does no damage
                 self.add_message_to_chat_log(f"Your attack hits but glances off {target_npc.name} harmlessly!")
 
-            # Ensure NPC becomes hostile if attacked and not already dead/hostile
-            # (take_damage also sets hostility, this is a fallback if no damage but was a hostile act)
             if not target_npc.is_hostile_to_player and not target_npc.is_dead:
                  target_npc.is_hostile_to_player = True
                  self.add_message_to_chat_log(f"{target_npc.name} becomes hostile!")
 
         except json.JSONDecodeError:
             self.add_message_to_chat_log(f"The outcome of your attack is unclear. (LLM Format Error: {response_str})")
-            if not target_npc.is_hostile_to_player and not target_npc.is_dead: # Still make hostile on error
+            self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=8, source_entity_id=self.player.id) # Still emit
+            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
                 target_npc.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
-        except ValueError: # For int(damage_dealt)
+        except ValueError:
             self.add_message_to_chat_log(f"The LLM provided an invalid damage amount: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
+            self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=8, source_entity_id=self.player.id) # Still emit
             if not target_npc.is_hostile_to_player and not target_npc.is_dead:
                 target_npc.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
 
@@ -2196,6 +2321,37 @@ class World:
         if self.chat_ui_target_npc == dead_npc: self.chat_ui_target_npc, self.chat_ui_active = None, False # Main loop should handle context.stop_text_input()
         if self.trade_ui_npc_target == dead_npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
         if self.last_talked_to_npc == dead_npc: self.last_talked_to_npc = None
+
+        # --- Item Drops ---
+        # Drop items from inventory
+        items_dropped_messages = []
+        for item_key, quantity in list(dead_npc.npc_inventory.items()): # Use list() for safe iteration if modifying dict
+            if item_key == "money": # Handle money separately if desired, or drop like other items
+                # For now, let's say money is not physically dropped, but could be looted differently.
+                # Or, add a "coin_pouch" item to drop. For simplicity, skipping physical money drop for now.
+                continue
+            if quantity > 0:
+                # TODO: Implement drop chances here if not 100%
+                self.drop_item_on_map(item_key, quantity, dead_npc.x, dead_npc.y)
+                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                items_dropped_messages.append(f"{quantity}x {item_name}")
+
+        # Chance to drop equipped items
+        equipped_to_check = [dead_npc.equipped_weapon, dead_npc.equipped_armor_body, dead_npc.equipped_armor_head]
+        for equipped_item_key in equipped_to_check:
+            if equipped_item_key and random.random() < 0.75: # 75% chance to drop an equipped item
+                self.drop_item_on_map(equipped_item_key, 1, dead_npc.x, dead_npc.y)
+                item_name = ITEM_DEFINITIONS.get(equipped_item_key, {}).get("name", equipped_item_key)
+                items_dropped_messages.append(f"1x {item_name} (equipped)")
+
+        if items_dropped_messages:
+            self.add_message_to_chat_log(f"{dead_npc.name} dropped: {', '.join(items_dropped_messages)}.")
+        else:
+            self.add_message_to_chat_log(f"{dead_npc.name} dropped nothing of note.")
+
+        # After death, emit a sound if appropriate (e.g. a shout or thud)
+        # For now, let's assume death itself is not a loud sound unless it's a dramatic one.
+        # self.emit_sound(dead_npc.x, dead_npc.y, "npc_death_cry", volume=8, source_entity_id=dead_npc.id)
 
 
     def player_attempt_pick_lock(self, target_x: int, target_y: int) -> bool:
@@ -3043,12 +3199,25 @@ class World:
             if chunk.biome == "plains":
                 for y_local in range(CHUNK_SIZE):
                     for x_local in range(CHUNK_SIZE):
-                        # Add patches of tall grass
-                        if random.random() < 0.15: # 15% chance
-                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"])
-                        # Add sparse flowers
-                        elif random.random() < 0.01: # 1% chance
-                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"])
+                        # Add patches of tall grass, flowers, and then attempt to place trees
+                        # Ensure trees don't overwrite existing non-plains features if any were placed by other logic (though unlikely here)
+                        if tiles[y_local][x_local].name == "Plains": # Only try to place on base plains tiles
+                            if random.random() < 0.03: # 3% chance for any tree
+                                tree_type_roll = random.random()
+                                tree_x_world = chunk_coord_x * CHUNK_SIZE + x_local
+                                tree_y_world = chunk_coord_y * CHUNK_SIZE + y_local
+                                if tree_type_roll < 0.4: # 40% of that 3% are Oaks
+                                    tiles[y_local][x_local] = OakTree(tree_x_world, tree_y_world)
+                                elif tree_type_roll < 0.7: # 30% are Apple
+                                    tiles[y_local][x_local] = AppleTree(tree_x_world, tree_y_world)
+                                else: # 30% are Pear
+                                    tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
+                                # Update transparency map for the new tree
+                                self.transparency_map[tree_x_world, tree_y_world] = False # Trees block FOV
+                            elif random.random() < 0.15: # 15% chance for tall grass (if not a tree)
+                                tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
+                            elif random.random() < 0.01: # 1% chance for a flower (if not a tree or grass)
+                                tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
         chunk.tiles = tiles
         chunk.is_generated = True
 
@@ -3360,19 +3529,37 @@ class World:
 
             self.update_fov() # Player moved, so update FOV
 
+            # Clear sound events after player move (and subsequent NPC updates for that turn)
+            # This means sounds last for one full game tick cycle.
+            self.sound_events.clear()
+
 
             # Check if the player moved onto a flower
-            if destination_tile.char == ord('*'):
-                # Add a flower to the player's inventory
-                current_flowers = self.player.inventory.get("flower", 0)
-                self.player.inventory["flower"] = current_flowers + 1
+            if destination_tile.char == ord('*'): # This was likely for herb_generic
+                # Add a herb_generic to the player's inventory
+                current_herbs = self.player.inventory.get("herb_generic", 0)
+                self.player.inventory["herb_generic"] = current_herbs + 1
                 
-                print(f"You picked a flower! You now have {self.player.inventory['flower']} flowers.")
+                self.add_message_to_chat_log(f"You picked a {ITEM_DEFINITIONS['herb_generic']['name']}! You now have {self.player.inventory['herb_generic']}.")
                 
                 # Replace the flower tile with a plains tile
                 chunk_x, chunk_y = new_x // CHUNK_SIZE, new_y // CHUNK_SIZE
                 local_x, local_y = new_x % CHUNK_SIZE, new_y % CHUNK_SIZE
-                self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"])
+                # Ensure properties are passed correctly for the new plains tile
+                plains_def = TILE_DEFINITIONS["plains"]
+                self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
+                    plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], plains_def.get("properties", {})
+                )
+
+    def emit_sound(self, origin_x: int, origin_y: int, sound_type: str, volume: int, source_entity_id: int | None = None):
+        """Emits a sound event that NPCs might react to."""
+        self.sound_events.append({
+            "x": origin_x, "y": origin_y,
+            "type": sound_type, "volume": volume,
+            "source_id": source_entity_id # Optional: ID of player/NPC that made the sound
+        })
+        # self.add_message_to_chat_log(f"Debug: Sound '{sound_type}' emitted at ({origin_x},{origin_y}) vol {volume}")
+
 
     def craft_item(self, item_key: str):
         """Crafts an item if the player has the required resources."""
@@ -3460,10 +3647,39 @@ class World:
                     self.add_message_to_chat_log("You are already at full health!")
                 else:
                     self.player.hp = min(self.player.max_hp, self.player.hp + heal_amount)
-                    self.player.inventory[item_key] -= 1 # Consume item
-                    if self.player.inventory[item_key] <= 0:
-                        del self.player.inventory[item_key]
-                    self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP. Current HP: {self.player.hp}")
+                    self.player.inventory[item_key] -= 1
+                    if self.player.inventory[item_key] <= 0: del self.player.inventory[item_key]
+                    self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP.")
+                    consumed = True
+
+            reduces_hunger_amount = on_use_dict.get("reduces_hunger")
+            if reduces_hunger_amount:
+                if self.player.hunger > 0 :
+                    self.player.hunger = max(0, self.player.hunger - reduces_hunger_amount)
+                    self.add_message_to_chat_log(f"You eat the {item_def['name']}. You feel less hungry.")
+                    if not consumed: # Consume item if not already consumed by healing
+                        self.player.inventory[item_key] -= 1
+                        if self.player.inventory[item_key] <= 0: del self.player.inventory[item_key]
+                    consumed = True
+                    self._update_player_hunger_thirst(initial_setup=True) # Update status messages immediately
+                else:
+                    self.add_message_to_chat_log(f"You are not hungry enough to eat the {item_def['name']}.")
+
+
+            reduces_thirst_amount = on_use_dict.get("reduces_thirst")
+            if reduces_thirst_amount:
+                if self.player.thirst > 0:
+                    self.player.thirst = max(0, self.player.thirst - reduces_thirst_amount)
+                    self.add_message_to_chat_log(f"You drink the {item_def.get('name', item_key)}. You feel less thirsty.")
+                    if not consumed: # Consume item if not already consumed
+                        self.player.inventory[item_key] -= 1
+                        if self.player.inventory[item_key] <= 0: del self.player.inventory[item_key]
+                    consumed = True
+                    self._update_player_hunger_thirst(initial_setup=True) # Update status messages immediately
+                else:
+                    self.add_message_to_chat_log(f"You are not thirsty enough for the {item_def.get('name', item_key)}.")
+
+            if consumed:
                 return # Action taken
 
         # Fallback if no specific use effect handled

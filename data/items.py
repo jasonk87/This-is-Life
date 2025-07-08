@@ -102,12 +102,24 @@ ITEM_DEFINITIONS = {
         "type": ["tool", "weapon_melee_axe"], # This will be standardized later
         "properties": {
             "tool_type": "axe",
-            "chop_power": 1
+            "chop_power": 1,
+            "durability_chance_to_degrade": 0.1, # 10% chance to degrade/break per use
+            "max_durability": 10 # Conceptual max uses, not directly tracked per item with current inventory
         },
         "crafting_recipe": {
             "stone_chunk": 2,
             "raw_log": 1 # Changed from log to raw_log
         },
+    },
+    "broken_tool_handle": {
+        "name": "Broken Tool Handle",
+        "description": "The snapped wooden handle of a tool. Might be reusable.",
+        "char": "_",
+        "color": tcod.constants.DARK_SEPIA,
+        "value": 1,
+        "weight": 0.5,
+        "stackable": True,
+        "item_type_tags": ["resource", "component"]
     },
     "lockpick": {
         "name": "Lockpick",
@@ -284,6 +296,127 @@ if "axe_stone" in ITEM_DEFINITIONS:
     # Keep existing tool_type and chop_power
     ITEM_DEFINITIONS["axe_stone"]["properties"]["tool_type"] = "axe"
     ITEM_DEFINITIONS["axe_stone"]["properties"]["chop_power"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("chop_power",1)
+
+    # --- New Crafted Items ---
+    "crude_spear": {
+        "name": "Crude Spear",
+        "description": "A sharpened log, barely a spear. Better than fists.",
+        "char": "/", # Same as axe for now, can change
+        "color": tcod.constants.DARK_SEPIA,
+        "value": 15,
+        "weight": 4,
+        "stackable": False,
+        "item_type_tags": ["weapon", "melee", "spear"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "damage_dice": "1d6", # Better than fists (1d3) or stone axe (1d4)
+            "damage_bonus": 0,
+            "attack_range": 2 # Spears often have a bit more reach
+        },
+        "crafting_recipe": {
+            "raw_log": 2,
+            "stone_chunk": 1 # For sharpening
+        }
+    },
+    "wooden_shield": {
+        "name": "Wooden Shield",
+        "description": "A simple shield made of wooden planks.",
+        "char": "[", # Same as jerkin for now, can change
+        "color": tcod.constants.BURlywood,
+        "value": 30,
+        "weight": 6,
+        "stackable": False,
+        "item_type_tags": ["armor", "shield"],
+        "equip_slot": "off_hand", # Assuming an off-hand slot exists or can be conceptualized
+        "properties": {
+            "defense_bonus": 1 # Basic shield bonus
+        },
+        "crafting_recipe": {
+            "wooden_plank": 4 # Requires processed planks
+        }
+    },
+    "raw_meat_scrap": {
+        "name": "Raw Meat Scrap",
+        "description": "A piece of raw meat. Needs cooking.",
+        "char": "m",
+        "color": tcod.constants.CRIMSON,
+        "value": 1,
+        "weight": 0.5,
+        "stackable": True,
+        "item_type_tags": ["resource", "food_ingredient_raw"]
+    },
+    "cooked_meat_scrap": {
+        "name": "Cooked Meat Scrap",
+        "description": "A cooked piece of meat. Edible.",
+        "char": "m",
+        "color": tcod.constants.DARK_ORANGE,
+        "value": 4,
+        "weight": 0.4, # Slightly less weight after cooking
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "crafting_recipe": {
+            "raw_meat_scrap": 1
+            # Conceptual: "requires_fire_pit_nearby": True
+        },
+        "on_use": {
+            "reduces_hunger": 35 # Increased hunger reduction
+        }
+    },
+    "water_flask": {
+        "name": "Water Flask",
+        "description": "A simple flask filled with water. Refreshing.",
+        "char": "~",
+        "color": tcod.constants.LIGHT_BLUE,
+        "value": 5,
+        "weight": 1,
+        "stackable": False, # Or True if they are like waterskins that can be refilled/stacked when empty
+        "item_type_tags": ["consumable", "drink"],
+        # Not craftable by default for now, could be found or bought
+        "on_use": {
+            "reduces_thirst": 40
+        }
+    },
+    "apple": { # Assuming apple might be a resource from AppleTree
+        "name": "Apple",
+        "description": "A crisp, juicy apple.",
+        "char": "a",
+        "color": tcod.constants.RED,
+        "value": 3,
+        "weight": 0.3,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "fruit"],
+        "on_use": {
+            "reduces_hunger": 10,
+            "reduces_thirst": 5
+        }
+    },
+    "pear": { # Assuming pear might be a resource from PearTree
+        "name": "Pear",
+        "description": "A sweet and soft pear.",
+        "char": "p", # Might conflict with wooden_plank, consider changing one
+        "color": tcod.constants.YELLOW, # Greenish-yellow
+        "value": 3,
+        "weight": 0.3,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "fruit"],
+        "on_use": {
+            "reduces_hunger": 10,
+            "reduces_thirst": 7
+        }
+    },
+    "acorn": { # From OakTree
+        "name": "Acorn",
+        "description": "The nut of an oak tree. Edible in a pinch.",
+        "char": ".", # Simple char
+        "color": tcod.constants.DARK_ORANGE,
+        "value": 1,
+        "weight": 0.1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "nut"],
+        "on_use": {
+            "reduces_hunger": 3 # Very little
+        }
+    },
 
 
 # Standardize 'type' to 'item_type_tags' for older items for consistency, if they don't have it

@@ -27,9 +27,8 @@ PROFESSIONS = {
                 "duration_ticks": 60,
                 "target_zone_tag": "splitting_area", # Another designated spot
                 "action_verb": "splitting wood",
-                # Consumes "log_raw" from workplace inventory, produces "lumber" or similar
-                "consumes_item_from_workplace": {"log_raw": 1},
-                "produces_item_at_workplace": {"lumber_processed": 2} # Example output
+                "consumes_item_from_workplace": {"raw_log": 1}, # Corrected to raw_log
+                "produces_item_at_workplace": {"lumber_processed": 1} # Adjusted output to 1 lumber per log
             }
         ],
         "default_sub_task_sequence": ["chop_trees", "haul_logs", "split_stack_wood"]
@@ -37,11 +36,43 @@ PROFESSIONS = {
     "Farmer": {
         "display_name": "Farmer",
         "description": "Cultivates crops and tends to farmland.",
-        "work_building_categories": ["Farm"],
+        "work_building_categories": ["Farm"], # Ensure "Farm" is a defined building category/type
         "sub_tasks": [
-            # To be defined later
+            {
+                "id": "till_soil",
+                "display_name": "Tilling Soil",
+                "duration_ticks": 50,
+                "target_zone_tag": "field_patch", # Farmer will look for 'plains' tiles in this zone
+                "action_verb": "tilling soil",
+                "target_tile_type_key": "plains", # Tile to look for to perform action on
+                "becomes_tile_type_key": "tilled_soil" # Tile it becomes after action
+            },
+            {
+                "id": "plant_seeds",
+                "display_name": "Planting Seeds",
+                "duration_ticks": 40,
+                "target_zone_tag": "field_patch", # Farmer will look for 'tilled_soil' tiles
+                "action_verb": "planting seeds",
+                "target_tile_type_key": "tilled_soil",
+                "becomes_tile_type_key": "mature_wheat_crop", # Direct to mature for now
+                "consumes_item_from_workplace": {"wheat_seeds": 1}
+            },
+            {
+                "id": "harvest_crops",
+                "display_name": "Harvesting Crops",
+                "duration_ticks": 60,
+                "target_zone_tag": "field_patch", # Looks for 'mature_wheat_crop'
+                "action_verb": "harvesting crops",
+                "target_tile_type_key": "mature_wheat_crop",
+                # Tile properties will define what it becomes_on_harvest_key and yield
+                # This sub-task will trigger that logic in engine.py
+                # For simplicity, we can still define a default 'becomes_tile_type_key' if tile doesn't specify
+                "becomes_tile_type_key": "tilled_soil",
+                 # Actual item production will be based on tile's harvest_yield_item_key and quantity
+                "produces_item_at_workplace_from_tile_harvest": True # Special flag
+            }
         ],
-        "default_sub_task_sequence": []
+        "default_sub_task_sequence": ["till_soil", "plant_seeds", "harvest_crops"]
     },
     "Miner": {
         "display_name": "Miner",

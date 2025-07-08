@@ -4,15 +4,15 @@ import tcod
 # --- Item Definitions ---
 ITEM_DEFINITIONS = {
     # --- Resources ---
-    "log": {
-        "name": "Log",
-        "description": "A sturdy log, good for building or fuel.",
+    "raw_log": {
+        "name": "Raw Log",
+        "description": "A rough, unprocessed log directly from a felled tree.",
         "char": "l",
         "color": tcod.constants.SADDLEBROWN,
-        "value": 2, # Increased value slightly
+        "value": 2,
         "weight": 5,
         "stackable": True,
-        "type": ["resource"],
+        "item_type_tags": ["resource"], # Standardized key
     },
     "stone_chunk": {
         "name": "Stone Chunk",
@@ -64,10 +64,30 @@ ITEM_DEFINITIONS = {
         "value": 5, # Value added by crafting
         "weight": 2,
         "stackable": True,
-        "type": ["component"],
+        "item_type_tags": ["component"], # Standardized key
         "crafting_recipe": {
-            "log": 1
+            "raw_log": 1 # Changed from log to raw_log
         },
+    },
+    "lumber_processed": {
+        "name": "Processed Lumber",
+        "description": "Smooth, processed lumber, ready for fine construction.",
+        "char": "=",
+        "color": tcod.constants.BURlywood, # Corrected typo from plan
+        "value": 8,
+        "weight": 3,
+        "stackable": True,
+        "item_type_tags": ["resource", "component"],
+    },
+    "wheat_seeds": {
+        "name": "Wheat Seeds",
+        "description": "Seeds for growing wheat.",
+        "char": "\"", # Using quote for seeds, like tiny grains
+        "color": tcod.constants.KHAKI,
+        "value": 1,
+        "weight": 0.1,
+        "stackable": True,
+        "item_type_tags": ["resource", "seed"],
     },
 
     # --- Tools ---
@@ -79,14 +99,14 @@ ITEM_DEFINITIONS = {
         "value": 25, # Tools are more valuable
         "weight": 7,
         "stackable": False,
-        "type": ["tool", "weapon_melee_axe"],
+        "type": ["tool", "weapon_melee_axe"], # This will be standardized later
         "properties": {
             "tool_type": "axe",
             "chop_power": 1
         },
         "crafting_recipe": {
             "stone_chunk": 2,
-            "log": 1
+            "raw_log": 1 # Changed from log to raw_log
         },
     },
     "lockpick": {
@@ -133,8 +153,8 @@ ITEM_DEFINITIONS = {
         "value": 3,
         "weight": 1,
         "stackable": True,
-        "type": ["tool", "light_source_potential"],
-        "crafting_recipe": {"log": 1, "herb_generic": 1}, # Example recipe, herb for tinder/oil
+        "item_type_tags": ["tool", "light_source_potential"], # Standardized key
+        "crafting_recipe": {"raw_log": 1, "herb_generic": 1}, # Changed log to raw_log
         "on_use_effect": "light_torch" # Custom effect string
     },
     "torch_lit": { # This item might not be directly in inventory, but represents the state

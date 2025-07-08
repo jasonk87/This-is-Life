@@ -198,3 +198,23 @@ TILE_DEFINITIONS["stump_generic"] = {
         "provides_cover_value": 0.1 # Very minor cover
     }
 }
+
+TILE_DEFINITIONS["tilled_soil"] = {
+    "char": "~",  # Using tilde for furrowed earth look
+    "color": (160, 110, 70),  # Darker, richer brown than wood_floor
+    "passable": True,
+    "name": "Tilled Soil",
+    "properties": {}
+}
+TILE_DEFINITIONS["mature_wheat_crop"] = {
+    "char": "W",
+    "color": (255, 223, 0),  # Golden yellow
+    "passable": True,
+    "name": "Mature Wheat Crop",
+    "properties": {
+        "is_harvestable": True,
+        "harvest_yield_item_key": "wheat",
+        "harvest_yield_quantity": 2,
+        "becomes_on_harvest_key": "tilled_soil"
+    }
+}

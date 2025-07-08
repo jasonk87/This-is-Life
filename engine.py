@@ -1257,8 +1257,42 @@ class World:
             # For chopping, we find a dynamic tree target near the building.
             # The work_building itself is passed to help center the search.
             return self._find_nearest_tree_for_chopping(npc, work_building)
+        elif npc.profession == "Farmer" and target_zone_tag == "field_patch":
+            field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
+            if not field_tiles_coords:
+                # self.add_message_to_chat_log(f"Warning: Farm {work_building.id} has no field_patch zone defined.")
+                return None
+
+            target_tile_type_key = sub_task_data.get("target_tile_type_key") # e.g., "plains", "tilled_soil"
+            if not target_tile_type_key:
+                # self.add_message_to_chat_log(f"Error: Farmer sub-task {sub_task_data['id']} missing 'target_tile_type_key'.")
+                return None
+
+            # Specific check for "plant_seeds": ensure seeds are available BEFORE finding a tile
+            if sub_task_data["id"] == "plant_seeds":
+                seeds_to_consume = sub_task_data.get("consumes_item_from_workplace", {})
+                seed_item_key = next(iter(seeds_to_consume), None) # Get the first seed type key
+                if not seed_item_key or work_building.building_inventory.get(seed_item_key, 0) < seeds_to_consume[seed_item_key]:
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} wants to plant seeds, but farm has no {seed_item_key}.")
+                    return None # Cannot plant if no seeds
+
+            # Shuffle to vary the choice of tile a bit if multiple are suitable
+            random.shuffle(field_tiles_coords)
+
+            for tx, ty in field_tiles_coords:
+                tile = self.get_tile_at(tx, ty)
+                # Check if tile name matches the required type for the sub-task
+                # Tile objects store their definition's key in tile.name if generated from TILE_DEFINITIONS keys
+                # Or compare against the actual name string from TILE_DEFINITIONS
+                expected_tile_name = TILE_DEFINITIONS.get(target_tile_type_key, {}).get("name")
+                if tile and tile.name == expected_tile_name:
+                    # TODO: Add a check here to ensure another NPC isn't already targeting this exact tile for the same sub-task type.
+                    # This is similar to the tree targeting check. For now, proceed without it for simplicity.
+                    return (tx, ty)
+            # self.add_message_to_chat_log(f"Debug: {npc.name} could not find suitable '{expected_tile_name}' tile in field_patch for {sub_task_data['id']}.")
+            return None
         else:
-            # For other zones, use pre-defined coordinates in work_building.work_zone_tiles
+            # For other zones (like Woodcutter's log_pile_area), use pre-defined coordinates
             zone_coords_list = work_building.work_zone_tiles.get(target_zone_tag)
             if zone_coords_list:
                 # Pick a random available coordinate from the list for now.
@@ -1268,10 +1302,12 @@ class World:
                 # self.add_message_to_chat_log(f"Warning: No coordinates defined for work zone '{target_zone_tag}' in building {work_building.id} for {npc.name}.")
                 return None
 
-    def _produce_sub_task_output(self, npc: NPC, work_building: Building, sub_task_data: dict):
+    def _produce_sub_task_output(self, npc: NPC, work_building: Building, sub_task_data: dict, target_tile_obj: Tile | None = None) -> bool:
         """
         Handles item production or consumption for a completed sub-task.
-        This now also handles transfers from NPC inventory to building inventory.
+        This now also handles transfers from NPC inventory to building inventory,
+        and production based on tile properties (for harvesting).
+        Returns True if all necessary consumptions were successful, False otherwise.
         """
         consumption_successful = True # Assume success unless specific consumption fails
 
@@ -1313,7 +1349,7 @@ class World:
                     # For now, if building consumption fails, the process stops, potentially leaving NPC items consumed.
                     # This implies sub-tasks should be designed carefully (e.g., consume from NPC then deposit to building is one flow,
                     # consume from building to produce to building is another).
-                    return
+                    return False # Indicate consumption failed
 
         # 3. Deposit items to Workplace (if defined, and all consumptions were successful)
         if consumption_successful:
@@ -1322,22 +1358,37 @@ class World:
                 for item_key, quantity_deposited in deposits_to_building_def.items():
                     current_building_qty = work_building.building_inventory.get(item_key, 0)
                     work_building.building_inventory[item_key] = current_building_qty + quantity_deposited
-                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    # item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
                     # self.add_message_to_chat_log(f"Debug: {npc.name} deposited {quantity_deposited} {item_name} to {work_building.building_type}.")
 
         # 4. Produce items at Workplace (if defined, and all consumptions were successful)
-        # This is for direct production, not transfers from NPC.
         if consumption_successful:
+            # A. Check for tile-based harvest production first
+            if sub_task_data.get("produces_item_at_workplace_from_tile_harvest") and target_tile_obj:
+                if target_tile_obj.properties.get("is_harvestable"):
+                    item_key = target_tile_obj.properties.get("harvest_yield_item_key")
+                    quantity_produced = target_tile_obj.properties.get("harvest_yield_quantity", 0)
+                    if item_key and quantity_produced > 0:
+                        current_building_qty = work_building.building_inventory.get(item_key, 0)
+                        work_building.building_inventory[item_key] = current_building_qty + quantity_produced
+                        # item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                        # self.add_message_to_chat_log(f"Debug: {npc.name} harvested {quantity_produced} {item_name} into {work_building.building_type}.")
+
+            # B. Standard sub-task defined production (if not tile harvest or in addition to)
+            # Ensure this doesn't double-produce if tile harvest already happened for same item.
+            # Current design: harvest flag is specific, so this is for other direct productions.
             produces_at_building_def = sub_task_data.get("produces_item_at_workplace")
             if produces_at_building_def:
                 for item_key, quantity_produced in produces_at_building_def.items():
                     current_building_qty = work_building.building_inventory.get(item_key, 0)
                     work_building.building_inventory[item_key] = current_building_qty + quantity_produced
-                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    # item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
                     # Optional: Log production for player if they can see/hear the NPC
                     # dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
                     # if dist_to_player <= 10:
                     #    self.add_message_to_chat_log(f"{npc.name} finishes working and produces {quantity_produced} {item_name} at the {work_building.building_type}.")
+
+        return consumption_successful
 
 
     def _handle_npc_work_sub_tasks(self, npc: NPC) -> bool:
@@ -1383,29 +1434,61 @@ class World:
                             stump_def = TILE_DEFINITIONS.get(stump_key)
 
                             if stump_def:
-                                cx, cy = npc.sub_task_target_coords[0] // CHUNK_SIZE, npc.sub_task_target_coords[1] // CHUNK_SIZE
-                                lx, ly = npc.sub_task_target_coords[0] % CHUNK_SIZE, npc.sub_task_target_coords[1] % CHUNK_SIZE
-                                if 0 <= cx < self.chunk_width and 0 <= cy < self.chunk_height:
-                                    self.chunks[cy][cx].tiles[ly][lx] = Tile(
-                                        char=stump_def["char"], color=stump_def["color"],
-                                        passable=stump_def["passable"], name=stump_def["name"],
-                                        properties=stump_def.get("properties", {})
-                                    )
-                                    # self.add_message_to_chat_log(f"Debug: {npc.name} felled a tree, now a {stump_def['name']}.")
-                                    # Update transparency map if the tree blocked FOV and stump doesn't (or vice-versa)
-                                    # This is a simplified update; a full rebuild might be safer or targeted update needed.
-                                    new_blocks_fov = stump_def.get("properties", {}).get("blocks_fov", False)
-                                    if self.transparency_map[npc.sub_task_target_coords[0], npc.sub_task_target_coords[1]] == new_blocks_fov:
-                                         self.transparency_map[npc.sub_task_target_coords[0], npc.sub_task_target_coords[1]] = not new_blocks_fov
-                                         self.update_fov() # FOV potentially changed
+                                self._change_map_tile(npc.sub_task_target_coords, stump_def)
+                                # self.add_message_to_chat_log(f"Debug: {npc.name} felled a tree, now a {stump_def['name']}.")
 
                             if logs_collected > 0:
                                 npc.npc_inventory["raw_log"] = npc.npc_inventory.get("raw_log", 0) + logs_collected
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} collected {logs_collected} raw_log(s). Inv: {npc.npc_inventory['raw_log']}")
                         # else:
                             # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
+
+                    elif npc.profession == "Farmer":
+                        target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+                        original_tile_name = target_tile_obj.name if target_tile_obj else "None"
+
+                        if completed_sub_task_id == "till_soil":
+                            expected_tile_name = TILE_DEFINITIONS.get(completed_sub_task_data.get("target_tile_type_key"), {}).get("name")
+                            if target_tile_obj and original_tile_name == expected_tile_name:
+                                becomes_key = completed_sub_task_data.get("becomes_tile_type_key")
+                                new_tile_def = TILE_DEFINITIONS.get(becomes_key)
+                                if new_tile_def:
+                                    self._change_map_tile(npc.sub_task_target_coords, new_tile_def)
+                                    # self.add_message_to_chat_log(f"Debug: {npc.name} tilled {original_tile_name} to {new_tile_def['name']} at {npc.sub_task_target_coords}.")
+
+                        elif completed_sub_task_id == "plant_seeds":
+                            expected_tile_name = TILE_DEFINITIONS.get(completed_sub_task_data.get("target_tile_type_key"), {}).get("name")
+                            if target_tile_obj and original_tile_name == expected_tile_name:
+                                # Seed consumption will be attempted by _produce_sub_task_output.
+                                # It needs to return a status or the calling code needs to check inventory.
+                                # For now, _produce_sub_task_output handles its own early exit if consumption fails.
+                                consumption_succeeded = self._produce_sub_task_output(npc, work_building, completed_sub_task_data)
+
+                                if consumption_succeeded: # Only change tile if seeds were successfully consumed
+                                    becomes_key = completed_sub_task_data.get("becomes_tile_type_key")
+                                    new_tile_def = TILE_DEFINITIONS.get(becomes_key)
+                                    if new_tile_def:
+                                        self._change_map_tile(npc.sub_task_target_coords, new_tile_def)
+                                        # self.add_message_to_chat_log(f"Debug: {npc.name} planted seeds at {npc.sub_task_target_coords}, tile now {new_tile_def['name']}.")
+                                # else:
+                                    # self.add_message_to_chat_log(f"Debug: {npc.name} failed to plant seeds at {npc.sub_task_target_coords} due to lack of seeds.")
+
+                        elif completed_sub_task_id == "harvest_crops":
+                            expected_tile_name = TILE_DEFINITIONS.get(completed_sub_task_data.get("target_tile_type_key"), {}).get("name")
+                            if target_tile_obj and original_tile_name == expected_tile_name and target_tile_obj.properties.get("is_harvestable"):
+                                # Item production from tile's properties handled by _produce_sub_task_output
+                                self._produce_sub_task_output(npc, work_building, completed_sub_task_data, target_tile_obj=target_tile_obj)
+
+                                becomes_key = target_tile_obj.properties.get("becomes_on_harvest_key")
+                                if not becomes_key:
+                                     becomes_key = completed_sub_task_data.get("becomes_tile_type_key") # Fallback
+
+                                new_tile_def = TILE_DEFINITIONS.get(becomes_key)
+                                if new_tile_def:
+                                    self._change_map_tile(npc.sub_task_target_coords, new_tile_def)
+                                    # self.add_message_to_chat_log(f"Debug: {npc.name} harvested {original_tile_name} at {npc.sub_task_target_coords}, tile now {new_tile_def['name']}.")
                     else:
-                        # Handle output/consumption for other sub-tasks via the helper
+                        # Handle output/consumption for other (non-Farmer, non-Woodcutter chop) sub-tasks via the helper
                         self._produce_sub_task_output(npc, work_building, completed_sub_task_data)
 
                 # Move to next sub-task in sequence
@@ -3120,6 +3203,60 @@ class World:
             # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area (fallback) at {lumber_mill.work_zone_tiles['splitting_area']}")
         else: # If no log pile area either, mark as empty
             lumber_mill.work_zone_tiles["splitting_area"] = []
+
+        # Generate Farm (example agricultural workplace)
+        if random.random() < 0.7: # Chance to generate a farm
+            farm_w, farm_h = 8, 6 # Farmhouse size
+            # Try to place it somewhat out of the way, similar to lumber mill
+            farm_x = CHUNK_SIZE - farm_w - 1
+            farm_y = 1
+            # Basic check to avoid overlap with roads (very simple)
+            if tiles[farm_y][farm_x].name == "road" or tiles[farm_y+farm_h-1][farm_x+farm_w-1].name == "road":
+                farm_x = 1 # Try other side
+                farm_y = CHUNK_SIZE - farm_h - 5 # Move it down a bit too to vary from lumber mill
+
+            farm_building = Building(farm_x, farm_y, farm_w, farm_h,
+                                   building_type="farm", category="agricultural_workplace",
+                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+            chunk.village.add_building(farm_building)
+            self.buildings_by_id[farm_building.id] = farm_building
+            self._draw_building(tiles, farm_building, "wood_wall") # Farmhouse uses wood wall
+
+            # Define "field_patch" zone for the farm
+            field_patch_coords_global = []
+            field_width = 5  # e.g., 5x5 field
+            field_height = 5
+            # Place field to the south of the farmhouse, with a 1-tile gap
+            field_start_local_x = farm_building.x + (farm_building.width // 2) - (field_width // 2) # Centered with farmhouse
+            field_start_local_y = farm_building.y + farm_building.height + 1 # 1 tile below farmhouse
+
+            # Ensure field patch is within chunk boundaries
+            field_start_local_x = max(0, min(field_start_local_x, CHUNK_SIZE - field_width))
+            field_start_local_y = max(0, min(field_start_local_y, CHUNK_SIZE - field_height))
+
+            for r_y in range(field_height):
+                for r_x in range(field_width):
+                    # Check if tile is within overall chunk bounds before adding
+                    # Also, for now, we assume these tiles are plains and will be tilled.
+                    # A more robust version would check tiles[field_start_local_y + r_y][field_start_local_x + r_x]
+                    # to ensure it's a suitable type before adding to field_patch.
+                    if 0 <= field_start_local_x + r_x < CHUNK_SIZE and \
+                       0 <= field_start_local_y + r_y < CHUNK_SIZE:
+
+                        # Ensure the field tiles are initially plains (or similar farmable land)
+                        # For now, we just define the zone. The farmer will till plains tiles within it.
+                        # The actual tile objects at these coords are already set (e.g. to plains by default chunk gen)
+                        # We are just collecting their global coordinates.
+                        gx = chunk_global_start_x + field_start_local_x + r_x
+                        gy = chunk_global_start_y + field_start_local_y + r_y
+                        field_patch_coords_global.append((gx, gy))
+
+            farm_building.work_zone_tiles["field_patch"] = field_patch_coords_global
+            # self.add_message_to_chat_log(f"Farm {farm_building.id[:4]}: Field Patch at {field_patch_coords_global}")
+
+            # Pre-populate farm with some seeds for the farmer to use
+            if "wheat_seeds" in ITEM_DEFINITIONS:
+                 farm_building.building_inventory["wheat_seeds"] = random.randint(5, 15)
 
 
         # Generate a few regular houses

@@ -8,99 +8,97 @@ DECORATION_ITEM_DEFINITIONS = {
     "wooden_chair": {
         "name": "Wooden Chair",
         "char": "h",
-        "color": tcod.constants.SIENNA, # (160, 82, 45)
+        "color": tcod.constants.SIENNA,
         "passable": False,
-        "properties": {
-            "potential_crafting_materials": {"log": 2}, # Alt: {"wooden_plank": 3}
-            "interaction_hint": "sit"
-        }
+        "properties": {"interaction_hint": "sit", "blocks_fov": False},
+        "placement_cost": {"wooden_plank": 2}
     },
     "wooden_table": {
         "name": "Wooden Table",
         "char": "T",
-        "color": tcod.constants.SIENNA, # (160, 82, 45)
-        "passable": False, # Typically tables are not passable on their main tile
-        "properties": {
-            "potential_crafting_materials": {"log": 3}, # Alt: {"wooden_plank": 4}
-        }
+        "color": tcod.constants.SIENNA,
+        "passable": False,
+        "properties": {"blocks_fov": False}, # Low table
+        "placement_cost": {"wooden_plank": 3}
     },
     "bed_simple": {
         "name": "Simple Bed",
         "char": "b",
-        "color": tcod.constants.PERU, # (205, 133, 63)
+        "color": tcod.constants.PERU,
         "passable": False,
-        "properties": {
-            "potential_crafting_materials": {"log": 4, "herb_generic": 5},
-            "interaction_hint": "sleep"
-        }
+        "properties": {"interaction_hint": "sleep", "blocks_fov": False}, # Bed is low
+        "placement_cost": {"wooden_plank": 4, "herb_generic": 3} # Herb for stuffing
     },
     "chest_wooden": {
         "name": "Wooden Chest",
         "char": "C",
-        "color": tcod.constants.SADDLEBROWN, # (139, 69, 19)
+        "color": tcod.constants.SADDLEBROWN,
         "passable": False,
         "properties": {
-            "potential_crafting_materials": {"log": 3},
-            "functional_type": "container", # Hint that it can hold items
-            "interaction_hint": "open",     # General interaction
+            "functional_type": "container",
+            "interaction_hint": "open",
             "is_lockable": True,            # Can it be locked?
             "is_locked": True,              # Default state: locked
             "lock_difficulty": 5,           # Example difficulty (1-10)
-            "unlocks_to_reveal": "building_inventory" # What it accesses (conceptual for now)
-        }
+            "unlocks_to_reveal": "building_inventory", # What it accesses (conceptual for now)
+            "blocks_fov": True # Chests are solid
+        },
+        "placement_cost": {"wooden_plank": 3, "raw_log": 1} # Logs for sturdier frame
     },
     "wall_shelf": {
         "name": "Wall Shelf",
         "char": "S",
-        "color": tcod.constants.TAN, # (210, 180, 140)
-        "passable": True, # Player can walk under it if it's on a wall tile
-        "properties": {
-            "potential_crafting_materials": {"wooden_plank": 2}
-        }
+        "color": tcod.constants.TAN,
+        "passable": True,
+        "properties": {"blocks_fov": False}, # Usually small and high
+        "placement_cost": {"wooden_plank": 1}
     },
-    # --- Keeping some of the old generic ones for variety, or they can be removed/aliased ---
     "bookshelf": {
         "name": "Bookshelf",
         "char": "B", "color": (100, 50, 0), "passable": False,
-        "properties": {"potential_crafting_materials": {"wooden_plank": 5}} # Example material
+        "properties": {"blocks_fov": True}, # Tall bookshelf blocks view
+        "placement_cost": {"wooden_plank": 5}
     },
-    "fireplace": {
+    "fireplace": { # This is more of a built-in structure, less for player placement yet
         "name": "Fireplace",
-        "char": "F", "color": (150, 50, 0), "passable": False, # Player shouldn't walk into fireplace
+        "char": "F", "color": (150, 50, 0), "passable": False,
         "properties": {
-            "potential_crafting_materials": {"stone_chunk": 10, "log": 2}, # Example
-            "functional_type": "heat_source", # Example hint
-            "interaction_hint": "add_fuel"
+            "functional_type": "heat_source",
+            "interaction_hint": "add_fuel",
+            "blocks_fov": False # Fire itself doesn't block, but structure might
         }
+        # No placement_cost for now as it's usually part of initial building gen by LLM
     },
     "rug": {
         "name": "Rug",
         "char": "=", "color": (150, 100, 50), "passable": True,
-        "properties": {"potential_crafting_materials": {"herb_generic": 10}} # e.g. woven herb rug
+        "properties": {"blocks_fov": False},
+        "placement_cost": {"herb_generic": 5}
     },
-    "plant_pot": { # Renamed "plant" to be more specific
+    "plant_pot": {
         "name": "Potted Plant",
         "char": "p", "color": (34, 139, 34), "passable": False,
-        "properties": {"potential_crafting_materials": {"log":1, "herb_generic":1}} # e.g. simple pot and a plant
+        "properties": {"blocks_fov": False},
+        "placement_cost": {"raw_log":1, "herb_generic":1}
     },
     "barrel": {
         "name": "Barrel",
         "char": "o", "color": (100, 70, 30), "passable": False,
         "properties": {
-            "potential_crafting_materials": {"wooden_plank": 3},
-            "functional_type": "container_liquid" # Example
-        }
+            "functional_type": "container_liquid",
+            "blocks_fov": True
+        },
+        "placement_cost": {"wooden_plank": 3}
     },
     "crate": {
         "name": "Crate",
         "char": "#", "color": (100, 70, 30), "passable": False,
         "properties": {
-            "potential_crafting_materials": {"wooden_plank": 2},
-            "functional_type": "container"
-        }
+            "functional_type": "container",
+            "blocks_fov": True
+        },
+        "placement_cost": {"wooden_plank": 2}
     },
-    # Removed generic "bed", "table", "chair", "chest" if they are superseded by specific types like "wooden_chair"
-    # The LLM prompt will use the new keys.
 
     # --- Doors ---
     "wooden_door_closed": {
@@ -147,7 +145,9 @@ DECORATION_ITEM_DEFINITIONS = {
         "properties": {
             "is_heat_source": True,
             "interaction_hint": "cook_here", # For conceptual crafting station
-            "description": "A ring of stones containing embers. Good for cooking."
-        }
+            "description": "A ring of stones containing embers. Good for cooking.",
+            "blocks_fov": False # Low to the ground
+        },
+        "placement_cost": {"stone_chunk": 5}
     }
 }

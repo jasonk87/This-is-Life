@@ -12,7 +12,7 @@ ITEM_DEFINITIONS = {
         "value": 2,
         "weight": 5,
         "stackable": True,
-        "item_type_tags": ["resource"], # Standardized key
+        "item_type_tags": ["resource"],
     },
     "stone_chunk": {
         "name": "Stone Chunk",
@@ -22,17 +22,17 @@ ITEM_DEFINITIONS = {
         "value": 1,
         "weight": 8,
         "stackable": True,
-        "type": ["resource"],
+        "item_type_tags": ["resource"],
     },
     "herb_generic": {
         "name": "Common Herb",
         "description": "A common herb, often used in simple remedies.",
         "char": "*",
         "color": tcod.constants.FOREST,
-        "value": 3, # Increased value
+        "value": 3,
         "weight": 0.1,
         "stackable": True,
-        "type": ["resource", "reagent"],
+        "item_type_tags": ["resource", "reagent"],
     },
     "wheat": {
         "name": "Wheat",
@@ -42,17 +42,17 @@ ITEM_DEFINITIONS = {
         "value": 2,
         "weight": 0.5,
         "stackable": True,
-        "type": ["resource", "food_ingredient"],
+        "item_type_tags": ["resource", "food_ingredient"],
     },
     "iron_ore": {
         "name": "Iron Ore",
         "description": "A chunk of rock containing iron.",
-        "char": "o", # 'o' for ore
-        "color": tcod.constants.DARK_ORANGE, # A rusty color
+        "char": "o",
+        "color": tcod.constants.DARK_ORANGE,
         "value": 4,
         "weight": 10,
         "stackable": True,
-        "type": ["resource"],
+        "item_type_tags": ["resource"],
     },
 
     # --- Crafted Components ---
@@ -61,19 +61,19 @@ ITEM_DEFINITIONS = {
         "description": "A processed wooden plank, ready for construction.",
         "char": "p",
         "color": tcod.constants.TAN,
-        "value": 5, # Value added by crafting
+        "value": 5,
         "weight": 2,
         "stackable": True,
-        "item_type_tags": ["component"], # Standardized key
+        "item_type_tags": ["component"],
         "crafting_recipe": {
-            "raw_log": 1 # Changed from log to raw_log
+            "raw_log": 1
         },
     },
     "lumber_processed": {
         "name": "Processed Lumber",
         "description": "Smooth, processed lumber, ready for fine construction.",
         "char": "=",
-        "color": tcod.constants.BURlywood, # Corrected typo from plan
+        "color": tcod.constants.BURlywood,
         "value": 8,
         "weight": 3,
         "stackable": True,
@@ -82,7 +82,7 @@ ITEM_DEFINITIONS = {
     "wheat_seeds": {
         "name": "Wheat Seeds",
         "description": "Seeds for growing wheat.",
-        "char": "\"", # Using quote for seeds, like tiny grains
+        "char": "\"",
         "color": tcod.constants.KHAKI,
         "value": 1,
         "weight": 0.1,
@@ -96,19 +96,22 @@ ITEM_DEFINITIONS = {
         "description": "A crudely made axe with a stone head. Good for chopping wood.",
         "char": "/",
         "color": tcod.constants.DARKSLATEGRAY,
-        "value": 25, # Tools are more valuable
+        "value": 25,
         "weight": 7,
         "stackable": False,
-        "type": ["tool", "weapon_melee_axe"], # This will be standardized later
+        "item_type_tags": ["tool", "weapon", "melee", "axe"],
+        "equip_slot": "main_hand",
         "properties": {
             "tool_type": "axe",
             "chop_power": 1,
-            "durability_chance_to_degrade": 0.1, # 10% chance to degrade/break per use
-            "max_durability": 10 # Conceptual max uses, not directly tracked per item with current inventory
+            "max_durability": 25,
+            "damage_dice": "1d4",
+            "damage_bonus": 0,
+            "attack_range": 1
         },
         "crafting_recipe": {
             "stone_chunk": 2,
-            "raw_log": 1 # Changed from log to raw_log
+            "raw_log": 1
         },
     },
     "broken_tool_handle": {
@@ -128,75 +131,156 @@ ITEM_DEFINITIONS = {
         "color": tcod.constants.SILVER,
         "value": 5,
         "weight": 0.1,
-        "stackable": True, # Lockpicks often come in sets or are stackable
-        "type": ["tool"],
+        "stackable": False,
+        "item_type_tags": ["tool"],
         "properties": {
             "tool_type": "lockpick",
-            "breaks_on_fail_chance": 0.25 # 25% chance to break on a failed lockpicking attempt
+            "max_durability": 5
         }
     },
 
-    # --- Existing Items ---
+    # --- Consumables ---
     "healing_salve": {
         "name": "Healing Salve",
         "description": "A simple paste that heals minor wounds.",
-        "char": "!", # Example char, can be anything not used
+        "char": "!",
         "color": tcod.constants.LIGHT_GREEN,
         "value": 15,
         "weight": 0.5,
         "stackable": True,
-        "type": ["consumable"],
+        "item_type_tags": ["consumable", "healing"],
         "crafting_recipe": {
-            "herb_generic": 3 # Changed from "flower" to "herb_generic"
+            "herb_generic": 3
         },
         "on_use": {
             "heal_amount": 10
         }
     },
-    # "flower" item itself is removed, as it's now "herb_generic"
-    # If player picks a flower tile, they get "herb_generic" item.
-
-    # --- Light Sources ---
     "unlit_torch": {
         "name": "Unlit Torch",
         "description": "A stick with oil-soaked rags, needs to be lit.",
-        "char": "\\", # Backslash for torch
+        "char": "\\",
         "color": tcod.constants.DARK_AMBER,
         "value": 3,
         "weight": 1,
         "stackable": True,
-        "item_type_tags": ["tool", "light_source_potential"], # Standardized key
-        "crafting_recipe": {"raw_log": 1, "herb_generic": 1}, # Changed log to raw_log
-        "on_use_effect": "light_torch" # Custom effect string
+        "item_type_tags": ["tool", "light_source_potential"],
+        "crafting_recipe": {"raw_log": 1, "herb_generic": 1},
+        "on_use_effect": "light_torch"
     },
-    "torch_lit": { # This item might not be directly in inventory, but represents the state
+    "torch_lit": {
         "name": "Lit Torch",
         "description": "A burning torch, casting a flickering light.",
         "char": "\\",
         "color": tcod.constants.FLAME,
-        "value": 3, # Same value as unlit
+        "value": 3,
         "weight": 1,
-        "stackable": False, # Only one lit torch "active" usually
-        "type": ["tool", "light_source_active"],
+        "stackable": False,
+        "item_type_tags": ["tool", "light_source_active"],
         "properties": {
             "emits_light": True,
             "light_radius": 10,
-            "duration_ticks": 600, # e.g., 600 ticks (1/2.5 of a short day, or 1/5 of a longer day)
-            "on_extinguish_becomes": "unlit_torch", # Optional: if it can be re-lit or partially used
-            "on_burnout_becomes": "burnt_out_torch"
+            "duration_ticks": 600,
+            "on_extinguish_becomes": "unlit_torch",
+            "on_burnout_becomes": "burnt_out_torch",
+            "max_durability": 600 # Duration can be its durability
         },
-        "on_use_effect": "extinguish_torch" # Using it again extinguishes it
+        "on_use_effect": "extinguish_torch"
     },
     "burnt_out_torch": {
         "name": "Burnt Out Torch",
         "description": "The charred remains of a torch. Useless.",
-        "char": "~", # Different char
+        "char": "~",
         "color": tcod.constants.DARKEST_GREY,
         "value": 0,
         "weight": 0.5,
         "stackable": True,
-        "type": ["trash"] # Changed from list to single string for consistency with others
+        "item_type_tags": ["trash"]
     },
+    "cooked_meat_scrap": {
+        "name": "Cooked Meat Scrap",
+        "description": "A cooked piece of meat. Edible.",
+        "char": "m",
+        "color": tcod.constants.DARK_ORANGE,
+        "value": 4,
+        "weight": 0.4,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "crafting_recipe": {
+            "raw_meat_scrap": 1
+        },
+        "on_use": {
+            "reduces_hunger": 35
+        }
+    },
+    "water_flask": {
+        "name": "Water Flask",
+        "description": "A simple flask filled with water. Refreshing.",
+        "char": "~",
+        "color": tcod.constants.LIGHT_BLUE,
+        "value": 5,
+        "weight": 1,
+        "stackable": False,
+        "item_type_tags": ["consumable", "drink"],
+        "properties": {
+             "max_durability": 3 # Represents 3 sips/uses
+        },
+        "on_use": { # Effect per sip
+            "reduces_thirst": 40
+        }
+    },
+    "apple": {
+        "name": "Apple",
+        "description": "A crisp, juicy apple.",
+        "char": "a",
+        "color": tcod.constants.RED,
+        "value": 3,
+        "weight": 0.3,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "fruit"],
+        "on_use": {
+            "reduces_hunger": 10,
+            "reduces_thirst": 5
+        }
+    },
+    "pear": {
+        "name": "Pear",
+        "description": "A sweet and soft pear.",
+        "char": "p",
+        "color": tcod.constants.YELLOW,
+        "value": 3,
+        "weight": 0.3,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "fruit"],
+        "on_use": {
+            "reduces_hunger": 10,
+            "reduces_thirst": 7
+        }
+    },
+    "acorn": {
+        "name": "Acorn",
+        "description": "The nut of an oak tree. Edible in a pinch.",
+        "char": ".",
+        "color": tcod.constants.DARK_ORANGE,
+        "value": 1,
+        "weight": 0.1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "nut"],
+        "on_use": {
+            "reduces_hunger": 3
+        }
+    },
+     "raw_meat_scrap": { # Already defined, ensure it's here for completeness of food section
+        "name": "Raw Meat Scrap",
+        "description": "A piece of raw meat. Needs cooking.",
+        "char": "m",
+        "color": tcod.constants.CRIMSON,
+        "value": 1,
+        "weight": 0.5,
+        "stackable": True,
+        "item_type_tags": ["resource", "food_ingredient_raw"]
+    },
+
 
     # --- Weapons ---
     "rusty_sword": {
@@ -212,7 +296,29 @@ ITEM_DEFINITIONS = {
         "properties": {
             "damage_dice": "1d6",
             "damage_bonus": 0,
-            "attack_range": 1
+            "attack_range": 1,
+            "max_durability": 40
+        }
+    },
+    "crude_spear": {
+        "name": "Crude Spear",
+        "description": "A sharpened log, barely a spear. Better than fists.",
+        "char": "/",
+        "color": tcod.constants.DARK_SEPIA,
+        "value": 15,
+        "weight": 4,
+        "stackable": False,
+        "item_type_tags": ["weapon", "melee", "spear"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "damage_dice": "1d6",
+            "damage_bonus": 0,
+            "attack_range": 2,
+            "max_durability": 20
+        },
+        "crafting_recipe": {
+            "raw_log": 2,
+            "stone_chunk": 1
         }
     },
     "short_bow": {
@@ -224,15 +330,15 @@ ITEM_DEFINITIONS = {
         "weight": 2,
         "stackable": False,
         "item_type_tags": ["weapon", "ranged", "bow"],
-        "equip_slot": "main_hand", # Or "ranged_weapon" slot if we add more
+        "equip_slot": "main_hand",
         "properties": {
             "damage_dice": "1d6",
             "damage_bonus": 0,
             "attack_range": 12,
-            "requires_ammo": "arrow" # Placeholder for future ammo system
+            "requires_ammo": "arrow",
+            "max_durability": 30
         }
     },
-    # Ammunition example (not fully used yet)
     "arrow": {
         "name": "Arrow",
         "description": "A standard arrow for a bow.",
@@ -245,6 +351,24 @@ ITEM_DEFINITIONS = {
     },
 
     # --- Armor ---
+    "wooden_shield": {
+        "name": "Wooden Shield",
+        "description": "A simple shield made of wooden planks.",
+        "char": "[",
+        "color": tcod.constants.BURlywood,
+        "value": 30,
+        "weight": 6,
+        "stackable": False,
+        "item_type_tags": ["armor", "shield"],
+        "equip_slot": "off_hand",
+        "properties": {
+            "defense_bonus": 1,
+            "max_durability": 50
+        },
+        "crafting_recipe": {
+            "wooden_plank": 4
+        }
+    },
     "leather_jerkin": {
         "name": "Leather Jerkin",
         "description": "A tough leather vest offering basic protection.",
@@ -256,13 +380,14 @@ ITEM_DEFINITIONS = {
         "item_type_tags": ["armor", "body"],
         "equip_slot": "body_armor",
         "properties": {
-            "defense_bonus": 1
+            "defense_bonus": 1,
+            "max_durability": 60
         }
     },
     "iron_helmet": {
         "name": "Iron Helmet",
         "description": "A sturdy iron helmet.",
-        "char": "^", # Using existing mountain char, might need unique
+        "char": "^",
         "color": tcod.constants.DARK_SLATE_GREY,
         "value": 35,
         "weight": 3,
@@ -270,162 +395,93 @@ ITEM_DEFINITIONS = {
         "item_type_tags": ["armor", "head"],
         "equip_slot": "head_armor",
         "properties": {
-            "defense_bonus": 1
+            "defense_bonus": 1,
+            "max_durability": 70
         }
     }
 }
 
-# Update existing Stone Axe to conform to new weapon properties
-if "axe_stone" in ITEM_DEFINITIONS:
-    ITEM_DEFINITIONS["axe_stone"]["item_type_tags"] = ITEM_DEFINITIONS["axe_stone"].get("item_type_tags", [])
-    if "weapon" not in ITEM_DEFINITIONS["axe_stone"]["item_type_tags"]:
-        ITEM_DEFINITIONS["axe_stone"]["item_type_tags"].append("weapon")
-    if "melee" not in ITEM_DEFINITIONS["axe_stone"]["item_type_tags"]:
-        ITEM_DEFINITIONS["axe_stone"]["item_type_tags"].append("melee")
-    if "axe" not in ITEM_DEFINITIONS["axe_stone"]["item_type_tags"]:
-        ITEM_DEFINITIONS["axe_stone"]["item_type_tags"].append("axe")
-
-    ITEM_DEFINITIONS["axe_stone"]["equip_slot"] = "main_hand"
-
-    if "properties" not in ITEM_DEFINITIONS["axe_stone"]:
-        ITEM_DEFINITIONS["axe_stone"]["properties"] = {}
-
-    ITEM_DEFINITIONS["axe_stone"]["properties"]["damage_dice"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("damage_dice", "1d4") # Default if not set
-    ITEM_DEFINITIONS["axe_stone"]["properties"]["damage_bonus"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("damage_bonus", 0)
-    ITEM_DEFINITIONS["axe_stone"]["properties"]["attack_range"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("attack_range", 1)
-    # Keep existing tool_type and chop_power
-    ITEM_DEFINITIONS["axe_stone"]["properties"]["tool_type"] = "axe"
-    ITEM_DEFINITIONS["axe_stone"]["properties"]["chop_power"] = ITEM_DEFINITIONS["axe_stone"]["properties"].get("chop_power",1)
-
-    # --- New Crafted Items ---
-    "crude_spear": {
-        "name": "Crude Spear",
-        "description": "A sharpened log, barely a spear. Better than fists.",
-        "char": "/", # Same as axe for now, can change
-        "color": tcod.constants.DARK_SEPIA,
-        "value": 15,
-        "weight": 4,
-        "stackable": False,
-        "item_type_tags": ["weapon", "melee", "spear"],
-        "equip_slot": "main_hand",
-        "properties": {
-            "damage_dice": "1d6", # Better than fists (1d3) or stone axe (1d4)
-            "damage_bonus": 0,
-            "attack_range": 2 # Spears often have a bit more reach
-        },
-        "crafting_recipe": {
-            "raw_log": 2,
-            "stone_chunk": 1 # For sharpening
-        }
-    },
-    "wooden_shield": {
-        "name": "Wooden Shield",
-        "description": "A simple shield made of wooden planks.",
-        "char": "[", # Same as jerkin for now, can change
-        "color": tcod.constants.BURlywood,
-        "value": 30,
-        "weight": 6,
-        "stackable": False,
-        "item_type_tags": ["armor", "shield"],
-        "equip_slot": "off_hand", # Assuming an off-hand slot exists or can be conceptualized
-        "properties": {
-            "defense_bonus": 1 # Basic shield bonus
-        },
-        "crafting_recipe": {
-            "wooden_plank": 4 # Requires processed planks
-        }
-    },
-    "raw_meat_scrap": {
-        "name": "Raw Meat Scrap",
-        "description": "A piece of raw meat. Needs cooking.",
-        "char": "m",
-        "color": tcod.constants.CRIMSON,
-        "value": 1,
-        "weight": 0.5,
-        "stackable": True,
-        "item_type_tags": ["resource", "food_ingredient_raw"]
-    },
-    "cooked_meat_scrap": {
-        "name": "Cooked Meat Scrap",
-        "description": "A cooked piece of meat. Edible.",
-        "char": "m",
-        "color": tcod.constants.DARK_ORANGE,
-        "value": 4,
-        "weight": 0.4, # Slightly less weight after cooking
-        "stackable": True,
-        "item_type_tags": ["consumable", "food"],
-        "crafting_recipe": {
-            "raw_meat_scrap": 1
-            # Conceptual: "requires_fire_pit_nearby": True
-        },
-        "on_use": {
-            "reduces_hunger": 35 # Increased hunger reduction
-        }
-    },
-    "water_flask": {
-        "name": "Water Flask",
-        "description": "A simple flask filled with water. Refreshing.",
-        "char": "~",
-        "color": tcod.constants.LIGHT_BLUE,
-        "value": 5,
-        "weight": 1,
-        "stackable": False, # Or True if they are like waterskins that can be refilled/stacked when empty
-        "item_type_tags": ["consumable", "drink"],
-        # Not craftable by default for now, could be found or bought
-        "on_use": {
-            "reduces_thirst": 40
-        }
-    },
-    "apple": { # Assuming apple might be a resource from AppleTree
-        "name": "Apple",
-        "description": "A crisp, juicy apple.",
-        "char": "a",
-        "color": tcod.constants.RED,
-        "value": 3,
-        "weight": 0.3,
-        "stackable": True,
-        "item_type_tags": ["consumable", "food", "fruit"],
-        "on_use": {
-            "reduces_hunger": 10,
-            "reduces_thirst": 5
-        }
-    },
-    "pear": { # Assuming pear might be a resource from PearTree
-        "name": "Pear",
-        "description": "A sweet and soft pear.",
-        "char": "p", # Might conflict with wooden_plank, consider changing one
-        "color": tcod.constants.YELLOW, # Greenish-yellow
-        "value": 3,
-        "weight": 0.3,
-        "stackable": True,
-        "item_type_tags": ["consumable", "food", "fruit"],
-        "on_use": {
-            "reduces_hunger": 10,
-            "reduces_thirst": 7
-        }
-    },
-    "acorn": { # From OakTree
-        "name": "Acorn",
-        "description": "The nut of an oak tree. Edible in a pinch.",
-        "char": ".", # Simple char
-        "color": tcod.constants.DARK_ORANGE,
-        "value": 1,
-        "weight": 0.1,
-        "stackable": True,
-        "item_type_tags": ["consumable", "food", "nut"],
-        "on_use": {
-            "reduces_hunger": 3 # Very little
-        }
-    },
-
-
-# Standardize 'type' to 'item_type_tags' for older items for consistency, if they don't have it
+# Standardize 'type' to 'item_type_tags' and ensure all items have item_type_tags
 for item_key, item_data in ITEM_DEFINITIONS.items():
     if "type" in item_data and "item_type_tags" not in item_data:
         if isinstance(item_data["type"], list):
-            item_data["item_type_tags"] = item_data["type"]
-        else: # If it's a single string
-            item_data["item_type_tags"] = [item_data["type"]]
-        # del item_data["type"] # Optionally remove old 'type' key after migration
-    elif "item_type_tags" not in item_data: # Ensure all items have the key, even if empty
+            item_data["item_type_tags"] = list(item_data["type"]) # Ensure it's a list copy
+        else:
+            item_data["item_type_tags"] = [str(item_data["type"])]
+        # del item_data["type"] # Optionally remove old 'type' key
+    elif "item_type_tags" not in item_data:
         item_data["item_type_tags"] = []
+
+    # Ensure stackable is defined, default to False for non-consumables/resources if not set
+    if "stackable" not in item_data:
+        if any(tag in item_data.get("item_type_tags", []) for tag in ["resource", "consumable", "reagent", "ammunition", "food_ingredient", "seed", "trash"]):
+            item_data["stackable"] = True
+        else:
+            item_data["stackable"] = False
+
+    # For non-stackable items that should have durability, ensure properties and max_durability exist
+    if not item_data["stackable"] and any(tag in item_data.get("item_type_tags", []) for tag in ["tool", "weapon", "armor", "shield"]):
+        if "properties" not in item_data:
+            item_data["properties"] = {}
+        if "max_durability" not in item_data["properties"]:
+            # Add a default max_durability if missing for durable types
+            if "tool" in item_data["item_type_tags"]:
+                item_data["properties"]["max_durability"] = 20
+            elif "weapon" in item_data["item_type_tags"]:
+                item_data["properties"]["max_durability"] = 50
+            elif "armor" in item_data["item_type_tags"] or "shield" in item_data["item_type_tags"]:
+                item_data["properties"]["max_durability"] = 80
+            else:
+                item_data["properties"]["max_durability"] = 10 # Generic fallback for other non-stackable
+
+# Ensure axe_stone specific properties are correctly merged (already done by direct edit)
+axe_stone_def = ITEM_DEFINITIONS.get("axe_stone")
+if axe_stone_def:
+    axe_stone_def["stackable"] = False # Explicit
+    if "properties" not in axe_stone_def: axe_stone_def["properties"] = {}
+    axe_stone_def["properties"]["tool_type"] = "axe"
+    axe_stone_def["properties"]["chop_power"] = axe_stone_def["properties"].get("chop_power",1)
+    axe_stone_def["properties"]["max_durability"] = axe_stone_def["properties"].get("max_durability", 25)
+    axe_stone_def["properties"]["damage_dice"] = axe_stone_def["properties"].get("damage_dice", "1d4")
+    axe_stone_def["properties"]["damage_bonus"] = axe_stone_def["properties"].get("damage_bonus", 0)
+    axe_stone_def["properties"]["attack_range"] = axe_stone_def["properties"].get("attack_range", 1)
+    axe_stone_def["equip_slot"] = "main_hand"
+    # Remove old chance based key if it exists
+    if "durability_chance_to_degrade" in axe_stone_def["properties"]:
+        del axe_stone_def["properties"]["durability_chance_to_degrade"]
+
+lockpick_def = ITEM_DEFINITIONS.get("lockpick")
+if lockpick_def:
+    lockpick_def["stackable"] = False # Explicitly non-stackable
+    if "properties" not in lockpick_def: lockpick_def["properties"] = {}
+    lockpick_def["properties"]["tool_type"] = "lockpick"
+    lockpick_def["properties"]["max_durability"] = lockpick_def["properties"].get("max_durability", 5)
+    if "breaks_on_fail_chance" in lockpick_def["properties"]:
+        del lockpick_def["properties"]["breaks_on_fail_chance"]
+
+# Final check for item_type_tags for newly added items
+new_items_to_check_tags = ["crude_spear", "wooden_shield", "raw_meat_scrap", "cooked_meat_scrap", "water_flask", "apple", "pear", "acorn"]
+for key in new_items_to_check_tags:
+    if key in ITEM_DEFINITIONS and "item_type_tags" not in ITEM_DEFINITIONS[key]:
+        ITEM_DEFINITIONS[key]["item_type_tags"] = [] # Initialize if totally missing
+
+    # Ensure 'stackable' is present
+    if key in ITEM_DEFINITIONS and "stackable" not in ITEM_DEFINITIONS[key]:
+         ITEM_DEFINITIONS[key]["stackable"] = False # Default non-stackable and then check tags
+         if any(tag in ITEM_DEFINITIONS[key].get("item_type_tags", []) for tag in ["resource", "consumable", "reagent", "ammunition", "food_ingredient", "seed", "trash"]):
+            ITEM_DEFINITIONS[key]["stackable"] = True
+
+    # Ensure 'properties' and 'max_durability' for non-stackable tools/weapons/armor
+    if key in ITEM_DEFINITIONS and not ITEM_DEFINITIONS[key]["stackable"]:
+        if any(tag in ITEM_DEFINITIONS[key].get("item_type_tags", []) for tag in ["tool", "weapon", "armor", "shield"]):
+            if "properties" not in ITEM_DEFINITIONS[key]:
+                ITEM_DEFINITIONS[key]["properties"] = {}
+            if "max_durability" not in ITEM_DEFINITIONS[key]["properties"]:
+                 ITEM_DEFINITIONS[key]["properties"]["max_durability"] = 30 # A generic default
+                 if key == "water_flask": ITEM_DEFINITIONS[key]["properties"]["max_durability"] = 3 # sips
+
+
+# One final pass to remove the old "type" key if "item_type_tags" exists
+for item_key, item_data in ITEM_DEFINITIONS.items():
+    if "type" in item_data and "item_type_tags" in item_data:
+        del item_data["type"]

@@ -91,6 +91,12 @@ def draw(console: tcod.console.Console, world) -> None:
 
     elif world.game_state == "INFO_MENU":
         draw_info_menu(console, world)
+    elif world.game_state == "BUILD_MODE":
+        # Draw the world as normal
+        # (The main map, player, NPCs, items are already drawn before this game_state check)
+        # Then overlay build mode UI elements
+        draw_build_mode_ui(console, world, start_x, start_y)
+
 
     draw_chat_log(console, world) # Draw chat log
 
@@ -481,3 +487,71 @@ def draw_trade_ui(console: tcod.console.Console, world) -> None:
     # Instructions
     instructions_y = box_y + box_height - 2
     console.print(x=box_x + 1, y=instructions_y, string="[TAB] Switch View | [UP/DOWN] Select | [ENTER/E] Buy/Sell | [ESC] Close")
+
+
+def draw_build_mode_ui(console: tcod.console.Console, world, start_render_x: int, start_render_y: int) -> None:
+    """Draws the UI elements for build mode."""
+    # Display list of placeable furniture items
+    furniture_list_x = 1
+    furniture_list_y = 1
+    furniture_list_width = 30
+    max_items_to_show = 10 # Limit how many items are shown in the list at once
+
+    console.draw_frame(
+        x=furniture_list_x, y=furniture_list_y,
+        width=furniture_list_width, height=min(len(world.placeable_furniture_keys) + 2, max_items_to_show + 2),
+        title="Placeable Items", clear=False, fg=(255,255,255), bg=(0,0,20)
+    )
+
+    for i, item_key in enumerate(world.placeable_furniture_keys):
+        if i >= max_items_to_show:
+            break
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key) # Get actual name if possible
+        display_text = f"{i+1}. {item_name}"
+        text_color = (200,200,200)
+        if i == world.build_mode_selected_item_index:
+            text_color = (255,255,0) # Highlight selected
+            display_text = "> " + display_text
+
+        console.print(x=furniture_list_x + 1, y=furniture_list_y + 1 + i, string=display_text, fg=text_color)
+
+    # Draw ghost/preview of the selected furniture item
+    if world.ghost_furniture_tile:
+        target_place_x = world.player.x + world.player.last_dx
+        target_place_y = world.player.y + world.player.last_dy
+
+        # Convert target world coords to screen coords
+        screen_target_x = target_place_x - start_render_x
+        screen_target_y = target_place_y - start_render_y
+
+        if 0 <= screen_target_x < console.width and 0 <= screen_target_y < console.height:
+            # Make ghost semi-transparent or use a distinct color
+            ghost_color = tuple(c // 2 for c in world.ghost_furniture_tile.color) # Dim color
+
+            # Check if target tile is valid for placement (e.g. empty floor)
+            # This is a visual hint; actual placement logic will re-verify
+            current_tile_at_target = world.get_tile_at(target_place_x, target_place_y)
+            can_place_visual_cue = (255,255,255) # White default outline
+            if current_tile_at_target and current_tile_at_target.passable and "floor" in current_tile_at_target.name.lower():
+                pass # Good to place
+            else: # Cannot place here (occupied or not floor)
+                ghost_color = (128,0,0) # Dark red to indicate invalid placement spot
+                can_place_visual_cue = (128,0,0)
+
+            # Draw the ghost character
+            console.rgb[screen_target_x, screen_target_y] = (
+                world.ghost_furniture_tile.char,
+                ghost_color,
+                console.rgb[screen_target_x, screen_target_y]["bg"] # Keep original background
+            )
+            # Optional: draw a small border around the ghost tile for better visibility
+            # console.rgb[screen_target_x, screen_target_y]["bg"] = (50,50,50) # slightly different bg for ghost
+
+    # Display instructions
+    instructions_text = "B/ESC: Exit | UP/DOWN: Select | ARROWS: Move | ENTER: Place"
+    console.print_box(
+        x=0, y=console.height - 1,
+        width=console.width, height=1,
+        string=instructions_text, fg=(255,255,255), bg=(0,0,0),
+        alignment=tcod.constants.LEFT
+    )

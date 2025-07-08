@@ -3,9 +3,9 @@ import math
 import random
 import numpy as np
 import tcod.noise
-import requests # Import requests
-import time # Import time for NPC speech timing
-from entities.base import NPC
+import requests
+import time
+from entities.base import NPC, DireWolf # Added DireWolf
 from entities.tree import Tree, OakTree, AppleTree, PearTree # Tree classes seem partially defined/used.
 from config import (
     WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
@@ -30,10 +30,13 @@ from data.items import ITEM_DEFINITIONS # For checking yielded resources
 from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
-from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data # Profession and sub-task data
+from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data
+from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
+from tile_types import Tile as BaseTileType
+from data.quests import QUEST_DEFINITIONS # Import quest definitions
 
-import json # Import json for parsing LLM responses
-import uuid # For unique building IDs
+import json
+import uuid
 
 class WorldGenerator:
     """Handles the procedural generation of the world's macro-structure."""
@@ -99,6 +102,11 @@ class Building:
         self.global_center_y = self.global_origin_y + height // 2
         self.player_owned: bool = False # New attribute for player housing
 
+    def contains_global_coords(self, world_x: int, world_y: int) -> bool:
+        """Checks if the given global world coordinates are within this building's footprint."""
+        return (self.global_origin_x <= world_x < self.global_origin_x + self.width and
+                self.global_origin_y <= world_y < self.global_origin_y + self.height)
+
 class Village:
     def __init__(self):
         self.buildings = []
@@ -124,7 +132,8 @@ class Player:
         self.y = y
         self.char = ord('@')
         self.color = COLORS["player_fg"]
-        self.inventory = {}
+        # New inventory: list of dicts. Example: [{"key": "raw_log", "quantity": 10}, {"key": "axe_stone", "durability": 50, "max_durability": 50}]
+        self.inventory: list[dict] = []
         self.max_hp = 30
         self.hp = self.max_hp
         self.reputation = {
@@ -168,6 +177,98 @@ class Player:
         if self.hp <=0 and hasattr(self, 'world_ref') and self.world_ref: # Check if world_ref exists
              self.world_ref.game_state = "PLAYER_DEAD"
 
+    def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None):
+        item_def = ITEM_DEFINITIONS.get(item_key_to_add)
+        if not item_def:
+            print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
+            return
+
+        is_stackable = item_def.get("stackable", False)
+
+        if is_stackable:
+            for item_instance in self.inventory:
+                if item_instance["key"] == item_key_to_add:
+                    item_instance["quantity"] = item_instance.get("quantity", 0) + quantity
+                    return
+            # Not found, add new stack
+            self.inventory.append({"key": item_key_to_add, "quantity": quantity})
+        else: # Non-stackable (durable or unique)
+            for _ in range(quantity): # Add multiple individual instances if quantity > 1
+                new_instance = {"key": item_key_to_add}
+                if "max_durability" in item_def.get("properties", {}):
+                    new_instance["max_durability"] = item_def["properties"]["max_durability"]
+                    new_instance["durability"] = initial_durability if initial_durability is not None else new_instance["max_durability"]
+                self.inventory.append(new_instance)
+
+    def remove_item(self, item_key_to_remove: str, quantity: int = 1, specific_instance_index: int | None = None) -> bool:
+        item_def = ITEM_DEFINITIONS.get(item_key_to_remove)
+        if not item_def:
+            # print(f"Warning: Tried to remove unknown item key '{item_key_to_remove}'")
+            return False
+
+        is_stackable = item_def.get("stackable", False)
+
+        if is_stackable:
+            for i, item_instance in enumerate(self.inventory):
+                if item_instance["key"] == item_key_to_remove:
+                    if item_instance.get("quantity", 0) >= quantity:
+                        item_instance["quantity"] -= quantity
+                        if item_instance["quantity"] <= 0:
+                            self.inventory.pop(i)
+                        return True
+                    else: # Not enough in this stack (shouldn't happen if has_item was checked)
+                        return False
+            return False # Item not found
+        else: # Non-stackable
+            removed_count = 0
+            indices_to_remove = []
+            if specific_instance_index is not None and 0 <= specific_instance_index < len(self.inventory):
+                 if self.inventory[specific_instance_index]["key"] == item_key_to_remove:
+                    indices_to_remove.append(specific_instance_index)
+                    removed_count = 1
+            else: # Remove first N instances found
+                for i in range(len(self.inventory) -1, -1, -1): # Iterate backwards for safe removal
+                    if self.inventory[i]["key"] == item_key_to_remove:
+                        indices_to_remove.append(i)
+                        removed_count += 1
+                        if removed_count == quantity:
+                            break
+
+            if removed_count == quantity:
+                for index in sorted(indices_to_remove, reverse=True): # Sort to remove from end first
+                    self.inventory.pop(index)
+                return True
+            return False # Not enough instances found or specific instance mismatch
+
+    def has_item(self, item_key_to_check: str, quantity: int = 1) -> bool:
+        item_def = ITEM_DEFINITIONS.get(item_key_to_check)
+        if not item_def: return False
+        is_stackable = item_def.get("stackable", False)
+
+        if is_stackable:
+            for item_instance in self.inventory:
+                if item_instance["key"] == item_key_to_check:
+                    return item_instance.get("quantity", 0) >= quantity
+            return False
+        else: # Non-stackable, check for presence of N instances
+            count = 0
+            for item_instance in self.inventory:
+                if item_instance["key"] == item_key_to_check:
+                    count += 1
+            return count >= quantity
+
+    def get_item_instance_indices(self, item_key_to_find: str) -> list[int]:
+        """Returns a list of indices for all instances of a given non-stackable item key."""
+        indices = []
+        for i, item_instance in enumerate(self.inventory):
+            if item_instance["key"] == item_key_to_find:
+                indices.append(i)
+        return indices
+
+    def get_item_by_index(self, index: int) -> dict | None:
+        if 0 <= index < len(self.inventory):
+            return self.inventory[index]
+        return None
 
     def adjust_reputation(self, rep_type: str, amount: int):
         """Adjusts the player's reputation of a specific type."""
@@ -175,9 +276,13 @@ class Player:
             self.reputation[rep_type] += amount
             # Could add clamping here if REP_MIN/MAX_VALUE were used
             # self.reputation[rep_type] = max(REP_MIN_VALUE, min(self.reputation[rep_type], REP_MAX_VALUE))
-            print(f"Player reputation updated: {rep_type} changed by {amount} to {self.reputation[rep_type]}") # For now, print to console
+            # print(f"Player reputation updated: {rep_type} changed by {amount} to {self.reputation[rep_type]}") # For now, print to console
+            if hasattr(self, 'world_ref') and self.world_ref: # Access world_ref if it exists
+                self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.reputation[rep_type]})")
         else:
-            print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+            # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+            if hasattr(self, 'world_ref') and self.world_ref:
+                 self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
 
 
 class World:
@@ -187,7 +292,8 @@ class World:
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
-        self.player.world_ref = self # Give player a reference to the world for game state changes
+        self.player.world_ref = self
+        self.pending_quest_offer: dict | None = None # For quests offered by NPCs before player accepts
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height)
         self.chunks = self._initialize_chunks()
         self.npcs = []
@@ -208,6 +314,14 @@ class World:
         self.interaction_menu_target_building = None # For interacting with buildings (e.g. claiming)
         self.interaction_menu_x = 0
         self.interaction_menu_y = 0
+
+        # Build Mode State
+        self.build_mode_selected_item_index: int = 0
+        # Define some placeable items (keys from DECORATION_ITEM_DEFINITIONS)
+        self.placeable_furniture_keys: list[str] = [
+            "wooden_chair", "wooden_table", "bed_simple", "chest_wooden", "wall_shelf", "fire_pit_simple"
+        ]
+        self.ghost_furniture_tile: Tile | None = None # For rendering placement preview
 
         # Chat UI State
         self.chat_ui_active = False
@@ -982,45 +1096,50 @@ class World:
 
             npc.game_time_last_updated = self.game_time
 
-            if npc.is_hostile_to_player:
-                self._handle_npc_combat_turn(npc)
-            # --- Sound Perception (runs even if hostile, might override combat task if sound is compelling enough or changes context) ---
-            # This is a simplified first pass. More complex logic would involve NPC state, personality, and sound type.
+            if npc.is_hostile_to_player: # This includes creatures who are hostile by default
+                self._handle_npc_combat_turn(npc) # Combat AI runs
+                # If creature is not actively pathing from combat AI (e.g. holding, or just attacked)
+                # and not investigating a sound, they could wander a bit.
+                if not npc.current_path and npc.current_task not in ["investigating_sound", "combat_action_attack_player"]:
+                    if random.random() < 0.1: # Small chance to wander if not actively fighting/pathing
+                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
+                        potential_x, potential_y = npc.x + dx, npc.y + dy
+                        target_tile = self.get_tile_at(potential_x, potential_y)
+                        if target_tile and target_tile.passable:
+                            npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
+                            npc.current_destination_coords = (potential_x, potential_y)
+                            npc.current_task = "wandering_hostile" # A specific task if needed
+
+            # --- Sound Perception (runs for all NPCs, might make non-hostile investigate or hostile change target/behavior) ---
             heard_compelling_sound = False
-            if self.sound_events: # Only process if there are sounds
+            if self.sound_events:
                 for sound in self.sound_events:
-                    # Skip sound if NPC itself made it
-                    if sound.get("source_id") and sound["source_id"] == npc.id:
-                        continue
+                    if sound.get("source_id") and sound["source_id"] == npc.id: continue
 
                     dist_to_sound = math.sqrt((npc.x - sound["x"])**2 + (npc.y - sound["y"])**2)
                     if dist_to_sound <= npc.hearing_radius and dist_to_sound <= sound["volume"]:
-                        # NPC hears the sound
-                        if npc.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]: # Don't interrupt critical combat/investigation for now
+                        if npc.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]:
                             sound_type = sound["type"]
-                            # Simple reaction: investigate combat or tree fall sounds
-                            if sound_type in ["combat_attack", "tree_fall"]:
+                            if sound_type in ["combat_attack", "tree_fall"]: # Hostile creatures also investigate these
                                 npc.current_task = "investigating_sound"
                                 npc.current_destination_coords = (sound["x"], sound["y"])
-                                npc.current_path = [] # Force repath
+                                npc.current_path = []
                                 self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
                                 heard_compelling_sound = True
-                                break # React to first compelling sound heard
+                                break
 
             if heard_compelling_sound:
-                # If NPC decided to investigate a sound, skip other scheduling for this tick
-                # Movement for "investigating_sound" will be handled by _update_npc_movement if path is set
                 if npc.current_task == "investigating_sound" and npc.current_destination_coords and not npc.current_path:
                     path = self.calculate_path(npc.x, npc.y, npc.current_destination_coords[0], npc.current_destination_coords[1])
-                    if path:
-                        npc.current_path = path
-                    else: # Cannot path to sound, revert to idle or previous
-                        npc.current_task = "idle_confused"
-                        npc.current_destination_coords = None
-            elif not npc.is_hostile_to_player and npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player", "holding_position_combat", "combat_action_use_healing_item", "combat_action_move_to_cover", "investigating_sound"]:
-                # Original scheduling logic for non-hostile, non-combat, non-investigating NPCs
-                # --- NPC Item Pickup Decision (New) ---
-                # If NPC is idle/wandering and sees items, they might try to pick one up.
+                    if path: npc.current_path = path
+                    else: npc.current_task = "idle_confused"; npc.current_destination_coords = None
+
+            # Standard scheduling logic ONLY if NOT hostile by default (e.g. not a Creature) AND not investigating a sound
+            elif npc.profession != "Creature" and not npc.is_hostile_to_player and \
+                 npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player",
+                                          "holding_position_combat", "combat_action_use_healing_item",
+                                          "combat_action_move_to_cover", "investigating_sound"]:
+                # --- NPC Item Pickup Decision ---
                 # This decision should happen before regular scheduling if items are perceived.
                 made_item_decision = False
                 if npc.perceived_item_tiles and npc.current_task in ["idle", "wandering", "at home", "at work"]: # Can decide to pickup even at work/home if item is compelling
@@ -2291,6 +2410,16 @@ class World:
     def handle_npc_death(self, dead_npc: NPC):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
 
+        # Quest kill tracking
+        for quest_id, quest_data in list(self.player.active_quests.items()): # Iterate on a copy
+            if quest_data["type"] == "kill" and \
+               dead_npc.name.startswith(str(quest_data.get("target_npc_name_prefix","!@#$%^"))): # Check prefix
+                quest_data["progress"] = quest_data.get("progress", 0) + 1
+                self.add_message_to_chat_log(
+                    f"Quest '{quest_data['title']}': {dead_npc.name} defeated ({quest_data['progress']}/{quest_data['target_count']})."
+                )
+                # No need to reassign to self.player.active_quests[quest_id] as quest_data is a mutable dict
+
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
 
@@ -2695,10 +2824,21 @@ class World:
             self.player.pending_contract_offer = {
                 "contract_id": contract_id, "npc_id": npc_target.id,
                 "item_key": item_needed, "quantity_needed": quantity_needed,
-                "reward": reward_amount, "npc_offerer_id": npc_target.id # Keep track of who offered
+            "reward": reward_amount, "npc_offerer_id": npc_target.id
             }
             self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
 
+        # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
+        # This is a simplified trigger; more robust would be keyword matching or LLM intent.
+        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
+           "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
+
+            quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
+            if quest_def:
+                offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
+                self.chat_ui_history.append((npc_target.name, offer_dialogue))
+                self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
+                self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
@@ -3218,6 +3358,17 @@ class World:
                                 tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
                             elif random.random() < 0.01: # 1% chance for a flower (if not a tree or grass)
                                 tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
+                            elif random.random() < 0.005: # 0.5% chance for a Dire Wolf if not other features
+                                wolf_x_world = chunk_coord_x * CHUNK_SIZE + x_local
+                                wolf_y_world = chunk_coord_y * CHUNK_SIZE + y_local
+                                # Ensure wolf doesn't spawn on player starting position (very rough check)
+                                if not (abs(wolf_x_world - self.player.x) < 5 and abs(wolf_y_world - self.player.y) < 5):
+                                    wolf_name_variant = f"Dire Wolf {random.choice(['Alpha', 'Beta', 'Omega', 'Lone', 'Grim'])}"
+                                    new_wolf = DireWolf(wolf_x_world, wolf_y_world, name=wolf_name_variant)
+                                    self.npcs.append(new_wolf) # Add to general NPC list for updates
+                                    # Note: Does not place a tile for the wolf here, NPC drawing handles it.
+                                    # If wolf was a Tile, it would be: tiles[y_local][x_local] = new_wolf
+                                    # self.add_message_to_chat_log(f"A {wolf_name_variant} has appeared nearby!") # Optional debug/event
         chunk.tiles = tiles
         chunk.is_generated = True
 
@@ -3564,27 +3715,36 @@ class World:
     def craft_item(self, item_key: str):
         """Crafts an item if the player has the required resources."""
         if item_key not in ITEM_DEFINITIONS:
-            print(f"You don't know how to craft '{item_key}'.")
+            self.add_message_to_chat_log(f"You don't know how to craft '{item_key}'.")
             return
 
         recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe", {})
+        if not recipe:
+            self.add_message_to_chat_log(f"There is no recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
+            return
+
         can_craft = True
-        for resource, required_qty in recipe.items():
-            if self.player.inventory.get(resource, 0) < required_qty:
-                print(f"You don't have enough {resource} to craft that. (Need {required_qty})")
+        for resource_key, required_qty in recipe.items():
+            if not self.player.has_item(resource_key, required_qty):
+                self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
                 can_craft = False
                 break
 
         if can_craft:
             # Consume resources
-            for resource, required_qty in recipe.items():
-                self.player.inventory[resource] -= required_qty
-                if self.player.inventory[resource] <= 0:
-                    del self.player.inventory[resource]
+            for resource_key, required_qty in recipe.items():
+                if not self.player.remove_item(resource_key, required_qty):
+                    # This should not happen if has_item check passed, but as a safeguard:
+                    self.add_message_to_chat_log(f"Error consuming {resource_key} for crafting. Aborted.")
+                    return
 
             # Add crafted item
-            self.player.inventory[item_key] = self.player.inventory.get(item_key, 0) + 1
-            print(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
+            self.player.add_item(item_key, 1)
+            self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
+        else:
+            # Message about missing resources already shown by has_item check.
+            pass
+
 
     def use_item(self, item_key: str):
         """Uses an item from the player's inventory."""
@@ -3710,25 +3870,103 @@ class World:
 
     def remove_item_from_map(self, item_key: str, quantity: int, x: int, y: int) -> bool:
         """Removes a specified quantity of an item from the map at coordinates. Returns True if successful."""
-        if quantity <= 0:
-            return False
-
+        if quantity <= 0: return False
         if (x, y) in self.items_on_map:
             items_at_loc = self.items_on_map[(x, y)]
             for i, item_on_tile in enumerate(items_at_loc):
                 if item_on_tile["item_key"] == item_key:
                     if item_on_tile["quantity"] >= quantity:
                         item_on_tile["quantity"] -= quantity
-                        if item_on_tile["quantity"] <= 0:
-                            items_at_loc.pop(i)
-                            if not items_at_loc: # If list is empty, remove key from dict
-                                del self.items_on_map[(x,y)]
-                        # self.add_message_to_chat_log(f"Picked up {quantity} {ITEM_DEFINITIONS.get(item_key,{}).get('name',item_key)} from ({x},{y}).") # Optional debug
+                        if item_on_tile["quantity"] <= 0: items_at_loc.pop(i)
+                        if not items_at_loc: del self.items_on_map[(x,y)]
                         return True
-                    else:
-                        # Not enough quantity in this specific stack
-                        # self.add_message_to_chat_log(f"Tried to pick up {quantity} of {item_key}, but only found {item_on_tile['quantity']}.")
-                        return False
-            # Item key not found in the list at this location
+                    return False
             return False
-        return False # No items at this location
+        return False
+
+    def complete_quest(self, quest_id: str, quest_giver_npc: NPC):
+        """Handles player attempting to complete a quest."""
+        if quest_id not in self.player.active_quests:
+            self.add_message_to_chat_log("Error: Quest not found or not active.")
+            if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
+                 self.chat_ui_history.append((quest_giver_npc.name, "Are you sure we had an arrangement like that?"))
+            return
+
+        active_quest_data = self.player.active_quests[quest_id]
+        quest_def = QUEST_DEFINITIONS.get(quest_id)
+
+        if not quest_def:
+            self.add_message_to_chat_log(f"Error: Quest definition for '{quest_id}' not found.")
+            return
+
+        # Check if this is the correct NPC to turn into
+        # For now, simple check on NPC's role or ID.
+        # A more robust system might store the specific NPC instance ID who gave the quest.
+        giver_match = False
+        if active_quest_data.get("npc_offerer_id") == quest_giver_npc.id:
+            giver_match = True
+        elif active_quest_data.get("quest_giver_id_or_role") == quest_giver_npc.profession: # Fallback to role
+            giver_match = True
+
+        if not giver_match:
+            self.add_message_to_chat_log("This isn't the right person to talk to about this quest.")
+            if self.chat_ui_active: self.chat_ui_history.append((quest_giver_npc.name, "I don't think that's for me."))
+            return
+
+        is_complete = False
+        if active_quest_data["type"] == "kill":
+            if active_quest_data.get("progress", 0) >= active_quest_data.get("target_count", 0):
+                is_complete = True
+        elif active_quest_data["type"] == "fetch":
+            if self.player.has_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"]):
+                is_complete = True
+
+        dialogue_key = "dialogue_complete_report" if is_complete else "dialogue_incomplete_report"
+        npc_dialogue = quest_def.get(dialogue_key, "...")
+
+        if not is_complete and active_quest_data["type"] == "kill":
+            remaining_count = active_quest_data.get("target_count", 0) - active_quest_data.get("progress", 0)
+            npc_dialogue = npc_dialogue.format(remaining_count=remaining_count)
+        elif not is_complete and active_quest_data["type"] == "fetch":
+            player_has = 0
+            for item_instance in self.player.inventory: # Check new inventory
+                if item_instance["key"] == active_quest_data["item_to_fetch_key"]:
+                    player_has = item_instance.get("quantity", 0)
+                    break
+            remaining_count = active_quest_data["item_fetch_count"] - player_has
+            npc_dialogue = npc_dialogue.format(remaining_count=remaining_count)
+
+
+        if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
+            self.chat_ui_history.append((quest_giver_npc.name, npc_dialogue))
+        else: # If not in chat, at least log it
+            self.add_message_to_chat_log(f"{quest_giver_npc.name}: \"{npc_dialogue}\"")
+
+
+        if is_complete:
+            if active_quest_data["type"] == "fetch": # Consume items for fetch quests
+                self.player.remove_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"])
+
+            reward_money = quest_def.get("reward_money", 0)
+            if reward_money > 0:
+                self.player.money += reward_money
+                self.add_message_to_chat_log(f"You received {reward_money} money.")
+
+            reward_items = quest_def.get("reward_items", {})
+            for item_key, qty in reward_items.items():
+                self.player.add_item(item_key, qty)
+                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                self.add_message_to_chat_log(f"You received {qty}x {item_name}.")
+
+            log_completion_msg = quest_def.get("completion_message_log", f"Quest '{active_quest_data['title']}' completed.")
+            self.add_message_to_chat_log(log_completion_msg)
+
+            del self.player.active_quests[quest_id]
+            self.player.completed_quests.append(quest_id)
+
+            if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
+                # Add a follow-up generic line from NPC after quest completion.
+                self.chat_ui_history.append((quest_giver_npc.name, "Anything else I can help you with today?"))
+                if len(self.chat_ui_history) > self.chat_ui_max_history:
+                    self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+                self.chat_ui_scroll_offset = 0

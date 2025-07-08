@@ -44,9 +44,9 @@ class NPC:
         self.target_entity_id = None       # ID of the entity this NPC is currently targeting (e.g., player's ID)
 
         # Auditory property
-        self.speech_volume: int = DEFAULT_SPEECH_VOLUME # How far this NPC's speech travels
+        self.speech_volume: int = DEFAULT_SPEECH_VOLUME
 
-        # Equipment Slots
+        # Equipment Slots (Usually None for simple creatures)
         self.equipped_weapon: str | None = None
         self.equipped_armor_body: str | None = None
         self.equipped_armor_head: str | None = None
@@ -70,7 +70,7 @@ class NPC:
     def get_dialogue(self):
         return self.dialogue
 
-    def take_damage(self, amount: int, world): # world is an instance of the World class from engine.py
+    def take_damage(self, amount: int, world):
         if self.is_dead:
             return
 
@@ -102,6 +102,26 @@ class NPC:
             # world.add_message_to_chat_log(f"{self.name} has died!") # This will also be part of LLM narrative or game logic
         else:
             # Non-fatal hit, NPC becomes hostile if not already
-            if not self.is_hostile_to_player:
+            if not self.is_hostile_to_player: # Only make non-hostiles hostile. Creatures might already be.
                 self.is_hostile_to_player = True
-                world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+                # Avoid "becomes hostile" message for creatures that are always hostile
+                if self.profession != "Creature": # Assuming Creature profession for always-hostile
+                    world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+
+class DireWolf(NPC):
+    def __init__(self, x, y, name="Dire Wolf"):
+        super().__init__(x, y, name=name)
+        self.char = ord('w')
+        self.color = (160, 160, 160) # Dark grey
+        self.max_hp = 15
+        self.hp = self.max_hp
+        self.toughness = "average"
+        self.is_hostile_to_player = True # Hostile by default
+        self.combat_behavior = "aggressive"
+        self.base_attack_name = "bite"
+        self.base_attack_damage_dice = "1d6"
+        self.attack_range = 1
+        self.profession = "Creature" # To differentiate from villagers for AI/scheduling
+        self.dialogue = ["*Growl*", "*Snarl*"] # Simple "dialogue"
+        self.speech_volume = 5 # Quieter than human speech
+        self.hearing_radius = DEFAULT_HEARING_RADIUS + 2 # Slightly better hearing

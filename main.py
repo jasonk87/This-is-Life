@@ -158,15 +158,42 @@ def main():
 
                                         contract = world.player.pending_contract_offer
                                         world.player.active_contracts[contract["contract_id"]] = {
-                                            "npc_id": contract["npc_id"],
-                                            "item_key": contract["item_key"],
-                                            "quantity_needed": contract["quantity_needed"],
-                                            "reward": contract["reward"],
+                                            "npc_id": contract["npc_id"], "item_key": contract["item_key"],
+                                            "quantity_needed": contract["quantity_needed"], "reward": contract["reward"],
                                             "progress_text": f"Deliver {contract['quantity_needed']} {contract['item_key']}(s) to {world.chat_ui_target_npc.name}.",
-                                            "turn_in_npc_id": contract["npc_id"] # NPC to turn into
+                                            "turn_in_npc_id": contract["npc_id"]
                                         }
                                         world.chat_ui_history.append(("System", f"Job accepted: {contract['progress_text']}"))
                                         world.player.pending_contract_offer = None
+
+                                    # Check if player is accepting a pending quest offer
+                                    elif world.pending_quest_offer and \
+                                         world.chat_ui_target_npc and \
+                                         world.pending_quest_offer["npc_offerer_id"] == world.chat_ui_target_npc.id and \
+                                         player_input.lower() in world.QUEST_DEFINITIONS.get(world.pending_quest_offer["quest_id"], {}).get("dialogue_accept_player", ["yes", "accept", "ok", "sure", "y"]):
+
+                                        quest_id_to_accept = world.pending_quest_offer["quest_id"]
+                                        quest_def = world.QUEST_DEFINITIONS.get(quest_id_to_accept)
+                                        if quest_def:
+                                            world.player.active_quests[quest_id_to_accept] = {
+                                                "id": quest_id_to_accept,
+                                                "title": quest_def["title"],
+                                                "type": quest_def["type"],
+                                                "target_npc_name_prefix": quest_def.get("target_npc_name_prefix"),
+                                                "target_count": quest_def.get("target_count", 0),
+                                                "item_to_fetch_key": quest_def.get("item_to_fetch_key"),
+                                                "item_fetch_count": quest_def.get("item_fetch_count", 0),
+                                                "progress": 0,
+                                                "quest_giver_id_or_role": quest_def["quest_giver_id_or_role"], # Store for turn-in
+                                                "npc_offerer_id": world.chat_ui_target_npc.id # Store who gave it
+                                            }
+                                            accept_response = quest_def.get("dialogue_accept_npc_response", "Good luck.")
+                                            world.chat_ui_history.append((world.chat_ui_target_npc.name, accept_response))
+                                            world.chat_ui_history.append(("System", f"Quest accepted: {quest_def['title']}"))
+                                            world.pending_quest_offer = None
+                                        else:
+                                            world.add_message_to_chat_log(f"Error: Tried to accept unknown quest '{quest_id_to_accept}'.")
+                                            world.pending_quest_offer = None
 
                                     elif world.chat_ui_target_npc: # Regular talk
                                         world.continue_npc_dialogue(world.chat_ui_target_npc, player_input)
@@ -301,6 +328,26 @@ def main():
                         elif event.sym == tcod.event.KeySym.J: # Debug hero rep
                             world.player.adjust_reputation(REP_HERO, 10)
                             world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")
+                        elif event.sym == tcod.event.KeySym.B: # Toggle Build Mode
+                            current_building_at_player = world.get_building_by_tile_coords(world.player.x, world.player.y)
+                            if current_building_at_player and current_building_at_player.player_owned:
+                                if world.game_state == "PLAYING":
+                                    world.game_state = "BUILD_MODE"
+                                    world.add_message_to_chat_log("Entered build mode. B/ESC to exit. UP/DOWN to select item. ENTER to place.")
+                                    # Initialize ghost tile for selected item
+                                    if world.placeable_furniture_keys: # Check if list is not empty
+                                        selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
+                                        item_def = ALL_DECORATION_DEFS.get(selected_item_key) # Use aliased import
+                                        if item_def:
+                                            world.ghost_furniture_tile = BaseTileType(item_def["char"], item_def["color"], True, item_def["name"], item_def.get("properties", {})) # Use aliased import
+                                    else:
+                                        world.ghost_furniture_tile = None
+                                elif world.game_state == "BUILD_MODE":
+                                    world.game_state = "PLAYING"
+                                    world.add_message_to_chat_log("Exited build mode.")
+                                    world.ghost_furniture_tile = None
+                            else:
+                                world.add_message_to_chat_log("You can only build inside a house you own.")
                         elif event.sym == tcod.event.KeySym.E:
                             target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
@@ -326,9 +373,24 @@ def main():
                                 # Check for active contracts with this NPC for turn-in
                                 for contract_id, contract_details in world.player.active_contracts.items():
                                     if contract_details["turn_in_npc_id"] == targeted_npc.id:
-                                        menu_opts.append(f"Complete: {contract_details['item_key']} ({contract_details['quantity_needed']})")
+                                        menu_opts.append(f"Complete Contract: {contract_details['item_key']} ({contract_details['quantity_needed']})")
 
-                                world.interaction_menu_target_building = None # Clear previous building target
+                                # Check for active quests to report/complete with this NPC
+                                for quest_id, quest_data in world.player.active_quests.items():
+                                    quest_def = world.QUEST_DEFINITIONS.get(quest_id)
+                                    if quest_def and (quest_def["quest_giver_id_or_role"] == targeted_npc.profession or quest_data.get("npc_offerer_id") == targeted_npc.id) :
+                                        is_quest_complete_for_menu = False
+                                        if quest_data["type"] == "kill":
+                                            if quest_data.get("progress", 0) >= quest_data.get("target_count", 0):
+                                                is_quest_complete_for_menu = True
+                                        elif quest_data["type"] == "fetch":
+                                             if world.player.has_item(quest_data["item_to_fetch_key"], quest_data["item_fetch_count"]):
+                                                 is_quest_complete_for_menu = True
+
+                                        status_indicator = "(Complete)" if is_quest_complete_for_menu else "(Report)"
+                                        menu_opts.append(f"Quest - {quest_data['title']} {status_indicator}")
+
+                                world.interaction_menu_target_building = None
                                 menu_opts.append("Cancel")
                                 world.interaction_menu_options = menu_opts
                                 world.interaction_menu_selected_index = 0
@@ -381,13 +443,107 @@ def main():
                                                 if not action_taken_this_turn:
                                                     world.player_attempt_chop_tree(target_x, target_y)
                                                     action_taken_this_turn = True # Assume chopping always "takes a turn"
-                        elif event.sym == tcod.event.KeySym.Q: # Global quit
-                             return
+
+                    # --- Game State: Build Mode ---
+                    elif world.game_state == "BUILD_MODE":
+                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.B:
+                            world.game_state = "PLAYING"
+                            world.add_message_to_chat_log("Exited build mode.")
+                            world.ghost_furniture_tile = None
+                        elif event.sym in move_keys: # Player movement still works to position for placement
+                            dx, dy = move_keys[event.sym]
+                            # Store original char before potential sitting from handle_player_movement
+                            original_char = world.player.char
+                            world.handle_player_movement(dx, dy)
+                            world.player.char = original_char # Ensure player char remains '@' or original in build mode
+                            world.player.is_sitting = False # Prevent sitting in build mode from movement
+                             # Update ghost tile position (implicitly handled by renderer based on player facing)
+                        elif event.sym == tcod.event.KeySym.UP:
+                            if world.placeable_furniture_keys:
+                                world.build_mode_selected_item_index = (world.build_mode_selected_item_index - 1) % len(world.placeable_furniture_keys)
+                                selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
+                                item_def = ALL_DECORATION_DEFS.get(selected_item_key)
+                                if item_def:
+                                    world.ghost_furniture_tile = BaseTileType(item_def["char"], item_def["color"], True, item_def["name"], item_def.get("properties", {}))
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            if world.placeable_furniture_keys:
+                                world.build_mode_selected_item_index = (world.build_mode_selected_item_index + 1) % len(world.placeable_furniture_keys)
+                                selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
+                                item_def = ALL_DECORATION_DEFS.get(selected_item_key)
+                                if item_def:
+                                    world.ghost_furniture_tile = BaseTileType(item_def["char"], item_def["color"], True, item_def["name"], item_def.get("properties", {}))
+                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E: # Place item
+                            if world.placeable_furniture_keys and world.ghost_furniture_tile:
+                                selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
+                                item_def_to_place = ALL_DECORATION_DEFS.get(selected_item_key)
+
+                                if item_def_to_place:
+                                    target_x = world.player.x + world.player.last_dx
+                                    target_y = world.player.y + world.player.last_dy
+
+                                    # Validate placement
+                                    current_building = world.get_building_by_tile_coords(world.player.x, world.player.y) # Building player is in
+                                    target_tile_current_obj = world.get_tile_at(target_x, target_y)
+
+                                    can_place = True
+                                    # 1. Is player in their owned building?
+                                    if not (current_building and current_building.player_owned):
+                                        world.add_message_to_chat_log("You must be inside your own building to place furniture.")
+                                        can_place = False
+                                    # 2. Is target tile within that same building?
+                                    elif not current_building.contains_global_coords(target_x, target_y):
+                                        world.add_message_to_chat_log("You can only place furniture inside this building.")
+                                        can_place = False
+                                    # 3. Is the target tile a passable floor?
+                                    elif not (target_tile_current_obj and target_tile_current_obj.passable and "floor" in target_tile_current_obj.name.lower()):
+                                        world.add_message_to_chat_log(f"Cannot place furniture on '{target_tile_current_obj.name if target_tile_current_obj else 'solid ground'}'. Must be clear floor.")
+                                        can_place = False
+
+                                    # 4. Check resources
+                                    cost = item_def_to_place.get("placement_cost", {})
+                                    if not cost: # No cost defined, allow free placement for now
+                                        pass
+                                    else:
+                                        for resource_key, required_qty in cost.items():
+                                            if world.player.inventory.get(resource_key, 0) < required_qty:
+                                                item_name_for_msg = ITEM_DEFINITIONS.get(resource_key, {}).get("name", resource_key)
+                                                world.add_message_to_chat_log(f"Not enough resources. Need {required_qty}x {item_name_for_msg}.")
+                                                can_place = False
+                                                break
+
+                                    if can_place:
+                                        # Deduct resources
+                                        for resource_key, required_qty in cost.items():
+                                            world.player.inventory[resource_key] -= required_qty
+                                            if world.player.inventory[resource_key] <= 0:
+                                                del world.player.inventory[resource_key]
+
+                                        # Place the item
+                                        new_furniture_tile = BaseTileType(
+                                            item_def_to_place["char"],
+                                            item_def_to_place["color"],
+                                            item_def_to_place["passable"],
+                                            item_def_to_place["name"],
+                                            item_def_to_place.get("properties", {})
+                                        )
+                                        chunk_x, chunk_y = target_x // CHUNK_SIZE, target_y // CHUNK_SIZE
+                                        local_x, local_y = target_x % CHUNK_SIZE, target_y % CHUNK_SIZE
+                                        world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = new_furniture_tile
+
+                                        # Update transparency map if it blocks FOV
+                                        if new_furniture_tile.properties.get("blocks_fov", False): # Default to False if not specified
+                                            world.transparency_map[target_x, target_y] = False
+                                        else: # Ensure it's True if it doesn't block (e.g. replacing a floor tile)
+                                            world.transparency_map[target_x, target_y] = True
+
+                                        world.add_message_to_chat_log(f"Placed {item_def_to_place['name']}.")
+                                        # Recalculate player FOV as transparency might have changed
+                                        world.update_fov()
+
 
                     # --- Interaction Menu Option Handling ---
-                    elif world.interaction_menu_active: # This block was inside KeyDown but should be at same level as other UI mode checks
+                    elif world.interaction_menu_active:
                         if event.sym == tcod.event.KeySym.UP:
-                            # ... (up/down navigation as before) ...
                             if world.interaction_menu_options:
                                 world.interaction_menu_selected_index = \
                                     (world.interaction_menu_selected_index - 1) % len(world.interaction_menu_options)
@@ -442,21 +598,53 @@ def main():
                                 elif selected_option_text == "Attack":
                                     if target_npc and not target_npc.is_dead:
                                         world.player_attempt_attack(target_npc)
-                                elif selected_option_text.startswith("Complete:"):
+                                elif selected_option_text.startswith("Complete Contract:"):
                                     if target_npc:
-                                        # ... contract completion logic ...
-                                        contract_id_to_complete = f"lumber_delivery_{target_npc.id}" # Simplified assumption
+                                        # Simplified: assumes contract key is part of the option text or derivable
+                                        # This part needs robust parsing if there are multiple contract types.
+                                        # For "lumber_delivery_{target_npc.id}"
+                                        contract_id_to_complete = f"lumber_delivery_{target_npc.id}"
                                         if contract_id_to_complete in world.player.active_contracts:
                                             world.complete_contract_delivery(contract_id_to_complete, target_npc)
-                                            world.chat_ui_target_npc = target_npc
-                                            world.chat_ui_mode = "talk"
-                                            world.chat_ui_active = True
-                                            context.start_text_input()
+                                            # Decide if chat UI should open
+                                            if not world.chat_ui_active: # Open chat if not already, to show dialogue
+                                                world.chat_ui_target_npc = target_npc
+                                                world.chat_ui_mode = "talk"
+                                                world.chat_ui_active = True
+                                                context.start_text_input()
                                         else:
                                             world.add_message_to_chat_log("Could not find that specific contract to complete.")
+                                    else:
+                                        world.add_message_to_chat_log("Error: No target NPC for contract completion.")
+                                elif selected_option_text.startswith("Quest - "):
+                                    if target_npc:
+                                        # Extract quest title from menu option to find quest_id
+                                        # Example: "Quest - Wolf Extermination (Complete)" -> "Wolf Extermination"
+                                        try:
+                                            quest_title_in_menu = selected_option_text.split(" - ")[1].split(" (")[0]
+                                            found_quest_id = None
+                                            for q_id, q_data in world.player.active_quests.items():
+                                                if q_data["title"] == quest_title_in_menu:
+                                                    found_quest_id = q_id
+                                                    break
+
+                                            if found_quest_id:
+                                                world.complete_quest(found_quest_id, target_npc)
+                                                # Potentially open chat UI to show NPC dialogue from complete_quest
+                                                if not world.chat_ui_active:
+                                                    world.chat_ui_target_npc = target_npc
+                                                    world.chat_ui_mode = "talk"
+                                                    world.chat_ui_active = True
+                                                    context.start_text_input()
+                                            else:
+                                                world.add_message_to_chat_log(f"Could not find active quest: {quest_title_in_menu}")
+                                        except IndexError:
+                                            world.add_message_to_chat_log("Error parsing quest option.")
+                                    else:
+                                        world.add_message_to_chat_log("Error: No target NPC for quest interaction.")
                                 elif selected_option_text == "Cancel":
                                     world.add_message_to_chat_log("Interaction cancelled.")
-                                world.interaction_menu_target_npc = None # Clear targets
+                                world.interaction_menu_target_npc = None
                                 world.interaction_menu_target_building = None
                         elif event.sym == tcod.event.KeySym.ESCAPE:
                             world.interaction_menu_active = False

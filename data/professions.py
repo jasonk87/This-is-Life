@@ -29,7 +29,7 @@ PROFESSIONS = {
                 "target_zone_tag": "splitting_area", # Another designated spot
                 "action_verb": "splitting wood",
                 "consumes_item_from_workplace": {"raw_log": 1}, # Corrected to raw_log
-                "produces_item_at_workplace": {"lumber_processed": 1} # Adjusted output to 1 lumber per log
+                "produces_item_at_workplace": {"wooden_plank": 1} # Adjusted output to 1 lumber per log
             }
         ],
         "default_sub_task_sequence": ["chop_trees", "haul_logs", "split_stack_wood"]
@@ -136,6 +136,17 @@ PROFESSIONS = {
         ],
         "default_sub_task_sequence": ["patrol_town", "office_work"]
     },
+    "Carpenter": {
+        "display_name": "Carpenter",
+        "wage": 22,
+        "description": "Builds and repairs wooden structures and furniture.",
+        "work_building_categories": ["Carpenter Shop"],
+        "sub_tasks": [
+            {"id": "fetch_wood", "display_name": "Fetching Wood", "duration_ticks": 100, "target_zone_tag": "lumber_mill", "action_verb": "fetching wood"},
+            {"id": "craft_furniture", "display_name": "Crafting Furniture", "duration_ticks": 200, "target_zone_tag": "workbench", "action_verb": "crafting furniture"}
+        ],
+        "default_sub_task_sequence": ["fetch_wood", "craft_furniture"]
+    }
     # More professions can be added here
 }
 

@@ -1628,6 +1628,12 @@ class World:
             # For chopping, we find a dynamic tree target near the building.
             # The work_building itself is passed to help center the search.
             return self._find_nearest_tree_for_chopping(npc, work_building)
+        elif target_zone_tag == "lumber_mill":
+            # For fetching wood, find the nearest lumber mill
+            lumber_mill = self._find_nearest_lumber_mill(npc)
+            if lumber_mill:
+                return lumber_mill.id
+            return None
         elif npc.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
@@ -1799,7 +1805,7 @@ class World:
                         tree_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
                         if isinstance(tree_tile_obj, Tree) and tree_tile_obj.is_choppable:
                             yielded_resources = tree_tile_obj.chop() # Marks tree as not choppable
-                            logs_collected = yielded_resources.get("log", 0)
+                            logs_collected = yielded_resources.get("raw_log", 0)
 
                             stump_key = tree_tile_obj.becomes_on_chop_key
                             stump_def = TILE_DEFINITIONS.get(stump_key)
@@ -1813,6 +1819,26 @@ class World:
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} collected {logs_collected} raw_log(s). Inv: {npc.npc_inventory['raw_log']}")
                         # else:
                             # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
+
+                    elif completed_sub_task_id == "fetch_wood":
+                        # Carpenter is at the lumber mill, try to buy wood
+                        lumber_mill = self.buildings_by_id.get(npc.sub_task_target_coords)
+                        if lumber_mill and lumber_mill.building_type == "lumber_mill":
+                            plank_price = ITEM_DEFINITIONS["wooden_plank"]["value"]
+                            planks_to_buy = 5 # Try to buy 5 planks
+                            if npc.money >= plank_price * planks_to_buy and lumber_mill.building_inventory.get("wooden_plank", 0) >= planks_to_buy:
+                                lumber_mill.building_inventory["wooden_plank"] -= planks_to_buy
+                                npc.money -= plank_price * planks_to_buy
+                                work_building.building_inventory["wooden_plank"] = work_building.building_inventory.get("wooden_plank", 0) + planks_to_buy
+                                # self.add_message_to_chat_log(f"{npc.name} bought {planks_to_buy} planks.")
+
+                    elif completed_sub_task_id == "craft_furniture":
+                        # Carpenter is at their workbench, try to craft furniture
+                        planks_needed = 2 # Example for a chair
+                        if work_building.building_inventory.get("wooden_plank", 0) >= planks_needed:
+                            work_building.building_inventory["wooden_plank"] -= planks_needed
+                            work_building.building_inventory["wooden_chair"] = work_building.building_inventory.get("wooden_chair", 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} crafted a wooden chair.")
 
                     elif npc.profession == "Farmer":
                         target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
@@ -2174,6 +2200,27 @@ class World:
                 closest_merchant = building
 
         return closest_merchant
+
+    def _find_nearest_lumber_mill(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'lumber_mill' type in the NPC's village."""
+        npc_village = self._get_village_for_npc(npc)
+        if not npc_village:
+            return None
+
+        lumber_mills = [b for b in npc_village.buildings if b.building_type == "lumber_mill"]
+        if not lumber_mills:
+            return None
+
+        closest_mill = None
+        min_dist_sq = float('inf')
+
+        for building in lumber_mills:
+            dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_mill = building
+
+        return closest_mill
 
     def _get_village_for_npc(self, npc: NPC) -> Village | None:
         """Finds the village object that an NPC belongs to, typically via their home."""
@@ -3232,6 +3279,8 @@ class World:
                          npc.profession = "Farmer"
                     elif work_building.building_type == "mine": # Assuming mine type
                          npc.profession = "Miner"
+                    elif work_building.building_type == "carpenter_shop":
+                        npc.profession = "Carpenter"
                     else:
                         npc.profession = work_building.building_type.replace("_", " ").title()
                 else:
@@ -3716,6 +3765,17 @@ class World:
             # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area (fallback) at {lumber_mill.work_zone_tiles['splitting_area']}")
         else: # If no log pile area either, mark as empty
             lumber_mill.work_zone_tiles["splitting_area"] = []
+
+        # Generate Carpenter Shop
+        carpenter_w, carpenter_h = 7, 6
+        carpenter_x = road_x + 2
+        carpenter_y = sheriff_office_y + sheriff_office_h + 2
+        carpenter_shop = Building(carpenter_x, carpenter_y, carpenter_w, carpenter_h,
+                                building_type="carpenter_shop", category="industrial_workplace",
+                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(carpenter_shop)
+        self.buildings_by_id[carpenter_shop.id] = carpenter_shop
+        self._draw_building(tiles, carpenter_shop, "wood_wall")
 
         # Generate Farm (example agricultural workplace)
         if random.random() < 0.7: # Chance to generate a farm

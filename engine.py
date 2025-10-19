@@ -166,6 +166,8 @@ class Player:
         self.is_jailed: bool = False
         self.jail_cell_coords: tuple[int, int] | None = None
         self.jail_time_remaining: int = 0
+        self.active_quests = {}
+        self.completed_quests = []
 
 
     def take_damage(self, amount: int):
@@ -3510,6 +3512,8 @@ class World:
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
 
+        self._check_and_offer_quests(npc_target)
+
     def continue_npc_dialogue(self, npc_target: NPC, player_input_text: str):
         """Continues dialogue with an NPC based on player input and history."""
         if not npc_target:
@@ -3582,20 +3586,32 @@ class World:
             }
             self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
 
-        # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
-        # This is a simplified trigger; more robust would be keyword matching or LLM intent.
-        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
-           "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
-
-            quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
-            if quest_def:
-                offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
-                self.chat_ui_history.append((npc_target.name, offer_dialogue))
-                self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
-                self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
+        self._check_and_offer_quests(npc_target)
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+
+
+    def _check_and_offer_quests(self, npc_target: NPC):
+        """Checks if an NPC should offer any faction quests to the player."""
+        if not self.pending_quest_offer: # Only check for new quests if one isn't already pending
+            for quest_id, quest_def in QUEST_DEFINITIONS.items():
+                required_faction = quest_def.get("required_faction")
+                if not required_faction:
+                    continue
+
+                # Check if the NPC belongs to the required faction
+                if required_faction in npc_target.factions:
+                    # Check reputation, completion status, and active status
+                    if (self.player.reputation.get(required_faction, 0) >= quest_def.get("required_reputation", 0) and
+                            quest_id not in self.player.active_quests and
+                            quest_id not in self.player.completed_quests):
+
+                        offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
+                        self.chat_ui_history.append((npc_target.name, offer_dialogue))
+                        self.pending_quest_offer = {"quest_id": quest_id, "npc_offerer_id": npc_target.id}
+                        self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
+                        break # Offer one quest at a time
 
 
     def _call_ollama(self, prompt: str) -> str:
@@ -3612,24 +3628,17 @@ class World:
             )
             response.raise_for_status() # Raise an exception for HTTP errors
             full_response = response.json()["response"]
-            # Attempt to extract JSON from markdown code block
+            # Attempt to extract JSON from markdown code block if present
             json_start = full_response.find("```json")
             if json_start != -1:
                 json_end = full_response.find("```", json_start + len("```json"))
                 if json_end != -1:
-                    json_str = full_response[json_start + len("```json"):json_end].strip()
-                    try:
-                        json.loads(json_str) # Validate JSON
-                        return json_str
-                    except json.JSONDecodeError:
-                        pass # Fall through to try parsing full response
+                    # Return the content of the JSON block
+                    return full_response[json_start + len("```json"):json_end].strip()
 
-            # If no markdown block or invalid JSON in block, try parsing full response
-            try:
-                json.loads(full_response) # Validate JSON
-                return full_response
-            except json.JSONDecodeError:
-                return "" # Return empty string if not valid JSON
+            # If no JSON block, return the full response.
+            # Callers that expect JSON are responsible for parsing and error handling.
+            return full_response
         except requests.exceptions.RequestException as e:
             print(f"Error communicating with Ollama: {e}")
             return ""
@@ -5037,6 +5046,9 @@ class World:
         elif active_quest_data["type"] == "fetch":
             if self.player.has_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"]):
                 is_complete = True
+        elif active_quest_data["type"] == "action":
+            if active_quest_data.get("progress", 0) >= active_quest_data.get("action_count", 0):
+                is_complete = True
 
         dialogue_key = "dialogue_complete_report" if is_complete else "dialogue_incomplete_report"
         npc_dialogue = quest_def.get(dialogue_key, "...")
@@ -5074,6 +5086,10 @@ class World:
                 self.player.add_item(item_key, qty)
                 item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
                 self.add_message_to_chat_log(f"You received {qty}x {item_name}.")
+
+            reward_reputation = quest_def.get("reward_reputation", {})
+            for faction_id, amount in reward_reputation.items():
+                self.player.adjust_reputation(faction_id, amount)
 
             log_completion_msg = quest_def.get("completion_message_log", f"Quest '{active_quest_data['title']}' completed.")
             self.add_message_to_chat_log(log_completion_msg)

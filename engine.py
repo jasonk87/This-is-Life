@@ -24,6 +24,7 @@ from config import (
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
+from data.environment import SEASONS, SEASON_ORDER, WEATHER_TYPES
 from tile_types import Tile # For Tile class
 from entities.tree import Tree # For isinstance check
 from data.items import ITEM_DEFINITIONS # For checking yielded resources
@@ -308,6 +309,11 @@ class World:
         self.mouse_y = 0
         self.game_state = "PLAYING"
         self.game_time = 0
+        self.total_days = 0
+        self.day_of_season = 0
+        self.current_season_key = SEASON_ORDER[0]
+        self.current_season = SEASONS[self.current_season_key]
+        self.current_weather = "clear"
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
 
         # New Interaction Context
@@ -3570,7 +3576,38 @@ class World:
             return ""
 
     def _update_world_environment(self):
-        """Handles time-based environmental changes, like tree regrowth."""
+        """Handles time-based environmental changes, like tree regrowth and season transitions."""
+        # --- Season and Day Tracking ---
+        current_total_days = self.game_time // DAY_LENGTH_TICKS
+        if current_total_days > self.total_days:
+            self.total_days = current_total_days
+            self.day_of_season += 1
+
+            # Check for season change
+            season_duration = self.current_season["duration_days"]
+            if self.day_of_season > season_duration:
+                current_season_index = SEASON_ORDER.index(self.current_season_key)
+                next_season_index = (current_season_index + 1) % len(SEASON_ORDER)
+                self.current_season_key = SEASON_ORDER[next_season_index]
+                self.current_season = SEASONS[self.current_season_key]
+                self.day_of_season = 1
+                self.add_message_to_chat_log(f"The season has changed to {self.current_season['name']}.")
+
+            # --- Weather Change on New Day ---
+            weather_probabilities = self.current_season["weather_probabilities"]
+            weather_types = list(weather_probabilities.keys())
+            probabilities = list(weather_probabilities.values())
+
+            new_weather = random.choices(weather_types, probabilities, k=1)[0]
+            if new_weather != self.current_weather:
+                self.current_weather = new_weather
+                self.add_message_to_chat_log(f"The weather has changed to: {WEATHER_TYPES[self.current_weather]['name']}.")
+
+        # Get seasonal growth modifiers
+        tree_growth_mod = self.current_season["effects"].get("tree_growth_modifier", 1.0)
+        sapling_growth_mod = self.current_season["effects"].get("sapling_growth_modifier", 1.0)
+
+
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
@@ -3581,8 +3618,8 @@ class World:
                     for x_local in range(CHUNK_SIZE):
                         tile = chunk.tiles[y_local][x_local]
                         if hasattr(tile, 'regrowth_timer') and tile.regrowth_timer > 0:
-                            tile.regrowth_timer -= 1
-                            if tile.regrowth_timer == 0:
+                            tile.regrowth_timer -= (1 * tree_growth_mod)
+                            if tile.regrowth_timer <= 0:
                                 if hasattr(tile, 'original_tree_type') and tile.original_tree_type:
                                     tree_type = tile.original_tree_type
                                     world_x = x_chunk * CHUNK_SIZE + x_local
@@ -3601,7 +3638,7 @@ class World:
                                         self.transparency_map[world_x, world_y] = True
 
                         elif tile.name == "Sapling" and tile.properties.get("growth_timer"):
-                            tile.properties["growth_timer"] -= 1
+                            tile.properties["growth_timer"] -= (1 * sapling_growth_mod)
                             if tile.properties["growth_timer"] <= 0:
                                 tree_type = tile.properties.get("evolves_to", "oak")
                                 world_x = x_chunk * CHUNK_SIZE + x_local

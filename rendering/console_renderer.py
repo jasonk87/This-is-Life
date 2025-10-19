@@ -1,6 +1,7 @@
 import tcod
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
+from data.environment import WEATHER_TYPES
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
@@ -69,23 +70,62 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
     draw_chat_log(console, world)
     draw_interaction_menu(console, world, camera_x, camera_y)
+    # --- Weather Overlay ---
+    draw_weather_overlay(console, world)
+
     draw_chat_ui(console, world)
     draw_trade_ui(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
+
+
+def draw_weather_overlay(console: tcod.console.Console, world) -> None:
+    """Draws a visual effect over the screen for the current weather."""
+    from data.environment import WEATHER_TYPES
+    import random
+
+    weather_key = world.current_weather
+    if weather_key == "clear":
+        return
+
+    weather_def = WEATHER_TYPES.get(weather_key)
+    if not weather_def:
+        return
+
+    # A simple particle effect: sprinkle a number of weather characters randomly.
+    # The number of particles can be tied to the game time to create a sense of movement.
+    num_particles = 50
+    char_to_draw = ord(str(weather_def["overlay_char"]))
+    color_to_draw = weather_def["overlay_color"]
+
+    for _ in range(num_particles):
+        # Add a time-based offset to the y-coordinate to simulate falling
+        x = random.randint(0, console.width - 1)
+        y_offset = (world.game_time + random.randint(0, console.height)) % console.height
+        y = y_offset
+
+        # Check if console coordinates are valid (they should be)
+        if 0 <= x < console.width and 0 <= y < console.height:
+            # Only draw if the background is empty (black), to avoid drawing over UI frames.
+            # This is a simple way to keep weather behind UI.
+            if console.rgb[x, y]["bg"] == (0, 0, 0):
+                 console.rgb[x, y] = (char_to_draw, color_to_draw, console.rgb[x, y]["bg"])
+
 
 def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws information about the tile under the mouse cursor."""
     cursor_world_x = camera_x + world.mouse_x
     cursor_world_y = camera_y + world.mouse_y
 
-    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) "
+    season_name = world.current_season['name']
+    weather_name = WEATHER_TYPES[world.current_weather]['name']
 
+    tile_info = ""
     if 0 <= cursor_world_x < WORLD_WIDTH and 0 <= cursor_world_y < WORLD_HEIGHT:
         cursor_tile = world.get_tile_at(cursor_world_x, cursor_world_y)
         if cursor_tile:
-            cursor_info_text += f"{cursor_tile.name}"
-    else:
-        cursor_info_text += "Void"
+            tile_info = f"| {cursor_tile.name}"
+
+    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name}, {weather_name} {tile_info}"
 
     text_width = len(cursor_info_text)
     border_width = text_width + 2

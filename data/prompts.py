@@ -49,36 +49,6 @@ JSON Output:
 """,
     "npc_personality": """\
 Generate a JSON object for a fantasy NPC.
-The NPC should have:
-- 'name'
-- 'personality' (e.g., 'grumpy', 'jovial', 'shy', 'lawful', 'greedy')
-- 'family_ties' (e.g., 'married to John', 'orphan', 'sibling of Jane')
-- 'attitude_to_player' (e.g., 'friendly', 'suspicious', 'indifferent', 'hostile', 'admiring')
-- 3-5 lines of 'dialogue' that reflect their personality and attitude.
-
-Consider the following information about the player when determining attitude and dialogue:
-- Player Criminal Points: {player_criminal_points} (Higher means more notorious for crimes)
-- Player Hero Points: {player_hero_points} (Higher means more renowned for heroic deeds)
-
-A lawful or good-natured NPC might have a negative attitude towards a player with high criminal points.
-A greedy or criminal NPC might be friendly or indifferent to a player with high criminal points.
-Most NPCs would have a positive attitude towards a player with high hero points.
-Incorporate any provided hints: name_hint, personality_hint, family_ties_hint, attitude_to_player_hint.
-
-Example Output:
-{{
-  "name": "Elara",
-  "personality": "wise and lawful",
-  "family_ties": "elder of the village",
-  "attitude_to_player": "cautiously respectful",
-  "dialogue": [
-    "We've heard tales of your deeds, traveler. Some good, some... less so.",
-    "Justice always finds its course.",
-    "May your path be clear, provided it aligns with the village's well-being."
-  ],
-  "combat_behavior": "defensive",
-  "base_attack_name": "fists"
-}}
 
 NPC Data:
 Provide the following fields for the NPC:
@@ -90,9 +60,7 @@ Provide the following fields for the NPC:
 - 'combat_behavior' (How they generally act in a fight: 'aggressive', 'defensive', 'cowardly', 'opportunist', 'avoids_combat') - should be consistent with personality.
 - 'base_attack_name' (Their primary unarmed or simple attack name if forced into combat: e.g., 'fists', 'teeth', 'claws', 'kick', 'old rusty dagger', 'farming tool')
 
-The player's current reputation is:
-- Criminal Points: {player_criminal_points}
-- Hero Points: {player_hero_points}
+The player's current reputation is: {player_reputation_str}
 
 Hints for generation (use if provided, otherwise generate freely):
 - Name Hint: {name_hint}
@@ -154,8 +122,7 @@ You are an AI adjudicating a persuasion attempt in a fantasy role-playing game.
 
 **Player Details:**
 - Social Skill (1-10, higher is better): {player_social_skill}
-- Criminal Reputation Points: {player_criminal_points} (Higher means more known for crimes)
-- Hero Reputation Points: {player_hero_points} (Higher means more known for good deeds)
+- Player Reputation: {player_reputation_str}
 
 **Persuasion Attempt:**
 The player is attempting to persuade {npc_name}. The player's specific goal is:
@@ -164,8 +131,8 @@ The player is attempting to persuade {npc_name}. The player's specific goal is:
 **Task:**
 Based on all the above, determine if the persuasion attempt is successful.
 Consider:
-- A high social skill and positive reputation (high hero points, low criminal points) should increase chances of success, especially with friendly or neutral NPCs.
-- A low social skill or negative reputation (high criminal points) should decrease chances, especially with lawful or wary NPCs.
+- A high social skill and positive reputation should increase chances of success, especially with friendly or neutral NPCs.
+- A low social skill or negative reputation should decrease chances, especially with lawful or wary NPCs.
 - The NPC's personality: A 'greedy' NPC might be swayed by offers of money (if implied in goal), a 'timid' one by intimidation (if implied), a 'lawful' one less likely by criminal-like requests.
 - The nature of the request itself. Is it reasonable? Does it align with or go against the NPC's personality and current attitude?
 
@@ -195,7 +162,7 @@ Adjudication:
 You are {npc_name}, an NPC in a fantasy village.
 Your personality is: {npc_personality}.
 Your current attitude towards the player is: {npc_attitude}.
-Player Reputation: Criminal Points: {player_criminal_points}, Hero Points: {player_hero_points}.
+Player Reputation: {player_reputation_str}.
 The player has just initiated conversation with you.
 Generate a short, in-character greeting or opening line.
 
@@ -205,7 +172,7 @@ Greeting:
 You are {npc_name}, an NPC in a fantasy village.
 Your personality is: {npc_personality}.
 Your current attitude towards the player is: {npc_attitude}.
-Player Reputation: Criminal Points: {player_criminal_points}, Hero Points: {player_hero_points}.
+Player Reputation: {player_reputation_str}.
 
 The conversation history so far is:
 {conversation_history}
@@ -220,7 +187,7 @@ Response:
     "npc_job_offer_lumber": """\
 You are {npc_name}, the {npc_profession} of this village. Your personality is {npc_personality}.
 Your current attitude towards the player is: {npc_attitude}.
-Player Reputation: Criminal Points: {player_criminal_points}, Hero Points: {player_hero_points}.
+Player Reputation: {player_reputation_str}.
 
 The player is talking to you, and you have a job opportunity for them.
 The job is to collect {quantity_needed} {item_name_plural}. You are offering {reward_amount} money for this task.

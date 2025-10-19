@@ -11,16 +11,9 @@ from config import (
     WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
     NOISE_SCALE, NOISE_OCTAVES, NOISE_PERSISTENCE, NOISE_LACUNARITY,
     ELEVATION_DEEP_WATER, ELEVATION_WATER, ELEVATION_MOUNTAIN, ELEVATION_SNOW,
-    # NPC Scheduling Configs
     USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
-    WORK_START_TIME_RATIO, WORK_END_TIME_RATIO,
-    # Reputation Configs
-    INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
-    REP_CRIMINAL, REP_HERO,
-    # FOV and Light Level Configs
-    DAY_LENGTH_TICKS, LIGHT_LEVEL_PERIODS,
+    WORK_START_TIME_RATIO, WORK_END_TIME_RATIO, LIGHT_LEVEL_PERIODS,
     FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK,
-    # Auditory Perception Configs
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
@@ -31,6 +24,7 @@ from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
 from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data
+from data.factions import FACTIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
@@ -139,10 +133,7 @@ class Player:
         self.inventory: list[dict] = []
         self.max_hp = 30
         self.hp = self.max_hp
-        self.reputation = {
-            REP_CRIMINAL: INITIAL_CRIMINAL_POINTS,
-            REP_HERO: INITIAL_HERO_POINTS,
-        }
+        self.reputation = {faction_id: 0 for faction_id in FACTIONS.keys()}
         self.last_dx = 0 # For facing direction
         self.last_dy = -1 # Default facing up
 
@@ -277,19 +268,18 @@ class Player:
             return self.inventory[index]
         return None
 
-    def adjust_reputation(self, rep_type: str, amount: int):
-        """Adjusts the player's reputation of a specific type."""
-        if rep_type in self.reputation:
-            self.reputation[rep_type] += amount
-            # Could add clamping here if REP_MIN/MAX_VALUE were used
-            # self.reputation[rep_type] = max(REP_MIN_VALUE, min(self.reputation[rep_type], REP_MAX_VALUE))
-            # print(f"Player reputation updated: {rep_type} changed by {amount} to {self.reputation[rep_type]}") # For now, print to console
-            if hasattr(self, 'world_ref') and self.world_ref: # Access world_ref if it exists
-                self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.reputation[rep_type]})")
-        else:
-            # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+    def adjust_reputation(self, faction_id: str, amount: int):
+        """Adjusts the player's reputation with a specific faction."""
+        if faction_id in self.reputation:
+            self.reputation[faction_id] += amount
+            # Optional: Add clamping to a min/max value, e.g., -100 to 100
+            # self.reputation[faction_id] = max(-100, min(self.reputation[faction_id], 100))
             if hasattr(self, 'world_ref') and self.world_ref:
-                 self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+                faction_name = FACTIONS.get(faction_id, {}).get("name", faction_id)
+                self.world_ref.add_message_to_chat_log(f"Reputation with {faction_name} changed by {amount:+}. (New total: {self.reputation[faction_id]})")
+        else:
+            if hasattr(self, 'world_ref') and self.world_ref:
+                self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust reputation with unknown faction '{faction_id}'")
 
 
 class World:
@@ -1168,9 +1158,9 @@ class World:
                         # Check if at the sheriff's office
                         if (npc.x, npc.y) == npc.task_target_coords:
                             self.add_message_to_chat_log(f"{npc.name} reports your crimes to the authorities!")
-                            self.player.bounty += 50 # Example bounty increase
-                            self.add_message_to_chat_log(f"Your bounty has increased by 50. Total bounty: {self.player.bounty}.")
-                            npc.current_task = "idle" # Or return to previous task
+                            self.player.adjust_reputation("law_and_order", -10)
+                            self.player.adjust_reputation("common_folk", -5)
+                            npc.current_task = "idle"
                             npc.task_target_coords = None
                         else:
                             # Path to the sheriff's office if not already pathing
@@ -1611,12 +1601,11 @@ class World:
 
             # --- Sheriff / Guard Hostility Check ---
             if npc.profession in ["Sheriff", "Guard"] and not npc.is_hostile_to_player:
-                if self.player.bounty >= 100: # Bounty threshold for arrest
+                if self.player.reputation.get("law_and_order", 0) <= -50: # Reputation threshold for arrest
                     # Check if player is visible to the Sheriff/Guard
                     if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
                         self.add_message_to_chat_log(f"{npc.name} spots you and moves to arrest you for your crimes!")
                         npc.is_hostile_to_player = True
-                        # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
 
             # After all task decisions and path assignments:
             # If NPC is at work, handle specific work sub-tasks or general production.
@@ -2278,10 +2267,9 @@ class World:
             return
 
         # --- ARREST LOGIC ---
-        if npc.profession in ["Sheriff", "Guard"] and self.player.bounty >= 100 and not self.player.is_jailed:
+        if npc.profession in ["Sheriff", "Guard"] and self.player.reputation.get("law_and_order", 0) <= -50 and not self.player.is_jailed:
             self.add_message_to_chat_log(f"{npc.name} apprehends you! You are under arrest.")
             self.serve_jail_time()
-            # Stop the NPC's hostile actions after arrest
             npc.is_hostile_to_player = False
             npc.current_task = "idle"
             npc.current_path = []
@@ -2675,9 +2663,10 @@ class World:
         self.player.jail_time_remaining = 500 # Set jail time
         self.add_message_to_chat_log("You've been thrown in jail!")
 
-        # Reduce bounty
-        self.player.bounty = 0
-        self.add_message_to_chat_log("Your bounty has been cleared.")
+        # Reset reputation with law and common folk
+        self.player.adjust_reputation("law_and_order", -self.player.reputation.get("law_and_order", 0))
+        self.player.adjust_reputation("common_folk", -self.player.reputation.get("common_folk", 0))
+        self.add_message_to_chat_log("Your reputation with the locals and the law has been reset.")
 
         self.update_fov() # Update FOV from new position
 
@@ -2969,8 +2958,7 @@ class World:
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
             player_social_skill=self.player.social_skill,
-            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0),
+            player_reputation_str=json.dumps(self.player.reputation),
             player_persuasion_goal_text=player_goal_text
         )
 
@@ -3291,7 +3279,8 @@ class World:
         if witness.profession in ["Guard", "Sheriff"]:
             self.add_message_to_chat_log(f"{witness.name} shouts, 'Stop right there, criminal scum!'")
             witness.is_hostile_to_player = True
-            # Combat AI will take over on the next tick
+            self.player.adjust_reputation("law_and_order", -10)
+            self.player.adjust_reputation("common_folk", -5)
             return
 
         # Reaction based on personality
@@ -3305,9 +3294,10 @@ class World:
                 self.add_message_to_chat_log(f"{witness.name} gasps, 'I'm reporting this to the sheriff!'")
                 witness.current_task = "going_to_report_crime"
                 witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
-                witness.current_path = [] # Clear path for new destination
+                witness.current_path = []
+                self.player.adjust_reputation("law_and_order", -5)
+                self.player.adjust_reputation("common_folk", -2)
             else:
-                # No sheriff's office, maybe they just shout or flee?
                 self.add_message_to_chat_log(f"{witness.name} yells, 'Someone stop them!' but doesn't know where to go.")
         else:
             # Other personalities might just stare, disapprove, or ignore it for now
@@ -3371,7 +3361,7 @@ class World:
         for item_key, quantity in player_inventory_aggregated.items():
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
-                price = self.get_dynamic_price(item_key, merchant_village)
+                price = self.get_dynamic_price(item_key, merchant_village, is_selling=True)
                 self.trade_ui_player_inventory_snapshot.append((item_key, quantity, price))
 
         # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
@@ -3384,10 +3374,10 @@ class World:
             merchant_inventory_source = self.trade_ui_npc_target.npc_inventory
 
         for item_key, quantity in merchant_inventory_source.items():
-            if item_key == "money": continue # Don't list merchant's money as a sellable item
+            if item_key == "money": continue
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
-                price = self.get_dynamic_price(item_key, merchant_village)
+                price = self.get_dynamic_price(item_key, merchant_village, is_selling=False)
                 self.trade_ui_merchant_inventory_snapshot.append((item_key, quantity, price))
 
         # Sort by name for consistent display
@@ -3412,7 +3402,7 @@ class World:
 
         merchant_money = merchant_true_inventory.get("money", 0)
 
-        if self.trade_ui_player_selling: # Player is selling
+        if self.trade_ui_player_selling:
             if not self.trade_ui_player_inventory_snapshot: return
             item_key, _, price = self.trade_ui_player_inventory_snapshot[self.trade_ui_player_item_index]
 
@@ -3425,6 +3415,7 @@ class World:
                         self.add_message_to_chat_log(f"You sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
                         if merchant_village:
                             merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) + 1
+                        self.player.adjust_reputation("merchants_guild", 1) # Increase reputation
                     else:
                         self.add_message_to_chat_log("Error: Could not remove item from inventory.")
                 else:
@@ -3432,7 +3423,7 @@ class World:
             else:
                 self.add_message_to_chat_log("Error: You don't have that item to sell (inventory mismatch).")
 
-        else: # Player is buying (viewing merchant's items)
+        else:
             if not self.trade_ui_merchant_inventory_snapshot: return
             item_key, _, price = self.trade_ui_merchant_inventory_snapshot[self.trade_ui_merchant_item_index]
 
@@ -3448,8 +3439,10 @@ class World:
                     self.add_message_to_chat_log(f"You bought 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
                     if merchant_village:
                         merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) - 1
+                    self.player.adjust_reputation("merchants_guild", 1)
                 else:
                     self.add_message_to_chat_log("You don't have enough money for that.")
+                    self.player.adjust_reputation("merchants_guild", -1)
             else:
                 self.add_message_to_chat_log(f"Error: {merchant_npc.name} doesn't have that item in stock (inventory mismatch).")
 
@@ -3506,8 +3499,7 @@ class World:
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
-            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0)
+            player_reputation_str=json.dumps(self.player.reputation)
         )
         greeting = self._call_ollama(prompt)
         if not greeting:
@@ -3541,8 +3533,7 @@ class World:
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
-            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0),
+            player_reputation_str=json.dumps(self.player.reputation),
             conversation_history=history_str,
             player_input=player_input_text
         )
@@ -3573,8 +3564,7 @@ class World:
                 npc_profession=npc_target.profession,
                 npc_personality=npc_target.personality,
                 npc_attitude=npc_target.attitude_to_player,
-                player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
-                player_hero_points=self.player.reputation.get(REP_HERO,0),
+                player_reputation_str=json.dumps(self.player.reputation),
                 quantity_needed=quantity_needed,
                 item_name_plural=item_name_plural,
                 reward_amount=reward_amount
@@ -3773,8 +3763,7 @@ class World:
             # Fetch player reputation to pass to the prompt
             player_rep = self.player.reputation
             prompt = LLM_PROMPTS["npc_personality"].format(
-                player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-                player_hero_points=player_rep.get(REP_HERO, 0),
+                player_reputation_str=json.dumps(self.player.reputation),
                 # Potentially add name_hint, personality_hint etc. if we want more specific NPC roles
                 name_hint="", personality_hint="", family_ties_hint="", attitude_to_player_hint=""
             )
@@ -3887,6 +3876,13 @@ class World:
                 else:
                     npc.profession = "Unemployed"
 
+                # Assign factions based on profession
+                npc.factions = ["common_folk"] # Everyone is part of the common folk
+                if npc.profession in ["Merchant", "Carpenter", "Blacksmith", "Miller", "Baker"]:
+                    npc.factions.append("merchants_guild")
+                if npc.profession in ["Sheriff", "Guard"]:
+                    npc.factions.append("law_and_order")
+
                 # If NPC is a Merchant and assigned to a general store, pre-populate store inventory
                 if npc.profession == "Merchant" and work_building and work_building.building_type == "general_store":
                     # Add some starting cash for the store to buy items
@@ -3953,11 +3949,10 @@ class World:
                 # Ambient speech might be general, or react to player if nearby and reputation is notable
                 prompt = (
                     f"NPC {npc.name} (Personality: {npc.personality}, Attitude to Player: {npc.attitude_to_player}, Family: {npc.family_ties}) "
-                    f"is going about their day. The player's reputation is: "
-                    f"Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}. "
+                    f"is going about their day. The player's reputation with various factions is represented by this JSON object: {json.dumps(player_rep)}. "
                     f"Generate a short, in-character ambient thought or statement from {npc.name}. "
                     f"It could be about their current (unspecified) activity, the village, a general thought, "
-                    f"or a comment related to the player if their reputation is particularly high or low and the player is assumed to be generally known or nearby. "
+                    f"or a comment related to the player if their reputation is particularly high or low with a relevant faction, and the player is assumed to be generally known or nearby. "
                     f"Keep it concise."
                 )
                 llm_dialogue = self._call_ollama(prompt)
@@ -4099,7 +4094,7 @@ class World:
             # Use LLM for dynamic dialogue
             player_rep = self.player.reputation
             prompt = (
-                f"The player (Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}) "
+                f"The player (Reputation: {json.dumps(player_rep)}) "
                 f"approaches {closest_npc.name}. "
                 f"{closest_npc.name} is {closest_npc.personality}, their family ties are '{closest_npc.family_ties}', "
                 f"and their current attitude towards the player is '{closest_npc.attitude_to_player}'. "
@@ -4280,6 +4275,8 @@ class World:
         capital_hall_w, capital_hall_h = 9, 7
         capital_hall_x = road_x - capital_hall_w - 2
         capital_hall_y = road_y - capital_hall_h // 2
+        capital_hall_x = max(0, min(capital_hall_x, CHUNK_SIZE - capital_hall_w))
+        capital_hall_y = max(0, min(capital_hall_y, CHUNK_SIZE - capital_hall_h))
         capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h,
                                 building_type="capital_hall", category="civic",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4291,6 +4288,8 @@ class World:
         jail_w, jail_h = 7, 5
         jail_x = road_x + 2
         jail_y = road_y - jail_h // 2
+        jail_x = max(0, min(jail_x, CHUNK_SIZE - jail_w))
+        jail_y = max(0, min(jail_y, CHUNK_SIZE - jail_h))
         jail = Building(jail_x, jail_y, jail_w, jail_h,
                         building_type="jail", category="civic",
                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4302,6 +4301,8 @@ class World:
         sheriff_office_w, sheriff_office_h = 7, 5
         sheriff_office_x = road_x + 2
         sheriff_office_y = jail_y + jail_h + 2
+        sheriff_office_x = max(0, min(sheriff_office_x, CHUNK_SIZE - sheriff_office_w))
+        sheriff_office_y = max(0, min(sheriff_office_y, CHUNK_SIZE - sheriff_office_h))
         sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h,
                                   building_type="sheriff_office", category="civic_workplace",
                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4507,6 +4508,8 @@ class World:
         blacksmith_w, blacksmith_h = 7, 6
         blacksmith_x = road_x + 2
         blacksmith_y = road_y + 2
+        blacksmith_x = max(0, min(blacksmith_x, CHUNK_SIZE - blacksmith_w))
+        blacksmith_y = max(0, min(blacksmith_y, CHUNK_SIZE - blacksmith_h))
         blacksmith_shop = Building(blacksmith_x, blacksmith_y, blacksmith_w, blacksmith_h,
                                    building_type="blacksmith_shop", category="industrial_workplace",
                                    global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4794,21 +4797,37 @@ class World:
                         for item_key, quantity in building.building_inventory.items():
                             village.supply[item_key] = village.supply.get(item_key, 0) + quantity
 
-    def get_dynamic_price(self, item_key: str, village: Village) -> int:
-        """Calculates the dynamic price of an item based on village supply and demand."""
+    def get_dynamic_price(self, item_key: str, village: Village, is_selling: bool = False) -> int:
+        """
+        Calculates the dynamic price of an item based on village supply, demand,
+        and player's reputation with the merchants' guild.
+        'is_selling' is True if the player is selling to the merchant, False if buying.
+        """
         base_price = ITEM_DEFINITIONS.get(item_key, {}).get("value", 0)
         if not village:
             return base_price
 
-        supply = village.supply.get(item_key, 1)  # Avoid division by zero
+        supply = village.supply.get(item_key, 1)
         demand = village.demand.get(item_key, 1)
 
-        # Simple formula: price = base_price * (demand / supply)
-        # Add clamping to prevent extreme prices
         price_modifier = max(0.2, min(5.0, demand / supply))
-        dynamic_price = int(base_price * price_modifier)
 
-        return max(1, dynamic_price) # Ensure price is at least 1
+        # Reputation modifier
+        rep_modifier = 1.0
+        merchant_rep = self.player.reputation.get("merchants_guild", 0)
+        # Example: a 50% discount/surcharge at max/min reputation
+        rep_effect = (merchant_rep / 100.0) * 0.50
+
+        if is_selling:
+            # Higher reputation means merchants pay you more
+            rep_modifier += rep_effect
+        else:
+            # Higher reputation means you pay less
+            rep_modifier -= rep_effect
+
+        dynamic_price = int(base_price * price_modifier * rep_modifier)
+
+        return max(1, dynamic_price)
 
     def craft_item(self, item_key: str):
         """Crafts an item if the player has the required resources."""

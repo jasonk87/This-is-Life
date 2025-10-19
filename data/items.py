@@ -139,7 +139,7 @@ ITEM_DEFINITIONS = {
         "description": "A crudely made axe with a stone head. Good for chopping wood.",
         "char": "/",
         "color": COLORS["dark_slate_gray"],
-        "value": 25,
+        "value": 100,
         "weight": 7,
         "stackable": False,
         "item_type_tags": ["tool", "weapon", "melee", "axe"],

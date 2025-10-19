@@ -1,6 +1,9 @@
 import random
-from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
 from data.items import ITEM_DEFINITIONS # For accessing armor properties
+
+# Constants previously in config.py
+DEFAULT_SPEECH_VOLUME = 8
+DEFAULT_HEARING_RADIUS = 10
 
 class NPC:
     def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent"):

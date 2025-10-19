@@ -146,6 +146,56 @@ PROFESSIONS = {
             {"id": "craft_furniture", "display_name": "Crafting Furniture", "duration_ticks": 200, "target_zone_tag": "workbench", "action_verb": "crafting furniture"}
         ],
         "default_sub_task_sequence": ["fetch_wood", "craft_furniture"]
+    },
+    "Miller": {
+        "display_name": "Miller",
+        "wage": 18,
+        "description": "Grinds grain into flour.",
+        "work_building_categories": ["Mill"],
+        "sub_tasks": [
+            {
+                "id": "fetch_wheat",
+                "display_name": "Fetching Wheat",
+                "duration_ticks": 120,
+                "target_zone_tag": "farm",
+                "action_verb": "fetching wheat"
+            },
+            {
+                "id": "mill_flour",
+                "display_name": "Milling Flour",
+                "duration_ticks": 150,
+                "target_zone_tag": "grinding_stone",
+                "action_verb": "milling flour",
+                "consumes_item_from_workplace": {"wheat": 1},
+                "produces_item_at_workplace": {"flour": 1}
+            }
+        ],
+        "default_sub_task_sequence": ["fetch_wheat", "mill_flour"]
+    },
+    "Baker": {
+        "display_name": "Baker",
+        "wage": 20,
+        "description": "Bakes bread and other goods.",
+        "work_building_categories": ["Bakery"],
+        "sub_tasks": [
+            {
+                "id": "fetch_flour",
+                "display_name": "Fetching Flour",
+                "duration_ticks": 120,
+                "target_zone_tag": "mill",
+                "action_verb": "fetching flour"
+            },
+            {
+                "id": "bake_bread",
+                "display_name": "Baking Bread",
+                "duration_ticks": 180,
+                "target_zone_tag": "oven",
+                "action_verb": "baking bread",
+                "consumes_item_from_workplace": {"flour": 1},
+                "produces_item_at_workplace": {"bread": 1}
+            }
+        ],
+        "default_sub_task_sequence": ["fetch_flour", "bake_bread"]
     }
     # More professions can be added here
 }

@@ -14,6 +14,25 @@ COLORS = {
     "flower_fg": (255, 105, 180),  # Hot Pink
     "mountain_fg": (130, 130, 130), # Grey
     "snow_fg": (250, 250, 250),   # White
+    "saddlebrown": (139, 69, 19),
+    "grey": (128, 128, 128),
+    "dark_orange": (255, 140, 0),
+    "tan": (210, 180, 140),
+    "burlywood": (222, 184, 135),
+    "khaki": (240, 230, 140),
+    "dark_slate_gray": (47, 79, 79),
+    "dark_sepia": (118, 92, 72),
+    "silver": (192, 192, 192),
+    "light_green": (144, 238, 144),
+    "dark_amber": (128, 70, 27),
+    "flame": (242, 85, 44),
+    "darkest_grey": (32, 32, 32),
+    "light_blue": (173, 216, 230),
+    "red": (255, 0, 0),
+    "yellow_green": (154, 205, 50),
+    "crimson": (220, 20, 60),
+    "light_sepia": (208, 188, 142),
+    "sienna": (160, 82, 45),
 }
 
 # --- Tile Definitions (Back to ASCII!) ---

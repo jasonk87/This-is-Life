@@ -298,7 +298,6 @@ class World:
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height)
         self.chunks = self._initialize_chunks()
         self.npcs = []
-        self._find_starting_position()
         self.village_npcs = []
         self.buildings_by_id = {}
         self.mouse_x = 0
@@ -350,17 +349,18 @@ class World:
         self.current_fov_radius = FOV_RADIUS_DAY # Default
 
         # Initialize FOV related maps
-        self.player_fov_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F") # Or use WORLD_HEIGHT, WORLD_WIDTH if row-major
+        self.player_fov_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F")
         self.npc_fov_maps: dict[int, np.ndarray] = {}
         self.explored_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F")
+        self.transparency_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=True, order="F")
 
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
 
+        self._find_starting_position()
 
         # Build transparency map - this is expensive on init as it forces all chunks to generate.
         # Consider dynamic updates or pre-generation if performance becomes an issue.
-        self.transparency_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=True, order="F")
         for x_map in range(WORLD_WIDTH):
             for y_map in range(WORLD_HEIGHT):
                 tile = self.get_tile_at(x_map, y_map) # Forces chunk generation
@@ -1213,19 +1213,19 @@ class World:
                                 else:
                                     # No food at home, try to buy food if they have money
                                     if npc.money > 10: # Arbitrary threshold to decide to buy food
-                                        merchant_building = self._find_nearest_merchant(npc)
-                                        if merchant_building:
+                                        food_vendor_building = self._find_nearest_food_vendor(npc)
+                                        if food_vendor_building:
                                             npc.current_task = "going_to_buy_food"
-                                            merchant_coords = (merchant_building.global_center_x, merchant_building.global_center_y)
-                                            if not npc.current_path or npc.current_destination_coords != merchant_coords:
-                                                path = self.calculate_path(npc.x, npc.y, merchant_coords[0], merchant_coords[1])
+                                            vendor_coords = (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
+                                            if not npc.current_path or npc.current_destination_coords != vendor_coords:
+                                                path = self.calculate_path(npc.x, npc.y, vendor_coords[0], vendor_coords[1])
                                                 if path:
                                                     npc.current_path = path
-                                                    npc.current_destination_coords = merchant_coords
+                                                    npc.current_destination_coords = vendor_coords
                                                 else:
-                                                    npc.current_task = "idle_confused" # Can't path to merchant
+                                                    npc.current_task = "idle_confused" # Can't path to vendor
                                         else:
-                                            # No merchant, wander hungry
+                                            # No vendor, wander hungry
                                             npc.current_task = "wandering_hungry"
                                     else:
                                         # No food at home and not enough money
@@ -1237,12 +1237,12 @@ class World:
 
                     needs_based_action_taken = True
                 elif npc.current_task == "going_to_buy_food":
-                    merchant_building = self._find_nearest_merchant(npc)
-                    if merchant_building and (npc.x, npc.y) == (merchant_building.global_center_x, merchant_building.global_center_y):
-                        # At the merchant, attempt to buy food
+                    food_vendor_building = self._find_nearest_food_vendor(npc)
+                    if food_vendor_building and (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y):
+                        # At the vendor, attempt to buy food
                         food_to_buy = None
                         food_price = 0
-                        for item_key, quantity in merchant_building.building_inventory.items():
+                        for item_key, quantity in food_vendor_building.building_inventory.items():
                             if quantity > 0:
                                 item_def = ITEM_DEFINITIONS.get(item_key, {})
                                 if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
@@ -1251,7 +1251,7 @@ class World:
                                     break
 
                         if food_to_buy and npc.money >= food_price:
-                            merchant_building.building_inventory[food_to_buy] -= 1
+                            food_vendor_building.building_inventory[food_to_buy] -= 1
                             npc.money -= food_price
                             npc.npc_inventory[food_to_buy] = npc.npc_inventory.get(food_to_buy, 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
@@ -1635,7 +1635,19 @@ class World:
             # For fetching wood, find the nearest lumber mill
             lumber_mill = self._find_nearest_lumber_mill(npc)
             if lumber_mill:
-                return lumber_mill.id
+                return (lumber_mill.global_center_x, lumber_mill.global_center_y)
+            return None
+        elif target_zone_tag == "farm":
+            # For fetching wheat, find the nearest farm
+            farm = self._find_nearest_farm(npc)
+            if farm:
+                return (farm.global_center_x, farm.global_center_y)
+            return None
+        elif target_zone_tag == "mill":
+            # For fetching flour, find the nearest mill
+            mill = self._find_nearest_mill(npc)
+            if mill:
+                return (mill.global_center_x, mill.global_center_y)
             return None
         elif npc.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
@@ -1843,6 +1855,26 @@ class World:
                             work_building.building_inventory["wooden_plank"] -= planks_needed
                             work_building.building_inventory["wooden_chair"] = work_building.building_inventory.get("wooden_chair", 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} crafted a wooden chair.")
+
+                    elif completed_sub_task_id == "fetch_wheat":
+                        # Miller is at the farm, try to buy wheat
+                        farm = self._find_nearest_farm(npc)
+                        if farm:
+                            wheat_price = ITEM_DEFINITIONS["wheat"]["value"]
+                            wheat_to_buy = 5 # Try to buy 5 wheat
+                            if npc.money >= wheat_price * wheat_to_buy and farm.building_inventory.get("wheat", 0) >= wheat_to_buy:
+                                farm.building_inventory["wheat"] -= wheat_to_buy
+                                npc.money -= wheat_price * wheat_to_buy
+                                work_building.building_inventory["wheat"] = work_building.building_inventory.get("wheat", 0) + wheat_to_buy
+                                # self.add_message_to_chat_log(f"{npc.name} bought {wheat_to_buy} wheat.")
+
+                    elif completed_sub_task_id == "mill_flour":
+                        # Miller is at their grinding stone, try to mill flour
+                        wheat_needed = 1
+                        if work_building.building_inventory.get("wheat", 0) >= wheat_needed:
+                            work_building.building_inventory["wheat"] -= wheat_needed
+                            work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} milled some flour.")
 
                     elif npc.profession == "Farmer":
                         target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
@@ -2190,26 +2222,26 @@ class World:
              self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
-    def _find_nearest_merchant(self, npc: NPC) -> Building | None:
-        """Finds the nearest building with a 'general_store' type in the NPC's village."""
+    def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
+        """Finds the nearest building that sells food (e.g., general store, bakery)."""
         npc_village = self._get_village_for_npc(npc)
         if not npc_village:
             return None
 
-        merchant_buildings = [b for b in npc_village.buildings if b.building_type == "general_store"]
-        if not merchant_buildings:
+        food_vendors = [b for b in npc_village.buildings if b.building_type in ["general_store", "bakery"]]
+        if not food_vendors:
             return None
 
-        closest_merchant = None
+        closest_vendor = None
         min_dist_sq = float('inf')
 
-        for building in merchant_buildings:
+        for building in food_vendors:
             dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
             if dist_sq < min_dist_sq:
                 min_dist_sq = dist_sq
-                closest_merchant = building
+                closest_vendor = building
 
-        return closest_merchant
+        return closest_vendor
 
     def _find_nearest_lumber_mill(self, npc: NPC) -> Building | None:
         """Finds the nearest building with a 'lumber_mill' type in the NPC's village."""
@@ -2225,6 +2257,48 @@ class World:
         min_dist_sq = float('inf')
 
         for building in lumber_mills:
+            dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_mill = building
+
+        return closest_mill
+
+    def _find_nearest_farm(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'farm' type in the NPC's village."""
+        npc_village = self._get_village_for_npc(npc)
+        if not npc_village:
+            return None
+
+        farms = [b for b in npc_village.buildings if b.building_type == "farm"]
+        if not farms:
+            return None
+
+        closest_farm = None
+        min_dist_sq = float('inf')
+
+        for building in farms:
+            dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_farm = building
+
+        return closest_farm
+
+    def _find_nearest_mill(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'mill' type in the NPC's village."""
+        npc_village = self._get_village_for_npc(npc)
+        if not npc_village:
+            return None
+
+        mills = [b for b in npc_village.buildings if b.building_type == "mill"]
+        if not mills:
+            return None
+
+        closest_mill = None
+        min_dist_sq = float('inf')
+
+        for building in mills:
             dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
             if dist_sq < min_dist_sq:
                 min_dist_sq = dist_sq
@@ -3305,9 +3379,6 @@ class World:
                     # Ensure NPC is within world bounds (still good practice)
                     npc_x = max(0, min(WORLD_WIDTH - 1, npc_x))
                     npc_y = max(0, min(WORLD_HEIGHT - 1, npc_y))
-                else:
-                    self.add_message_to_chat_log(f"Skipping NPC generation for {npc_data.get('name', 'Unknown')} due to no available home.")
-                    continue # Skip this NPC if no home can be assigned
 
                 # Assign workplace (optional)
                 work_building = None
@@ -3384,6 +3455,10 @@ class World:
                          npc.profession = "Miner"
                     elif work_building.building_type == "carpenter_shop":
                         npc.profession = "Carpenter"
+                    elif work_building.building_type == "mill":
+                        npc.profession = "Miller"
+                    elif work_building.building_type == "bakery":
+                        npc.profession = "Baker"
                     else:
                         npc.profession = work_building.building_type.replace("_", " ").title()
                 else:
@@ -3882,6 +3957,46 @@ class World:
         chunk.village.add_building(carpenter_shop)
         self.buildings_by_id[carpenter_shop.id] = carpenter_shop
         self._draw_building(tiles, carpenter_shop, "wood_wall")
+
+        # Generate Windmill
+        windmill_w, windmill_h = 7, 7
+        windmill_x = CHUNK_SIZE - windmill_w - 1
+        windmill_y = CHUNK_SIZE - windmill_h - 1
+        windmill = Building(windmill_x, windmill_y, windmill_w, windmill_h,
+                            building_type="mill", category="industrial_workplace",
+                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(windmill)
+        self.buildings_by_id[windmill.id] = windmill
+        self._draw_building(tiles, windmill, "wood_wall")
+
+        grinding_stone_coords_global = []
+        if windmill.width > 2 and windmill.height > 2:
+            local_stone_x = windmill.width // 2
+            local_stone_y = windmill.height // 2
+            gx = windmill.global_origin_x + local_stone_x
+            gy = windmill.global_origin_y + local_stone_y
+            grinding_stone_coords_global.append((gx, gy))
+        windmill.work_zone_tiles["grinding_stone"] = grinding_stone_coords_global
+
+        # Generate Bakery
+        bakery_w, bakery_h = 7, 6
+        bakery_x = 1
+        bakery_y = 1
+        bakery = Building(bakery_x, bakery_y, bakery_w, bakery_h,
+                          building_type="bakery", category="commercial_workplace",
+                          global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(bakery)
+        self.buildings_by_id[bakery.id] = bakery
+        self._draw_building(tiles, bakery, "wood_wall")
+
+        oven_coords_global = []
+        if bakery.width > 2 and bakery.height > 2:
+            local_oven_x = bakery.width // 2
+            local_oven_y = 1
+            gx = bakery.global_origin_x + local_oven_x
+            gy = bakery.global_origin_y + local_oven_y
+            oven_coords_global.append((gx, gy))
+        bakery.work_zone_tiles["oven"] = oven_coords_global
 
         # Generate Farm (example agricultural workplace)
         if random.random() < 0.7: # Chance to generate a farm

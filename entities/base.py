@@ -1,4 +1,5 @@
-from config import DEFAULT_SPEECH_VOLUME
+import random
+from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
 from data.items import ITEM_DEFINITIONS # For accessing armor properties
 
 class NPC:

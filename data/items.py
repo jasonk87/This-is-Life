@@ -77,6 +77,26 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource"],
     },
+    "iron_ingot": {
+        "name": "Iron Ingot",
+        "description": "A bar of refined iron, ready for smithing.",
+        "char": "=",
+        "color": COLORS["silver"],
+        "value": 15,
+        "weight": 8,
+        "stackable": True,
+        "item_type_tags": ["component", "metal"],
+    },
+    "coal": {
+        "name": "Coal",
+        "description": "A combustible black rock, used as fuel.",
+        "char": "c",
+        "color": COLORS["darkest_grey"],
+        "value": 3,
+        "weight": 4,
+        "stackable": True,
+        "item_type_tags": ["resource", "fuel"],
+    },
 
     # --- Crafted Components ---
     "wooden_plank": {
@@ -430,7 +450,68 @@ ITEM_DEFINITIONS = {
         "properties": {
             "defense_bonus": 1,
             "max_durability": 70
+        },
+        "crafting_recipe": {
+            "iron_ingot": 3
         }
+    },
+    "stone_pickaxe": {
+        "name": "Stone Pickaxe",
+        "description": "A crude pickaxe for mining.",
+        "char": "p",
+        "color": COLORS["dark_slate_gray"],
+        "value": 30,
+        "weight": 8,
+        "stackable": False,
+        "item_type_tags": ["tool", "weapon", "melee", "pickaxe"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "tool_type": "pickaxe",
+            "mine_power": 1,
+            "max_durability": 25,
+            "damage_dice": "1d4",
+        },
+        "crafting_recipe": {
+            "stone_chunk": 3,
+            "raw_log": 2
+        },
+    },
+    "iron_sword": {
+        "name": "Iron Sword",
+        "description": "A simple but effective iron sword.",
+        "char": "|",
+        "color": COLORS["silver"],
+        "value": 50,
+        "weight": 5,
+        "stackable": False,
+        "item_type_tags": ["weapon", "melee", "sword"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "damage_dice": "1d8",
+            "max_durability": 60
+        },
+        "crafting_recipe": {
+            "iron_ingot": 2,
+            "raw_log": 1
+        },
+    },
+    "iron_breastplate": {
+        "name": "Iron Breastplate",
+        "description": "A sturdy breastplate made of iron.",
+        "char": "[",
+        "color": COLORS["silver"],
+        "value": 80,
+        "weight": 15,
+        "stackable": False,
+        "item_type_tags": ["armor", "body"],
+        "equip_slot": "body_armor",
+        "properties": {
+            "defense_bonus": 2,
+            "max_durability": 100
+        },
+        "crafting_recipe": {
+            "iron_ingot": 5,
+        },
     }
 }
 

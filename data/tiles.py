@@ -61,6 +61,12 @@ TILE_DEFINITIONS = {
         "passable": False,
         "name": "Wood Wall"
     },
+    "stone_wall": {
+        "char": "#",
+        "color": COLORS["grey"],
+        "passable": False,
+        "name": "Stone Wall"
+    },
     "door": {
         "char": "+",
         "color": COLORS["door_fg"],

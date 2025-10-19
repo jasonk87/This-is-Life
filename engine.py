@@ -1649,6 +1649,12 @@ class World:
             if mill:
                 return (mill.global_center_x, mill.global_center_y)
             return None
+        elif target_zone_tag == "mine":
+            # For fetching ore, find the nearest mine
+            mine = self._find_nearest_mine(npc)
+            if mine:
+                return (mine.global_center_x, mine.global_center_y)
+            return None
         elif npc.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
@@ -1835,6 +1841,21 @@ class World:
                                 npc.add_item("raw_log", logs_collected)
                         # else:
                             # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
+                    elif completed_sub_task_id == "mine_ore":
+                        # Miner is at the mine face, generate ore
+                        npc.add_item("iron_ore", 1)
+
+                    elif completed_sub_task_id == "fetch_ore":
+                        # Blacksmith is at the mine, try to buy ore
+                        mine = self._find_nearest_mine(npc)
+                        if mine:
+                            ore_price = ITEM_DEFINITIONS["iron_ore"]["value"]
+                            ore_to_buy = 5 # Try to buy 5 ore
+                            if npc.money >= ore_price * ore_to_buy and mine.building_inventory.get("iron_ore", 0) >= ore_to_buy:
+                                mine.building_inventory["iron_ore"] -= ore_to_buy
+                                npc.money -= ore_price * ore_to_buy
+                                npc.add_item("iron_ore", ore_to_buy)
+                                # self.add_message_to_chat_log(f"{npc.name} bought {ore_to_buy} iron ore.")
 
                     elif completed_sub_task_id == "fetch_wood":
                         # Carpenter is at the lumber mill, try to buy wood
@@ -2263,6 +2284,27 @@ class World:
                 closest_mill = building
 
         return closest_mill
+
+    def _find_nearest_mine(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'mine' type in the NPC's village."""
+        npc_village = self._get_village_for_npc(npc)
+        if not npc_village:
+            return None
+
+        mines = [b for b in npc_village.buildings if b.building_type == "mine"]
+        if not mines:
+            return None
+
+        closest_mine = None
+        min_dist_sq = float('inf')
+
+        for building in mines:
+            dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_mine = building
+
+        return closest_mine
 
     def _find_nearest_farm(self, npc: NPC) -> Building | None:
         """Finds the nearest building with a 'farm' type in the NPC's village."""
@@ -3370,15 +3412,17 @@ class World:
                     # self.add_message_to_chat_log("Warning: No available homes for new NPC.")
                     # Create NPC without a home, or handle differently
                     home_building = None
+                    npc_x = chunk_coord_x * CHUNK_SIZE + CHUNK_SIZE // 2
+                    npc_y = chunk_coord_y * CHUNK_SIZE + CHUNK_SIZE // 2
                 else:
                     home_building = available_homes.pop(0)
                     # Place NPC at the global center of their home building
                     npc_x = home_building.global_center_x
                     npc_y = home_building.global_center_y
 
-                    # Ensure NPC is within world bounds (still good practice)
-                    npc_x = max(0, min(WORLD_WIDTH - 1, npc_x))
-                    npc_y = max(0, min(WORLD_HEIGHT - 1, npc_y))
+                # Ensure NPC is within world bounds (still good practice)
+                npc_x = max(0, min(WORLD_WIDTH - 1, npc_x))
+                npc_y = max(0, min(WORLD_HEIGHT - 1, npc_y))
 
                 # Assign workplace (optional)
                 work_building = None
@@ -4006,6 +4050,66 @@ class World:
             gy = bakery.global_origin_y + local_oven_y
             oven_coords_global.append((gx, gy))
         bakery.work_zone_tiles["oven"] = oven_coords_global
+
+        # Generate Mine
+        mine_w, mine_h = 8, 6
+        mine_x = 1
+        mine_y = 1
+        mine = Building(mine_x, mine_y, mine_w, mine_h,
+                        building_type="mine", category="industrial_workplace",
+                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(mine)
+        self.buildings_by_id[mine.id] = mine
+        self._draw_building(tiles, mine, "stone_wall")
+
+        # Define work zones for the Mine
+        mine_face_coords_global = []
+        if mine.width > 2 and mine.height > 2:
+            # Example: Mine face is the back wall
+            for i in range(1, mine.width - 1):
+                gx = mine.global_origin_x + i
+                gy = mine.global_origin_y + 1
+                mine_face_coords_global.append((gx, gy))
+        mine.work_zone_tiles["mine_face"] = mine_face_coords_global
+
+        storage_area_coords_global = []
+        if mine.width > 2 and mine.height > 2:
+            # Example: Storage area is near the entrance
+            for i in range(1, mine.width - 1):
+                gx = mine.global_origin_x + i
+                gy = mine.global_origin_y + mine.height - 2
+                storage_area_coords_global.append((gx, gy))
+        mine.work_zone_tiles["storage_area"] = storage_area_coords_global
+
+        # Generate Blacksmith Shop
+        blacksmith_w, blacksmith_h = 7, 6
+        blacksmith_x = road_x + 2
+        blacksmith_y = road_y + 2
+        blacksmith_shop = Building(blacksmith_x, blacksmith_y, blacksmith_w, blacksmith_h,
+                                   building_type="blacksmith_shop", category="industrial_workplace",
+                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(blacksmith_shop)
+        self.buildings_by_id[blacksmith_shop.id] = blacksmith_shop
+        self._draw_building(tiles, blacksmith_shop, "stone_wall")
+
+        # Define work zones for the Blacksmith Shop
+        forge_coords_global = []
+        if blacksmith_shop.width > 2 and blacksmith_shop.height > 2:
+            local_forge_x = 1
+            local_forge_y = 1
+            gx = blacksmith_shop.global_origin_x + local_forge_x
+            gy = blacksmith_shop.global_origin_y + local_forge_y
+            forge_coords_global.append((gx, gy))
+        blacksmith_shop.work_zone_tiles["forge"] = forge_coords_global
+
+        anvil_coords_global = []
+        if blacksmith_shop.width > 2 and blacksmith_shop.height > 2:
+            local_anvil_x = blacksmith_shop.width - 2
+            local_anvil_y = blacksmith_shop.height - 2
+            gx = blacksmith_shop.global_origin_x + local_anvil_x
+            gy = blacksmith_shop.global_origin_y + local_anvil_y
+            anvil_coords_global.append((gx, gy))
+        blacksmith_shop.work_zone_tiles["anvil"] = anvil_coords_global
 
         # Generate Farm (example agricultural workplace)
         if random.random() < 0.7: # Chance to generate a farm

@@ -81,20 +81,59 @@ PROFESSIONS = {
         "wage": 25,
         "description": "Extracts ores and minerals from the earth.",
         "work_building_categories": ["Mine"],
-         "sub_tasks": [
-            # To be defined later
+        "sub_tasks": [
+            {
+                "id": "mine_ore",
+                "display_name": "Mining Ore",
+                "duration_ticks": 100,
+                "target_zone_tag": "mine_face",
+                "action_verb": "mining"
+            },
+            {
+                "id": "haul_ore",
+                "display_name": "Hauling Ore",
+                "duration_ticks": 30,
+                "target_zone_tag": "storage_area",
+                "action_verb": "hauling ore",
+                "consumes_item_from_npc_inventory": {"iron_ore": 1},
+                "deposits_item_to_workplace": {"iron_ore": 1}
+            }
         ],
-        "default_sub_task_sequence": []
+        "default_sub_task_sequence": ["mine_ore", "haul_ore"]
     },
     "Blacksmith": {
         "display_name": "Blacksmith",
         "wage": 30,
         "description": "Forges tools, weapons, and armor from metal.",
-        "work_building_categories": ["Smithy", "Forge"],
+        "work_building_categories": ["blacksmith_shop"],
         "sub_tasks": [
-            # To be defined later
+            {
+                "id": "fetch_ore",
+                "display_name": "Fetching Ore",
+                "duration_ticks": 120,
+                "target_zone_tag": "mine",
+                "action_verb": "fetching ore"
+            },
+            {
+                "id": "smelt_ingot",
+                "display_name": "Smelting Ingot",
+                "duration_ticks": 150,
+                "target_zone_tag": "forge",
+                "action_verb": "smelting ingot",
+                "consumes_item_from_workplace": {"iron_ore": 2, "coal": 1},
+                "produces_item_at_workplace": {"iron_ingot": 1}
+            },
+            {
+                "id": "craft_tool",
+                "display_name": "Crafting Tool",
+                "duration_ticks": 200,
+                "target_zone_tag": "anvil",
+                "action_verb": "crafting tool",
+                "consumes_item_from_workplace": {"iron_ingot": 1},
+                "produces_item_at_workplace": {"axe_stone": 1}
+            }
         ],
-        "default_sub_task_sequence": []
+        "default_sub_task_sequence": ["fetch_ore", "smelt_ingot", "craft_tool"]
     },
     "Merchant": {
         "display_name": "Merchant",

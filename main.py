@@ -10,7 +10,7 @@ from config import (
     REP_CRIMINAL, REP_HERO # Import reputation keys
 )
 from data.items import ITEM_DEFINITIONS
-from rendering.console_renderer import draw, draw_info_menu
+from rendering.console_renderer import draw
 
 
 def main():
@@ -58,7 +58,6 @@ def main():
             world._update_npc_schedules() # New: Update NPC schedules (includes combat AI decisions)
             world._update_npc_movement() # Update NPC movement (includes combat movement/action execution)
             world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
-            world._update_world_environment()
 
             # --- Drawing ---
             if world.game_state == "PLAYER_DEAD":
@@ -83,7 +82,11 @@ def main():
                     if isinstance(event_deep_loop, tcod.event.KeyDown):
                         return # Exit on any key press
             else:
-                draw(console, world)
+                # --- Camera Calculation ---
+                camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
+                camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
+
+                draw(console, world, camera_x, camera_y)
                 # Update the screen
                 context.present(console)
 
@@ -320,10 +323,6 @@ def main():
                         # Keybind for using cooked meat scrap - let's use 'U' for "Use food"
                         elif event.sym == tcod.event.KeySym.U:
                             world.use_item("cooked_meat_scrap")
-                        elif event.sym == tcod.event.KeySym.P: # Plant sapling
-                            target_x = world.player.x + world.player.last_dx
-                            target_y = world.player.y + world.player.last_dy
-                            world.player_attempt_plant_sapling(target_x, target_y)
                         elif event.sym == tcod.event.KeySym.D: # Debug damage
                             world.player.take_damage(5)
                             world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}")

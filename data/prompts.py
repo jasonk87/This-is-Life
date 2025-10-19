@@ -37,13 +37,13 @@ Constraints:
 - Do not place items on the exact border (x=0, x=width-1, y=0, y=height-1) if these are typically walls, unless the item is explicitly a wall-mounted item like a 'Wall Shelf' (which can be on y=1 to height-2, and x=1 to width-2, assuming it's not on the direct edge). Generally, keep items within the inner area.
 
 Example Output:
-{
+{{
   "decorations": [
-    {"type": "bed_simple", "x": 1, "y": 1},
-    {"type": "wooden_table", "x": 3, "y": 2},
-    {"type": "wooden_chair", "x": 2, "y": 2}
+    {{"type": "bed_simple", "x": 1, "y": 1}},
+    {{"type": "wooden_table", "x": 3, "y": 2}},
+    {{"type": "wooden_chair", "x": 2, "y": 2}}
   ]
-}
+}}
 
 JSON Output:
 """,
@@ -66,7 +66,7 @@ Most NPCs would have a positive attitude towards a player with high hero points.
 Incorporate any provided hints: name_hint, personality_hint, family_ties_hint, attitude_to_player_hint.
 
 Example Output:
-{
+{{
   "name": "Elara",
   "personality": "wise and lawful",
   "family_ties": "elder of the village",
@@ -78,7 +78,7 @@ Example Output:
   ],
   "combat_behavior": "defensive",
   "base_attack_name": "fists"
-}
+}}
 
 NPC Data:
 Provide the following fields for the NPC:
@@ -102,7 +102,7 @@ Hints for generation (use if provided, otherwise generate freely):
 
 Make sure the entire output is a single JSON object.
 Example of a full JSON structure to output (after filling in the values):
-{
+{{
   "name": "Borin",
   "personality": "gruff but fair",
   "family_ties": "widower",
@@ -114,7 +114,7 @@ Example of a full JSON structure to output (after filling in the values):
   ],
   "combat_behavior": "defensive",
   "base_attack_name": "work hammer"
-}
+}}
 """,
     "npc_daily_goal": """\
 You are an AI simulating the behavior of an NPC in a village.
@@ -134,8 +134,8 @@ Available Goals:
 6.  "Seek food/resources" (Future feature)
 
 Based on all this context, what is the MOST LIKELY high-level goal for {npc_name} right now?
-Respond with a JSON object containing the chosen goal, like: {"goal": "Chosen Goal"}
-Example: {"goal": "Go to work"}
+Respond with a JSON object containing the chosen goal, like: {{"goal": "Chosen Goal"}}
+Example: {{"goal": "Go to work"}}
 If the NPC should stay put or has no other pressing task, use "Stay put".
 If the NPC has a job and it's working hours (typically during DAY or DAWN/DUSK), they should prioritize "Go to work" unless already there.
 If it's evening/night (especially DEEP_NIGHT or NIGHT light levels), they should prioritize "Go home" unless already there.
@@ -176,18 +176,18 @@ Return a JSON object with the following fields:
 - "new_attitude_to_player": string (The NPC's new attitude towards the player after this interaction. Examples: "friendly", "neutral", "wary", "hostile", "impressed", "annoyed". This should reflect the outcome and the NPC's personality.)
 
 Example if successful:
-{
+{{
   "success": true,
   "reaction_dialogue": "Alright, alright, you've convinced me. I'll tell you what I know...",
   "new_attitude_to_player": "neutral"
-}
+}}
 
 Example if failed:
-{
+{{
   "success": false,
   "reaction_dialogue": "I'm sorry, but I can't help you with that. And I don't like your tone.",
   "new_attitude_to_player": "annoyed"
-}
+}}
 
 Adjudication:
 """,
@@ -253,25 +253,25 @@ Return a JSON object with the following fields:
 - "lockpick_broken": boolean (true if the lockpick used for the attempt breaks, false otherwise. A pick might break on failure, or rarely even on success if the lock was particularly stubborn/rusty.)
 
 Example Success:
-{
+{{
   "success": true,
   "narrative_feedback": "You carefully manipulate the tumblers, feeling them give way one by one. With a final satisfying *thunk*, the lock opens!",
   "lockpick_broken": false
-}
+}}
 
 Example Failure (pick breaks):
-{
+{{
   "success": false,
   "narrative_feedback": "You apply a bit too much pressure, and the delicate lockpick snaps in two! The lock remains closed.",
   "lockpick_broken": true
-}
+}}
 
 Example Failure (no break):
-{
+{{
   "success": false,
   "narrative_feedback": "Despite your efforts, the intricate mechanism of the lock resists your attempts. It remains firmly shut.",
   "lockpick_broken": false
-}
+}}
 
 Adjudication:
 """,
@@ -301,28 +301,28 @@ Return a JSON object with the following fields:
 - "target_status_change": string (For now, usually "none". Future options: "staggered", "bleeding", "knocked_down")
 
 Example - Successful Hit:
-{
+{{
   "hit": true,
   "damage_dealt": 7,
   "narrative_feedback": "Your Stone Axe bites deeply into {npc_name}'s shoulder!",
   "target_status_change": "none"
-}
+}}
 
 Example - Miss:
-{
+{{
   "hit": false,
   "damage_dealt": 0,
-  "narrative_feedback": "{npc_name} nimbly dodges your wild swing with the {player_weapon_name}.",
+  "narrative_feedback": "{{npc_name}} nimbly dodges your wild swing with the {player_weapon_name}.",
   "target_status_change": "none"
-}
+}}
 
 Example - Glancing Hit (low damage):
-{
+{{
   "hit": true,
   "damage_dealt": 1,
   "narrative_feedback": "Your {player_weapon_name} skitters across {npc_name}'s defenses, barely scratching them.",
   "target_status_change": "none"
-}
+}}
 
 Adjudication Output:
 """,
@@ -369,9 +369,9 @@ Based on the NPC's personality, combat behavior, health, possession of healing i
 - If can_see_player is false, and the NPC is not fleeing or taking cover, "hold_position" or "search_area" (if available) are good defaults. An aggressive NPC might move towards where they last saw the player.
 
 Respond with a JSON object containing the chosen action and a brief narrative for the NPC's thought process or intent.
-Example: {"action": "move_to_attack_player", "narrative": "{npc_name} growls and charges towards the player!"}
-Example: {"action": "flee_from_player", "narrative": "Seeing their injuries, {npc_name} decides to retreat!"}
-Example: {"action": "attack_player", "narrative": "{npc_name} lashes out with their {npc_attack_name}!"}
+Example: {{"action": "move_to_attack_player", "narrative": "{{npc_name}} growls and charges towards the player!"}}
+Example: {{"action": "flee_from_player", "narrative": "Seeing their injuries, {{npc_name}} decides to retreat!"}}
+Example: {{"action": "attack_player", "narrative": "{{npc_name}} lashes out with their {{npc_attack_name}}!"}}
 
 JSON Output:
 """
@@ -404,20 +404,20 @@ Return a JSON object with the following fields:
 - "attacker_status_change": string (For now, usually "none". Future options for NPC: "overextended", "enraged")
 
 Example - Successful Hit:
-{
+{{
   "hit": true,
   "damage_dealt": 5,
-  "narrative_feedback": "{npc_name} strikes you hard with their {weapon_name}!",
+  "narrative_feedback": "{{npc_name}} strikes you hard with their {weapon_name}!",
   "attacker_status_change": "none"
-}
+}}
 
 Example - Miss:
-{
+{{
   "hit": false,
   "damage_dealt": 0,
-  "narrative_feedback": "You manage to avoid {npc_name}'s telegraphed attack with their {weapon_name}.",
+  "narrative_feedback": "You manage to avoid {{npc_name}}'s telegraphed attack with their {weapon_name}.",
   "attacker_status_change": "none"
-}
+}}
 
 Adjudication Output:
 """
@@ -457,17 +457,17 @@ If deciding to ignore all items for now:
   {{"action": "ignore_items", "reasoning": "brief in-character thought"}}
 
 Example - Pickup:
-{
+{{
   "action": "pickup_item",
   "target_coords": [15, 22],
   "item_key_to_pickup": "rusty_sword",
-  "reasoning": "{npc_name} spots a sword. 'This could be useful,' they think."
-}
+  "reasoning": "{{npc_name}} spots a sword. 'This could be useful,' they think."
+}}
 Example - Ignore:
-{
+{{
   "action": "ignore_items",
-  "reasoning": "{npc_name} glances at the items but decides they have no need for them right now."
-}
+  "reasoning": "{{npc_name}} glances at the items but decides they have no need for them right now."
+}}
 
 JSON Decision:
 """
@@ -510,17 +510,17 @@ If deciding to do nothing with equipment for now:
   {{"action": "do_nothing", "reasoning": "brief in-character thought why no change is made"}}
 
 Example - Equip Weapon:
-{
+{{
   "action": "equip",
   "item_key_to_equip": "steel_sword",
   "equip_slot": "main_hand",
-  "reasoning": "{npc_name} hefts the steel sword. 'Much better than that rusty piece of junk!'"
-}
+  "reasoning": "{{npc_name}} hefts the steel sword. 'Much better than that rusty piece of junk!'"
+}}
 Example - Do Nothing:
-{
+{{
   "action": "do_nothing",
-  "reasoning": "{npc_name} checks their gear. 'My current setup is fine for now.'"
-}
+  "reasoning": "{{npc_name}} checks their gear. 'My current setup is fine for now.'"
+}}
 
 JSON Decision:
 """

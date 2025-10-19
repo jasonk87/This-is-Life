@@ -3517,7 +3517,14 @@ class World:
 
     def _handle_npc_speech(self):
         current_time = time.time()
-        player_rep = self.player.reputation # Get player rep once
+        player_rep = self.player.reputation  # Get player rep once
+
+        # Ensure self.npcs and self.village_npcs are initialized
+        if not hasattr(self, 'npcs'):
+            self.npcs = []
+        if not hasattr(self, 'village_npcs'):
+            self.village_npcs = []
+
         for npc in self.npcs + self.village_npcs:
             if current_time - npc.last_speech_time > random.randint(10, 30):
                 # Ambient speech might be general, or react to player if nearby and reputation is notable
@@ -3913,10 +3920,10 @@ class World:
         # Ensure it's within the building's actual floor space.
         # (building.width - 2) and (building.height - 2) give inner dimensions.
         # We need to place it relative to building.global_origin_x and building.global_origin_y
-        if building.width > 3 and building.height > 3: # Ensure mill is large enough
+        if lumber_mill.width > 3 and lumber_mill.height > 3: # Ensure mill is large enough
             # Relative local coords for the start of the 2x2 log pile area
             local_pile_start_x = 1
-            local_pile_start_y = building.height - 3 # 1 up from bottom floor, then 1 more for 2x2
+            local_pile_start_y = lumber_mill.height - 3 # 1 up from bottom floor, then 1 more for 2x2
 
             for i in range(2): # y_offset
                 for j in range(2): # x_offset
@@ -3930,9 +3937,9 @@ class World:
         # Splitting area: another 2x2 area, perhaps near the log pile or another side.
         # Example: Place it near the bottom-right.
         splitting_area_coords_global = []
-        if building.width > 5 and building.height > 3: # Need more width to avoid overlap if simple placement
-            local_split_start_x = building.width - 3
-            local_split_start_y = building.height - 3
+        if lumber_mill.width > 5 and lumber_mill.height > 3: # Need more width to avoid overlap if simple placement
+            local_split_start_x = lumber_mill.width - 3
+            local_split_start_y = lumber_mill.height - 3
 
             for i in range(2): # y_offset
                 for j in range(2): # x_offset
@@ -3951,6 +3958,8 @@ class World:
         carpenter_w, carpenter_h = 7, 6
         carpenter_x = road_x + 2
         carpenter_y = sheriff_office_y + sheriff_office_h + 2
+        carpenter_x = max(1, min(carpenter_x, CHUNK_SIZE - carpenter_w - 1))
+        carpenter_y = max(1, min(carpenter_y, CHUNK_SIZE - carpenter_h - 1))
         carpenter_shop = Building(carpenter_x, carpenter_y, carpenter_w, carpenter_h,
                                 building_type="carpenter_shop", category="industrial_workplace",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)

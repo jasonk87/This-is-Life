@@ -11,6 +11,7 @@ class Tree(Tile):
         self.char = ord('T') # Default tree character
         self.color = COLORS["forest_fg"] # Default tree color
         self.passable = False
+        self.blocks_fov = True
         self.name = f"{tree_type.capitalize()} Tree"
         # self.drops = {} # Replaced by resource_yield for clarity with plan
 

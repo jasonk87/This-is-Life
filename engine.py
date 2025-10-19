@@ -72,8 +72,11 @@ class WorldGenerator:
 
     def get_poi_at(self, x, y, biome):
         """Determines if a POI should be placed at a chunk coordinate."""
-        if biome == "plains" and random.random() < POI_DENSITY:
-            return "village"
+        if biome == "plains":
+            if random.random() < POI_DENSITY:
+                return "village"
+            elif random.random() < 0.02:  # 2% chance for an abandoned cabin
+                return "abandoned_cabin"
         return None
 
 class Building:
@@ -3330,6 +3333,8 @@ class World:
                 chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             
             tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
+        elif chunk.poi_type == "abandoned_cabin":
+            tiles = self._generate_abandoned_cabin(chunk, chunk_coord_x, chunk_coord_y)
         else:
             # Generate the base biome tiles
             biome_def = TILE_DEFINITIONS[chunk.biome]
@@ -3597,6 +3602,66 @@ class World:
             self._draw_building(tiles, house, "wood_wall")
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
+        return tiles
+
+    def _generate_abandoned_cabin(self, chunk, chunk_coord_x, chunk_coord_y):
+        # Generate the base plains tiles
+        plains_def = TILE_DEFINITIONS["plains"]
+        tiles = [[Tile(plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+
+        # Cabin dimensions
+        cabin_w = random.randint(7, 10)
+        cabin_h = random.randint(5, 8)
+
+        # Center the cabin in the chunk
+        cabin_x = (CHUNK_SIZE - cabin_w) // 2
+        cabin_y = (CHUNK_SIZE - cabin_h) // 2
+
+        # Get tile definitions
+        wall_def = TILE_DEFINITIONS["rotting_wall"]
+        floor_def = TILE_DEFINITIONS["wood_floor"]
+        door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"]
+        furniture_def = DECORATION_ITEM_DEFINITIONS["broken_furniture"]
+        chest_def = DECORATION_ITEM_DEFINITIONS["ransacked_chest"]
+
+        # Draw the cabin
+        for i in range(cabin_h):
+            for j in range(cabin_w):
+                is_border = i == 0 or i == cabin_h - 1 or j == 0 or j == cabin_w - 1
+                if is_border:
+                    tiles[cabin_y + i][cabin_x + j] = Tile(wall_def["char"], wall_def["color"], wall_def["passable"], wall_def["name"])
+                else:
+                    tiles[cabin_y + i][cabin_x + j] = Tile(floor_def["char"], floor_def["color"], floor_def["passable"], floor_def["name"])
+
+        # Place door
+        door_x = cabin_x + cabin_w // 2
+        door_y = cabin_y + cabin_h - 1
+        tiles[door_y][door_x] = Tile(door_def["char"], door_def["color"], door_def["passable"], door_def["name"], door_def["properties"])
+
+        # Place some broken furniture and a ransacked chest
+        for _ in range(random.randint(1, 3)):
+            fx = cabin_x + random.randint(1, cabin_w - 2)
+            fy = cabin_y + random.randint(1, cabin_h - 2)
+            if tiles[fy][fx].name == "Wood Floor":
+                tiles[fy][fx] = Tile(furniture_def["char"], furniture_def["color"], furniture_def["passable"], furniture_def["name"], furniture_def["properties"])
+
+        # Place one ransacked chest
+        cx = cabin_x + random.randint(1, cabin_w - 2)
+        cy = cabin_y + random.randint(1, cabin_h - 2)
+        if tiles[cy][cx].name == "Wood Floor":
+            tiles[cy][cx] = Tile(chest_def["char"], chest_def["color"], chest_def["passable"], chest_def["name"], chest_def["properties"])
+
+        # Place some loot on the floor
+        loot_table = ["tattered_cloth", "moldy_bread", "rusty_can"]
+        for _ in range(random.randint(2, 5)): # Place 2 to 5 items
+            lx = cabin_x + random.randint(1, cabin_w - 2)
+            ly = cabin_y + random.randint(1, cabin_h - 2)
+            if tiles[ly][lx].name == "Wood Floor":
+                item_key = random.choice(loot_table)
+                global_x = chunk_coord_x * CHUNK_SIZE + lx
+                global_y = chunk_coord_y * CHUNK_SIZE + ly
+                self.drop_item_on_map(item_key, 1, global_x, global_y)
+
         return tiles
 
     def _draw_building(self, tiles, building, wall_tile_key):

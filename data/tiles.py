@@ -217,4 +217,11 @@ TILE_DEFINITIONS["mature_wheat_crop"] = {
         "harvest_yield_quantity": 2,
         "becomes_on_harvest_key": "tilled_soil"
     }
+},
+"rotting_wall": {
+    "char": "#",
+    "color": (90, 80, 50),
+    "passable": False,
+    "name": "Rotting Wall",
+    "properties": {"provides_cover_value": 0.6}
 }

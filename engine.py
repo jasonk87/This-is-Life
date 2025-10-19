@@ -75,8 +75,6 @@ class WorldGenerator:
         if biome == "plains":
             if random.random() < POI_DENSITY:
                 return "village"
-            elif random.random() < 0.02:  # 2% chance for an abandoned cabin
-                return "abandoned_cabin"
         return None
 
 class Building:
@@ -1087,6 +1085,11 @@ class World:
             if npc.is_dead:
                 continue
 
+            # --- NPC NEEDS UPDATE ---
+            if npc.profession != "Creature":
+                npc.hunger = min(npc.max_hunger, npc.hunger + 2)
+                npc.thirst = min(npc.max_thirst, npc.thirst + 3)
+
             if self.game_time - npc.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
                 # Even if not due for a full schedule update, hostile NPCs should still get a combat AI tick
                 if npc.is_hostile_to_player:
@@ -1142,6 +1145,83 @@ class World:
                  npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player",
                                           "holding_position_combat", "combat_action_use_healing_item",
                                           "combat_action_move_to_cover", "investigating_sound"]:
+
+                needs_based_action_taken = False
+                # --- Thirst Fulfillment ---
+                if npc.thirst >= 70 or npc.current_task == "seeking_water":
+                    if not needs_based_action_taken and npc.current_task != "seeking_water":
+                        npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
+                        npc.current_task = "seeking_water"
+
+                    npc_village = self._get_village_for_npc(npc)
+                    if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
+                        well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
+                        if (npc.x, npc.y) == well_coords:
+                            npc.thirst = 0
+                            # self.add_message_to_chat_log(f"{npc.name} drinks from the well and is no longer thirsty.")
+                            npc.current_task = npc.previous_task or "idle"
+                            npc.previous_task = None
+                        else:
+                            # Path to the well if not already pathing
+                            if not npc.current_path or npc.current_destination_coords != well_coords:
+                                path = self.calculate_path(npc.x, npc.y, well_coords[0], well_coords[1])
+                                if path:
+                                    npc.current_path = path
+                                    npc.current_destination_coords = well_coords
+                                else:
+                                    npc.current_task = "idle_confused" # Can't reach the well
+                    needs_based_action_taken = True
+
+                # --- Hunger Fulfillment ---
+                elif npc.hunger >= 70 or npc.current_task == "seeking_food":
+                    if not needs_based_action_taken and npc.current_task != "seeking_food":
+                        npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
+                        npc.current_task = "seeking_food"
+
+                    # 1. Try eating from personal inventory first
+                    found, consumed = self._npc_eat_from_inventory(npc, npc.npc_inventory, is_building_inventory=False)
+                    if consumed:
+                        npc.current_task = npc.previous_task or "idle"
+                        npc.previous_task = None
+                    else:
+                        # 2. If no food in pack, try to go home to eat
+                        home_building = self.buildings_by_id.get(npc.home_building_id)
+                        if home_building:
+                            is_at_home = (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y) # Simplified check
+                            if is_at_home:
+                                found_home, consumed_home = self._npc_eat_from_inventory(npc, home_building.building_inventory, is_building_inventory=True)
+                                if consumed_home:
+                                    npc.current_task = npc.previous_task or "idle"
+                                    npc.previous_task = None
+                                else:
+                                    # At home, but no food. What to do now?
+                                    # self.add_message_to_chat_log(f"{npc.name} is hungry at home, but there is no food.")
+                                    npc.current_task = "wandering_hungry" # A new state
+                                    npc.previous_task = None
+                            else:
+                                # Not at home, check if there's food there before pathing
+                                has_food_at_home = any(ITEM_DEFINITIONS.get(k,{}).get("on_use",{}).get("reduces_hunger",0) > 0 for k,v in home_building.building_inventory.items() if v > 0)
+                                if has_food_at_home:
+                                    home_coords = (home_building.global_center_x, home_building.global_center_y)
+                                    if not npc.current_path or npc.current_destination_coords != home_coords:
+                                        path = self.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
+                                        if path:
+                                            npc.current_path = path
+                                            npc.current_destination_coords = home_coords
+                                        else:
+                                            npc.current_task = "idle_confused" # Can't path home
+                                else:
+                                    # No food at home, no need to go there.
+                                    # self.add_message_to_chat_log(f"{npc.name} is hungry, but has no food at home.")
+                                    npc.current_task = "wandering_hungry"
+                                    npc.previous_task = None
+                        else:
+                            # Homeless and hungry.
+                            npc.current_task = "wandering_hungry_homeless"
+
+                    needs_based_action_taken = True
+
+
                 # --- NPC Item Pickup Decision ---
                 # This decision should happen before regular scheduling if items are perceived.
                 made_item_decision = False
@@ -1213,7 +1293,7 @@ class World:
                                 pass # Fall through to regular scheduling
 
                 # Original scheduling logic starts here, only if no item pickup decision was made
-                if not made_item_decision and npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
+                if not made_item_decision and not needs_based_action_taken and npc.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.current_path:
                     current_time_in_day = self.game_time % DAY_LENGTH_TICKS
                     time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
@@ -2019,6 +2099,51 @@ class World:
              self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
+    def _get_village_for_npc(self, npc: NPC) -> Village | None:
+        """Finds the village object that an NPC belongs to, typically via their home."""
+        if not npc.home_building_id:
+            return None
+        # This is inefficient and relies on iterating all chunks.
+        # A future optimization would be to cache npc -> village mapping.
+        for y_idx, row in enumerate(self.chunks):
+            for x_idx, chk in enumerate(row):
+                if chk.village:
+                    # Check if the building object is in this village's list of buildings
+                    if self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
+                        return chk.village
+        return None
+
+    def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
+        """
+        Searches an inventory for food and consumes one item if found.
+        Returns (found_food: bool, consumed_food: bool).
+        `found_food` is True if any food item exists.
+        `consumed_food` is True if a food item was successfully consumed.
+        """
+        food_item_key = None
+        for item_key, qty in inventory.items():
+            if qty > 0:
+                item_def = ITEM_DEFINITIONS.get(item_key, {})
+                on_use = item_def.get("on_use", {})
+                if on_use.get("reduces_hunger", 0) > 0:
+                    food_item_key = item_key
+                    break  # Found a food item to eat
+
+        if food_item_key:
+            item_def = ITEM_DEFINITIONS[food_item_key]
+            on_use = item_def["on_use"]
+            inventory[food_item_key] -= 1
+            if inventory[food_item_key] <= 0:
+                del inventory[food_item_key]
+
+            npc.hunger = max(0, npc.hunger - on_use["reduces_hunger"])
+
+            # location = "at home" if is_building_inventory else "from their pack"
+            # self.add_message_to_chat_log(f"{npc.name} eats a {item_def.get('name', food_item_key)} {location}.")
+
+            return True, True  # Found food, and ate it
+
+        return False, False  # Did not find food, did not eat
 
     def complete_contract_delivery(self, contract_id: str, turn_in_npc: NPC):
         """Handles player attempting to turn in a contract delivery."""
@@ -3333,8 +3458,6 @@ class World:
                 chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             
             tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
-        elif chunk.poi_type == "abandoned_cabin":
-            tiles = self._generate_abandoned_cabin(chunk, chunk_coord_x, chunk_coord_y)
         else:
             # Generate the base biome tiles
             biome_def = TILE_DEFINITIONS[chunk.biome]
@@ -3602,66 +3725,6 @@ class World:
             self._draw_building(tiles, house, "wood_wall")
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
-        return tiles
-
-    def _generate_abandoned_cabin(self, chunk, chunk_coord_x, chunk_coord_y):
-        # Generate the base plains tiles
-        plains_def = TILE_DEFINITIONS["plains"]
-        tiles = [[Tile(plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
-
-        # Cabin dimensions
-        cabin_w = random.randint(7, 10)
-        cabin_h = random.randint(5, 8)
-
-        # Center the cabin in the chunk
-        cabin_x = (CHUNK_SIZE - cabin_w) // 2
-        cabin_y = (CHUNK_SIZE - cabin_h) // 2
-
-        # Get tile definitions
-        wall_def = TILE_DEFINITIONS["rotting_wall"]
-        floor_def = TILE_DEFINITIONS["wood_floor"]
-        door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"]
-        furniture_def = DECORATION_ITEM_DEFINITIONS["broken_furniture"]
-        chest_def = DECORATION_ITEM_DEFINITIONS["ransacked_chest"]
-
-        # Draw the cabin
-        for i in range(cabin_h):
-            for j in range(cabin_w):
-                is_border = i == 0 or i == cabin_h - 1 or j == 0 or j == cabin_w - 1
-                if is_border:
-                    tiles[cabin_y + i][cabin_x + j] = Tile(wall_def["char"], wall_def["color"], wall_def["passable"], wall_def["name"])
-                else:
-                    tiles[cabin_y + i][cabin_x + j] = Tile(floor_def["char"], floor_def["color"], floor_def["passable"], floor_def["name"])
-
-        # Place door
-        door_x = cabin_x + cabin_w // 2
-        door_y = cabin_y + cabin_h - 1
-        tiles[door_y][door_x] = Tile(door_def["char"], door_def["color"], door_def["passable"], door_def["name"], door_def["properties"])
-
-        # Place some broken furniture and a ransacked chest
-        for _ in range(random.randint(1, 3)):
-            fx = cabin_x + random.randint(1, cabin_w - 2)
-            fy = cabin_y + random.randint(1, cabin_h - 2)
-            if tiles[fy][fx].name == "Wood Floor":
-                tiles[fy][fx] = Tile(furniture_def["char"], furniture_def["color"], furniture_def["passable"], furniture_def["name"], furniture_def["properties"])
-
-        # Place one ransacked chest
-        cx = cabin_x + random.randint(1, cabin_w - 2)
-        cy = cabin_y + random.randint(1, cabin_h - 2)
-        if tiles[cy][cx].name == "Wood Floor":
-            tiles[cy][cx] = Tile(chest_def["char"], chest_def["color"], chest_def["passable"], chest_def["name"], chest_def["properties"])
-
-        # Place some loot on the floor
-        loot_table = ["tattered_cloth", "moldy_bread", "rusty_can"]
-        for _ in range(random.randint(2, 5)): # Place 2 to 5 items
-            lx = cabin_x + random.randint(1, cabin_w - 2)
-            ly = cabin_y + random.randint(1, cabin_h - 2)
-            if tiles[ly][lx].name == "Wood Floor":
-                item_key = random.choice(loot_table)
-                global_x = chunk_coord_x * CHUNK_SIZE + lx
-                global_y = chunk_coord_y * CHUNK_SIZE + ly
-                self.drop_item_on_map(item_key, 1, global_x, global_y)
-
         return tiles
 
     def _draw_building(self, tiles, building, wall_tile_key):

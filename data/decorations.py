@@ -149,19 +149,5 @@ DECORATION_ITEM_DEFINITIONS = {
             "blocks_fov": False # Low to the ground
         },
         "placement_cost": {"stone_chunk": 5}
-    },
-    "broken_furniture": {
-        "name": "Broken Furniture",
-        "char": "h",
-        "color": (80, 50, 20),
-        "passable": True,
-        "properties": {"blocks_fov": False}
-    },
-    "ransacked_chest": {
-        "name": "Ransacked Chest",
-        "char": "C",
-        "color": (80, 50, 20),
-        "passable": True,
-        "properties": {"interaction_hint": "search"}
     }
 }

@@ -280,39 +280,6 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"]
     },
-    "tattered_cloth": {
-        "name": "Tattered Cloth",
-        "description": "A piece of old, worn cloth. Could be used for bandages.",
-        "char": "~",
-        "color": tcod.constants.dark_grey,
-        "value": 1,
-        "weight": 0.2,
-        "stackable": True,
-        "item_type_tags": ["resource", "component"]
-    },
-    "moldy_bread": {
-        "name": "Moldy Bread",
-        "description": "A stale, moldy piece of bread. Barely edible.",
-        "char": "%",
-        "color": tcod.constants.dark_green,
-        "value": 0,
-        "weight": 0.5,
-        "stackable": True,
-        "item_type_tags": ["consumable", "food"],
-        "on_use": {
-            "reduces_hunger": 5
-        }
-    },
-    "rusty_can": {
-        "name": "Rusty Can",
-        "description": "An old, empty, rusty can.",
-        "char": "o",
-        "color": tcod.constants.dark_orange,
-        "value": 0,
-        "weight": 0.3,
-        "stackable": True,
-        "item_type_tags": ["trash"]
-    },
 
 
     # --- Weapons ---

@@ -20,6 +20,7 @@ class NPC:
         self.current_destination_coords = None
         self.current_path = []
         self.current_task = "idle"
+        self.previous_task = "idle"
         self.game_time_last_updated = 0
 
         # Contextual attributes for Phase 6
@@ -27,6 +28,12 @@ class NPC:
         self.profession = "unemployed"
         self.original_char_before_sleep = self.char
         self.npc_inventory = {}
+
+        # Hunger and Thirst
+        self.hunger: int = 0
+        self.max_hunger: int = 100
+        self.thirst: int = 0
+        self.max_thirst: int = 100
 
         # Combat Attributes (Phase 5.3)
         self.max_hp = 20  # Default max HP

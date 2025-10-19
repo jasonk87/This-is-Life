@@ -22,9 +22,18 @@ class NPC:
         self.current_task = "idle"
         self.previous_task = "idle"
         self.game_time_last_updated = 0
+        self.last_paid_day = 0
 
         # Contextual attributes for Phase 6
         self.wealth_level = "average"
+        if self.wealth_level == "poor":
+            self.money = random.randint(5, 20)
+        elif self.wealth_level == "average":
+            self.money = random.randint(20, 100)
+        elif self.wealth_level == "wealthy":
+            self.money = random.randint(100, 500)
+        else:
+            self.money = random.randint(10, 50)
         self.profession = "unemployed"
         self.original_char_before_sleep = self.char
         self.npc_inventory = {}

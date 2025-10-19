@@ -1,6 +1,7 @@
 PROFESSIONS = {
     "Woodcutter": {
         "display_name": "Woodcutter",
+        "wage": 20,
         "description": "Chops trees and processes logs into lumber.",
         "work_building_categories": ["Lumber Mill"],
         "sub_tasks": [
@@ -35,6 +36,7 @@ PROFESSIONS = {
     },
     "Farmer": {
         "display_name": "Farmer",
+        "wage": 15,
         "description": "Cultivates crops and tends to farmland.",
         "work_building_categories": ["Farm"], # Ensure "Farm" is a defined building category/type
         "sub_tasks": [
@@ -76,6 +78,7 @@ PROFESSIONS = {
     },
     "Miner": {
         "display_name": "Miner",
+        "wage": 25,
         "description": "Extracts ores and minerals from the earth.",
         "work_building_categories": ["Mine"],
          "sub_tasks": [
@@ -85,6 +88,7 @@ PROFESSIONS = {
     },
     "Blacksmith": {
         "display_name": "Blacksmith",
+        "wage": 30,
         "description": "Forges tools, weapons, and armor from metal.",
         "work_building_categories": ["Smithy", "Forge"],
         "sub_tasks": [
@@ -94,6 +98,7 @@ PROFESSIONS = {
     },
     "Merchant": {
         "display_name": "Merchant",
+        "wage": 20,
         "description": "Buys and sells goods at a store or market.",
         "work_building_categories": ["General Store", "Market Stall"],
         # Merchants might not have sub-tasks in the same way, their "work" is trading.
@@ -102,6 +107,7 @@ PROFESSIONS = {
     },
     "Lumber Mill Foreman": {
         "display_name": "Lumber Mill Foreman",
+        "wage": 25,
         "description": "Manages the operations at the lumber mill.",
         "work_building_categories": ["Lumber Mill"],
         # May have supervisory tasks or also perform some woodcutter tasks. For now, none.
@@ -110,6 +116,7 @@ PROFESSIONS = {
     },
     "Guard": {
         "display_name": "Guard",
+        "wage": 20,
         "description": "Maintains peace and order, patrols designated areas.",
         "work_building_categories": ["Guardhouse", "Barracks", "Town Hall"], # Can work out of various places
         "sub_tasks": [
@@ -120,6 +127,7 @@ PROFESSIONS = {
     },
     "Sheriff": {
         "display_name": "Sheriff",
+        "wage": 35,
         "description": "Upholds the law and manages town security.",
         "work_building_categories": ["Sheriff's Office", "Town Hall"],
         "sub_tasks": [ # Similar to guard but perhaps more investigative or office-based tasks later

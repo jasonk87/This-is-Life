@@ -1211,14 +1211,55 @@ class World:
                                         else:
                                             npc.current_task = "idle_confused" # Can't path home
                                 else:
-                                    # No food at home, no need to go there.
-                                    # self.add_message_to_chat_log(f"{npc.name} is hungry, but has no food at home.")
-                                    npc.current_task = "wandering_hungry"
+                                    # No food at home, try to buy food if they have money
+                                    if npc.money > 10: # Arbitrary threshold to decide to buy food
+                                        merchant_building = self._find_nearest_merchant(npc)
+                                        if merchant_building:
+                                            npc.current_task = "going_to_buy_food"
+                                            merchant_coords = (merchant_building.global_center_x, merchant_building.global_center_y)
+                                            if not npc.current_path or npc.current_destination_coords != merchant_coords:
+                                                path = self.calculate_path(npc.x, npc.y, merchant_coords[0], merchant_coords[1])
+                                                if path:
+                                                    npc.current_path = path
+                                                    npc.current_destination_coords = merchant_coords
+                                                else:
+                                                    npc.current_task = "idle_confused" # Can't path to merchant
+                                        else:
+                                            # No merchant, wander hungry
+                                            npc.current_task = "wandering_hungry"
+                                    else:
+                                        # No food at home and not enough money
+                                        npc.current_task = "wandering_hungry"
                                     npc.previous_task = None
                         else:
                             # Homeless and hungry.
                             npc.current_task = "wandering_hungry_homeless"
 
+                    needs_based_action_taken = True
+                elif npc.current_task == "going_to_buy_food":
+                    merchant_building = self._find_nearest_merchant(npc)
+                    if merchant_building and (npc.x, npc.y) == (merchant_building.global_center_x, merchant_building.global_center_y):
+                        # At the merchant, attempt to buy food
+                        food_to_buy = None
+                        food_price = 0
+                        for item_key, quantity in merchant_building.building_inventory.items():
+                            if quantity > 0:
+                                item_def = ITEM_DEFINITIONS.get(item_key, {})
+                                if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
+                                    food_to_buy = item_key
+                                    food_price = item_def.get("value", 10) # Default price
+                                    break
+
+                        if food_to_buy and npc.money >= food_price:
+                            merchant_building.building_inventory[food_to_buy] -= 1
+                            npc.money -= food_price
+                            npc.npc_inventory[food_to_buy] = npc.npc_inventory.get(food_to_buy, 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
+                            # Now that food is in inventory, the main hunger logic will handle eating it next tick
+                            npc.current_task = "seeking_food"
+                        else:
+                            # No food to buy or can't afford it
+                            npc.current_task = "wandering_hungry"
                     needs_based_action_taken = True
 
 
@@ -1370,6 +1411,20 @@ class World:
                 else:
                     work_start_tick = DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
                     work_end_tick = DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
+
+                    # Payroll check at the end of the workday
+                    current_day = self.game_time // DAY_LENGTH_TICKS
+                    if npc.profession != "Unemployed" and npc.work_building_id and npc.last_paid_day < current_day:
+                        # Check if the workday is over for the current day
+                        if self.game_time % DAY_LENGTH_TICKS >= work_end_tick:
+                            profession_data = get_profession_data(npc.profession)
+                            if profession_data:
+                                wage = profession_data.get("wage", 10) # Default wage if not specified
+                                npc.money += wage
+                                npc.last_paid_day = current_day
+                                # Optional: Log this event for debugging or storytelling
+                                # self.add_message_to_chat_log(f"{npc.name} received {wage} coins for a day's work as a {npc.profession}.")
+
                     # Define "night" for sleeping (e.g., last 20% of day or first 10%)
                     sleep_start_tick = DAY_LENGTH_TICKS * 0.85
                     sleep_end_tick = DAY_LENGTH_TICKS * 0.15 # Next day
@@ -2098,6 +2153,27 @@ class World:
         except ValueError: # For int(damage_dealt)
              self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
+
+    def _find_nearest_merchant(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'general_store' type in the NPC's village."""
+        npc_village = self._get_village_for_npc(npc)
+        if not npc_village:
+            return None
+
+        merchant_buildings = [b for b in npc_village.buildings if b.building_type == "general_store"]
+        if not merchant_buildings:
+            return None
+
+        closest_merchant = None
+        min_dist_sq = float('inf')
+
+        for building in merchant_buildings:
+            dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_merchant = building
+
+        return closest_merchant
 
     def _get_village_for_npc(self, npc: NPC) -> Village | None:
         """Finds the village object that an NPC belongs to, typically via their home."""

@@ -20,6 +20,7 @@ class Tree(Tile):
         # self.chopped_color = (139, 69, 19) # No longer needed here
         self.original_name = self.name # Store original name, might be useful for messages
         self.becomes_on_chop_key = "stump_generic" # Key for TILE_DEFINITIONS for the stump
+        self.regrowth_timer = -1
 
     def chop(self):
         """
@@ -28,9 +29,10 @@ class Tree(Tile):
         """
         if self.is_choppable:
             self.is_choppable = False
-            # The tree object itself doesn't change its appearance here.
-            # The engine will replace this Tree tile object with a new Tile object (the stump).
-            return dict(self.resource_yield)
+            yields = dict(self.resource_yield)
+            if random.random() < 0.25: # 25% chance to drop a sapling
+                yields["sapling"] = yields.get("sapling", 0) + 1
+            return yields
         return {}
 
 class OakTree(Tree):

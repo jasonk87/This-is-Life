@@ -81,6 +81,8 @@ class NPC:
         # Auditory Perception
         self.hearing_radius: int = DEFAULT_HEARING_RADIUS # Standard hearing range for NPCs
 
+        self.woodcutter_search_radius: int = 15 # Specific to woodcutter AI
+
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
 
     def get_dialogue(self):

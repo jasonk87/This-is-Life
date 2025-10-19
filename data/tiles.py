@@ -199,6 +199,17 @@ TILE_DEFINITIONS["stump_generic"] = {
     }
 }
 
+TILE_DEFINITIONS["sapling"] = {
+    "char": "y",
+    "color": (154, 205, 50), # YellowGreen
+    "passable": True,
+    "name": "Sapling",
+    "properties": {
+        "growth_timer": 200, # Ticks to grow into a tree
+        "evolves_to": "oak_tree" # Default evolution
+    }
+}
+
 TILE_DEFINITIONS["tilled_soil"] = {
     "char": "~",  # Using tilde for furrowed earth look
     "color": (160, 110, 70),  # Darker, richer brown than wood_floor

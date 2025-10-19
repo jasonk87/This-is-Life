@@ -1560,17 +1560,19 @@ class World:
 
             npc.game_time_last_updated = self.game_time
 
-    def _find_nearest_tree_for_chopping(self, npc: NPC, work_building: Building, search_radius: int = 15) -> tuple[int, int] | None:
+    def _find_nearest_tree_for_chopping(self, npc: NPC, work_building: Building) -> tuple[int, int] | None:
         """
-        Finds the nearest choppable tree to the work_building's center for the NPC.
+        Finds the nearest choppable tree for the NPC, using the NPC's dynamic search radius.
+        If no tree is found, the NPC's search radius is increased.
         Returns global (x,y) coordinates or None.
         """
+        search_radius = npc.woodcutter_search_radius
         center_x, center_y = work_building.global_center_x, work_building.global_center_y
         closest_tree_coords = None
         min_dist_sq = float('inf')
 
         # Iterate in expanding square rings around the building's center
-        for r in range(search_radius + 1): # r=0 is the center point itself
+        for r in range(search_radius + 1):
             coords_in_ring = []
             if r == 0:
                 coords_in_ring.append((center_x, center_y))
@@ -1615,7 +1617,8 @@ class World:
                 # If we found a tree in this ring, it's the closest overall because we search radially.
                 return current_ring_closest_tree
 
-        return None # No choppable, untargeted tree found within search_radius
+        npc.woodcutter_search_radius += 5
+        return None
 
     def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
         """Determines the global target coordinates for a given sub-task."""
@@ -1801,22 +1804,23 @@ class World:
 
                 if completed_sub_task_data:
                     if completed_sub_task_id == "chop_trees":
-                        # Special handling for chopping trees: transform tile, add logs to NPC inventory
                         tree_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
                         if isinstance(tree_tile_obj, Tree) and tree_tile_obj.is_choppable:
-                            yielded_resources = tree_tile_obj.chop() # Marks tree as not choppable
+                            original_tree_type = tree_tile_obj.tree_type
+                            yielded_resources = tree_tile_obj.chop()
                             logs_collected = yielded_resources.get("raw_log", 0)
 
                             stump_key = tree_tile_obj.becomes_on_chop_key
                             stump_def = TILE_DEFINITIONS.get(stump_key)
 
                             if stump_def:
-                                self._change_map_tile(npc.sub_task_target_coords, stump_def)
-                                # self.add_message_to_chat_log(f"Debug: {npc.name} felled a tree, now a {stump_def['name']}.")
+                                self._change_map_tile(npc.sub_task_target_coords, stump_def, original_tree_type=original_tree_type)
+                                new_stump_tile = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+                                if new_stump_tile:
+                                    new_stump_tile.regrowth_timer = 100
 
                             if logs_collected > 0:
-                                npc.npc_inventory["raw_log"] = npc.npc_inventory.get("raw_log", 0) + logs_collected
-                                # self.add_message_to_chat_log(f"Debug: {npc.name} collected {logs_collected} raw_log(s). Inv: {npc.npc_inventory['raw_log']}")
+                                npc.add_item("raw_log", logs_collected)
                         # else:
                             # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
 
@@ -1888,35 +1892,41 @@ class World:
                         # Handle output/consumption for other (non-Farmer, non-Woodcutter chop) sub-tasks via the helper
                         self._produce_sub_task_output(npc, work_building, completed_sub_task_data)
 
-                # Move to next sub-task in sequence
-                npc.current_sub_task_sequence_index = (npc.current_sub_task_sequence_index + 1) % len(sub_task_sequence)
-                npc.current_sub_task = None # Force selection of the new sub-task logic below
+                # Move to next sub-task in sequence - This is where the logic changes.
+                # Instead of just incrementing, we will now search for the next VALID task.
+                npc.current_sub_task = None # Force re-evaluation below
 
-            # Set up the new sub-task (or re-setup if current_sub_task was cleared above)
-            if not npc.current_sub_task: # Ensures we select a new task if one was just completed.
-                next_sub_task_id = sub_task_sequence[npc.current_sub_task_sequence_index]
-            current_sub_task_data = get_sub_task_data(npc.profession, next_sub_task_id)
+            # Set up the new sub-task
+            if not npc.current_sub_task:
+                found_viable_task = False
+                # Iterate through the sequence from the last known index to find the next possible task.
+                # We check up to `len(sub_task_sequence)` times to avoid an infinite loop if no task is possible.
+                for i in range(len(sub_task_sequence)):
+                    next_task_index = (npc.current_sub_task_sequence_index + i) % len(sub_task_sequence)
+                    next_sub_task_id = sub_task_sequence[next_task_index]
+                    current_sub_task_data = get_sub_task_data(npc.profession, next_sub_task_id)
 
-            if not current_sub_task_data:
-                # self.add_message_to_chat_log(f"Error: Could not find sub_task_data for {next_sub_task_id} in {npc.profession}")
-                npc.current_task = "idle_confused"
-                return True
+                    if not current_sub_task_data: continue # Skip if data is missing
 
-            npc.current_sub_task = next_sub_task_id
-            npc.sub_task_zone_target = current_sub_task_data.get("target_zone_tag")
-            npc.sub_task_target_coords = self._find_target_coords_for_sub_task(npc, work_building, current_sub_task_data)
+                    # Check if this task is possible by trying to find a target.
+                    target_coords = self._find_target_coords_for_sub_task(npc, work_building, current_sub_task_data)
 
-            if not npc.sub_task_target_coords:
-                # self.add_message_to_chat_log(f"{npc.name} could not find a location for sub-task: {npc.current_sub_task}.")
-                # NPC might be stuck for this cycle. Clear sub-task to retry finding location next schedule update.
-                npc.current_sub_task = None
-                npc.sub_task_zone_target = None
-                npc.current_task = f"Working ({npc.profession} - stalled)" # Or some other indicator
-                return True
+                    if target_coords:
+                        # Found a valid task. Set it as the current one.
+                        npc.current_sub_task_sequence_index = next_task_index
+                        npc.current_sub_task = next_sub_task_id
+                        npc.sub_task_zone_target = current_sub_task_data.get("target_zone_tag")
+                        npc.sub_task_target_coords = target_coords
+                        npc.current_path = []
+                        npc.sub_task_timer = current_sub_task_data.get("duration_ticks", 10)
+                        found_viable_task = True
+                        break # Exit the loop once a task is found
 
-            npc.current_path = [] # Clear path for new sub-task target
-            npc.sub_task_timer = current_sub_task_data.get("duration_ticks", 10) # Reset timer for the action phase
-            # self.add_message_to_chat_log(f"Debug: {npc.name} starting sub-task {npc.current_sub_task}, target {npc.sub_task_target_coords}, zone {npc.sub_task_zone_target}")
+                if not found_viable_task:
+                    # If no task in the entire sequence is possible, the NPC is stalled.
+                    npc.current_task = f"Working ({npc.profession} - No available tasks)"
+                    return True # Handled for this cycle
+
 
 
         # If NPC has a sub-task and a target location for it
@@ -2409,47 +2419,78 @@ class World:
         # self.add_message_to_chat_log(f"Debug: No '{interaction_hint}' found in building {building.id[:6]}")
         return False
 
+    def _change_map_tile(self, coords: tuple[int, int], new_tile_def: dict, original_tree_type: str | None = None):
+        """Changes a tile on the map to a new one based on a TILE_DEFINITION."""
+        x, y = coords
+        chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
+        local_x, local_y = x % CHUNK_SIZE, y % CHUNK_SIZE
+
+        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+            chunk = self.chunks[chunk_y][chunk_x]
+            if chunk and chunk.tiles:
+                new_tile = Tile(
+                    char=new_tile_def["char"],
+                    color=new_tile_def["color"],
+                    passable=new_tile_def["passable"],
+                    name=new_tile_def["name"],
+                    properties=new_tile_def.get("properties", {})
+                )
+                if original_tree_type:
+                    new_tile.original_tree_type = original_tree_type
+
+                chunk.tiles[local_y][local_x] = new_tile
+                # Update transparency map
+                self.transparency_map[x, y] = not new_tile.blocks_fov
+
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
-        # Check if player has an axe
-        # For now, let's assume "axe_stone" is the only axe type.
-        # A more robust system would check for any item with property "tool_type": "axe".
-        # For now, only "axe_stone" is considered. A more robust system would check for any item with "tool_type": "axe".
         axe_item_key = "axe_stone"
-        if self.player.inventory.get(axe_item_key, 0) <= 0:
+        if not self.player.has_item(axe_item_key):
             self.add_message_to_chat_log("You need an axe to chop trees.")
             return
 
         target_tile = self.get_tile_at(tree_x, tree_y)
 
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
+            original_tree_type = target_tile.tree_type
             yielded_resources = target_tile.chop()
 
             if yielded_resources:
                 self.add_message_to_chat_log(f"You chopped the {target_tile.original_name}!")
-                self.emit_sound(tree_x, tree_y, "tree_fall", volume=15, source_entity_id=self.player.id) # Emit sound
+                self.emit_sound(tree_x, tree_y, "tree_fall", volume=15, source_entity_id=self.player.id)
                 for resource_key, quantity in yielded_resources.items():
                     if resource_key in ITEM_DEFINITIONS:
-                        current_qty = self.player.inventory.get(resource_key, 0)
-                        self.player.inventory[resource_key] = current_qty + quantity
+                        self.player.add_item(resource_key, quantity)
                         self.add_message_to_chat_log(f"  + {quantity} {ITEM_DEFINITIONS[resource_key]['name']}")
                     else:
                         self.add_message_to_chat_log(f"  (Received undefined resource: {resource_key} x{quantity})")
 
+                stump_key = target_tile.becomes_on_chop_key
+                stump_def = TILE_DEFINITIONS.get(stump_key)
+                if stump_def:
+                    self._change_map_tile((tree_x, tree_y), stump_def, original_tree_type=original_tree_type)
+                    new_stump_tile = self.get_tile_at(tree_x, tree_y)
+                    if new_stump_tile:
+                        new_stump_tile.regrowth_timer = 100
+
                 # Handle axe degradation/breaking
                 axe_def = ITEM_DEFINITIONS.get(axe_item_key)
-                if axe_def:
-                    degrade_chance = axe_def.get("properties", {}).get("durability_chance_to_degrade", 0.0)
+                if axe_def and not axe_def.get("stackable", False):
+                    degrade_chance = axe_def.get("properties", {}).get("durability_chance_to_degrade", 0.05) # 5% chance
                     if random.random() < degrade_chance:
-                        self.player.inventory[axe_item_key] -= 1
-                        self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
-                        if self.player.inventory[axe_item_key] <= 0:
-                            del self.player.inventory[axe_item_key]
-                            self.add_message_to_chat_log("That was your last one.")
-                        # Optionally, give back a "broken_tool_handle"
-                        if "broken_tool_handle" in ITEM_DEFINITIONS:
-                            self.player.inventory["broken_tool_handle"] = self.player.inventory.get("broken_tool_handle", 0) + 1
-                            self.add_message_to_chat_log("You salvaged a broken tool handle.")
+                        axe_indices = self.player.get_item_instance_indices(axe_item_key)
+                        if axe_indices:
+                            axe_to_degrade = self.player.get_item_by_index(axe_indices[0])
+                            if axe_to_degrade and "durability" in axe_to_degrade:
+                                axe_to_degrade["durability"] -= 1
+                                if axe_to_degrade["durability"] <= 0:
+                                    self.player.remove_item(axe_item_key, 1, specific_instance_index=axe_indices[0])
+                                    self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
+                                    if "broken_tool_handle" in ITEM_DEFINITIONS:
+                                        self.player.add_item("broken_tool_handle", 1)
+                                        self.add_message_to_chat_log("You salvaged a broken tool handle.")
+                                else:
+                                    self.add_message_to_chat_log(f"Your {axe_def['name']} shows some wear.")
             else:
                 self.add_message_to_chat_log("Nothing was yielded from the tree.")
         elif isinstance(target_tile, Tree) and not target_tile.is_choppable:
@@ -2457,6 +2498,20 @@ class World:
         else:
             self.add_message_to_chat_log("There's nothing to chop there.")
 
+    def player_attempt_plant_sapling(self, target_x: int, target_y: int):
+        """Handles the player's attempt to plant a sapling."""
+        if not self.player.has_item("sapling"):
+            self.add_message_to_chat_log("You don't have any saplings to plant.")
+            return
+
+        target_tile = self.get_tile_at(target_x, target_y)
+        if target_tile and target_tile.name in ["Plains", "Tilled Soil"]:
+            self.player.remove_item("sapling", 1)
+            sapling_def = TILE_DEFINITIONS["sapling"]
+            self._change_map_tile((target_x, target_y), sapling_def)
+            self.add_message_to_chat_log("You planted a sapling.")
+        else:
+            self.add_message_to_chat_log("You can't plant a sapling there.")
 
     def add_message_to_chat_log(self, message: str):
         self.chat_log.append(message)
@@ -3131,7 +3186,55 @@ class World:
             print(f"Error communicating with Ollama: {e}")
             return ""
 
-    
+    def _update_world_environment(self):
+        """Handles time-based environmental changes, like tree regrowth."""
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if not chunk.is_generated:
+                    continue
+
+                for y_local in range(CHUNK_SIZE):
+                    for x_local in range(CHUNK_SIZE):
+                        tile = chunk.tiles[y_local][x_local]
+                        if hasattr(tile, 'regrowth_timer') and tile.regrowth_timer > 0:
+                            tile.regrowth_timer -= 1
+                            if tile.regrowth_timer == 0:
+                                if hasattr(tile, 'original_tree_type') and tile.original_tree_type:
+                                    tree_type = tile.original_tree_type
+                                    world_x = x_chunk * CHUNK_SIZE + x_local
+                                    world_y = y_chunk * CHUNK_SIZE + y_local
+
+                                    new_tree = None
+                                    if tree_type == "oak":
+                                        new_tree = OakTree(world_x, world_y)
+                                    elif tree_type == "apple":
+                                        new_tree = AppleTree(world_x, world_y)
+                                    elif tree_type == "pear":
+                                        new_tree = PearTree(world_x, world_y)
+
+                                    if new_tree:
+                                        chunk.tiles[y_local][x_local] = new_tree
+                                        self.transparency_map[world_x, world_y] = True
+
+                        elif tile.name == "Sapling" and tile.properties.get("growth_timer"):
+                            tile.properties["growth_timer"] -= 1
+                            if tile.properties["growth_timer"] <= 0:
+                                tree_type = tile.properties.get("evolves_to", "oak")
+                                world_x = x_chunk * CHUNK_SIZE + x_local
+                                world_y = y_chunk * CHUNK_SIZE + y_local
+
+                                new_tree = None
+                                if tree_type == "oak":
+                                    new_tree = OakTree(world_x, world_y)
+                                elif tree_type == "apple":
+                                    new_tree = AppleTree(world_x, world_y)
+                                elif tree_type == "pear":
+                                    new_tree = PearTree(world_x, world_y)
+
+                                if new_tree:
+                                    chunk.tiles[y_local][x_local] = new_tree
+                                    self.transparency_map[world_x, world_y] = True
 
     def _populate_npcs(self):
         # Generate NPCs using LLM
@@ -3607,6 +3710,9 @@ class World:
                                     tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
                                 # Update transparency map for the new tree
                                 self.transparency_map[tree_x_world, tree_y_world] = False # Trees block FOV
+                            elif random.random() < 0.01: # 1% chance for a sapling
+                                sapling_def = TILE_DEFINITIONS["sapling"]
+                                tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
                             elif random.random() < 0.15: # 15% chance for tall grass (if not a tree)
                                 tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
                             elif random.random() < 0.01: # 1% chance for a flower (if not a tree or grass)

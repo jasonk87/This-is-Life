@@ -270,6 +270,16 @@ ITEM_DEFINITIONS = {
             "reduces_hunger": 3
         }
     },
+    "sapling": {
+        "name": "Sapling",
+        "description": "A young tree, ready for planting.",
+        "char": "y",
+        "color": tcod.constants.YELLOW_GREEN,
+        "value": 5,
+        "weight": 0.5,
+        "stackable": True,
+        "item_type_tags": ["resource", "reforestation"],
+    },
      "raw_meat_scrap": { # Already defined, ensure it's here for completeness of food section
         "name": "Raw Meat Scrap",
         "description": "A piece of raw meat. Needs cooking.",

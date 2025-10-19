@@ -24,7 +24,6 @@ from config import (
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
-from data.environment import SEASONS, SEASON_ORDER, WEATHER_TYPES
 from tile_types import Tile # For Tile class
 from entities.tree import Tree # For isinstance check
 from data.items import ITEM_DEFINITIONS # For checking yielded resources
@@ -309,11 +308,6 @@ class World:
         self.mouse_y = 0
         self.game_state = "PLAYING"
         self.game_time = 0
-        self.total_days = 0
-        self.day_of_season = 0
-        self.current_season_key = SEASON_ORDER[0]
-        self.current_season = SEASONS[self.current_season_key]
-        self.current_weather = "clear"
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
 
         # New Interaction Context
@@ -915,6 +909,10 @@ class World:
                         elif npc.current_task == "fetching water":
                             npc.current_task = "at the well"
                             # NPC will stay "at the well" until scheduler gives a new task (e.g. "going home")
+                        elif npc.current_task == "going to tavern":
+                            npc.current_task = "socializing"
+                        elif npc.current_task == "visiting friend":
+                            npc.current_task = "socializing"
                         else:
                             npc.current_task = "idle"
 
@@ -928,6 +926,8 @@ class World:
                         npc.current_task = "at home"
                     elif npc.current_task == "fetching water":
                         npc.current_task = "at the well"
+                    elif npc.current_task == "going to tavern":
+                        npc.current_task = "socializing"
                     else:
                         npc.current_task = "idle"
 
@@ -1464,6 +1464,7 @@ class World:
                     sleep_start_tick = DAY_LENGTH_TICKS * 0.85
                     sleep_end_tick = DAY_LENGTH_TICKS * 0.15 # Next day
                     is_night_time = current_time_in_day >= sleep_start_tick or current_time_in_day < sleep_end_tick
+                    is_leisure_time = work_end_tick <= current_time_in_day < sleep_start_tick
 
                     # Priority: Go to work during work hours
                     if work_start_tick <= current_time_in_day < work_end_tick:
@@ -1479,6 +1480,32 @@ class World:
                         elif npc.work_building_id and is_at_work:
                              npc.current_task = f"Working ({npc.profession})" if npc.profession != "Unemployed" else "At Work (Idle)"
                              if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
+
+                    # Leisure time logic
+                    elif is_leisure_time and npc.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
+                        if npc.leisure_timer > 0:
+                            npc.leisure_timer -= 1
+                        elif random.random() < 0.05: # 5% chance to go to the tavern
+                            tavern = self._find_nearest_tavern(npc)
+                            if tavern:
+                                new_task_label = "going to tavern"
+                                destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                        elif random.random() < 0.05: # 5% chance to visit a friend
+                            friend = random.choice([n for n in self.village_npcs if n.id != npc.id])
+                            if friend and friend.home_building_id:
+                                friend_home = self.buildings_by_id.get(friend.home_building_id)
+                                if friend_home:
+                                    new_task_label = "visiting friend"
+                                    destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
+                                    npc.task_target_entity_id = friend.id
+                                    npc.leisure_timer = random.randint(100, 300) # Stay for a while
+                        elif random.random() < 0.05: # 5% chance to go fishing
+                            npc_village = self._get_village_for_npc(npc)
+                            if npc_village and "fishing_spot" in npc_village.interaction_points:
+                                fishing_spot = random.choice(npc_village.interaction_points["fishing_spot"])
+                                new_task_label = "fishing"
+                                destination_coords = fishing_spot
+                                npc.leisure_timer = random.randint(100, 300)
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home to sleep"]:
@@ -2438,6 +2465,10 @@ class World:
                 closest_building = building
 
         return closest_building
+
+    def _find_nearest_tavern(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'tavern' type in the NPC's village."""
+        return self._find_nearest_building_of_type(npc, "tavern")
 
     def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
         """
@@ -3576,38 +3607,7 @@ class World:
             return ""
 
     def _update_world_environment(self):
-        """Handles time-based environmental changes, like tree regrowth and season transitions."""
-        # --- Season and Day Tracking ---
-        current_total_days = self.game_time // DAY_LENGTH_TICKS
-        if current_total_days > self.total_days:
-            self.total_days = current_total_days
-            self.day_of_season += 1
-
-            # Check for season change
-            season_duration = self.current_season["duration_days"]
-            if self.day_of_season > season_duration:
-                current_season_index = SEASON_ORDER.index(self.current_season_key)
-                next_season_index = (current_season_index + 1) % len(SEASON_ORDER)
-                self.current_season_key = SEASON_ORDER[next_season_index]
-                self.current_season = SEASONS[self.current_season_key]
-                self.day_of_season = 1
-                self.add_message_to_chat_log(f"The season has changed to {self.current_season['name']}.")
-
-            # --- Weather Change on New Day ---
-            weather_probabilities = self.current_season["weather_probabilities"]
-            weather_types = list(weather_probabilities.keys())
-            probabilities = list(weather_probabilities.values())
-
-            new_weather = random.choices(weather_types, probabilities, k=1)[0]
-            if new_weather != self.current_weather:
-                self.current_weather = new_weather
-                self.add_message_to_chat_log(f"The weather has changed to: {WEATHER_TYPES[self.current_weather]['name']}.")
-
-        # Get seasonal growth modifiers
-        tree_growth_mod = self.current_season["effects"].get("tree_growth_modifier", 1.0)
-        sapling_growth_mod = self.current_season["effects"].get("sapling_growth_modifier", 1.0)
-
-
+        """Handles time-based environmental changes like tree regrowth."""
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
@@ -3617,8 +3617,10 @@ class World:
                 for y_local in range(CHUNK_SIZE):
                     for x_local in range(CHUNK_SIZE):
                         tile = chunk.tiles[y_local][x_local]
+
+                        # Tree regrowth from stump
                         if hasattr(tile, 'regrowth_timer') and tile.regrowth_timer > 0:
-                            tile.regrowth_timer -= (1 * tree_growth_mod)
+                            tile.regrowth_timer -= 1
                             if tile.regrowth_timer <= 0:
                                 if hasattr(tile, 'original_tree_type') and tile.original_tree_type:
                                     tree_type = tile.original_tree_type
@@ -3635,12 +3637,16 @@ class World:
 
                                     if new_tree:
                                         chunk.tiles[y_local][x_local] = new_tree
-                                        self.transparency_map[world_x, world_y] = True
+                                        # Also update the global transparency map for FOV
+                                        self.transparency_map[world_x, world_y] = True # Trees are not transparent
 
-                        elif tile.name == "Sapling" and tile.properties.get("growth_timer"):
-                            tile.properties["growth_timer"] -= (1 * sapling_growth_mod)
+
+                        # Sapling growth into tree
+                        elif tile.name == "Sapling" and "growth_timer" in tile.properties:
+                            tile.properties["growth_timer"] -= 1
                             if tile.properties["growth_timer"] <= 0:
-                                tree_type = tile.properties.get("evolves_to", "oak")
+                                # Determine what kind of tree it becomes
+                                tree_type = tile.properties.get("evolves_to", "oak") # Default to oak
                                 world_x = x_chunk * CHUNK_SIZE + x_local
                                 world_y = y_chunk * CHUNK_SIZE + y_local
 
@@ -3654,7 +3660,8 @@ class World:
 
                                 if new_tree:
                                     chunk.tiles[y_local][x_local] = new_tree
-                                    self.transparency_map[world_x, world_y] = True
+                                    self.transparency_map[world_x, world_y] = True # Update transparency map
+
 
     def _populate_npcs(self):
         # Generate NPCs using LLM
@@ -3785,6 +3792,8 @@ class World:
                          "shop" in work_building.building_type or \
                          "market" in work_building.building_type:
                         npc.profession = "Merchant"
+                    elif work_building.building_type == "tavern":
+                        npc.profession = "Tavern Keeper"
                     elif work_building.building_type == "lumber_mill":
                         # Could have multiple roles at a lumber mill, e.g. Foreman and Woodcutter
                         # For now, let's make the first NPC assigned to a lumber_mill the "Foreman" (quest giver)
@@ -3807,6 +3816,8 @@ class World:
                         npc.profession = "Miller"
                     elif work_building.building_type == "bakery":
                         npc.profession = "Baker"
+                    elif work_building.building_type == "fishing_hut":
+                        npc.profession = "Fisherman"
                     else:
                         npc.profession = work_building.building_type.replace("_", " ").title()
                 else:
@@ -4164,6 +4175,16 @@ class World:
     def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
+        # Add a pond to the village
+        if random.random() < 0.5:
+            pond_center_x = random.randint(5, CHUNK_SIZE - 6)
+            pond_center_y = random.randint(5, CHUNK_SIZE - 6)
+            pond_radius = random.randint(3, 5)
+            for y in range(CHUNK_SIZE):
+                for x in range(CHUNK_SIZE):
+                    if (x - pond_center_x)**2 + (y - pond_center_y)**2 < pond_radius**2:
+                        tiles[y][x] = Tile(TILE_DEFINITIONS["water"]["char"], TILE_DEFINITIONS["water"]["color"], TILE_DEFINITIONS["water"]["passable"], TILE_DEFINITIONS["water"]["name"])
+
         chunk_global_start_x = chunk_coord_x * CHUNK_SIZE
         chunk_global_start_y = chunk_coord_y * CHUNK_SIZE
 
@@ -4238,6 +4259,39 @@ class World:
         chunk.village.add_building(general_store)
         self.buildings_by_id[general_store.id] = general_store
         self._draw_building(tiles, general_store, "wood_wall")
+
+        # Generate Tavern
+        tavern_w, tavern_h = 9, 7
+        tavern_x, tavern_y = 0, 0
+
+        attempts = 0
+        while attempts < 100:
+            tavern_x = random.randint(1, CHUNK_SIZE - tavern_w - 1)
+            tavern_y = random.randint(1, CHUNK_SIZE - tavern_h - 1)
+            overlap = False
+            for i in range(tavern_h):
+                for j in range(tavern_w):
+                    if tiles[tavern_y + i][tavern_x + j].name == "road":
+                        overlap = True
+                        break
+                if overlap:
+                    break
+            for existing_building in chunk.village.buildings:
+                if not (tavern_x + tavern_w < existing_building.x or tavern_x > existing_building.x + existing_building.width or
+                        tavern_y + tavern_h < existing_building.y or tavern_y > existing_building.y + existing_building.height):
+                    overlap = True
+                    break
+            if not overlap:
+                break
+            attempts += 1
+
+        if attempts < 100:
+            tavern = Building(tavern_x, tavern_y, tavern_w, tavern_h,
+                                building_type="tavern", category="commercial_workplace",
+                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+            chunk.village.add_building(tavern)
+            self.buildings_by_id[tavern.id] = tavern
+            self._draw_building(tiles, tavern, "wood_wall")
 
         # Generate Lumber Mill (example producer workplace)
         lumber_mill_w, lumber_mill_h = 7, 7
@@ -4469,6 +4523,45 @@ class World:
             if "wheat_seeds" in ITEM_DEFINITIONS:
                  farm_building.building_inventory["wheat_seeds"] = random.randint(5, 15)
 
+
+        # Generate Fishing Hut
+        if any(tiles[y][x].name == "water" for x in range(CHUNK_SIZE) for y in range(CHUNK_SIZE)):
+            hut_w, hut_h = 5, 5
+            for _ in range(100): # Attempts to place hut
+                hut_x = random.randint(1, CHUNK_SIZE - hut_w - 1)
+                hut_y = random.randint(1, CHUNK_SIZE - hut_h - 1)
+
+                # Check for proximity to water
+                is_near_water = False
+                for i in range(-1, hut_h + 1):
+                    for j in range(-1, hut_w + 1):
+                        check_x, check_y = hut_x + j, hut_y + i
+                        if 0 <= check_x < CHUNK_SIZE and 0 <= check_y < CHUNK_SIZE:
+                            if tiles[check_y][check_x].name == "water":
+                                is_near_water = True
+                                break
+                    if is_near_water:
+                        break
+
+                if is_near_water:
+                    fishing_hut = Building(hut_x, hut_y, hut_w, hut_h, building_type="fishing_hut", category="industrial_workplace", global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                    chunk.village.add_building(fishing_hut)
+                    self.buildings_by_id[fishing_hut.id] = fishing_hut
+                    self._draw_building(tiles, fishing_hut, "wood_wall")
+
+                    # Designate a fishing spot
+                    for i in range(-2, hut_h + 2):
+                        for j in range(-2, hut_w + 2):
+                            spot_x, spot_y = hut_x + j, hut_y + i
+                            if 0 <= spot_x < CHUNK_SIZE and 0 <= spot_y < CHUNK_SIZE:
+                                if tiles[spot_y][spot_x].name == "water":
+                                    if "fishing_spot" not in chunk.village.interaction_points:
+                                        chunk.village.interaction_points["fishing_spot"] = []
+                                    chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + spot_x, chunk_global_start_y + spot_y))
+                                    break
+                        if "fishing_spot" in chunk.village.interaction_points:
+                            break
+                    break
 
         # Generate a few regular houses
         num_houses = random.randint(3, 5)

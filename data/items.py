@@ -512,6 +512,19 @@ ITEM_DEFINITIONS = {
         "crafting_recipe": {
             "iron_ingot": 5,
         },
+    },
+    "fish": {
+        "name": "Fish",
+        "description": "A freshly caught fish.",
+        "char": "f",
+        "color": COLORS["silver"],
+        "value": 5,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "on_use": {
+            "reduces_hunger": 20
+        }
     }
 }
 

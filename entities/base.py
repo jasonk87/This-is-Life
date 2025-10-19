@@ -85,6 +85,8 @@ class NPC:
         self.woodcutter_search_radius: int = 15 # Specific to woodcutter AI
 
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
+        self.task_target_entity_id: int | None = None
+        self.leisure_timer = 0
 
     def get_dialogue(self):
         return self.dialogue

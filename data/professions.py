@@ -236,6 +236,40 @@ PROFESSIONS = {
             }
         ],
         "default_sub_task_sequence": ["fetch_flour", "bake_bread"]
+    },
+    "Tavern Keeper": {
+        "display_name": "Tavern Keeper",
+        "wage": 25,
+        "description": "Runs the local tavern, serving drinks and food.",
+        "work_building_categories": ["Tavern"],
+        "sub_tasks": [],
+        "default_sub_task_sequence": []
+    },
+    "Fisherman": {
+        "display_name": "Fisherman",
+        "wage": 18,
+        "description": "Catches fish to supply the village.",
+        "work_building_categories": ["Fishing Hut"],
+        "sub_tasks": [
+            {
+                "id": "fish_at_spot",
+                "display_name": "Fishing",
+                "action_verb": "fishing at",
+                "duration_ticks": 150,
+                "target_zone_tag": "fishing_spot",
+                "produces_item_at_workplace": {"fish": 1}
+            },
+            {
+                "id": "store_fish",
+                "display_name": "Storing Fish",
+                "action_verb": "storing fish in",
+                "duration_ticks": 20,
+                "target_zone_tag": "storage_area",
+                "consumes_item_from_npc_inventory": {"fish": 1},
+                "deposits_item_to_workplace": {"fish": 1}
+            }
+        ],
+        "default_sub_task_sequence": ["fish_at_spot", "store_fish"]
     }
     # More professions can be added here
 }

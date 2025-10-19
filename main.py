@@ -86,6 +86,7 @@ def main():
 
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
             world._update_light_level_and_fov() # Update light level and FOV radius
+            world._update_world_environment()
             world.update_fov() # Update FOV maps for player and NPCs
             world._update_npc_schedules() # New: Update NPC schedules (includes combat AI decisions)
             world._update_npc_movement() # Update NPC movement (includes combat movement/action execution)

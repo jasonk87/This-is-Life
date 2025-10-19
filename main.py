@@ -52,6 +52,19 @@ def main():
             # Player actions are handled in event loop below
             # NPC Updates
             world.game_time += 1 # Increment game time
+
+            # --- Jail Time Update ---
+            if world.player.is_jailed and world.player.jail_time_remaining > 0:
+                world.player.jail_time_remaining -= 1
+                if world.player.jail_time_remaining == 0:
+                    world.add_message_to_chat_log("Your sentence is over. The guard unlocks the door.")
+                    world.player.is_jailed = False
+                    door_x, door_y = world.player.jail_cell_coords
+                    open_door_def = world.DECORATION_ITEM_DEFINITIONS["iron_door_open"]
+                    world._change_map_tile((door_x, door_y), open_door_def)
+                    world.player.jail_cell_coords = None
+
+
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
             world._update_light_level_and_fov() # Update light level and FOV radius
             world.update_fov() # Update FOV maps for player and NPCs

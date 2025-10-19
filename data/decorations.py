@@ -118,5 +118,32 @@ DECORATION_ITEM_DEFINITIONS = {
             "interaction_hint": "loot",
             "decay_timer": 500 # Ticks until it disappears or turns to skeleton
         }
+    },
+    "iron_door_closed": {
+        "char": "+",
+        "color": COLORS["dark_slate_gray"],
+        "passable": False,
+        "name": "Iron Door",
+        "properties": {
+            "is_door": True,
+            "is_open": False,
+            "opens_to": "iron_door_open",
+            "is_lockable": True,
+            "is_locked": True,
+            "lock_difficulty": 7,
+            "blocks_fov": True
+        }
+    },
+    "iron_door_open": {
+        "char": "'",
+        "color": COLORS["dark_slate_gray"],
+        "passable": True,
+        "name": "Open Iron Door",
+        "properties": {
+            "is_door": True,
+            "is_open": True,
+            "closes_to": "iron_door_closed",
+            "blocks_fov": False
+        }
     }
 }

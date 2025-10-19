@@ -155,6 +155,7 @@ class Player:
         self.pending_contract_offer = None
         self.lockpicking_skill = 3 # Conceptual skill, scale 1-10, default slightly below average
         self.id = id(self) # Simple unique ID for player
+        self.bounty = 0
 
         # Light Source State
         self.equipped_light_item_key: str | None = None # e.g., "torch_lit"
@@ -169,6 +170,9 @@ class Player:
         self.max_thirst: int = 100
         self.hunger_level_msg: str = "" # To store message like "Hungry"
         self.thirst_level_msg: str = "" # To store message like "Thirsty"
+        self.is_jailed: bool = False
+        self.jail_cell_coords: tuple[int, int] | None = None
+        self.jail_time_remaining: int = 0
 
 
     def take_damage(self, amount: int):
@@ -1147,9 +1151,32 @@ class World:
                                           "combat_action_move_to_cover", "investigating_sound"]:
 
                 needs_based_action_taken = False
+
+                # --- Crime Reporting Task ---
+                if npc.current_task == "going_to_report_crime":
+                    if npc.task_target_coords:
+                        # Check if at the sheriff's office
+                        if (npc.x, npc.y) == npc.task_target_coords:
+                            self.add_message_to_chat_log(f"{npc.name} reports your crimes to the authorities!")
+                            self.player.bounty += 50 # Example bounty increase
+                            self.add_message_to_chat_log(f"Your bounty has increased by 50. Total bounty: {self.player.bounty}.")
+                            npc.current_task = "idle" # Or return to previous task
+                            npc.task_target_coords = None
+                        else:
+                            # Path to the sheriff's office if not already pathing
+                            if not npc.current_path or npc.current_destination_coords != npc.task_target_coords:
+                                path = self.calculate_path(npc.x, npc.y, npc.task_target_coords[0], npc.task_target_coords[1])
+                                if path:
+                                    npc.current_path = path
+                                    npc.current_destination_coords = npc.task_target_coords
+                                else:
+                                    npc.current_task = "idle_confused" # Can't reach the office
+                    needs_based_action_taken = True
+
+
                 # --- Thirst Fulfillment ---
-                if npc.thirst >= 70 or npc.current_task == "seeking_water":
-                    if not needs_based_action_taken and npc.current_task != "seeking_water":
+                if not needs_based_action_taken and (npc.thirst >= 70 or npc.current_task == "seeking_water"):
+                    if npc.current_task != "seeking_water":
                         npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                         npc.current_task = "seeking_water"
 
@@ -1543,6 +1570,15 @@ class World:
                         else:
                             # self.add_message_to_chat_log(f"Could not find path for {npc.name} for task {new_task_label} to {destination_coords}")
                             npc.current_task = "idle_confused" # Cannot find path
+
+            # --- Sheriff / Guard Hostility Check ---
+            if npc.profession in ["Sheriff", "Guard"] and not npc.is_hostile_to_player:
+                if self.player.bounty >= 100: # Bounty threshold for arrest
+                    # Check if player is visible to the Sheriff/Guard
+                    if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
+                        self.add_message_to_chat_log(f"{npc.name} spots you and moves to arrest you for your crimes!")
+                        npc.is_hostile_to_player = True
+                        # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
 
             # After all task decisions and path assignments:
             # If NPC is at work, handle specific work sub-tasks or general production.
@@ -2176,6 +2212,17 @@ class World:
         if npc.is_dead or player.hp <= 0:
             return
 
+        # --- ARREST LOGIC ---
+        if npc.profession in ["Sheriff", "Guard"] and self.player.bounty >= 100 and not self.player.is_jailed:
+            self.add_message_to_chat_log(f"{npc.name} apprehends you! You are under arrest.")
+            self.serve_jail_time()
+            # Stop the NPC's hostile actions after arrest
+            npc.is_hostile_to_player = False
+            npc.current_task = "idle"
+            npc.current_path = []
+            return
+
+
         # Determine weapon details for the attack
         weapon_name = npc.base_attack_name
         weapon_damage_description = npc.base_attack_damage_dice
@@ -2362,6 +2409,28 @@ class World:
                         return chk.village
         return None
 
+    def _find_nearest_building_of_type(self, npc: NPC, building_type: str) -> Building | None:
+        """Finds the nearest building of a specific type in the NPC's village."""
+        npc_village = self._get_village_for_npc(npc)
+        if not npc_village:
+            # If no village, maybe search all buildings in a radius? For now, only village NPCs report.
+            return None
+
+        target_buildings = [b for b in npc_village.buildings if b.building_type == building_type]
+        if not target_buildings:
+            return None
+
+        closest_building = None
+        min_dist_sq = float('inf')
+
+        for building in target_buildings:
+            dist_sq = (npc.x - building.global_center_x)**2 + (npc.y - building.global_center_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_building = building
+
+        return closest_building
+
     def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
         """
         Searches an inventory for food and consumes one item if found.
@@ -2431,11 +2500,68 @@ class World:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
 
+    def serve_jail_time(self):
+        """Handles the process of putting the player in jail."""
+        # Find the nearest sheriff's office.
+        sheriff_office = None
+        min_dist_sq = float('inf')
+        for building in self.buildings_by_id.values():
+            if building.building_type == "sheriff_office":
+                dist_sq = (self.player.x - building.global_center_x)**2 + (self.player.y - building.global_center_y)**2
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    sheriff_office = building
 
-            del self.player.active_contracts[contract_id]
+        if not sheriff_office:
+            self.add_message_to_chat_log("The sheriff pats you down but has nowhere to hold you. You're free to go... for now.")
+            self.player.bounty = self.player.bounty // 2 # Reduce bounty anyway
+            return
 
-            # If chat UI was active, maybe close it or go back to general talk mode
-            if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
+        # Dynamically create a 3x3 jail cell in the top-left corner of the building's interior.
+        cell_origin_x = sheriff_office.global_origin_x + 1
+        cell_origin_y = sheriff_office.global_origin_y + 1
+        cell_center_x = cell_origin_x + 1
+        cell_center_y = cell_origin_y + 1
+        door_x, door_y = cell_origin_x + 1, cell_origin_y + 2
+
+        jail_bar_def = TILE_DEFINITIONS["jail_bars"]
+        iron_door_def = DECORATION_ITEM_DEFINITIONS["iron_door_closed"]
+        floor_def = TILE_DEFINITIONS["wood_floor"]
+
+        # Carve out the cell
+        for y_offset in range(3):
+            for x_offset in range(3):
+                is_border = x_offset == 0 or x_offset == 2 or y_offset == 0 or y_offset == 2
+                tile_x, tile_y = cell_origin_x + x_offset, cell_origin_y + y_offset
+
+                if is_border:
+                    if y_offset == 2 and x_offset == 1: # Door on the bottom wall
+                        self._change_map_tile((tile_x, tile_y), iron_door_def)
+                    else:
+                        self._change_map_tile((tile_x, tile_y), jail_bar_def)
+                else: # Interior of the cell
+                    self._change_map_tile((tile_x, tile_y), floor_def)
+
+
+        # Move player to cell
+        self.player.x = cell_center_x
+        self.player.y = cell_center_y
+        self.player.is_jailed = True
+        self.player.jail_cell_coords = (door_x, door_y) # Store the DOOR coordinates
+        self.player.jail_time_remaining = 500 # Set jail time
+        self.add_message_to_chat_log("You've been thrown in jail!")
+
+        # Reduce bounty
+        self.player.bounty = 0
+        self.add_message_to_chat_log("Your bounty has been cleared.")
+
+        self.update_fov() # Update FOV from new position
+
+
+        del self.player.active_contracts[contract_id]
+
+        # If chat UI was active, maybe close it or go back to general talk mode
+        if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
                 self.chat_ui_mode = "talk" # Or could close: self.chat_ui_active = False; context.stop_text_input()
                                            # For now, let's keep it open in talk mode.
                 # Add a follow-up generic line from NPC after payment.
@@ -2807,6 +2933,13 @@ class World:
             self.add_message_to_chat_log(narrative)
             self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=10, source_entity_id=self.player.id) # Emit attack sound
 
+            # --- Witness Check ---
+            witnesses = self._get_witnesses_to_action(self.player.x, self.player.y, "assault")
+            if witnesses:
+                for witness in witnesses:
+                    # self.add_message_to_chat_log(f"{witness.name} saw you attack {target_npc.name}!")
+                    self._handle_witness_reaction(witness, "assault", self.player, victim=target_npc)
+
             if hit and damage_dealt > 0:
                 target_npc.take_damage(damage_dealt, self)
                 if target_npc.is_dead:
@@ -2949,6 +3082,22 @@ class World:
 
             if success:
                 target_tile.properties["is_locked"] = False
+
+                # --- Jail Escape Logic ---
+                if self.player.is_jailed and (target_x, target_y) == self.player.jail_cell_coords:
+                    self.add_message_to_chat_log("With a final click, the cell door swings open. You're free!")
+                    self.player.is_jailed = False
+                    self.player.jail_cell_coords = None
+                    # The door is now unlocked and will become passable after the toggle action.
+                    return True # Escape successful
+
+
+                # --- Witness Check ---
+                witnesses = self._get_witnesses_to_action(target_x, target_y, "lockpicking")
+                if witnesses:
+                    for witness in witnesses:
+                        self._handle_witness_reaction(witness, "lockpicking", self.player)
+
                 # For now, just message. Actual content access is next step.
                 # self.add_message_to_chat_log(f"The {target_tile.name} clicks open!")
                 # Try to find which building this chest is in to list its inventory as a placeholder
@@ -2978,6 +3127,66 @@ class World:
                 building_obj.global_origin_y <= world_y < building_obj.global_origin_y + building_obj.height):
                 return building_obj
         return None
+
+    def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
+        """
+        Finds NPCs who witness a criminal act.
+        A witness must have line of sight to the action.
+        """
+        witnesses = []
+        # Combine all NPCs who could be witnesses
+        potential_witnesses = self.village_npcs + self.npcs
+
+        for npc in potential_witnesses:
+            if npc.is_dead:
+                continue
+
+            # Check if NPC can see the tile where the action occurred
+            can_see_action = False
+            if npc.id in self.npc_fov_maps:
+                fov_map = self.npc_fov_maps[npc.id]
+                if 0 <= action_x < WORLD_WIDTH and 0 <= action_y < WORLD_HEIGHT:
+                    if fov_map[action_x, action_y]:
+                        can_see_action = True
+
+            if can_see_action:
+                # Simple logic for now: if they can see it, they are a witness.
+                # Future: Could add personality checks (e.g., some ignore theft, some are brave/cowardly)
+                witnesses.append(npc)
+
+        return witnesses
+
+    def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player, victim: NPC | None = None):
+        """Determines how an NPC reacts to witnessing a crime."""
+        # Prevent reaction chaining or if already hostile
+        if witness.is_hostile_to_player or witness.current_task in ["fleeing_from_player", "going_to_report_crime"]:
+            return
+
+        # Guards, Sheriffs, etc., become hostile immediately
+        if witness.profession in ["Guard", "Sheriff"]:
+            self.add_message_to_chat_log(f"{witness.name} shouts, 'Stop right there, criminal scum!'")
+            witness.is_hostile_to_player = True
+            # Combat AI will take over on the next tick
+            return
+
+        # Reaction based on personality
+        if witness.personality == "cowardly":
+            self.add_message_to_chat_log(f"{witness.name} shrieks and runs away in fear!")
+            witness.current_task = "combat_action_flee_from_player" # Use the existing flee logic
+            witness.current_path = [] # Clear path to force recalculation
+        elif witness.personality in ["lawful", "civic-minded", "gossipy"]:
+            sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
+            if sheriff_office:
+                self.add_message_to_chat_log(f"{witness.name} gasps, 'I'm reporting this to the sheriff!'")
+                witness.current_task = "going_to_report_crime"
+                witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
+                witness.current_path = [] # Clear path for new destination
+            else:
+                # No sheriff's office, maybe they just shout or flee?
+                self.add_message_to_chat_log(f"{witness.name} yells, 'Someone stop them!' but doesn't know where to go.")
+        else:
+            # Other personalities might just stare, disapprove, or ignore it for now
+            self.add_message_to_chat_log(f"{witness.name} stares in disbelief.")
 
 
     def npc_toggle_door(self, requesting_npc: NPC, door_x: int, door_y: int) -> bool:
@@ -4251,6 +4460,10 @@ class World:
         return None
 
     def handle_player_movement(self, dx, dy):
+        if self.player.is_jailed:
+            self.add_message_to_chat_log("You are in jail and cannot move freely.")
+            return
+
         if self.player.is_sitting:
             self.player_attempt_stand_up()
             # self.add_message_to_chat_log("You stand up to move.") # Optional message

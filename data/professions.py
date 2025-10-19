@@ -171,7 +171,8 @@ PROFESSIONS = {
         "work_building_categories": ["Sheriff's Office", "Town Hall"],
         "sub_tasks": [ # Similar to guard but perhaps more investigative or office-based tasks later
             {"id": "patrol_town", "display_name": "Patrolling Town", "duration_ticks": 250, "target_zone_tag": "town_patrol_route", "action_verb": "patrolling"},
-            {"id": "office_work", "display_name": "Office Work", "duration_ticks": 180, "target_zone_tag": "office_desk", "action_verb": "doing paperwork"}
+            {"id": "office_work", "display_name": "Office Work", "duration_ticks": 180, "target_zone_tag": "office_desk", "action_verb": "doing paperwork"},
+            {"id": "arrest_player", "display_name": "Arresting a Criminal", "duration_ticks": 100, "target_zone_tag": "jail_cell", "action_verb": "arresting"}
         ],
         "default_sub_task_sequence": ["patrol_town", "office_work"]
     },

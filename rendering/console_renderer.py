@@ -170,8 +170,42 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
              # ... (the rest of the NPC info is okay)
 
 def draw_interaction_menu(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
-    if not world.interaction_menu_active: return
-    # ... (rest of function is okay as it uses start_render_x which is now camera_x)
+    if not world.interaction_context["active"]:
+        return
+
+    ctx = world.interaction_context
+    menu_x = world.mouse_x + 1
+    menu_y = world.mouse_y + 1
+
+    # Basic dynamic width, more complex logic can be added
+    max_entity_name_len = max(len(e["name"]) for e in ctx["target_entities"]) if ctx["target_entities"] else 10
+    max_action_len = max(len(a) for a in ctx["available_actions"]) if ctx["available_actions"] else 10
+    menu_width = max(max_entity_name_len, max_action_len) + 6 # Padding
+
+    # Total height: 1 for title, len(entities), 1 for separator, len(actions), 2 for borders
+    menu_height = 1 + len(ctx["target_entities"]) + 1 + len(ctx["available_actions"]) + 2
+
+    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="Interact", clear=True)
+
+    y_offset = menu_y + 1
+    # Draw entities list
+    for i, entity in enumerate(ctx["target_entities"]):
+        fg = (255, 255, 0) if i == ctx["selected_entity_index"] else (255, 255, 255)
+        prefix = "> " if i == ctx["selected_entity_index"] else "  "
+        console.print(x=menu_x + 1, y=y_offset, string=f"{prefix}{entity['name']}", fg=fg)
+        y_offset += 1
+
+    # Separator
+    console.print(x=menu_x + 1, y=y_offset, string="-" * (menu_width - 2))
+    y_offset += 1
+
+    # Draw actions for selected entity
+    for i, action in enumerate(ctx["available_actions"]):
+        fg = (255, 255, 0) if i == ctx["selected_action_index"] else (255, 255, 255)
+        prefix = "* " if i == ctx["selected_action_index"] else "  "
+        console.print(x=menu_x + 1, y=y_offset, string=f"{prefix}{action}", fg=fg)
+        y_offset += 1
+
 
 def draw_chat_ui(console: tcod.console.Console, world) -> None:
     if not world.chat_ui_active: return

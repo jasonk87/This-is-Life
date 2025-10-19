@@ -13,6 +13,25 @@ from data.items import ITEM_DEFINITIONS
 from rendering.console_renderer import draw
 
 
+def open_interaction_menu(world: World, x: int, y: int):
+    """Opens the interaction menu for a specific tile."""
+    entities = world._get_interactables_at(x, y)
+    if not entities:
+        world.add_message_to_chat_log("There is nothing to interact with here.")
+        return
+
+    world.interaction_context["active"] = True
+    world.interaction_context["x"] = x
+    world.interaction_context["y"] = y
+    world.interaction_context["target_entities"] = entities
+    world.interaction_context["selected_entity_index"] = 0
+
+    # Get actions for the first entity
+    first_entity = entities[0]
+    world.interaction_context["available_actions"] = world._get_actions_for_entity(first_entity)
+    world.interaction_context["selected_action_index"] = 0
+
+
 def main():
     """Sets up the game and runs the main loop."""
     move_keys = {
@@ -113,6 +132,14 @@ def main():
                 if isinstance(event, tcod.event.MouseMotion):
                     world.mouse_x = int(event.tile.x)
                     world.mouse_y = int(event.tile.y)
+
+                if isinstance(event, tcod.event.MouseButtonDown):
+                    if event.button == tcod.event.BUTTON_RIGHT:
+                        camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
+                        camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
+                        mouse_world_x = camera_x + world.mouse_x
+                        mouse_world_y = camera_y + world.mouse_y
+                        open_interaction_menu(world, mouse_world_x, mouse_world_y)
 
                 if isinstance(event, tcod.event.TextInput):
                     if world.chat_ui_active: # Only process text input if chat UI is active
@@ -229,86 +256,25 @@ def main():
                                 world.chat_ui_scroll_offset = 0
                     
                     # --- UI Mode: Interaction Menu Active ---
-                    elif world.interaction_menu_active:
+                    elif world.interaction_context["active"]:
+                        ctx = world.interaction_context
                         if event.sym == tcod.event.KeySym.UP:
-                            if world.interaction_menu_options:
-                                world.interaction_menu_selected_index = \
-                                    (world.interaction_menu_selected_index - 1) % len(world.interaction_menu_options)
+                            ctx["selected_action_index"] = (ctx["selected_action_index"] - 1) % len(ctx["available_actions"])
                         elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.interaction_menu_options:
-                                world.interaction_menu_selected_index = \
-                                    (world.interaction_menu_selected_index + 1) % len(world.interaction_menu_options)
+                            ctx["selected_action_index"] = (ctx["selected_action_index"] + 1) % len(ctx["available_actions"])
+                        elif event.sym == tcod.event.KeySym.LCTRL or event.sym == tcod.event.KeySym.RCTRL:
+                            ctx["selected_entity_index"] = (ctx["selected_entity_index"] + 1) % len(ctx["target_entities"])
+                            # Update actions for the new entity
+                            selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
+                            ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
+                            ctx["selected_action_index"] = 0
                         elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            if world.interaction_menu_options:
-                                selected_option = world.interaction_menu_options[world.interaction_menu_selected_index]
-                                target_npc = world.interaction_menu_target_npc
-
-                                world.interaction_menu_active = False
-
-                                if selected_option == "Talk":
-                                    if target_npc:
-                                        world.chat_ui_target_npc = target_npc
-                                        world.chat_ui_mode = "talk"
-                                        world.start_npc_dialogue(target_npc)
-                                        world.chat_ui_active = True
-                                        context.start_text_input()
-                                    else:
-                                        world.add_message_to_chat_log("Error: No target NPC for talk.")
-                                elif selected_option == "Persuade":
-                                    if target_npc:
-                                        world.chat_ui_target_npc = target_npc
-                                        world.chat_ui_mode = "persuade_goal_input"
-                                        world.chat_ui_history.clear()
-                                        world.chat_ui_scroll_offset = 0
-                                        world.chat_ui_input_line = ""
-                                        world.chat_ui_history.append(("System", f"Persuade {target_npc.name}: What is your goal?"))
-                                        world.chat_ui_active = True
-                                        context.start_text_input()
-                                    else:
-                                        world.add_message_to_chat_log("Error: No target NPC for persuade.")
-                                elif selected_option == "Trade":
-                                    if target_npc and target_npc.profession == "Merchant":
-                                        world.trade_ui_npc_target = target_npc
-                                        world.initialize_trade_session()
-                                        world.trade_ui_active = True
-                                    else:
-                                        world.add_message_to_chat_log(f"{target_npc.name if target_npc else 'They'} are not a merchant.")
-                                        world.interaction_menu_target_npc = None
-                                elif selected_option == "Attack":
-                                    if target_npc and not target_npc.is_dead:
-                                        world.player_attempt_attack(target_npc)
-                                        # Attacking consumes the turn and closes the menu.
-                                        # The player_attempt_attack method in world will add messages to chat log.
-                                    elif target_npc and target_npc.is_dead:
-                                        world.add_message_to_chat_log(f"{target_npc.name} is already defeated.")
-                                    else:
-                                        world.add_message_to_chat_log("Error: No valid target for attack.")
-                                elif selected_option.startswith("Complete:"): # Handle contract completion
-                                    if target_npc:
-                                        # Reconstruct contract_id based on current convention
-                                        # This assumes only one type of contract per NPC for now.
-                                        # A more robust system would store contract_id with the menu option.
-                                        contract_id_to_complete = f"lumber_delivery_{target_npc.id}"
-                                        if contract_id_to_complete in world.player.active_contracts:
-                                            world.complete_contract_delivery(contract_id_to_complete, target_npc)
-                                            # Decide if chat UI should open or just show log messages.
-                                            # For now, complete_contract_delivery adds to chat_ui_history if chat_ui is active.
-                                            # Let's open chat UI to show the result.
-                                            world.chat_ui_target_npc = target_npc
-                                            world.chat_ui_mode = "talk" # Or a specific "post_contract" mode
-                                            world.chat_ui_active = True
-                                            context.start_text_input()
-                                        else:
-                                            world.add_message_to_chat_log("Could not find that specific contract to complete.")
-                                    else:
-                                        world.add_message_to_chat_log("Error: No target NPC for contract completion.")
-                                elif selected_option == "Cancel":
-                                    world.add_message_to_chat_log("Interaction cancelled.")
-                                    world.interaction_menu_target_npc = None
+                            # Execute action
+                            # This part will be complex, mapping action strings to methods
+                            world.add_message_to_chat_log("Action execution not fully implemented yet.")
+                            ctx["active"] = False # Close menu for now
                         elif event.sym == tcod.event.KeySym.ESCAPE:
-                            world.interaction_menu_active = False
-                            world.interaction_menu_target_npc = None
-                            world.add_message_to_chat_log("Interaction cancelled.")
+                            ctx["active"] = False
 
                     # --- UI Mode: Info Menu Active (or toggling it) ---
                     elif event.sym == tcod.event.KeySym.I:
@@ -368,98 +334,7 @@ def main():
                         elif event.sym == tcod.event.KeySym.E:
                             target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
-
-                            targeted_npc = None
-                            all_npcs = world.npcs + world.village_npcs
-                            for npc_obj in all_npcs:
-                                if npc_obj.x == target_x and npc_obj.y == target_y:
-                                    targeted_npc = npc_obj
-                                    break
-
-                            if targeted_npc and world.player_fov_map[target_x, target_y]: # Check if NPC is in FOV
-                                world.interaction_menu_target_npc = targeted_npc
-                                menu_opts = ["Talk", "Persuade"] # Start with basic options
-
-                                # Add Trade if merchant
-                                if targeted_npc.profession == "Merchant":
-                                    menu_opts.append("Trade")
-
-                                # Add Attack if not dead
-                                if not targeted_npc.is_dead:
-                                    menu_opts.append("Attack")
-                                # Check for active contracts with this NPC for turn-in
-                                for contract_id, contract_details in world.player.active_contracts.items():
-                                    if contract_details["turn_in_npc_id"] == targeted_npc.id:
-                                        menu_opts.append(f"Complete Contract: {contract_details['item_key']} ({contract_details['quantity_needed']})")
-
-                                # Check for active quests to report/complete with this NPC
-                                for quest_id, quest_data in world.player.active_quests.items():
-                                    quest_def = world.QUEST_DEFINITIONS.get(quest_id)
-                                    if quest_def and (quest_def["quest_giver_id_or_role"] == targeted_npc.profession or quest_data.get("npc_offerer_id") == targeted_npc.id) :
-                                        is_quest_complete_for_menu = False
-                                        if quest_data["type"] == "kill":
-                                            if quest_data.get("progress", 0) >= quest_data.get("target_count", 0):
-                                                is_quest_complete_for_menu = True
-                                        elif quest_data["type"] == "fetch":
-                                             if world.player.has_item(quest_data["item_to_fetch_key"], quest_data["item_fetch_count"]):
-                                                 is_quest_complete_for_menu = True
-
-                                        status_indicator = "(Complete)" if is_quest_complete_for_menu else "(Report)"
-                                        menu_opts.append(f"Quest - {quest_data['title']} {status_indicator}")
-
-                                world.interaction_menu_target_building = None
-                                menu_opts.append("Cancel")
-                                world.interaction_menu_options = menu_opts
-                                world.interaction_menu_selected_index = 0
-                                world.interaction_menu_x = console.width // 2
-                                world.interaction_menu_y = console.height // 2
-                                world.interaction_menu_active = True
-                                action_taken_this_turn = True # Menu opened, counts as action
-                            else: # No NPC at target, check for building/tile interactions
-                                action_taken_this_turn = False
-                                tile_being_interacted_with = world.get_tile_at(target_x, target_y)
-
-                                if tile_being_interacted_with and tile_being_interacted_with.properties.get("is_door"):
-                                    building_of_door = world.get_building_by_tile_coords(target_x, target_y)
-                                    if building_of_door and building_of_door.building_type == "house" and \
-                                       not building_of_door.player_owned and not building_of_door.residents:
-                                        # Offer to claim the house via interaction menu
-                                        world.interaction_menu_target_npc = None
-                                        world.interaction_menu_target_building = building_of_door
-                                        menu_opts = [f"Claim this {building_of_door.building_type} for yourself."]
-                                        door_action_text = "Open door" if not tile_being_interacted_with.properties.get("is_open") else "Close door"
-                                        menu_opts.append(door_action_text)
-                                        menu_opts.append("Cancel")
-                                        world.interaction_menu_options = menu_opts
-                                        world.interaction_menu_selected_index = 0
-                                        world.interaction_menu_x = console.width // 2
-                                        world.interaction_menu_y = console.height // 2
-                                        world.interaction_menu_active = True
-                                        action_taken_this_turn = True
-                                    else:
-                                        # Standard door toggle if not a claimable house
-                                        action_taken_this_turn = world.player_attempt_toggle_door(target_x, target_y)
-
-                                if not action_taken_this_turn: # If no menu opened and door not toggled
-                                    if world.player.is_sitting:
-                                        if world.player.sitting_on_object_at == (target_x, target_y) or \
-                                           world.player.sitting_on_object_at is None:
-                                            world.player_attempt_stand_up()
-                                            action_taken_this_turn = True
-                                        else:
-                                            world.add_message_to_chat_log("You need to stand up first to interact with that.")
-                                    else:
-                                        action_taken_this_turn = world.player_attempt_sit(target_x, target_y)
-                                        if not action_taken_this_turn:
-                                            action_taken_this_turn = world.player_attempt_sleep(target_x, target_y)
-                                            if not action_taken_this_turn:
-                                                # Door toggle handled above if it wasn't a claimable house
-                                                # action_taken_this_turn = world.player_attempt_toggle_door(target_x, target_y)
-                                                # if not action_taken_this_turn:
-                                                action_taken_this_turn = world.player_attempt_pick_lock(target_x, target_y)
-                                                if not action_taken_this_turn:
-                                                    world.player_attempt_chop_tree(target_x, target_y)
-                                                    action_taken_this_turn = True # Assume chopping always "takes a turn"
+                            open_interaction_menu(world, target_x, target_y)
 
                     # --- Game State: Build Mode ---
                     elif world.game_state == "BUILD_MODE":

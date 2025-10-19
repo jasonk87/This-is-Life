@@ -310,14 +310,16 @@ class World:
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
 
-        # Interaction Menu State
-        self.interaction_menu_active = False
-        self.interaction_menu_options = []
-        self.interaction_menu_selected_index = 0
-        self.interaction_menu_target_npc = None
-        self.interaction_menu_target_building = None # For interacting with buildings (e.g. claiming)
-        self.interaction_menu_x = 0
-        self.interaction_menu_y = 0
+        # New Interaction Context
+        self.interaction_context = {
+            "active": False,
+            "x": 0,
+            "y": 0,
+            "target_entities": [],  # List of entities on the tile
+            "selected_entity_index": 0,
+            "available_actions": [], # Actions for the selected entity
+            "selected_action_index": 0
+        }
 
         # Build Mode State
         self.build_mode_selected_item_index: int = 0
@@ -2500,6 +2502,61 @@ class World:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
 
+    def _get_interactables_at(self, x: int, y: int) -> list:
+        """Returns a list of all interactable entities at a given coordinate."""
+        entities = []
+
+        # 1. Add the tile itself
+        tile = self.get_tile_at(x, y)
+        if tile:
+            entities.append({"type": "tile", "data": tile, "name": tile.name})
+
+        # 2. Add items on the ground
+        if (x, y) in self.items_on_map:
+            for item_info in self.items_on_map[(x, y)]:
+                item_def = ITEM_DEFINITIONS.get(item_info["item_key"], {})
+                entities.append({
+                    "type": "item",
+                    "data": item_info,
+                    "name": item_def.get("name", item_info["item_key"])
+                })
+
+        # 3. Add NPCs
+        for npc in self.village_npcs + self.npcs:
+            if npc.x == x and npc.y == y and not npc.is_dead:
+                entities.append({"type": "npc", "data": npc, "name": npc.name})
+
+        # 4. Add Buildings
+        building = self.get_building_at(x,y)
+        if building:
+            entities.append({"type": "building", "data": building, "name": building.building_type})
+
+        return entities
+
+    def _get_actions_for_entity(self, entity: dict) -> list[str]:
+        """Returns a list of available actions for a given entity dictionary."""
+        actions = []
+        entity_type = entity["type"]
+        entity_data = entity["data"]
+
+        if entity_type == "npc":
+            actions.extend(["Talk", "Attack"])
+            if entity_data.profession == "Merchant":
+                actions.append("Trade")
+        elif entity_type == "item":
+            actions.append("Pick up")
+        elif entity_type == "tile":
+            if isinstance(entity_data, Tree) and entity_data.is_choppable:
+                actions.append("Chop")
+            elif entity_data.properties.get("is_door"):
+                actions.append("Toggle Door")
+        elif entity_type == "building":
+            if entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
+                actions.append("Claim House")
+
+        actions.append("Examine") # Universal action
+        return actions
+
     def serve_jail_time(self):
         """Handles the process of putting the player in jail."""
         # Find the nearest sheriff's office.
@@ -3001,7 +3058,8 @@ class World:
             building_obj.occupants = [occ for occ in building_obj.occupants if occ.id != dead_npc.id]
 
         # Clear NPC from UI states if they were targeted
-        if self.interaction_menu_target_npc == dead_npc: self.interaction_menu_target_npc, self.interaction_menu_active = None, False
+        if self.interaction_context["active"] and dead_npc in self.interaction_context["target_entities"]:
+            self.interaction_context["active"] = False
         if self.chat_ui_target_npc == dead_npc: self.chat_ui_target_npc, self.chat_ui_active = None, False # Main loop should handle context.stop_text_input()
         if self.trade_ui_npc_target == dead_npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
         if self.last_talked_to_npc == dead_npc: self.last_talked_to_npc = None

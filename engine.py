@@ -113,6 +113,8 @@ class Village:
         self.buildings = []
         self.lore = "No lore generated yet."
         self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
+        self.supply = {}  # item_key: count
+        self.demand = {}  # item_key: count
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -1277,12 +1279,13 @@ class World:
                         # At the vendor, attempt to buy food
                         food_to_buy = None
                         food_price = 0
+                        village = self._get_village_for_npc(npc)
                         for item_key, quantity in food_vendor_building.building_inventory.items():
                             if quantity > 0:
                                 item_def = ITEM_DEFINITIONS.get(item_key, {})
                                 if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
                                     food_to_buy = item_key
-                                    food_price = item_def.get("value", 10) # Default price
+                                    food_price = self.get_dynamic_price(item_key, village)
                                     break
 
                         if food_to_buy and npc.money >= food_price:
@@ -1857,6 +1860,18 @@ class World:
                     # if dist_to_player <= 10:
                     #    self.add_message_to_chat_log(f"{npc.name} finishes working and produces {quantity_produced} {item_name} at the {work_building.building_type}.")
 
+        village = self._get_village_for_npc(npc)
+        if village:
+            if consumption_successful:
+                produces = sub_task_data.get("produces_item_at_workplace", {})
+                for item_key, qty in produces.items():
+                    village.supply[item_key] = village.supply.get(item_key, 0) + qty
+
+                consumes = sub_task_data.get("consumes_item_from_workplace", {})
+                for item_key, qty in consumes.items():
+                    village.supply[item_key] = village.supply.get(item_key, 0) - qty
+                    village.demand[item_key] = village.demand.get(item_key, 0) + qty
+
         return consumption_successful
 
 
@@ -1920,7 +1935,8 @@ class World:
                         # Blacksmith is at the mine, try to buy ore
                         mine = self._find_nearest_mine(npc)
                         if mine:
-                            ore_price = ITEM_DEFINITIONS["iron_ore"]["value"]
+                            village = self._get_village_for_npc(npc)
+                            ore_price = self.get_dynamic_price("iron_ore", village)
                             ore_to_buy = 5 # Try to buy 5 ore
                             if npc.money >= ore_price * ore_to_buy and mine.building_inventory.get("iron_ore", 0) >= ore_to_buy:
                                 mine.building_inventory["iron_ore"] -= ore_to_buy
@@ -1932,7 +1948,8 @@ class World:
                         # Carpenter is at the lumber mill, try to buy wood
                         lumber_mill = self.buildings_by_id.get(npc.sub_task_target_coords)
                         if lumber_mill and lumber_mill.building_type == "lumber_mill":
-                            plank_price = ITEM_DEFINITIONS["wooden_plank"]["value"]
+                            village = self._get_village_for_npc(npc)
+                            plank_price = self.get_dynamic_price("wooden_plank", village)
                             planks_to_buy = 5 # Try to buy 5 planks
                             if npc.money >= plank_price * planks_to_buy and lumber_mill.building_inventory.get("wooden_plank", 0) >= planks_to_buy:
                                 lumber_mill.building_inventory["wooden_plank"] -= planks_to_buy
@@ -1952,13 +1969,26 @@ class World:
                         # Miller is at the farm, try to buy wheat
                         farm = self._find_nearest_farm(npc)
                         if farm:
-                            wheat_price = ITEM_DEFINITIONS["wheat"]["value"]
+                            village = self._get_village_for_npc(npc)
+                            wheat_price = self.get_dynamic_price("wheat", village)
                             wheat_to_buy = 5 # Try to buy 5 wheat
                             if npc.money >= wheat_price * wheat_to_buy and farm.building_inventory.get("wheat", 0) >= wheat_to_buy:
                                 farm.building_inventory["wheat"] -= wheat_to_buy
                                 npc.money -= wheat_price * wheat_to_buy
                                 work_building.building_inventory["wheat"] = work_building.building_inventory.get("wheat", 0) + wheat_to_buy
                                 # self.add_message_to_chat_log(f"{npc.name} bought {wheat_to_buy} wheat.")
+
+                    elif completed_sub_task_id == "fetch_flour":
+                        # Baker is at the mill, try to buy flour
+                        mill = self._find_nearest_mill(npc)
+                        if mill:
+                            village = self._get_village_for_npc(npc)
+                            flour_price = self.get_dynamic_price("flour", village)
+                            flour_to_buy = 5 # Try to buy 5 flour
+                            if npc.money >= flour_price * flour_to_buy and mill.building_inventory.get("flour", 0) >= flour_to_buy:
+                                mill.building_inventory["flour"] -= flour_to_buy
+                                npc.money -= flour_price * flour_to_buy
+                                work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + flour_to_buy
 
                     elif completed_sub_task_id == "mill_flour":
                         # Miller is at their grinding stone, try to mill flour
@@ -3329,12 +3359,19 @@ class World:
         self.trade_ui_merchant_item_index = 0
         self.trade_ui_player_selling = True # Default to player selling view
 
+        merchant_village = self._get_village_for_npc(self.trade_ui_npc_target)
+
         # Player inventory snapshot: (item_key, quantity, price_to_sell_at)
-        for item_key, quantity in self.player.inventory.items():
+        player_inventory_aggregated = {}
+        for item in self.player.inventory:
+            key = item["key"]
+            qty = item.get("quantity", 1)
+            player_inventory_aggregated[key] = player_inventory_aggregated.get(key, 0) + qty
+
+        for item_key, quantity in player_inventory_aggregated.items():
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
-                # Simple pricing: sell at base value (or slightly less)
-                price = item_def.get("value", 0)
+                price = self.get_dynamic_price(item_key, merchant_village)
                 self.trade_ui_player_inventory_snapshot.append((item_key, quantity, price))
 
         # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
@@ -3350,8 +3387,7 @@ class World:
             if item_key == "money": continue # Don't list merchant's money as a sellable item
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
-                # Simple pricing: buy at base value (or slightly more)
-                price = item_def.get("value", 0)
+                price = self.get_dynamic_price(item_key, merchant_village)
                 self.trade_ui_merchant_inventory_snapshot.append((item_key, quantity, price))
 
         # Sort by name for consistent display
@@ -3365,6 +3401,7 @@ class World:
 
         merchant_npc = self.trade_ui_npc_target
         merchant_building = self.buildings_by_id.get(merchant_npc.work_building_id)
+        merchant_village = self._get_village_for_npc(merchant_npc)
 
         # Determine merchant's actual inventory (store or personal)
         merchant_true_inventory = {}
@@ -3377,19 +3414,19 @@ class World:
 
         if self.trade_ui_player_selling: # Player is selling
             if not self.trade_ui_player_inventory_snapshot: return
-            item_key, quantity, price = self.trade_ui_player_inventory_snapshot[self.trade_ui_player_item_index]
+            item_key, _, price = self.trade_ui_player_inventory_snapshot[self.trade_ui_player_item_index]
 
-            if self.player.inventory.get(item_key, 0) > 0:
+            if self.player.has_item(item_key):
                 if merchant_money >= price:
-                    # Player sells 1 unit of the item
-                    self.player.inventory[item_key] -= 1
-                    if self.player.inventory[item_key] <= 0:
-                        del self.player.inventory[item_key]
-                    self.player.money += price
-
-                    merchant_true_inventory[item_key] = merchant_true_inventory.get(item_key, 0) + 1
-                    merchant_true_inventory["money"] = merchant_money - price
-                    self.add_message_to_chat_log(f"You sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
+                    if self.player.remove_item(item_key, 1):
+                        self.player.money += price
+                        merchant_true_inventory[item_key] = merchant_true_inventory.get(item_key, 0) + 1
+                        merchant_true_inventory["money"] = merchant_money - price
+                        self.add_message_to_chat_log(f"You sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
+                        if merchant_village:
+                            merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) + 1
+                    else:
+                        self.add_message_to_chat_log("Error: Could not remove item from inventory.")
                 else:
                     self.add_message_to_chat_log(f"{merchant_npc.name} doesn't have enough money to buy that.")
             else:
@@ -3397,19 +3434,20 @@ class World:
 
         else: # Player is buying (viewing merchant's items)
             if not self.trade_ui_merchant_inventory_snapshot: return
-            item_key, quantity, price = self.trade_ui_merchant_inventory_snapshot[self.trade_ui_merchant_item_index]
+            item_key, _, price = self.trade_ui_merchant_inventory_snapshot[self.trade_ui_merchant_item_index]
 
             if merchant_true_inventory.get(item_key, 0) > 0:
                 if self.player.money >= price:
-                    # Player buys 1 unit
                     merchant_true_inventory[item_key] -= 1
                     if merchant_true_inventory[item_key] <= 0:
                         del merchant_true_inventory[item_key]
-                    merchant_true_inventory["money"] = merchant_money + price # Merchant gains money
+                    merchant_true_inventory["money"] = merchant_money + price
 
-                    self.player.inventory[item_key] = self.player.inventory.get(item_key, 0) + 1
+                    self.player.add_item(item_key, 1)
                     self.player.money -= price
                     self.add_message_to_chat_log(f"You bought 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
+                    if merchant_village:
+                        merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) - 1
                 else:
                     self.add_message_to_chat_log("You don't have enough money for that.")
             else:
@@ -3687,6 +3725,32 @@ class World:
             except json.JSONDecodeError as e:
                 self.add_message_to_chat_log(f"Error parsing LLM response for NPC: {e}")
                 self.add_message_to_chat_log(f"LLM Response: {llm_response}")
+
+    def _initialize_economy(self, village: Village):
+        """Calculates initial supply and demand for a village."""
+        village.supply = {}
+        village.demand = {}
+
+        # Calculate initial supply from all building inventories in the village
+        for building in village.buildings:
+            for item_key, quantity in building.building_inventory.items():
+                village.supply[item_key] = village.supply.get(item_key, 0) + quantity
+
+        # Calculate baseline demand from NPC professions and basic needs
+        for npc in self.village_npcs:
+            if self._get_village_for_npc(npc) != village:
+                continue
+
+            # Basic needs demand (e.g., food)
+            village.demand["bread"] = village.demand.get("bread", 0) + 2 # Example: each NPC creates demand for 2 bread
+
+            # Professional needs demand
+            profession_data = get_profession_data(npc.profession)
+            if profession_data and profession_data.get("sub_tasks"):
+                for sub_task in profession_data["sub_tasks"]:
+                    consumes = sub_task.get("consumes_item_from_workplace", {})
+                    for item_key, qty in consumes.items():
+                        village.demand[item_key] = village.demand.get(item_key, 0) + 5 # Baseline demand of 5 for each required resource
 
     def _populate_village_npcs(self, chunk: Chunk, village: Village, chunk_coord_x: int, chunk_coord_y: int): # Added chunk_coord_x, chunk_coord_y
         """Populates a village with NPCs, assigning them homes and potentially jobs."""
@@ -4592,6 +4656,7 @@ class World:
             self._draw_building(tiles, house, "wood_wall")
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
+        self._initialize_economy(chunk.village)
         return tiles
 
     def _draw_building(self, tiles, building, wall_tile_key):
@@ -4710,6 +4775,40 @@ class World:
         })
         # self.add_message_to_chat_log(f"Debug: Sound '{sound_type}' emitted at ({origin_x},{origin_y}) vol {volume}")
 
+    def _update_economy(self):
+        """Periodically updates the supply and demand of all villages."""
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if chunk.village:
+                    village = chunk.village
+                    # Decay demand over time
+                    for item_key in list(village.demand.keys()):
+                        village.demand[item_key] *= 0.99
+                        if village.demand[item_key] < 1:
+                            del village.demand[item_key]
+
+                    # Recalculate supply from scratch
+                    village.supply = {}
+                    for building in village.buildings:
+                        for item_key, quantity in building.building_inventory.items():
+                            village.supply[item_key] = village.supply.get(item_key, 0) + quantity
+
+    def get_dynamic_price(self, item_key: str, village: Village) -> int:
+        """Calculates the dynamic price of an item based on village supply and demand."""
+        base_price = ITEM_DEFINITIONS.get(item_key, {}).get("value", 0)
+        if not village:
+            return base_price
+
+        supply = village.supply.get(item_key, 1)  # Avoid division by zero
+        demand = village.demand.get(item_key, 1)
+
+        # Simple formula: price = base_price * (demand / supply)
+        # Add clamping to prevent extreme prices
+        price_modifier = max(0.2, min(5.0, demand / supply))
+        dynamic_price = int(base_price * price_modifier)
+
+        return max(1, dynamic_price) # Ensure price is at least 1
 
     def craft_item(self, item_key: str):
         """Crafts an item if the player has the required resources."""

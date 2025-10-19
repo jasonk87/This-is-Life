@@ -91,6 +91,8 @@ def main():
             world._update_npc_schedules() # New: Update NPC schedules (includes combat AI decisions)
             world._update_npc_movement() # Update NPC movement (includes combat movement/action execution)
             world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
+            if world.game_time % 100 == 0: # Update economy every 100 ticks
+                world._update_economy()
 
             # --- Drawing ---
             if world.game_state == "PLAYER_DEAD":

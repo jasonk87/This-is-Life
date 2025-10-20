@@ -149,3 +149,4 @@ class DireWolf(NPC):
         self.dialogue = ["*Growl*", "*Snarl*"] # Simple "dialogue"
         self.speech_volume = 5 # Quieter than human speech
         self.hearing_radius = DEFAULT_HEARING_RADIUS + 2 # Slightly better hearing
+        self.npc_inventory["raw_meat"] = random.randint(1, 2)

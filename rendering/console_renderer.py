@@ -1,7 +1,7 @@
 import tcod
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
-from data.environment import WEATHER_TYPES
+from data.weather import WEATHER_TYPES
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
@@ -30,6 +30,15 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
                     tile = world.get_tile_at(x_world, y_world)
                     if tile:
                         tile_char, tile_fg = tile.char, tile.color
+                        # Apply weather color modifier
+                        weather_def = WEATHER_TYPES[world.current_weather]
+                        if tile.name.lower() in weather_def["color_modifier"]:
+                            mod = weather_def["color_modifier"][tile.name.lower()]
+                            tile_fg = (
+                                max(0, min(255, tile_fg[0] + mod[0])),
+                                max(0, min(255, tile_fg[1] + mod[1])),
+                                max(0, min(255, tile_fg[2] + mod[2])),
+                            )
                 elif is_explored:
                     tile = world.get_tile_at(x_world, y_world)
                     if tile:
@@ -80,7 +89,6 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
 def draw_weather_overlay(console: tcod.console.Console, world) -> None:
     """Draws a visual effect over the screen for the current weather."""
-    from data.environment import WEATHER_TYPES
     import random
 
     weather_key = world.current_weather
@@ -116,7 +124,6 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
     cursor_world_x = camera_x + world.mouse_x
     cursor_world_y = camera_y + world.mouse_y
 
-    season_name = world.current_season['name']
     weather_name = WEATHER_TYPES[world.current_weather]['name']
 
     tile_info = ""
@@ -125,7 +132,7 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
         if cursor_tile:
             tile_info = f"| {cursor_tile.name}"
 
-    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name}, {weather_name} {tile_info}"
+    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {weather_name} {tile_info}"
 
     text_width = len(cursor_info_text)
     border_width = text_width + 2

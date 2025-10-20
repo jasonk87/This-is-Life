@@ -323,17 +323,37 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "reforestation"],
     },
-     "raw_meat_scrap": { # Already defined, ensure it's here for completeness of food section
-        "name": "Raw Meat Scrap",
-        "description": "A piece of raw meat. Needs cooking.",
+    "raw_meat": {
+        "name": "Raw Meat",
+        "description": "A cut of raw meat. Should be cooked before eating.",
         "char": "m",
         "color": COLORS["crimson"],
-        "value": 1,
+        "value": 2,
         "weight": 0.5,
         "stackable": True,
-        "item_type_tags": ["resource", "food_ingredient_raw"]
+        "item_type_tags": ["resource", "food_ingredient_raw"],
+        "on_use": { # Eating raw meat is possible but not ideal
+            "reduces_hunger": 10,
+            "effects": [{"type": "food_poisoning", "chance": 0.5, "duration": 100}]
+        }
     },
-
+    "cooked_meat": {
+        "name": "Cooked Meat",
+        "description": "A properly cooked piece of meat. Restorative and safe.",
+        "char": "m",
+        "color": COLORS["dark_orange"],
+        "value": 8,
+        "weight": 0.4,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "cooking_recipe": {
+            "ingredients": {"raw_meat": 1},
+            "station": "cooking_station" # Requires a tile with interaction_hint: 'cook'
+        },
+        "on_use": {
+            "reduces_hunger": 40
+        }
+    },
 
     # --- Weapons ---
     "rusty_sword": {
@@ -491,8 +511,11 @@ ITEM_DEFINITIONS = {
             "max_durability": 60
         },
         "crafting_recipe": {
-            "iron_ingot": 2,
-            "raw_log": 1
+            "ingredients": {
+                "iron_ingot": 2,
+                "raw_log": 1
+            },
+            "station": "craft"
         },
     },
     "iron_breastplate": {

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from engine import World, Chunk, Village, NPC
 from data.quests import QUEST_DEFINITIONS
+from data.decorations import DECORATION_ITEM_DEFINITIONS
 import json
 
 class TestGame(unittest.TestCase):
@@ -145,6 +146,80 @@ class TestGame(unittest.TestCase):
         if quest_def["type"] == "fetch":
             self.assertFalse(player.has_item(item_key))
 
+
+    @patch('engine.World._call_ollama')
+    def test_cooking_system(self, mock_call_ollama):
+        # Setup
+        mock_call_ollama.return_value = json.dumps({"name": "test", "personality": "test"})
+        world = World()
+        player = world.player
+
+        # Add a fire pit (cooking station)
+        station_x, station_y = player.x + 1, player.y
+        world._change_map_tile((station_x, station_y), DECORATION_ITEM_DEFINITIONS["fire_pit_simple"])
+
+        # 1. Test successful cooking
+        player.add_item("raw_meat", 1)
+        world.cook_item("cooked_meat")
+
+        self.assertTrue(player.has_item("cooked_meat"))
+        self.assertFalse(player.has_item("raw_meat"))
+
+        # 2. Test cooking failure (no station)
+        player.add_item("raw_meat", 1)
+        # Move player away from fire
+        player.x += 5
+        world.cook_item("cooked_meat")
+        # Assert nothing changed
+        self.assertTrue(player.has_item("raw_meat", 1))
+
+
+    @patch('engine.World._call_ollama')
+    def test_crafting_system(self, mock_call_ollama):
+        # Setup
+        mock_call_ollama.return_value = json.dumps({"name": "test", "personality": "test"})
+        world = World()
+        player = world.player
+
+        # Add an anvil (crafting station)
+        station_x, station_y = player.x + 1, player.y
+        world._change_map_tile((station_x, station_y), DECORATION_ITEM_DEFINITIONS["anvil"])
+
+        # 1. Test successful crafting
+        player.add_item("iron_ingot", 2)
+        player.add_item("raw_log", 1)
+        world.craft_item("iron_sword")
+
+        self.assertTrue(player.has_item("iron_sword"))
+        self.assertFalse(player.has_item("iron_ingot"))
+        self.assertFalse(player.has_item("raw_log"))
+
+        # 2. Test crafting failure (no station)
+        player.add_item("iron_ingot", 2)
+        player.add_item("raw_log", 1)
+        player.x += 5 # Move away
+        world.craft_item("iron_sword")
+        self.assertFalse(player.has_item("iron_sword", 2))
+        self.assertTrue(player.has_item("iron_ingot", 2))
+
+
+    @patch('random.choices')
+    @patch('engine.World._call_ollama')
+    def test_weather_system(self, mock_call_ollama, mock_random_choices):
+        # Setup
+        mock_call_ollama.return_value = json.dumps({"name": "test", "personality": "test"})
+        # Force the weather to transition to "rain"
+        mock_random_choices.return_value = ["rain"]
+
+        world = World()
+        self.assertEqual(world.current_weather, "clear")
+
+        # Force a weather update
+        world.weather_timer = world.weather_duration
+        world._update_weather()
+
+        self.assertEqual(world.current_weather, "rain")
+        self.assertIn("The weather changes to Rain.", world.chat_log[-1])
 
 if __name__ == '__main__':
     unittest.main()

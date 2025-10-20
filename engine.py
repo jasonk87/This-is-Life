@@ -28,6 +28,7 @@ from data.factions import FACTIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
+from data.weather import WEATHER_TYPES
 
 import json
 import uuid
@@ -356,6 +357,14 @@ class World:
 
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
+
+        # Weather system state
+        self.current_weather = "clear"
+        self.weather_timer = 0
+        self.weather_duration = random.randint(
+            WEATHER_TYPES["clear"]["min_duration"],
+            WEATHER_TYPES["clear"]["max_duration"]
+        )
 
         self._find_starting_position()
 
@@ -2559,6 +2568,22 @@ class World:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
 
+    def _update_weather(self):
+        """Updates the current weather and handles transitions."""
+        self.weather_timer += 1
+        if self.weather_timer >= self.weather_duration:
+            current_weather_def = WEATHER_TYPES[self.current_weather]
+            transitions = current_weather_def["transitions"]
+
+            new_weather_key = random.choices(list(transitions.keys()), list(transitions.values()), k=1)[0]
+
+            if new_weather_key != self.current_weather:
+                self.current_weather = new_weather_key
+                new_weather_def = WEATHER_TYPES[new_weather_key]
+                self.weather_duration = random.randint(new_weather_def["min_duration"], new_weather_def["max_duration"])
+                self.weather_timer = 0
+                self.add_message_to_chat_log(f"The weather changes to {new_weather_def['name']}.")
+
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
         entities = []
@@ -3645,6 +3670,7 @@ class World:
 
     def _update_world_environment(self):
         """Handles time-based environmental changes like tree regrowth."""
+        self._update_weather()
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
@@ -4839,18 +4865,41 @@ class World:
         return max(1, dynamic_price)
 
     def craft_item(self, item_key: str):
-        """Crafts an item if the player has the required resources."""
+        """Crafts an item if the player has the required resources and is near the correct station."""
         if item_key not in ITEM_DEFINITIONS:
             self.add_message_to_chat_log(f"You don't know how to craft '{item_key}'.")
             return
 
-        recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe", {})
+        recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe")
         if not recipe:
             self.add_message_to_chat_log(f"There is no recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
             return
 
+        # Check for crafting station
+        required_station = recipe.get("station")
+        if required_station:
+            station_found = False
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    if dx == 0 and dy == 0: continue
+                    tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
+                    if tile and tile.properties.get("interaction_hint") == required_station:
+                        station_found = True
+                        break
+                if station_found:
+                    break
+
+            if not station_found:
+                self.add_message_to_chat_log(f"You need to be near a {required_station} to craft this.")
+                return
+
+        ingredients = recipe.get("ingredients", {})
+        if not ingredients:
+            self.add_message_to_chat_log("This recipe has no ingredients.")
+            return
+
         can_craft = True
-        for resource_key, required_qty in recipe.items():
+        for resource_key, required_qty in ingredients.items():
             if not self.player.has_item(resource_key, required_qty):
                 self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
                 can_craft = False
@@ -4858,18 +4907,57 @@ class World:
 
         if can_craft:
             # Consume resources
-            for resource_key, required_qty in recipe.items():
+            for resource_key, required_qty in ingredients.items():
                 if not self.player.remove_item(resource_key, required_qty):
-                    # This should not happen if has_item check passed, but as a safeguard:
                     self.add_message_to_chat_log(f"Error consuming {resource_key} for crafting. Aborted.")
                     return
 
             # Add crafted item
             self.player.add_item(item_key, 1)
             self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
-        else:
-            # Message about missing resources already shown by has_item check.
-            pass
+
+    def cook_item(self, item_key: str):
+        """Cooks an item if the player has the required resources and is near a cooking station."""
+        if item_key not in ITEM_DEFINITIONS:
+            self.add_message_to_chat_log(f"You don't know how to cook '{item_key}'.")
+            return
+
+        recipe = ITEM_DEFINITIONS[item_key].get("cooking_recipe")
+        if not recipe:
+            self.add_message_to_chat_log(f"There is no cooking recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
+            return
+
+        # Check for cooking station
+        station_found = False
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                if dx == 0 and dy == 0: continue
+                tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
+                if tile and hasattr(tile, "properties") and tile.properties.get("interaction_hint") == "cook":
+                    station_found = True
+                    break
+            if station_found:
+                break
+
+        if not station_found:
+            self.add_message_to_chat_log("You need to be near a fire to cook.")
+            return
+
+        can_cook = True
+        for resource_key, required_qty in recipe["ingredients"].items():
+            if not self.player.has_item(resource_key, required_qty):
+                self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
+                can_cook = False
+                break
+
+        if can_cook:
+            # Consume resources
+            for resource_key, required_qty in recipe["ingredients"].items():
+                self.player.remove_item(resource_key, required_qty)
+
+            # Add cooked item
+            self.player.add_item(item_key, 1)
+            self.add_message_to_chat_log(f"You cooked a {ITEM_DEFINITIONS[item_key]['name']}!")
 
 
     def use_item(self, item_key: str):

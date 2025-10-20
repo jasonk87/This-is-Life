@@ -55,11 +55,25 @@ TILE_DEFINITIONS = {
         "passable": True,
         "name": "Road"
     },
+    "stone_foundation": {
+        "name": "Stone Foundation",
+        "char": ".",
+        "color": COLORS["grey"],
+        "passable": True,
+        "blocks_fov": False
+    },
     "wood_wall": {
         "char": "#",
         "color": COLORS["wall_fg"],
         "passable": False,
         "name": "Wood Wall"
+    },
+    "construction_site": {
+        "name": "Construction Site",
+        "char": "X",
+        "color": COLORS["dark_orange"],
+        "passable": True,
+        "blocks_fov": False
     },
     "stone_wall": {
         "char": "#",

@@ -78,6 +78,16 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
         draw_build_mode_ui(console, world, camera_x, camera_y)
 
     draw_chat_log(console, world)
+    # --- Ghost Tile for Build Mode ---
+    if world.build_mode_active and world.ghost_tile:
+        # The ghost_tile has its target world coords on it. Convert to screen coords.
+        ghost_screen_x = world.ghost_tile.x
+        ghost_screen_y = world.ghost_tile.y
+        # The renderer needs to know where to draw it relative to the console, not camera
+        # The mouse x,y are already screen coordinates
+        if 0 <= ghost_screen_x < console.width and 0 <= ghost_screen_y < console.height:
+            console.print(x=ghost_screen_x, y=ghost_screen_y, string=chr(world.ghost_tile.char), fg=world.ghost_tile.color)
+
     draw_interaction_menu(console, world, camera_x, camera_y)
     # --- Weather Overlay ---
     draw_weather_overlay(console, world)

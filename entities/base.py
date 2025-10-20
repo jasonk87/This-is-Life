@@ -6,7 +6,7 @@ DEFAULT_SPEECH_VOLUME = 8
 DEFAULT_HEARING_RADIUS = 10
 
 class NPC:
-    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent"):
+    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent", village=None):
         self.x = x
         self.y = y
         self.name = name
@@ -17,6 +17,7 @@ class NPC:
         self.family_ties = family_ties
         self.attitude_to_player = attitude_to_player
         self.last_speech_time = 0
+        self.village = village
 
         # Scheduling attributes from Phase 1
         self.home_building_id = None
@@ -99,6 +100,23 @@ class NPC:
             return
 
         total_defense_bonus = 0
+
+    def add_item(self, item_key_to_add: str, quantity: int = 1):
+        """Adds an item to the NPC's inventory."""
+        self.npc_inventory[item_key_to_add] = self.npc_inventory.get(item_key_to_add, 0) + quantity
+
+    def remove_item(self, item_key_to_remove: str, quantity: int = 1) -> bool:
+        """Removes an item from the NPC's inventory."""
+        if self.npc_inventory.get(item_key_to_remove, 0) >= quantity:
+            self.npc_inventory[item_key_to_remove] -= quantity
+            if self.npc_inventory[item_key_to_remove] <= 0:
+                del self.npc_inventory[item_key_to_remove]
+            return True
+        return False
+
+    def has_item(self, item_key_to_check: str, quantity: int = 1) -> bool:
+        """Checks if the NPC has a certain quantity of an item."""
+        return self.npc_inventory.get(item_key_to_check, 0) >= quantity
         # Check body armor
         if self.equipped_armor_body and self.equipped_armor_body in ITEM_DEFINITIONS:
             armor_def = ITEM_DEFINITIONS[self.equipped_armor_body]

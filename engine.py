@@ -122,7 +122,20 @@ class Chunk:
         self.is_generated = False
         self.village = None # To store Village object if POI is a village
 
-
+class ConstructionSite:
+    def __init__(self, x, y, width, height, building_type, village):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.building_type = building_type
+        self.village = village
+        self.progress = 0
+        self.required_materials = {
+            "stone_foundation": width * height,
+            "wood_wall": 2 * (width + height) - 4
+        }
+        self.assigned_builder_id = None
 
 class Player:
     def __init__(self, x, y):
@@ -299,6 +312,7 @@ class World:
         self.npcs = []
         self.village_npcs = []
         self.buildings_by_id = {}
+        self.construction_sites = []
         self.mouse_x = 0
         self.mouse_y = 0
         self.game_state = "PLAYING"
@@ -317,12 +331,10 @@ class World:
         }
 
         # Build Mode State
+        self.build_mode_active = False
+        self.buildable_item_keys = ["stone_foundation_kit", "wood_wall_kit"]
         self.build_mode_selected_item_index: int = 0
-        # Define some placeable items (keys from DECORATION_ITEM_DEFINITIONS)
-        self.placeable_furniture_keys: list[str] = [
-            "wooden_chair", "wooden_table", "bed_simple", "chest_wooden", "wall_shelf", "fire_pit_simple"
-        ]
-        self.ghost_furniture_tile: Tile | None = None # For rendering placement preview
+        self.ghost_tile: Tile | None = None # For rendering placement preview
 
         # Chat UI State
         self.chat_ui_active = False
@@ -1705,17 +1717,29 @@ class World:
             # For chopping, we find a dynamic tree target near the building.
             # The work_building itself is passed to help center the search.
             return self._find_nearest_tree_for_chopping(npc, work_building)
-        elif target_zone_tag == "lumber_mill":
+        elif target_zone_tag == "lumber_mill" or (npc.profession == "Builder" and sub_task_data["id"] == "fetch_wood"):
             # For fetching wood, find the nearest lumber mill
             lumber_mill = self._find_nearest_lumber_mill(npc)
             if lumber_mill:
                 return (lumber_mill.global_center_x, lumber_mill.global_center_y)
+            return None
+        elif target_zone_tag == "mine" or (npc.profession == "Builder" and sub_task_data["id"] == "fetch_stone"):
+            # For fetching stone, find the nearest mine
+            mine = self._find_nearest_mine(npc)
+            if mine:
+                return (mine.global_center_x, mine.global_center_y)
             return None
         elif target_zone_tag == "farm":
             # For fetching wheat, find the nearest farm
             farm = self._find_nearest_farm(npc)
             if farm:
                 return (farm.global_center_x, farm.global_center_y)
+            return None
+        elif npc.profession == "Builder" and sub_task_data["id"] in ["lay_foundation", "build_walls"]:
+            # Find the construction site this builder is assigned to
+            site = next((s for s in self.construction_sites if s.assigned_builder_id == npc.id), None)
+            if site:
+                return (site.x, site.y) # Target the top-left corner of the site
             return None
         elif target_zone_tag == "mill":
             # For fetching flour, find the nearest mill
@@ -1997,6 +2021,50 @@ class World:
                             work_building.building_inventory["wheat"] -= wheat_needed
                             work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} milled some flour.")
+
+                    elif npc.profession == "Builder":
+                        if completed_sub_task_id == "fetch_stone":
+                            mine = self._find_nearest_mine(npc)
+                            if mine and mine.building_inventory.get("stone_chunk", 0) > 0:
+                                mine.building_inventory["stone_chunk"] -= 1
+                                npc.add_item("stone_chunk", 1)
+                                self.add_message_to_chat_log(f"{npc.name} acquired stone for the construction.")
+                        elif completed_sub_task_id == "fetch_wood":
+                            lumber_mill = self._find_nearest_lumber_mill(npc)
+                            if lumber_mill and lumber_mill.building_inventory.get("wooden_plank", 0) > 0:
+                                lumber_mill.building_inventory["wooden_plank"] -= 1
+                                npc.add_item("wooden_plank", 1)
+                                self.add_message_to_chat_log(f"{npc.name} acquired wood for the construction.")
+                        elif completed_sub_task_id == "lay_foundation":
+                            site = next((s for s in self.construction_sites if s.assigned_builder_id == npc.id), None)
+                            if site and npc.has_item("stone_chunk"):
+                                npc.remove_item("stone_chunk", 1)
+                                # Lay one foundation tile
+                                foundation_laid_count = sum(1 for y in range(site.height) for x in range(site.width) if self.get_tile_at(site.x + x, site.y + y).name == "Stone Foundation")
+                                if foundation_laid_count < site.width * site.height:
+                                    tile_x = site.x + foundation_laid_count % site.width
+                                    tile_y = site.y + foundation_laid_count // site.width
+                                    self._change_map_tile((tile_x, tile_y), TILE_DEFINITIONS["stone_foundation"])
+                                    self.add_message_to_chat_log(f"{npc.name} lays a foundation stone.")
+                        elif completed_sub_task_id == "build_walls":
+                            site = next((s for s in self.construction_sites if s.assigned_builder_id == npc.id), None)
+                            if site and npc.has_item("wooden_plank"):
+                                npc.remove_item("wooden_plank", 1)
+                                # Build one wall tile
+                                wall_built_count = sum(1 for y in range(site.height) for x in range(site.width) if self.get_tile_at(site.x + x, site.y + y).name == "Wood Wall")
+                                if wall_built_count < 2 * (site.width + site.height) - 4:
+                                     # This logic is simplified and just builds walls around the perimeter
+                                    x, y = 0, 0 # placeholder
+                                    if wall_built_count < site.width:
+                                        x, y = site.x + wall_built_count, site.y
+                                    elif wall_built_count < site.width + site.height - 1:
+                                        x, y = site.x + site.width - 1, site.y + (wall_built_count - site.width + 1)
+                                    elif wall_built_count < site.width * 2 + site.height - 2:
+                                        x, y = site.x + (site.width - (wall_built_count - (site.width + site.height - 2))), site.y + site.height - 1
+                                    else:
+                                        x, y = site.x, site.y + (site.height - (wall_built_count - (site.width * 2 + site.height - 3)))
+                                    self._change_map_tile((x, y), TILE_DEFINITIONS["wood_wall"])
+                                    self.add_message_to_chat_log(f"{npc.name} raises a section of wall.")
 
                     elif npc.profession == "Farmer":
                         target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
@@ -2460,18 +2528,8 @@ class World:
         return closest_mill
 
     def _get_village_for_npc(self, npc: NPC) -> Village | None:
-        """Finds the village object that an NPC belongs to, typically via their home."""
-        if not npc.home_building_id:
-            return None
-        # This is inefficient and relies on iterating all chunks.
-        # A future optimization would be to cache npc -> village mapping.
-        for y_idx, row in enumerate(self.chunks):
-            for x_idx, chk in enumerate(row):
-                if chk.village:
-                    # Check if the building object is in this village's list of buildings
-                    if self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
-                        return chk.village
-        return None
+        """Finds the village object that an NPC belongs to."""
+        return npc.village
 
     def _find_nearest_building_of_type(self, npc: NPC, building_type: str) -> Building | None:
         """Finds the nearest building of a specific type in the NPC's village."""
@@ -2809,13 +2867,16 @@ class World:
 
         if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
             chunk = self.chunks[chunk_y][chunk_x]
-            if chunk and chunk.tiles:
+            if not chunk.is_generated:
+                self._generate_chunk_detail(chunk, chunk_x, chunk_y)
+
+            if chunk.tiles:
                 new_tile = Tile(
                     char=new_tile_def["char"],
                     color=new_tile_def["color"],
                     passable=new_tile_def["passable"],
                     name=new_tile_def["name"],
-                    properties=new_tile_def.get("properties", {})
+                    properties=new_tile_def.get("properties", {}).copy()
                 )
                 if original_tree_type:
                     new_tile.original_tree_type = original_tree_type
@@ -3835,7 +3896,8 @@ class World:
                     dialogue=npc_data.get("dialogue", ["Greetings."]),
                     personality=npc_data.get("personality", "commoner"),
                     family_ties=npc_data.get("family_ties", "none"),
-                    attitude_to_player=npc_data.get("attitude_to_player", "neutral")
+                    attitude_to_player=npc_data.get("attitude_to_player", "neutral"),
+                    village=village
                 )
 
                 # Assign wealth (randomly for now) - This is now part of LLM prompt for personality
@@ -4786,7 +4848,6 @@ class World:
             # This means sounds last for one full game tick cycle.
             self.sound_events.clear()
 
-
             # Check if the player moved onto a flower
             if destination_tile.char == ord('*'): # This was likely for herb_generic
                 # Add a herb_generic to the player's inventory
@@ -4803,6 +4864,177 @@ class World:
                 self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
                     plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], plains_def.get("properties", {})
                 )
+
+    def _update_village_construction(self):
+        """Periodically checks if new construction projects should be started."""
+        if self.game_time % 500 != 0: # Check every 500 ticks
+            return
+
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if chunk.village:
+                    village = chunk.village
+                    homeless_npcs = [npc for npc in self.village_npcs if not npc.home_building_id and self._get_village_for_npc(npc) == village]
+
+                    if len(homeless_npcs) > 0:
+                        # Check if there is already a construction site for a house
+                        house_under_construction = any(site.building_type == "house" for site in self.construction_sites if site.village == village)
+                        if not house_under_construction:
+                            self.add_message_to_chat_log(f"The village of {village.lore.split('.')[0]} has decided to build a new house for its homeless.")
+                            # Find a suitable location for the new house
+                            # This is a placeholder, a more robust system would find a clear, flat area
+                            new_house_x = random.randint(1, CHUNK_SIZE - 10)
+                            new_house_y = random.randint(1, CHUNK_SIZE - 10)
+
+                            new_site = ConstructionSite(new_house_x, new_house_y, 7, 5, "house", village)
+                            self.construction_sites.append(new_site)
+
+                            # Find and assign a builder
+                            builder_npc = next((npc for npc in self.village_npcs if npc.profession == "Builder" and self._get_village_for_npc(npc) == village), None)
+                            if builder_npc:
+                                new_site.assigned_builder_id = builder_npc.id
+                                builder_npc.work_building_id = None # Unassign from any current work
+                                builder_npc.current_task = "assigned_to_build"
+                                self.add_message_to_chat_log(f"{builder_npc.name} has been assigned to build the new house.")
+                            else:
+                                self.add_message_to_chat_log("There are no builders in the village to construct the new house.")
+
+    def _check_for_completed_construction(self):
+        """Checks for and finalizes completed construction sites."""
+        for site in self.construction_sites[:]:
+            interior_foundation_count = 0
+            perimeter_piece_count = 0
+            has_door = False
+
+            for y_offset in range(site.height):
+                for x_offset in range(site.width):
+                    tile = self.get_tile_at(site.x + x_offset, site.y + y_offset)
+                    is_perimeter = x_offset == 0 or x_offset == site.width - 1 or y_offset == 0 or y_offset == site.height - 1
+
+                    if is_perimeter:
+                        if tile.name == "Wood Wall":
+                            perimeter_piece_count += 1
+                        elif tile.properties.get("is_door"):
+                            perimeter_piece_count += 1
+                            has_door = True
+                    else: # Is interior
+                        if tile.name == "Stone Foundation":
+                            interior_foundation_count += 1
+
+            expected_perimeter_pieces = 2 * (site.width + site.height) - 4
+            expected_interior_foundations = (site.width - 2) * (site.height - 2)
+
+            if interior_foundation_count >= expected_interior_foundations and perimeter_piece_count >= expected_perimeter_pieces and has_door:
+                self.add_message_to_chat_log(f"A new {site.building_type} has been completed in {site.village.lore.split('.')[0]}!")
+
+                # Convert site to building
+                new_building = Building(site.x, site.y, site.width, site.height, site.building_type, "residential", 0, 0)
+                site.village.add_building(new_building)
+                self.buildings_by_id[new_building.id] = new_building
+
+                # Assign a homeless NPC to the new house
+                homeless_npc = next((npc for npc in self.village_npcs if not npc.home_building_id and self._get_village_for_npc(npc) == site.village), None)
+                if homeless_npc:
+                    new_building.residents.append(homeless_npc)
+                    homeless_npc.home_building_id = new_building.id
+                    self.add_message_to_chat_log(f"{homeless_npc.name} has moved into the new house.")
+
+                # Clean up
+                self.construction_sites.remove(site)
+                builder_npc = next((npc for npc in self.village_npcs if npc.id == site.assigned_builder_id), None)
+                if builder_npc:
+                    builder_npc.current_task = "idle"
+
+    def toggle_build_mode(self):
+        """Toggles the player's build mode on or off."""
+        self.build_mode_active = not self.build_mode_active
+        if self.build_mode_active:
+            self.add_message_to_chat_log("Build mode enabled. Press 'C' to cycle items, 'Enter' to place.")
+        else:
+            self.add_message_to_chat_log("Build mode disabled.")
+            self.ghost_tile = None # Clear ghost tile when exiting build mode
+
+    def cycle_build_mode_item(self):
+        """Cycles through the available buildable items."""
+        if not self.build_mode_active:
+            return
+        self.build_mode_selected_item_index = (self.build_mode_selected_item_index + 1) % len(self.buildable_item_keys)
+        selected_item_key = self.buildable_item_keys[self.build_mode_selected_item_index]
+        item_name = ITEM_DEFINITIONS.get(selected_item_key, {}).get("name", "Unknown")
+        self.add_message_to_chat_log(f"Selected buildable: {item_name}")
+
+    def update_ghost_tile(self, target_x, target_y):
+        """Updates the ghost tile for placement preview."""
+        if not self.build_mode_active:
+            self.ghost_tile = None
+            return
+
+        selected_item_key = self.buildable_item_keys[self.build_mode_selected_item_index]
+        item_def = ITEM_DEFINITIONS.get(selected_item_key)
+        if not item_def:
+            self.ghost_tile = None
+            return
+
+        becomes_tile_key = item_def.get("on_use_place", {}).get("becomes_tile_key")
+        if not becomes_tile_key:
+            self.ghost_tile = None
+            return
+
+        new_tile_def = TILE_DEFINITIONS.get(becomes_tile_key)
+        if not new_tile_def:
+            self.ghost_tile = None
+            return
+
+        # Create a temporary tile for rendering the ghost
+        # The color is modified to be semi-transparent
+        ghost_color = (*new_tile_def["color"], 128) # Adding an alpha value
+        self.ghost_tile = Tile(
+            char=new_tile_def["char"],
+            color=ghost_color,
+            passable=new_tile_def["passable"],
+            name=new_tile_def["name"],
+            properties=new_tile_def.get("properties", {})
+        )
+        # Store target coordinates on the ghost tile object for the renderer
+        self.ghost_tile.x = target_x
+        self.ghost_tile.y = target_y
+
+    def player_attempt_place_buildable(self, target_x: int, target_y: int):
+        """Handles the player's attempt to place a buildable item."""
+        if not self.build_mode_active:
+            return
+
+        selected_item_key = self.buildable_item_keys[self.build_mode_selected_item_index]
+        if not self.player.has_item(selected_item_key):
+            self.add_message_to_chat_log(f"You don't have any {ITEM_DEFINITIONS[selected_item_key]['name']} to build with.")
+            return
+
+        item_def = ITEM_DEFINITIONS.get(selected_item_key)
+        if not item_def: return
+
+        place_info = item_def.get("on_use_place")
+        if not place_info: return
+
+        allowed_on_names = place_info.get("allowed_on_tile_names", [])
+        target_tile = self.get_tile_at(target_x, target_y)
+
+        if not target_tile or target_tile.name not in allowed_on_names:
+            self.add_message_to_chat_log(f"You can't build that on a {target_tile.name if target_tile else 'invalid tile'}.")
+            return
+
+        becomes_tile_key = place_info.get("becomes_tile_key")
+        if not becomes_tile_key: return
+
+        new_tile_def = TILE_DEFINITIONS.get(becomes_tile_key)
+        if not new_tile_def: return
+
+        if self.player.remove_item(selected_item_key, 1):
+            self._change_map_tile((target_x, target_y), new_tile_def)
+            self.add_message_to_chat_log(f"You placed a {new_tile_def['name']}.")
+            self.update_fov() # Update FOV in case a wall was built
+        else:
+            self.add_message_to_chat_log("Error: Could not remove build item from inventory.")
 
     def emit_sound(self, origin_x: int, origin_y: int, sound_type: str, volume: int, source_entity_id: int | None = None):
         """Emits a sound event that NPCs might react to."""
@@ -4883,7 +5115,7 @@ class World:
                 for dy in range(-1, 2):
                     if dx == 0 and dy == 0: continue
                     tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
-                    if tile and tile.properties.get("interaction_hint") == required_station:
+                    if tile and hasattr(tile, "properties") and tile.properties.get("interaction_hint") == required_station:
                         station_found = True
                         break
                 if station_found:

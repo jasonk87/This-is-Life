@@ -1,9 +1,10 @@
 
 import unittest
 from unittest.mock import patch, MagicMock
-from engine import World, Chunk, Village, NPC
+from engine import World, Chunk, Village, NPC, Building
 from data.quests import QUEST_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
+from data.tiles import TILE_DEFINITIONS
 import json
 
 class TestGame(unittest.TestCase):
@@ -22,7 +23,7 @@ class TestGame(unittest.TestCase):
 
         # Manually create a village and a merchant NPC to ensure the test can run
         village = Village()
-        merchant_npc = NPC(x=0, y=0, name="Test Merchant", dialogue=[], personality="greedy", family_ties="", attitude_to_player="neutral")
+        merchant_npc = NPC(x=0, y=0, name="Test Merchant", dialogue=[], personality="greedy", family_ties="", attitude_to_player="neutral", village=village)
         merchant_npc.profession = "Merchant"
         world.village_npcs.append(merchant_npc)
 
@@ -85,9 +86,10 @@ class TestGame(unittest.TestCase):
 
         world = World()
         player = world.player
+        village = Village()
 
         # Manually create a Woodcutter NPC
-        woodcutter_npc = NPC(x=1, y=1, name="Test Woodcutter", dialogue=[], personality="friendly", family_ties="", attitude_to_player="neutral")
+        woodcutter_npc = NPC(x=1, y=1, name="Test Woodcutter", dialogue=[], personality="friendly", family_ties="", attitude_to_player="neutral", village=village)
         woodcutter_npc.profession = "Woodcutter"
         woodcutter_npc.factions = ["common_folk"] # Assign faction
         world.village_npcs.append(woodcutter_npc)
@@ -220,6 +222,93 @@ class TestGame(unittest.TestCase):
 
         self.assertEqual(world.current_weather, "rain")
         self.assertIn("The weather changes to Rain.", world.chat_log[-1])
+
+    @patch('engine.World._call_ollama')
+    def test_building_system(self, mock_call_ollama):
+        # Setup
+        mock_call_ollama.return_value = json.dumps({"name": "test", "personality": "test"})
+        world = World()
+        player = world.player
+
+        # 1. Player crafts building kits
+        player.add_item("stone_chunk", 5)
+        player.add_item("wooden_plank", 4)
+        world.craft_item("stone_foundation_kit")
+        world.craft_item("wood_wall_kit")
+        self.assertTrue(player.has_item("stone_foundation_kit"))
+        self.assertTrue(player.has_item("wood_wall_kit"))
+
+        # 2. Player enters build mode and places foundation
+        world.toggle_build_mode()
+        self.assertTrue(world.build_mode_active)
+
+        # Clear the area for building to avoid procedural generation interference
+        build_x, build_y = player.x + 1, player.y
+        world._change_map_tile((build_x, build_y), TILE_DEFINITIONS["plains"])
+
+        world.player_attempt_place_buildable(build_x, build_y)
+        self.assertEqual(world.get_tile_at(build_x, build_y).name, "Stone Foundation")
+
+        # 3. Player places wall on foundation
+        world.cycle_build_mode_item() # Select wood wall kit
+        world.player_attempt_place_buildable(player.x + 1, player.y)
+        self.assertEqual(world.get_tile_at(player.x + 1, player.y).name, "Wood Wall")
+        world.toggle_build_mode()
+
+        # Reset world state for a clean NPC test
+        world.chunks = [[Chunk("plains", poi_type=None) for _ in range(world.chunk_width)] for _ in range(world.chunk_height)]
+        world.village_npcs = []
+        world.construction_sites = []
+        world.buildings_by_id = {}
+
+
+        # 4. NPC Builder is assigned to a construction site
+        village = Village()
+        world.chunks[0][0].village = village # Create a village for the test
+
+        # Create a dummy building for the builder to live in, to associate them with the village
+        builder_house = Building(1,1,1,1)
+        village.add_building(builder_house)
+        world.buildings_by_id[builder_house.id] = builder_house
+
+        homeless_npc = NPC(x=1, y=1, name="Homeless", dialogue=[], personality="sad", family_ties="", attitude_to_player="neutral", village=village)
+        builder_npc = NPC(x=2, y=2, name="Builder Bob", dialogue=[], personality="diligent", family_ties="", attitude_to_player="neutral", village=village)
+        builder_npc.profession = "Builder"
+        builder_npc.home_building_id = builder_house.id # Associate builder with village
+        world.village_npcs.extend([homeless_npc, builder_npc])
+
+        world.game_time = 500
+        world._update_village_construction()
+        self.assertEqual(len(world.construction_sites), 1)
+        site = world.construction_sites[0]
+        self.assertEqual(site.assigned_builder_id, builder_npc.id)
+
+        # 5. Builder gathers resources (simplified)
+        world._handle_npc_work_sub_tasks(builder_npc) # This should trigger fetching stone
+        builder_npc.x, builder_npc.y = site.x, site.y # Teleport to site for testing
+        builder_npc.add_item("stone_chunk", 1)
+        world._handle_npc_work_sub_tasks(builder_npc) # This should trigger laying foundation
+
+        # 6. A homeless NPC moves into the newly constructed house
+        # Manually complete the building for the test
+        for i in range(site.width * site.height):
+             world._change_map_tile((site.x + i % site.width, site.y + i // site.width), TILE_DEFINITIONS["stone_foundation"])
+
+        # Manually build the perimeter walls
+        for y_offset in range(site.height):
+            for x_offset in range(site.width):
+                if x_offset == 0 or x_offset == site.width - 1 or y_offset == 0 or y_offset == site.height - 1:
+                    world._change_map_tile((site.x + x_offset, site.y + y_offset), TILE_DEFINITIONS["wood_wall"])
+
+        # Manually place a door
+        door_x, door_y = site.x + site.width // 2, site.y + site.height - 1
+        world._change_map_tile((door_x, door_y), DECORATION_ITEM_DEFINITIONS["wooden_door_closed"])
+
+        world.game_time += 500
+        world._check_for_completed_construction()
+        self.assertEqual(len(world.construction_sites), 0)
+        self.assertIsNotNone(homeless_npc.home_building_id)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -548,7 +548,43 @@ ITEM_DEFINITIONS = {
         "on_use": {
             "reduces_hunger": 20
         }
-    }
+    },
+
+    # --- Building Kits ---
+    "stone_foundation_kit": {
+        "name": "Stone Foundation Kit",
+        "description": "A kit to lay a single stone foundation tile.",
+        "char": "K",
+        "color": COLORS["grey"],
+        "value": 15,
+        "weight": 20,
+        "stackable": True,
+        "item_type_tags": ["buildable"],
+        "crafting_recipe": {
+            "ingredients": {"stone_chunk": 5}
+        },
+        "on_use_place": {
+            "becomes_tile_key": "stone_foundation",
+            "allowed_on_tile_names": ["Plains", "Tall Grass"]
+        }
+    },
+    "wood_wall_kit": {
+        "name": "Wood Wall Kit",
+        "description": "A kit to construct a single wooden wall section.",
+        "char": "K",
+        "color": COLORS["saddlebrown"],
+        "value": 20,
+        "weight": 15,
+        "stackable": True,
+        "item_type_tags": ["buildable"],
+        "crafting_recipe": {
+            "ingredients": {"wooden_plank": 4}
+        },
+        "on_use_place": {
+            "becomes_tile_key": "wood_wall",
+            "allowed_on_tile_names": ["Stone Foundation"]
+        },
+    },
 }
 
 # Standardize 'type' to 'item_type_tags' and ensure all items have item_type_tags

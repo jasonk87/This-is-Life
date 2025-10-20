@@ -2098,15 +2098,7 @@ class World:
                     is_day_leisure_time = not is_night_time and not (work_start_tick <= current_time_in_day < work_end_tick)
                     if not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
                         # Find the NPC's village to get well location
-                        npc_village = None
-                        for y_idx, row in enumerate(self.chunks):
-                            for x_idx, chk in enumerate(row):
-                                if chk.village: # Assuming NPC is in a village chunk that has a village object
-                                    # Check if this NPC belongs to this village (e.g. home is here)
-                                    if npc.home_building_id and self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
-                                        npc_village = chk.village
-                                        break
-                            if npc_village: break
+                        npc_village = self._get_village_for_npc(npc)
 
                         if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
                             well_coords = random.choice(npc_village.interaction_points["well"]) # Pick one if multiple wells
@@ -3001,12 +2993,11 @@ class World:
             return None
         # This is inefficient and relies on iterating all chunks.
         # A future optimization would be to cache npc -> village mapping.
-        for y_idx, row in enumerate(self.chunks):
-            for x_idx, chk in enumerate(row):
-                if chk.village:
-                    # Check if the building object is in this village's list of buildings
-                    if self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
-                        return chk.village
+        for (chunk_x, chunk_y), chunk in self.chunks.items():
+            if chunk.village:
+                # Check if the building object is in this village's list of buildings
+                if self.buildings_by_id.get(npc.home_building_id) in chunk.village.buildings:
+                    return chunk.village
         return None
 
     def _find_nearest_building_of_type(self, npc: NPC, building_type: str) -> Building | None:
@@ -3417,10 +3408,9 @@ class World:
     def _get_chunk_from_building(self, building_to_find: Building) -> tuple[Chunk | None, int, int]:
         """Finds the chunk a building belongs to and its global starting coords."""
         # This is inefficient. Ideally, Building objects would store their parent chunk's coords or reference.
-        for y_idx, chunk_row in enumerate(self.chunks):
-            for x_idx, chunk in enumerate(chunk_row):
-                if chunk and chunk.village and building_to_find in chunk.village.buildings:
-                    return chunk, x_idx * CHUNK_SIZE, y_idx * CHUNK_SIZE
+        for (chunk_x, chunk_y), chunk in self.chunks.items():
+            if chunk and chunk.village and building_to_find in chunk.village.buildings:
+                return chunk, chunk_x * CHUNK_SIZE, chunk_y * CHUNK_SIZE
         return None, 0, 0
 
     def _building_contains_item_with_interaction(self, building: Building, interaction_hint: str) -> bool:
@@ -3459,20 +3449,19 @@ class World:
         chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
         local_x, local_y = x % CHUNK_SIZE, y % CHUNK_SIZE
 
-        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
-            chunk = self.chunks[chunk_y][chunk_x]
-            if chunk and chunk.tiles:
-                new_tile = Tile(
-                    char=new_tile_def["char"],
-                    color=new_tile_def["color"],
-                    passable=new_tile_def["passable"],
-                    name=new_tile_def["name"],
-                    properties=new_tile_def.get("properties", {})
-                )
-                if original_tree_type:
-                    new_tile.original_tree_type = original_tree_type
+        chunk = self.chunks.get((chunk_x, chunk_y))
+        if chunk and chunk.tiles:
+            new_tile = Tile(
+                char=new_tile_def["char"],
+                color=new_tile_def["color"],
+                passable=new_tile_def["passable"],
+                name=new_tile_def["name"],
+                properties=new_tile_def.get("properties", {})
+            )
+            if original_tree_type:
+                new_tile.original_tree_type = original_tree_type
 
-                chunk.tiles[local_y][local_x] = new_tile
+            chunk.tiles[local_y][local_x] = new_tile
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
@@ -3769,17 +3758,16 @@ class World:
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
 
         corpse_placed_on_map = False
-        if 0 <= npc_chunk_x < self.chunk_width and 0 <= npc_chunk_y < self.chunk_height:
-            chunk = self.chunks[npc_chunk_y][npc_chunk_x]
-            if chunk and chunk.tiles:
-                corpse_def = DECORATION_ITEM_DEFINITIONS.get("corpse_humanoid")
-                if corpse_def:
-                    chunk.tiles[npc_local_y][npc_local_x] = Tile(
-                        char=corpse_def["char"], color=corpse_def["color"],
-                        passable=corpse_def["passable"], name=corpse_def["name"],
-                        properties=corpse_def.get("properties", {})
-                    )
-                    corpse_placed_on_map = True
+        chunk = self.chunks.get((npc_chunk_x, npc_chunk_y))
+        if chunk and chunk.tiles:
+            corpse_def = DECORATION_ITEM_DEFINITIONS.get("corpse_humanoid")
+            if corpse_def:
+                chunk.tiles[npc_local_y][npc_local_x] = Tile(
+                    char=corpse_def["char"], color=corpse_def["color"],
+                    passable=corpse_def["passable"], name=corpse_def["name"],
+                    properties=corpse_def.get("properties", {})
+                )
+                corpse_placed_on_map = True
 
         if not corpse_placed_on_map: self.add_message_to_chat_log(f"(Could not place corpse for {dead_npc.name} on map)")
 
@@ -4140,9 +4128,11 @@ class World:
                 chunk_x, chunk_y = target_x // CHUNK_SIZE, target_y // CHUNK_SIZE
                 local_x, local_y = target_x % CHUNK_SIZE, target_y % CHUNK_SIZE
 
-                self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
-                    char=new_door_def["char"],
-                    color=new_door_def["color"],
+                chunk = self.chunks.get((chunk_x, chunk_y))
+                if chunk:
+                    chunk.tiles[local_y][local_x] = Tile(
+                        char=new_door_def["char"],
+                        color=new_door_def["color"],
                     passable=new_door_def["passable"],
                     name=new_door_def["name"],
                     properties=new_door_def["properties"]
@@ -5387,8 +5377,8 @@ class World:
                 # Get the chunk the building is in to pass to decoration method
                 current_chunk_x = new_x // CHUNK_SIZE
                 current_chunk_y = new_y // CHUNK_SIZE
-                if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
-                    chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
+                chunk_of_building = self.chunks.get((current_chunk_x, current_chunk_y))
+                if chunk_of_building:
                     self.decorate_building_interior(building, chunk_of_building)
                 else:
                     # This should ideally not happen if get_building_at found a building
@@ -5429,18 +5419,16 @@ class World:
 
     def _update_economy(self):
         """Periodically updates the supply and demand of all villages."""
-        for y_chunk in range(self.chunk_height):
-            for x_chunk in range(self.chunk_width):
-                chunk = self.chunks[y_chunk][x_chunk]
-                if chunk.village:
-                    village = chunk.village
-                    # Decay demand over time
-                    for item_key in list(village.demand.keys()):
-                        village.demand[item_key] *= 0.99
-                        if village.demand[item_key] < 1:
-                            del village.demand[item_key]
+        for (chunk_x, chunk_y), chunk in self.chunks.items():
+            if chunk.village:
+                village = chunk.village
+                # Decay demand over time
+                for item_key in list(village.demand.keys()):
+                    village.demand[item_key] *= 0.99
+                    if village.demand[item_key] < 1:
+                        del village.demand[item_key]
 
-                    # Recalculate supply from scratch
+                # Recalculate supply from scratch
                     village.supply = {}
                     for building in village.buildings:
                         for item_key, quantity in building.building_inventory.items():

@@ -255,3 +255,26 @@ TILE_DEFINITIONS["mature_wheat_crop"] = {
         "becomes_on_harvest_key": "tilled_soil"
     }
 }
+
+TILE_DEFINITIONS["wheat_growing"] = {
+    "char": "w",
+    "color": COLORS["yellow_green"],
+    "passable": True,
+    "name": "Growing Wheat Crop",
+    "properties": {
+        "is_harvestable": False,
+        "growth_progress": 0,
+        "growth_target": 100,
+        "evolves_to": "mature_wheat_crop"
+    }
+}
+
+TILE_DEFINITIONS["ice"] = {
+    "char": "~",
+    "color": COLORS["light_blue"],
+    "passable": True,
+    "name": "Ice",
+    "properties": {
+        "original_tile": None
+    }
+}

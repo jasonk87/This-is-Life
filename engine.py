@@ -491,9 +491,11 @@ class World:
         new_season_index = (day_of_year // DAYS_PER_SEASON) % len(self.seasons)
 
         if new_season_index != self.current_season_index:
+            old_season_name = self.seasons[self.current_season_index]
             self.current_season_index = new_season_index
-            season_name = self.seasons[self.current_season_index]
-            self.add_message_to_chat_log(f"The season has changed to {season_name}.")
+            new_season_name = self.seasons[self.current_season_index]
+            self.add_message_to_chat_log(f"The season has changed to {new_season_name}.")
+            self._handle_seasonal_tile_changes(old_season_name, new_season_name)
 
     def _update_weather(self):
         """Periodically updates the world's weather."""
@@ -524,6 +526,26 @@ class World:
             # Handle immediate effects of weather change
             if self.current_weather in ["rain", "snow"]:
                 self._extinguish_all_outdoor_fires()
+
+        # Water crops if it is raining
+        if self.current_weather == "rain":
+            self._water_crops()
+
+
+    def _water_crops(self):
+        """Increases the growth progress of all growing crops."""
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if not chunk.is_generated:
+                    continue
+
+                for y_local in range(CHUNK_SIZE):
+                    for x_local in range(CHUNK_SIZE):
+                        tile = chunk.tiles[y_local][x_local]
+                        if tile.name == "Growing Wheat Crop":
+                            if "growth_progress" in tile.properties:
+                                tile.properties["growth_progress"] += 5
 
 
     def _extinguish_all_outdoor_fires(self):
@@ -567,6 +589,38 @@ class World:
 
         if extinguished_count > 0:
             self.add_message_to_chat_log("The rain has extinguished the outdoor fires.")
+
+    def _handle_seasonal_tile_changes(self, old_season: str, new_season: str):
+        """Changes tiles based on the season, e.g., freezing water in winter."""
+        water_def = TILE_DEFINITIONS["water"]
+        ice_def = TILE_DEFINITIONS["ice"]
+
+        if new_season == "Winter" and old_season != "Winter":
+            # Freeze water to ice
+            self.add_message_to_chat_log("A deep chill sets in, freezing the water.")
+            from_name = water_def["name"]
+            to_def = ice_def
+        elif old_season == "Winter" and new_season != "Winter":
+            # Thaw ice to water
+            self.add_message_to_chat_log("The ice begins to thaw.")
+            from_name = ice_def["name"]
+            to_def = water_def
+        else:
+            return # No change needed
+
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if not chunk.is_generated:
+                    continue
+
+                for y_local in range(CHUNK_SIZE):
+                    for x_local in range(CHUNK_SIZE):
+                        tile = chunk.tiles[y_local][x_local]
+                        if tile.name == from_name:
+                            world_x = x_chunk * CHUNK_SIZE + x_local
+                            world_y = y_chunk * CHUNK_SIZE + y_local
+                            self._change_map_tile((world_x, world_y), to_def)
 
     def _update_player_temperature(self):
         """Calculates ambient temperature and updates player's body temperature."""
@@ -4305,7 +4359,17 @@ class World:
 
                                 if new_tree:
                                     chunk.tiles[y_local][x_local] = new_tree
-                                    self.transparency_map[world_x, world_y] = True # Update transparency map
+                                    self.transparency_map[world_x, world_y] = False
+
+                        elif tile.name == "Growing Wheat Crop":
+                            if "growth_progress" in tile.properties and "growth_target" in tile.properties:
+                                tile.properties["growth_progress"] += 1
+                                if tile.properties["growth_progress"] >= tile.properties["growth_target"]:
+                                    evolves_to_key = tile.properties.get("evolves_to")
+                                    if evolves_to_key:
+                                        new_tile_def = TILE_DEFINITIONS.get(evolves_to_key)
+                                        if new_tile_def:
+                                            self._change_map_tile((x_chunk * CHUNK_SIZE + x_local, y_chunk * CHUNK_SIZE + y_local), new_tile_def)
 
 
     def _populate_npcs(self):

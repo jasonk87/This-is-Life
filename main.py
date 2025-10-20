@@ -83,7 +83,7 @@ def main():
                     world._change_map_tile((door_x, door_y), open_door_def)
                     world.player.jail_cell_coords = None
 
-
+            world._update_player_movement_timer()
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
             world._update_season()
             world._update_weather()

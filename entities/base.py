@@ -45,6 +45,14 @@ class NPC:
         self.thirst: int = 0
         self.max_thirst: int = 100
 
+        # Temperature and Weather
+        self.temperature: float = 37.0
+        self.base_temperature_resistance: float = 0.0
+        self.clothing_insulation: float = 0.0
+        self.status_effects: list[str] = []
+        self.is_wet: bool = False
+        self.wetness_timer: int = 0
+
         # Combat Attributes (Phase 5.3)
         self.max_hp = 20  # Default max HP
         self.hp = self.max_hp
@@ -91,6 +99,22 @@ class NPC:
 
     def get_dialogue(self):
         return self.dialogue
+
+    def recalculate_stats(self):
+        """Recalculates NPC stats based on equipped items."""
+        self.clothing_insulation = 0.0
+
+        # Check body armor
+        if self.equipped_armor_body and self.equipped_armor_body in ITEM_DEFINITIONS:
+            item_def = ITEM_DEFINITIONS[self.equipped_armor_body]
+            if "properties" in item_def:
+                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+
+        # Check head armor
+        if self.equipped_armor_head and self.equipped_armor_head in ITEM_DEFINITIONS:
+            item_def = ITEM_DEFINITIONS[self.equipped_armor_head]
+            if "properties" in item_def:
+                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
 
     def take_damage(self, amount: int, world):
         if self.is_dead:

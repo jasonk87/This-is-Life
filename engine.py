@@ -196,6 +196,7 @@ class Player:
             "hands": None,
             "feet": None
         }
+        self.movement_timer: int = 0
 
 
     def take_damage(self, amount: int):
@@ -663,6 +664,77 @@ class World:
                 self.add_message_to_chat_log("You are burning up!")
                 player.take_damage(1)
 
+    def _update_player_movement_timer(self):
+        """Decrements the player's movement timer."""
+        if self.player.movement_timer > 0:
+            self.player.movement_timer -= 1
+
+    def _update_npc_temperature(self, npc: NPC):
+        """Calculates ambient temperature at NPC's location and updates their body temperature."""
+        # 1. Calculate Ambient Temperature at NPC location
+        season_name = self.seasons[self.current_season_index]
+        base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
+
+        npc_chunk = self.chunks[npc.y // CHUNK_SIZE][npc.x // CHUNK_SIZE]
+        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(npc_chunk.biome, 0)
+
+        time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
+
+        weather_def = WEATHER_TYPES.get(self.current_weather, {})
+        weather_temp_mod = weather_def.get("effects", {}).get("temperature_modifier", 0.0)
+
+        ambient_temp = base_temp + biome_temp_mod + time_of_day_mod + weather_temp_mod
+
+        # Check for nearby heat sources
+        heat_source_bonus = 0.0
+        # A smaller radius check for NPCs to reduce performance impact
+        for y in range(npc.y - 4, npc.y + 5):
+            for x in range(npc.x - 4, npc.x + 5):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
+                        radius = tile.properties.get("heat_source_radius", 0)
+                        intensity = tile.properties.get("heat_intensity", 0)
+                        distance = max(abs(npc.x - x), abs(npc.y - y))
+                        if distance <= radius:
+                            heat_bonus = intensity * (1 - (distance / radius))
+                            if heat_bonus > heat_source_bonus:
+                                heat_source_bonus = heat_bonus
+
+        effective_ambient_temp = ambient_temp + heat_source_bonus
+
+        # 2. Update NPC Temperature
+        npc.recalculate_stats()
+        total_insulation = npc.base_temperature_resistance + npc.clothing_insulation
+
+        npc.is_sheltered = self.get_building_at(npc.x, npc.y) is not None
+
+        weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
+        if weather_effects.get("applies_wetness") and not npc.is_sheltered:
+            npc.is_wet = True
+            npc.wetness_timer = 200
+
+        if npc.is_wet:
+            total_insulation *= 0.5
+            if npc.wetness_timer > 0 and not (weather_effects.get("applies_wetness") and not npc.is_sheltered):
+                npc.wetness_timer -= 1
+            elif npc.wetness_timer <= 0:
+                npc.is_wet = False
+
+        target_temp_equilibrium = effective_ambient_temp + total_insulation
+        temp_diff = target_temp_equilibrium - npc.temperature
+        change_rate = 0.05
+        npc.temperature += temp_diff * change_rate
+
+        # 3. Apply Effects
+        npc.status_effects.clear()
+        if npc.is_wet:
+            npc.status_effects.append("Wet")
+        if npc.temperature < 35.0:
+            npc.status_effects.append("Freezing")
+        elif npc.temperature > 38.5:
+            npc.status_effects.append("Overheating")
+
 
     def _handle_player_light_source_burnout(self):
         """Checks and handles burnout of player's active light source."""
@@ -826,9 +898,13 @@ class World:
         # for a grid, but it's good practice if more complex graph structures arise.
         # For now, we can directly use the AStar with `cost` and `diagonal` parameters.
 
+        weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
+        movement_cost_modifier = weather_effects.get("slows_movement", 1.0)
+        base_cost = int(1 * movement_cost_modifier)
+
         # Create a numpy array for pathfinding compatible with tcod.path functions
         # Cost array: 0 for wall, 1 for floor.
-        cost = np.ones((WORLD_HEIGHT, WORLD_WIDTH), dtype=np.int8)
+        cost = np.full((WORLD_HEIGHT, WORLD_WIDTH), fill_value=base_cost, dtype=np.int8)
         for y_coord in range(WORLD_HEIGHT):
             for x_coord in range(WORLD_WIDTH):
                 tile = self.get_tile_at(x_coord,y_coord)
@@ -1358,6 +1434,7 @@ class World:
                     continue # Skip non-hostile NPC if not their update interval
 
             npc.game_time_last_updated = self.game_time
+            self._update_npc_temperature(npc)
 
             if npc.is_hostile_to_player: # This includes creatures who are hostile by default
                 self._handle_npc_combat_turn(npc) # Combat AI runs
@@ -1552,6 +1629,40 @@ class World:
                             npc.current_task = "wandering_hungry_homeless"
 
                     needs_based_action_taken = True
+                # --- Warmth-Seeking Behavior ---
+                elif "Freezing" in npc.status_effects and npc.current_task != "seeking_warmth":
+                    npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering", "seeking_warmth"] else "idle"
+                    npc.current_task = "seeking_warmth"
+                    self.add_message_to_chat_log(f"{npc.name} looks cold and starts searching for warmth.")
+                    # Pathfinding logic will be handled in the next step
+                    needs_based_action_taken = True
+                elif npc.current_task == "seeking_warmth" and "Freezing" not in npc.status_effects:
+                    # Warmed up, can go back to previous task
+                    self.add_message_to_chat_log(f"{npc.name} has warmed up.")
+                    npc.current_task = npc.previous_task or "idle"
+                    npc.previous_task = None
+                elif npc.current_task == "seeking_warmth":
+                    # If already seeking warmth, check if a path needs to be calculated
+                    if not npc.current_path:
+                        heat_source_coords = self._find_nearest_heat_source(npc)
+                        if heat_source_coords:
+                            # Path to a tile adjacent to the heat source
+                            path = self.calculate_path(npc.x, npc.y, heat_source_coords[0], heat_source_coords[1])
+                            if path and len(path) > 1:
+                                # The path target should be the tile *before* the fire itself
+                                target_tile = path[-2] if len(path) > 1 else path[-1]
+                                npc.current_path = self.calculate_path(npc.x, npc.y, target_tile[0], target_tile[1])
+                                npc.current_destination_coords = target_tile
+                                self.add_message_to_chat_log(f"{npc.name} is heading towards a fire to warm up.")
+                            elif path: # Path is just the destination, they are already next to it
+                                npc.current_path = [] # Stand still
+                        else:
+                            # No heat source found, wander sadly
+                            npc.current_task = "wandering_cold"
+                            self.add_message_to_chat_log(f"{npc.name} is cold but can't find a fire.")
+                    needs_based_action_taken = True
+
+
                 elif npc.current_task == "going_to_buy_food":
                     food_vendor_building = self._find_nearest_food_vendor(npc)
                     if food_vendor_building and (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y):
@@ -2780,6 +2891,71 @@ class World:
     def _find_nearest_tavern(self, npc: NPC) -> Building | None:
         """Finds the nearest building with a 'tavern' type in the NPC's village."""
         return self._find_nearest_building_of_type(npc, "tavern")
+
+    def _scan_building_for_heat_source(self, building: Building) -> list[tuple[int, int]]:
+        """Scans all tiles within a building's footprint for heat sources."""
+        heat_sources = []
+        if not building:
+            return heat_sources
+
+        for y_offset in range(building.height):
+            for x_offset in range(building.width):
+                # Check the global coordinates of each tile within the building
+                world_x = building.global_origin_x + x_offset
+                world_y = building.global_origin_y + y_offset
+
+                tile = self.get_tile_at(world_x, world_y)
+                if tile and tile.properties.get("heat_source"):
+                    heat_sources.append((world_x, world_y))
+        return heat_sources
+
+    def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
+        """
+        Finds the global coordinates of the nearest "lit" heat source for an NPC.
+        Searches a radius around the NPC, then checks their home and the local tavern.
+        """
+        search_radius = 15
+        min_dist_sq = float('inf')
+        closest_heat_source_coords = None
+
+        # 1. Search in a radius around the NPC
+        for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+            for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and tile.properties.get("heat_source"):
+                        dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                        if dist_sq < min_dist_sq:
+                            min_dist_sq = dist_sq
+                            closest_heat_source_coords = (x, y)
+
+        # After radius search, check known buildings
+        candidate_coords = []
+        if closest_heat_source_coords:
+            candidate_coords.append(closest_heat_source_coords)
+
+        # 2. Check NPC's home for a fire
+        home_building = self.buildings_by_id.get(npc.home_building_id)
+        if home_building:
+            home_fires = self._scan_building_for_heat_source(home_building)
+            candidate_coords.extend(home_fires)
+
+        # 3. Check the nearest tavern for a fire
+        tavern = self._find_nearest_tavern(npc)
+        if tavern:
+            tavern_fires = self._scan_building_for_heat_source(tavern)
+            candidate_coords.extend(tavern_fires)
+
+        # Find the closest among all found candidates
+        final_closest_coords = None
+        min_dist_sq_final = float('inf')
+        for x, y in candidate_coords:
+            dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+            if dist_sq < min_dist_sq_final:
+                min_dist_sq_final = dist_sq
+                final_closest_coords = (x, y)
+
+        return final_closest_coords
 
     def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
         """
@@ -4994,6 +5170,9 @@ class World:
         return None
 
     def handle_player_movement(self, dx, dy):
+        if self.player.movement_timer > 0:
+            return # Player is on cooldown and cannot move
+
         if self.player.is_jailed:
             self.add_message_to_chat_log("You are in jail and cannot move freely.")
             return
@@ -5007,6 +5186,10 @@ class World:
         destination_tile = self.get_tile_at(new_x, new_y)
 
         if destination_tile and destination_tile.passable:
+            weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
+            movement_cost = weather_effects.get("slows_movement", 1.0)
+            self.player.movement_timer = int(1 * movement_cost) # Set cooldown
+
             self.player.x, self.player.y = new_x, new_y
             self.player.last_dx, self.player.last_dy = dx, dy # Store last move
 

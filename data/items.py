@@ -431,7 +431,7 @@ ITEM_DEFINITIONS = {
         "weight": 5,
         "stackable": False,
         "item_type_tags": ["armor", "body"],
-        "equip_slot": "body_armor",
+        "equip_slot": "body",
         "properties": {
             "defense_bonus": 1,
             "max_durability": 60
@@ -446,7 +446,7 @@ ITEM_DEFINITIONS = {
         "weight": 3,
         "stackable": False,
         "item_type_tags": ["armor", "head"],
-        "equip_slot": "head_armor",
+        "equip_slot": "head",
         "properties": {
             "defense_bonus": 1,
             "max_durability": 70
@@ -504,13 +504,32 @@ ITEM_DEFINITIONS = {
         "weight": 15,
         "stackable": False,
         "item_type_tags": ["armor", "body"],
-        "equip_slot": "body_armor",
+        "equip_slot": "body",
         "properties": {
             "defense_bonus": 2,
             "max_durability": 100
         },
         "crafting_recipe": {
             "iron_ingot": 5,
+        },
+    },
+    "fur_cloak": {
+        "name": "Fur Cloak",
+        "description": "A thick cloak made of animal fur, providing excellent warmth.",
+        "char": "C",
+        "color": COLORS["dark_sepia"],
+        "value": 60,
+        "weight": 8,
+        "stackable": False,
+        "item_type_tags": ["armor", "body"],
+        "equip_slot": "body",
+        "properties": {
+            "defense_bonus": 0,
+            "insulation": 10.0,
+            "max_durability": 80
+        },
+        "crafting_recipe": {
+            "raw_meat_scrap": 5, # placeholder for fur/hide
         },
     },
     "fish": {

@@ -30,6 +30,29 @@ NPC_SCHEDULE_UPDATE_INTERVAL = 50 # How often an NPC re-evaluates its schedule (
 WORK_START_TIME_RATIO = 0.25 # e.g., 25% into the day
 WORK_END_TIME_RATIO = 0.70   # e.g., 70% into the day
 
+# --- Season & Temperature Settings ---
+DAYS_PER_SEASON = 10 # Game days per season
+SEASON_TEMPERATURE_MODIFIERS = {
+    "Spring": 20,
+    "Summer": 30,
+    "Autumn": 15,
+    "Winter": -5
+}
+BIOME_TEMPERATURE_MODIFIERS = {
+    "snow": -15,
+    "mountain": -8,
+    "water": -3,
+    "plains": 0,
+    "default": 0
+}
+TIME_OF_DAY_TEMPERATURE_MODIFIERS = {
+    "DEEP_NIGHT": -8,
+    "NIGHT": -5,
+    "DAWN": -2,
+    "DAY": 0,
+    "DUSK": -3
+}
+
 # --- Reputation Settings ---
 # Initial values for player reputation
 INITIAL_CRIMINAL_POINTS = 0
@@ -81,19 +104,3 @@ LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
 DEFAULT_HEARING_RADIUS = 12 # How far the player can hear standard volume speech.
 DEFAULT_SPEECH_VOLUME = 10  # How far standard NPC speech travels.
 # Speech is heard if distance <= player.hearing_radius AND distance <= npc.speech_volume.
-
-# --- Minimap Settings ---
-MINIMAP_WIDTH = 20
-MINIMAP_HEIGHT = 15
-MINIMAP_X = SCREEN_WIDTH_TILES - MINIMAP_WIDTH - 1
-MINIMAP_Y = SCREEN_HEIGHT_TILES - MINIMAP_HEIGHT - 1
-
-MINIMAP_COLORS = {
-    "player": (255, 255, 0),
-    "npc": (255, 0, 0),
-    "wall": (100, 100, 100),
-    "road": (150, 120, 80),
-    "water": (0, 0, 255),
-    "grass": (0, 150, 0),
-    "default": (50, 50, 50)
-}

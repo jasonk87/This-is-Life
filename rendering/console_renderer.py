@@ -1,8 +1,32 @@
 import tcod
+import random
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
 from data.environment import WEATHER_TYPES
-from data.factions import FACTIONS
+
+def draw_weather_overlay(console: tcod.console.Console, world) -> None:
+    """Draws a visual effect for the current weather, like rain."""
+    current_weather_name = getattr(world, 'current_weather', 'clear')
+    if current_weather_name != 'clear':
+        weather_def = WEATHER_TYPES.get(current_weather_name)
+        if weather_def:
+            weather_char = weather_def.get("char", ord(' '))
+            weather_color = weather_def.get("color", (200, 200, 255))
+            weather_chance = weather_def.get("chance", 0.1)
+
+            map_view_width = console.width - (SCREEN_WIDTH_TILES // 4)
+
+            for y in range(console.height):
+                for x in range(map_view_width):
+                    if random.random() < weather_chance:
+                        if console.rgb[x, y]["bg"] != (0, 0, 0) and console.rgb[x, y]["char"] not in [ord('#'), ord('+'), 177, 178]:
+                            existing_fg = console.rgb[x, y]["fg"]
+                            mixed_color = (
+                                (weather_color[0] + existing_fg[0]) // 2,
+                                (weather_color[1] + existing_fg[1]) // 2,
+                                (weather_color[2] + existing_fg[2]) // 2,
+                            )
+                            console.rgb[x, y] = (weather_char, mixed_color, console.rgb[x, y]["bg"])
 
 def draw_status_panel(console: tcod.console.Console, world) -> None:
     """Draws a dedicated panel for player status."""
@@ -23,63 +47,29 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
     console.print(x=panel_x + 2, y=y_offset, string=f"Thirst: {world.player.thirst_level_msg if world.player.thirst_level_msg else 'Quenched'}")
     y_offset += 2
 
-    # Reputation
-    console.print(x=panel_x + 2, y=y_offset, string="Reputation:")
-    y_offset += 1
-    for faction_id, score in world.player.reputation.items():
-        faction_name = FACTIONS.get(faction_id, {}).get("name", faction_id)
-        console.print(x=panel_x + 3, y=y_offset, string=f"- {faction_name}: {score}")
-        y_offset += 1
-    y_offset += 2
-
     # Time of Day
     console.print(x=panel_x + 2, y=y_offset, string=f"Time: {world.current_light_level_name}")
+    y_offset += 2
 
+    # Season and Temperature
+    season_name = world.seasons[world.current_season_index]
+    console.print(x=panel_x + 2, y=y_offset, string=f"Season: {season_name}")
+    y_offset += 1
+    console.print(x=panel_x + 2, y=y_offset, string=f"Ambient: {world.ambient_temperature:.1f}C")
+    y_offset += 1
 
-def draw_minimap(console: tcod.console.Console, world) -> None:
-    """Draws a minimap in the corner of the screen."""
-    from config import MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y, MINIMAP_COLORS
+    body_temp_color = (255, 255, 255)
+    if "Freezing" in world.player.status_effects:
+        body_temp_color = (100, 100, 255)
+    elif "Overheating" in world.player.status_effects:
+        body_temp_color = (255, 100, 100)
+    console.print(x=panel_x + 2, y=y_offset, string=f"Body Temp: {world.player.temperature:.1f}C", fg=body_temp_color)
+    y_offset += 1
 
-    minimap_console = tcod.console.Console(MINIMAP_WIDTH, MINIMAP_HEIGHT, order="F")
-    minimap_console.draw_frame(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT, title="Minimap", fg=(255, 255, 255))
-
-    map_center_x = world.player.x
-    map_center_y = world.player.y
-
-    for y_minimap in range(1, MINIMAP_HEIGHT - 1):
-        for x_minimap in range(1, MINIMAP_WIDTH - 1):
-            x_world = map_center_x - (MINIMAP_WIDTH // 2) + x_minimap
-            y_world = map_center_y - (MINIMAP_HEIGHT // 2) + y_minimap
-
-            if 0 <= x_world < WORLD_WIDTH and 0 <= y_world < WORLD_HEIGHT and world.explored_map[x_world, y_world]:
-                tile = world.get_tile_at(x_world, y_world)
-                if tile:
-                    color = MINIMAP_COLORS["default"]
-                    if "wall" in tile.name.lower():
-                        color = MINIMAP_COLORS["wall"]
-                    elif "road" in tile.name.lower():
-                        color = MINIMAP_COLORS["road"]
-                    elif "water" in tile.name.lower():
-                        color = MINIMAP_COLORS["water"]
-                    elif "plains" in tile.name.lower() or "grass" in tile.name.lower():
-                        color = MINIMAP_COLORS["grass"]
-                    minimap_console.bg[x_minimap, y_minimap] = color
-
-    # Draw NPCs
-    for npc in world.npcs + world.village_npcs:
-        if world.player_fov_map[npc.x, npc.y]:
-            x_minimap = npc.x - map_center_x + (MINIMAP_WIDTH // 2)
-            y_minimap = npc.y - map_center_y + (MINIMAP_HEIGHT // 2)
-            if 1 <= x_minimap < MINIMAP_WIDTH -1 and 1 <= y_minimap < MINIMAP_HEIGHT -1:
-                minimap_console.bg[x_minimap, y_minimap] = MINIMAP_COLORS["npc"]
-
-    # Draw player
-    player_x_minimap = MINIMAP_WIDTH // 2
-    player_y_minimap = MINIMAP_HEIGHT // 2
-    minimap_console.bg[player_x_minimap, player_y_minimap] = MINIMAP_COLORS["player"]
-
-    minimap_console.blit(console, MINIMAP_X, MINIMAP_Y, 0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT)
-
+    # Status Effects (if any)
+    if world.player.status_effects:
+        status_str = ", ".join(world.player.status_effects)
+        console.print(x=panel_x + 3, y=y_offset, string=f"({status_str})", fg=(255, 100, 100))
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
@@ -141,59 +131,20 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
         player_screen_y = world.player.y - camera_y
         console.rgb[player_screen_x, player_screen_y] = (world.player.char, world.player.color, (0, 0, 0))
 
+        draw_weather_overlay(console, world)
+
     # --- UI Overlays ---
     if game_state == "INFO_MENU":
         draw_info_menu(console, world, camera_x, camera_y)
     elif game_state == "BUILD_MODE":
         draw_build_mode_ui(console, world, camera_x, camera_y)
-    elif game_state == "INVENTORY_MENU":
-        draw_inventory_menu(console, world)
-    elif game_state == "CRAFTING_MENU":
-        draw_crafting_menu(console, world)
 
     draw_chat_log(console, world)
     draw_interaction_menu(console, world, camera_x, camera_y)
-    # --- Weather Overlay ---
-    draw_weather_overlay(console, world)
-
     draw_chat_ui(console, world)
     draw_trade_ui(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
     draw_status_panel(console, world)
-    draw_minimap(console, world)
-
-
-def draw_weather_overlay(console: tcod.console.Console, world) -> None:
-    """Draws a visual effect over the screen for the current weather."""
-    from data.environment import WEATHER_TYPES
-    import random
-
-    weather_key = world.current_weather
-    if weather_key == "clear":
-        return
-
-    weather_def = WEATHER_TYPES.get(weather_key)
-    if not weather_def:
-        return
-
-    # A simple particle effect: sprinkle a number of weather characters randomly.
-    # The number of particles can be tied to the game time to create a sense of movement.
-    num_particles = 50
-    char_to_draw = ord(str(weather_def["overlay_char"]))
-    color_to_draw = weather_def["overlay_color"]
-
-    for _ in range(num_particles):
-        # Add a time-based offset to the y-coordinate to simulate falling
-        x = random.randint(0, console.width - 1)
-        y_offset = (world.game_time + random.randint(0, console.height)) % console.height
-        y = y_offset
-
-        # Check if console coordinates are valid (they should be)
-        if 0 <= x < console.width and 0 <= y < console.height:
-            # Only draw if the background is empty (black), to avoid drawing over UI frames.
-            # This is a simple way to keep weather behind UI.
-            if console.rgb[x, y]["bg"] == (0, 0, 0):
-                 console.rgb[x, y] = (char_to_draw, color_to_draw, console.rgb[x, y]["bg"])
 
 
 def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
@@ -201,8 +152,8 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
     cursor_world_x = camera_x + world.mouse_x
     cursor_world_y = camera_y + world.mouse_y
 
-    season_name = world.current_season['name']
-    weather_name = WEATHER_TYPES[world.current_weather]['name']
+    season_name = world.seasons[world.current_season_index]
+    weather_name = getattr(world, 'current_weather', 'clear').capitalize()
 
     tile_info = ""
     if 0 <= cursor_world_x < WORLD_WIDTH and 0 <= cursor_world_y < WORLD_HEIGHT:
@@ -210,7 +161,7 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
         if cursor_tile:
             tile_info = f"| {cursor_tile.name}"
 
-    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name}, {weather_name} {tile_info}"
+    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name} | {weather_name} {tile_info}"
 
     text_width = len(cursor_info_text)
     border_width = text_width + 2
@@ -294,190 +245,6 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
              main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
              # ... (the rest of the NPC info is okay)
 
-
-def draw_inventory_menu(console: tcod.console.Console, world) -> None:
-    """Draws a full-screen, interactive inventory menu."""
-    menu_width = SCREEN_WIDTH_TILES - 10
-    menu_height = SCREEN_HEIGHT_TILES - 6
-    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
-    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
-
-    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="INVENTORY", clear=True)
-
-    # Split the menu into two panels: item list and details
-    list_panel_width = menu_width // 2
-    detail_panel_width = menu_width - list_panel_width - 1
-
-    # Draw vertical separator
-    for i in range(1, menu_height - 1):
-        console.print(x=menu_x + list_panel_width, y=menu_y + i, string="│")
-
-    # --- Item List Panel ---
-    inv_context = world.inventory_menu_context
-    inventory = world.player.inventory
-
-    list_height = menu_height - 4 # Top/bottom border + padding
-
-    # Handle scrolling
-    if inv_context["selected_item_index"] < inv_context["scroll_offset"]:
-        inv_context["scroll_offset"] = inv_context["selected_item_index"]
-    elif inv_context["selected_item_index"] >= inv_context["scroll_offset"] + list_height:
-        inv_context["scroll_offset"] = inv_context["selected_item_index"] - list_height + 1
-
-    y_offset = menu_y + 2
-    for i, item in enumerate(inventory[inv_context["scroll_offset"] : inv_context["scroll_offset"] + list_height]):
-        item_def = ITEM_DEFINITIONS.get(item["key"], {})
-        display_name = item_def.get("name", item["key"])
-
-        # Format name with quantity or durability
-        if "quantity" in item:
-            display_str = f"{display_name} (x{item['quantity']})"
-        elif "durability" in item:
-            display_str = f"{display_name} ({item['durability']}/{item['max_durability']})"
-        else:
-            display_str = display_name
-
-        fg_color = (255, 255, 0) if i + inv_context["scroll_offset"] == inv_context["selected_item_index"] else (255, 255, 255)
-
-        console.print(x=menu_x + 2, y=y_offset + i, string=display_str, fg=fg_color)
-
-    # --- Item Detail Panel ---
-    if inventory:
-        selected_item = inventory[inv_context["selected_item_index"]]
-        item_def = ITEM_DEFINITIONS.get(selected_item["key"], {})
-
-        detail_x = menu_x + list_panel_width + 2
-        detail_y = menu_y + 2
-
-        # Item Name
-        console.print(x=detail_x, y=detail_y, string=item_def.get("name", "Unknown Item"), fg=(200, 200, 255))
-        detail_y += 2
-
-        # Description
-        desc = item_def.get("description", "No details available.")
-        console.print_box(x=detail_x, y=detail_y, width=detail_panel_width - 4, height=10, string=desc)
-        detail_y += 5
-
-        # Properties
-        if "properties" in item_def:
-            for prop, val in item_def["properties"].items():
-                console.print(x=detail_x, y=detail_y, string=f"{prop.replace('_', ' ').title()}: {val}")
-                detail_y += 1
-
-        # Usable effects
-        if "on_use" in item_def:
-            detail_y +=1
-            console.print(x=detail_x, y=detail_y, string="[Usable]", fg=(0, 255, 0))
-            for effect, val in item_def["on_use"].items():
-                 detail_y += 1
-                 console.print(x=detail_x + 1, y=detail_y, string=f"- {effect.replace('_', ' ').title()}: {val}")
-
-
-def draw_crafting_menu(console: tcod.console.Console, world) -> None:
-    """Draws a full-screen, interactive crafting menu."""
-    menu_width = SCREEN_WIDTH_TILES - 10
-    menu_height = SCREEN_HEIGHT_TILES - 6
-    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
-    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
-
-    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="CRAFTING", clear=True)
-
-    # Panels: Recipe List | Recipe Details & Player Inventory
-    list_panel_width = menu_width // 3
-    detail_panel_width = menu_width - list_panel_width - 1
-
-    # Separator
-    for i in range(1, menu_height - 1):
-        console.print(x=menu_x + list_panel_width, y=menu_y + i, string="│")
-
-    craft_context = world.crafting_menu_context
-    recipes = craft_context.get("craftable_recipes", [])
-
-    # --- Recipe List Panel ---
-    list_height = menu_height - 4
-
-    if craft_context["selected_recipe_index"] < craft_context["scroll_offset"]:
-        craft_context["scroll_offset"] = craft_context["selected_recipe_index"]
-    elif craft_context["selected_recipe_index"] >= craft_context["scroll_offset"] + list_height:
-        craft_context["scroll_offset"] = craft_context["selected_recipe_index"] - list_height + 1
-
-    y_offset = menu_y + 2
-    for i, recipe_info in enumerate(recipes[craft_context["scroll_offset"] : craft_context["scroll_offset"] + list_height]):
-        item_key = recipe_info["item_key"]
-        item_def = ITEM_DEFINITIONS.get(item_key, {})
-        display_name = item_def.get("name", item_key)
-
-        can_craft, _ = world.player_can_craft(item_key) # Use helper
-
-        fg_color = (255, 255, 0) if i + craft_context["scroll_offset"] == craft_context["selected_recipe_index"] else ((255, 255, 255) if can_craft else (128, 128, 128))
-
-        console.print(x=menu_x + 2, y=y_offset + i, string=display_name, fg=fg_color)
-
-    # --- Recipe Detail Panel ---
-    if recipes:
-        selected_recipe_info = recipes[craft_context["selected_recipe_index"]]
-        item_key = selected_recipe_info["item_key"]
-        item_def = ITEM_DEFINITIONS.get(item_key, {})
-        recipe_reqs = selected_recipe_info.get("recipe", {})
-
-        detail_x = menu_x + list_panel_width + 2
-        detail_y = menu_y + 2
-
-        # Item Name & Description
-        console.print(x=detail_x, y=detail_y, string=item_def.get("name", "Unknown"), fg=(200, 200, 255))
-        detail_y += 2
-        console.print_box(x=detail_x, y=detail_y, width=detail_panel_width - 4, height=5, string=item_def.get("description", "No description."))
-        detail_y += 6
-
-        # Required Ingredients
-        console.print(x=detail_x, y=detail_y, string="Ingredients:")
-        detail_y += 1
-        for res_key, qty_needed in recipe_reqs.items():
-            res_name = ITEM_DEFINITIONS.get(res_key, {}).get("name", res_key)
-            player_has_qty = world.player.get_item_quantity(res_key)
-            has_enough = player_has_qty >= qty_needed
-            res_color = (255, 255, 255) if has_enough else (255, 100, 100)
-            console.print(x=detail_x + 1, y=detail_y, string=f"- {res_name}: {player_has_qty}/{qty_needed}", fg=res_color)
-            detail_y += 1
-
-        # Workstation Requirement
-        workstation_key = selected_recipe_info.get("workstation")
-        if workstation_key:
-            detail_y += 1
-            workstation_name = ITEM_DEFINITIONS.get(workstation_key, {}).get("name", workstation_key)
-            player_is_near_station = world.player_is_near_workstation(workstation_key)
-            station_color = (0, 255, 0) if player_is_near_station else (255, 100, 100)
-            console.print(x=detail_x, y=detail_y, string=f"Requires: {workstation_name}", fg=station_color)
-            if not player_is_near_station:
-                console.print(x=detail_x, y=detail_y + 1, string="(You are not near one)", fg=station_color)
-
-
-    # --- Player Resources Panel (Bottom right) ---
-    res_panel_height = menu_height // 2
-    res_panel_y = menu_y + menu_height - res_panel_height -1
-    console.draw_frame(x=menu_x + list_panel_width + 1, y=res_panel_y, width=detail_panel_width, height=res_panel_height, title="Materials", clear=False)
-
-    res_y = res_panel_y + 2
-    res_x = menu_x + list_panel_width + 2
-
-    # Aggregate player inventory for display
-    inventory_summary = world.player.get_inventory_summary()
-
-    # Collect all unique resources needed by all craftable recipes
-    all_needed_resources = set()
-    for recipe_info in recipes:
-        for res_key in recipe_info.get("recipe", {}).keys():
-            all_needed_resources.add(res_key)
-
-    sorted_resources = sorted(list(all_needed_resources), key=lambda r: ITEM_DEFINITIONS.get(r, {}).get("name", r))
-
-    max_res_lines = res_panel_height - 4
-    for i, res_key in enumerate(sorted_resources[:max_res_lines]):
-        res_name = ITEM_DEFINITIONS.get(res_key, {}).get("name", res_key)
-        qty_owned = inventory_summary.get(res_key, 0)
-        console.print(x=res_x, y=res_y + i, string=f"{res_name}: {qty_owned}")
-
-
 def draw_interaction_menu(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     if not world.interaction_context["active"]:
         return
@@ -522,71 +289,7 @@ def draw_chat_ui(console: tcod.console.Console, world) -> None:
 
 def draw_trade_ui(console: tcod.console.Console, world) -> None:
     if not world.trade_ui_active: return
-
-    menu_width = SCREEN_WIDTH_TILES - 6
-    menu_height = SCREEN_HEIGHT_TILES - 4
-    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
-    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
-
-    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="TRADE", clear=True)
-
-    trade_context = world.trade_ui_context
-    merchant_name = trade_context.get("npc_target_name", "Merchant")
-
-    # --- Layout Definitions ---
-    half_width = menu_width // 2
-    player_panel_x = menu_x + 1
-    merchant_panel_x = menu_x + half_width
-
-    info_panel_height = 8
-    info_panel_y = menu_y + menu_height - info_panel_height - 1
-
-    list_height = menu_height - info_panel_height - 3
-
-    # --- Draw Headers and Money ---
-    player_header_color = (255, 255, 0) if trade_context["active_panel"] == "PLAYER" else (255, 255, 255)
-    merchant_header_color = (255, 255, 0) if trade_context["active_panel"] == "MERCHANT" else (255, 255, 255)
-
-    console.print(x=player_panel_x, y=menu_y + 1, string=f"Your Items (Sell)", fg=player_header_color)
-    console.print(x=merchant_panel_x, y=menu_y + 1, string=f"{merchant_name}'s Wares (Buy)", fg=merchant_header_color)
-
-    money_str = f"Your Money: {world.player.money}"
-    console.print(x=menu_x + menu_width - len(money_str) - 2, y=menu_y + 1, string=money_str, fg=(255, 223, 0))
-
-    # --- Draw Item Lists ---
-    def draw_item_list(panel_x, panel_width, items, selected_index, scroll_offset):
-        y_pos = menu_y + 3
-        for i, item_data in enumerate(items[scroll_offset : scroll_offset + list_height]):
-            item_key, quantity, price = item_data
-            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-            display_str = f"{item_name} (x{quantity}) - ${price}"
-
-            fg = (0, 255, 255) if i + scroll_offset == selected_index else (255, 255, 255)
-            console.print(x=panel_x, y=y_pos + i, string=display_str, fg=fg)
-
-    # Player's items
-    draw_item_list(player_panel_x, half_width, trade_context["player_inventory_snapshot"],
-                   trade_context["player_item_index"], trade_context["player_scroll_offset"])
-
-    # Merchant's items
-    draw_item_list(merchant_panel_x, half_width, trade_context["merchant_inventory_snapshot"],
-                   trade_context["merchant_item_index"], trade_context["merchant_scroll_offset"])
-
-    # --- Draw Info Panel ---
-    console.draw_frame(x=menu_x, y=info_panel_y, width=menu_width, height=info_panel_height, title="Item Info", clear=False)
-
-    selected_item_key = None
-    if trade_context["active_panel"] == "PLAYER" and trade_context["player_inventory_snapshot"]:
-        selected_item_key = trade_context["player_inventory_snapshot"][trade_context["player_item_index"]][0]
-    elif trade_context["active_panel"] == "MERCHANT" and trade_context["merchant_inventory_snapshot"]:
-        selected_item_key = trade_context["merchant_inventory_snapshot"][trade_context["merchant_item_index"]][0]
-
-    if selected_item_key:
-        item_def = ITEM_DEFINITIONS.get(selected_item_key, {})
-        console.print_box(x=menu_x + 2, y=info_panel_y + 2,
-                          width=menu_width - 4, height=info_panel_height - 4,
-                          string=item_def.get("description", "No description available."))
-
+    # ... (this function is full-screen overlay, no camera coords needed)
 
 def draw_build_mode_ui(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     if not world.ghost_furniture_tile: return

@@ -21,7 +21,12 @@ from config import (
     DAY_LENGTH_TICKS, LIGHT_LEVEL_PERIODS,
     FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK,
     # Auditory Perception Configs
-    DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME
+    DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME,
+    # Season and Temperature Configs
+    DAYS_PER_SEASON,
+    SEASON_TEMPERATURE_MODIFIERS,
+    BIOME_TEMPERATURE_MODIFIERS,
+    TIME_OF_DAY_TEMPERATURE_MODIFIERS,
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
@@ -175,7 +180,20 @@ class Player:
         self.is_jailed: bool = False
         self.jail_cell_coords: tuple[int, int] | None = None
         self.jail_time_remaining: int = 0
-        self.current_path = []
+
+        # Temperature and Weather
+        self.temperature: float = 37.0  # Normal body temperature in Celsius
+        self.base_temperature_resistance: float = 0.0 # Innate resistance
+        self.clothing_insulation: float = 0.0 # From equipped clothing
+        self.status_effects: list[str] = [] # e.g., "Freezing", "Overheating"
+        self.is_wet: bool = False
+        self.wetness_timer: int = 0
+        self.equipped_armor: dict[str, str | None] = {
+            "head": None,
+            "body": None,
+            "hands": None,
+            "feet": None
+        }
 
 
     def take_damage(self, amount: int):
@@ -184,6 +202,42 @@ class Player:
             self.hp = 0
         if self.hp <=0 and hasattr(self, 'world_ref') and self.world_ref: # Check if world_ref exists
              self.world_ref.game_state = "PLAYER_DEAD"
+
+    def equip_armor(self, item_key: str):
+        item_def = ITEM_DEFINITIONS.get(item_key)
+        if not item_def or "armor" not in item_def.get("item_type_tags", []):
+            self.world_ref.add_message_to_chat_log("You can't equip that.")
+            return
+
+        slot = item_def.get("equip_slot")
+        if not slot or slot not in self.equipped_armor:
+            self.world_ref.add_message_to_chat_log("That item doesn't have a valid equip slot.")
+            return
+
+        # Unequip current item in that slot, if any
+        if self.equipped_armor.get(slot):
+            self.unequip_armor(slot)
+
+        self.equipped_armor[slot] = item_key
+        self.world_ref.add_message_to_chat_log(f"You equip the {item_def['name']}.")
+        self.recalculate_stats()
+
+    def unequip_armor(self, slot: str):
+        if slot in self.equipped_armor and self.equipped_armor[slot]:
+            item_key = self.equipped_armor[slot]
+            item_def = ITEM_DEFINITIONS.get(item_key)
+            self.equipped_armor[slot] = None
+            self.world_ref.add_message_to_chat_log(f"You unequip the {item_def['name']}.")
+            self.recalculate_stats()
+
+    def recalculate_stats(self):
+        """Recalculates player stats based on equipped items."""
+        self.clothing_insulation = 0.0
+        for slot, item_key in self.equipped_armor.items():
+            if item_key:
+                item_def = ITEM_DEFINITIONS.get(item_key)
+                if item_def and "properties" in item_def:
+                    self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
 
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None):
         item_def = ITEM_DEFINITIONS.get(item_key_to_add)
@@ -278,33 +332,6 @@ class Player:
             return self.inventory[index]
         return None
 
-    def get_item_quantity(self, item_key_to_check: str) -> int:
-        """Returns the total quantity of a given item, summing up stackable and counting non-stackable."""
-        total_quantity = 0
-        item_def = ITEM_DEFINITIONS.get(item_key_to_check)
-        if not item_def: return 0
-
-        is_stackable = item_def.get("stackable", False)
-
-        for item_instance in self.inventory:
-            if item_instance["key"] == item_key_to_check:
-                if is_stackable:
-                    total_quantity += item_instance.get("quantity", 0)
-                else: # Non-stackable
-                    total_quantity += 1
-        return total_quantity
-
-    def get_inventory_summary(self) -> dict[str, int]:
-        """Returns a dictionary summarizing the player's inventory with aggregated quantities."""
-        summary = {}
-        for item_instance in self.inventory:
-            key = item_instance["key"]
-            if ITEM_DEFINITIONS.get(key, {}).get("stackable", False):
-                summary[key] = summary.get(key, 0) + item_instance.get("quantity", 0)
-            else:
-                summary[key] = summary.get(key, 0) + 1
-        return summary
-
     def adjust_reputation(self, rep_type: str, amount: int):
         """Adjusts the player's reputation of a specific type."""
         if rep_type in self.reputation:
@@ -339,7 +366,12 @@ class World:
         self.game_state = "PLAYING"
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
-        self.needs_text_input = False # Flag to signal the main loop to start text input
+
+        # Season and Temperature
+        self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
+        self.current_season_index: int = 0
+        self.current_day: int = 0
+        self.ambient_temperature: float = 20.0 # Default starting temp
 
         # New Interaction Context
         self.interaction_context = {
@@ -350,21 +382,6 @@ class World:
             "selected_entity_index": 0,
             "available_actions": [], # Actions for the selected entity
             "selected_action_index": 0
-        }
-
-        # Inventory Menu Context
-        self.inventory_menu_context = {
-            "active": False,
-            "selected_item_index": 0,
-            "scroll_offset": 0,
-        }
-
-        # Crafting Menu Context
-        self.crafting_menu_context = {
-            "active": False,
-            "selected_recipe_index": 0,
-            "scroll_offset": 0,
-            "craftable_recipes": [], # Cache of recipes player can craft
         }
 
         # Build Mode State
@@ -384,19 +401,14 @@ class World:
         self.chat_ui_scroll_offset = 0
         self.chat_ui_max_history = 50
 
-        # Trade UI State (New Structure)
+        # Trade UI State
         self.trade_ui_active = False
-        self.trade_ui_context = {
-            "npc_target_id": None,
-            "npc_target_name": "",
-            "active_panel": "PLAYER",  # "PLAYER" or "MERCHANT"
-            "player_item_index": 0,
-            "merchant_item_index": 0,
-            "player_scroll_offset": 0,
-            "merchant_scroll_offset": 0,
-            "player_inventory_snapshot": [], # List of (item_key, quantity, price)
-            "merchant_inventory_snapshot": [], # List of (item_key, quantity, price)
-        }
+        self.trade_ui_npc_target = None # The NPC merchant
+        self.trade_ui_player_inventory_view = True # True if viewing player's items to sell, False for merchant's
+        self.trade_ui_player_item_index = 0
+        self.trade_ui_merchant_item_index = 0
+        self.trade_ui_player_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
+        self.trade_ui_merchant_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
 
         # Items on the ground
         self.items_on_map: dict[tuple[int, int], list[dict]] = {} # Key: (x,y), Value: list of {"item_key": str, "quantity": int}
@@ -468,6 +480,85 @@ class World:
             player.thirst_level_msg = "Thirsty"
         else:
             player.thirst_level_msg = ""
+
+    def _update_season(self):
+        """Updates the current season based on the number of days passed."""
+        day_of_year = self.game_time // DAY_LENGTH_TICKS
+        new_season_index = (day_of_year // DAYS_PER_SEASON) % len(self.seasons)
+
+        if new_season_index != self.current_season_index:
+            self.current_season_index = new_season_index
+            season_name = self.seasons[self.current_season_index]
+            self.add_message_to_chat_log(f"The season has changed to {season_name}.")
+
+    def _update_player_temperature(self):
+        """Calculates ambient temperature and updates player's body temperature."""
+        player = self.player
+
+        # 1. Calculate Ambient Temperature
+        season_name = self.seasons[self.current_season_index]
+        base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
+
+        player_tile = self.get_tile_at(player.x, player.y)
+        player_chunk = self.chunks[player.y // CHUNK_SIZE][player.x // CHUNK_SIZE]
+        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(player_chunk.biome, 0)
+
+        time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
+
+        # More modifiers can be added (e.g., elevation, weather)
+
+        ambient_temp = base_temp + biome_temp_mod + time_of_day_mod
+
+        # Check for nearby heat sources
+        heat_source_bonus = 0.0
+        for y in range(player.y - 5, player.y + 6):
+            for x in range(player.x - 5, player.x + 6):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
+                        radius = tile.properties.get("heat_source_radius", 0)
+                        intensity = tile.properties.get("heat_intensity", 0)
+                        distance = max(abs(player.x - x), abs(player.y - y))
+                        if distance <= radius:
+                            # Simple linear falloff
+                            heat_bonus = intensity * (1 - (distance / radius))
+                            if heat_bonus > heat_source_bonus:
+                                heat_source_bonus = heat_bonus
+
+        self.ambient_temperature = ambient_temp + heat_source_bonus
+
+        # 2. Update Player Temperature
+        # Simplified model: player temperature moves towards a target equilibrium
+        player.recalculate_stats() # Recalculate insulation from armor
+        total_insulation = player.base_temperature_resistance + player.clothing_insulation
+        target_temp_equilibrium = self.ambient_temperature + total_insulation
+
+        # Rate of change based on difference between current body temp and equilibrium
+        temp_diff = target_temp_equilibrium - player.temperature
+        change_rate = 0.05 # How fast temperature changes per update
+        player.temperature += temp_diff * change_rate
+
+        # 3. Apply Effects
+        player.status_effects.clear()
+        if player.temperature < 35.0: # Hypothermia threshold
+            player.status_effects.append("Freezing")
+            # Apply damage or other penalties
+        elif player.temperature > 38.5: # Hyperthermia/heatstroke
+            player.status_effects.append("Overheating")
+
+    def _apply_temperature_effects(self):
+        """Applies damage and other effects based on player temperature status."""
+        player = self.player
+        ticks_for_temp_damage = DAY_LENGTH_TICKS // 25 # Damage if critical for this long, faster than starvation
+
+        if "Freezing" in player.status_effects:
+            if self.game_time % ticks_for_temp_damage == 0:
+                self.add_message_to_chat_log("You are freezing cold!")
+                player.take_damage(1)
+        elif "Overheating" in player.status_effects:
+            if self.game_time % ticks_for_temp_damage == 0:
+                self.add_message_to_chat_log("You are burning up!")
+                player.take_damage(1)
 
 
     def _handle_player_light_source_burnout(self):
@@ -3397,91 +3488,110 @@ class World:
                 return False
         return False # Not a door
 
-    def initialize_trade_session(self, merchant_npc: NPC):
+    def initialize_trade_session(self):
         """Populates snapshots of player and merchant inventories for the trade UI."""
-        self.trade_ui_context["npc_target_id"] = merchant_npc.id
-        self.trade_ui_context["npc_target_name"] = merchant_npc.name
-        self.trade_ui_context["active_panel"] = "PLAYER"
-        self.trade_ui_context["player_item_index"] = 0
-        self.trade_ui_context["merchant_item_index"] = 0
-        self.trade_ui_context["player_scroll_offset"] = 0
-        self.trade_ui_context["merchant_scroll_offset"] = 0
-
-        merchant_village = self._get_village_for_npc(merchant_npc)
-
-        # Player inventory snapshot
-        player_items = []
-        player_summary = self.player.get_inventory_summary()
-        for item_key, quantity in player_summary.items():
-            price = self.get_dynamic_price(item_key, merchant_village)
-            player_items.append((item_key, quantity, price))
-
-        # Merchant inventory snapshot
-        merchant_items = []
-        merchant_building = self.buildings_by_id.get(merchant_npc.work_building_id)
-        merchant_inventory_source = merchant_building.building_inventory if merchant_building else merchant_npc.npc_inventory
-
-        for item_key, quantity in merchant_inventory_source.items():
-            if item_key == "money": continue
-            price = self.get_dynamic_price(item_key, merchant_village)
-            merchant_items.append((item_key, quantity, price))
-
-        # Sort and store
-        self.trade_ui_context["player_inventory_snapshot"] = sorted(player_items, key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
-        self.trade_ui_context["merchant_inventory_snapshot"] = sorted(merchant_items, key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
-
-    def handle_trade_action(self):
-        """Processes a buy or sell action from the trade UI based on the active panel."""
-        ctx = self.trade_ui_context
-        merchant_npc = next((n for n in self.village_npcs if n.id == ctx["npc_target_id"]), None)
-        if not merchant_npc:
-            self.add_message_to_chat_log("Error: Merchant not found.")
+        if not self.trade_ui_active or not self.trade_ui_npc_target:
             return
 
+        self.trade_ui_player_inventory_snapshot = []
+        self.trade_ui_merchant_inventory_snapshot = []
+        self.trade_ui_player_item_index = 0
+        self.trade_ui_merchant_item_index = 0
+        self.trade_ui_player_selling = True # Default to player selling view
+
+        merchant_village = self._get_village_for_npc(self.trade_ui_npc_target)
+
+        # Player inventory snapshot: (item_key, quantity, price_to_sell_at)
+        player_inventory_aggregated = {}
+        for item in self.player.inventory:
+            key = item["key"]
+            qty = item.get("quantity", 1)
+            player_inventory_aggregated[key] = player_inventory_aggregated.get(key, 0) + qty
+
+        for item_key, quantity in player_inventory_aggregated.items():
+            item_def = ITEM_DEFINITIONS.get(item_key)
+            if item_def:
+                price = self.get_dynamic_price(item_key, merchant_village)
+                self.trade_ui_player_inventory_snapshot.append((item_key, quantity, price))
+
+        # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
+        # Merchant inventory is likely in their work building
+        merchant_inventory_source = {}
+        merchant_building = self.buildings_by_id.get(self.trade_ui_npc_target.work_building_id)
+        if merchant_building and merchant_building.building_type == "general_store":
+            merchant_inventory_source = merchant_building.building_inventory
+        else: # Fallback to NPC's personal inventory if no store or not a store
+            merchant_inventory_source = self.trade_ui_npc_target.npc_inventory
+
+        for item_key, quantity in merchant_inventory_source.items():
+            if item_key == "money": continue # Don't list merchant's money as a sellable item
+            item_def = ITEM_DEFINITIONS.get(item_key)
+            if item_def:
+                price = self.get_dynamic_price(item_key, merchant_village)
+                self.trade_ui_merchant_inventory_snapshot.append((item_key, quantity, price))
+
+        # Sort by name for consistent display
+        self.trade_ui_player_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
+        self.trade_ui_merchant_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
+
+    def handle_trade_action(self):
+        """Processes a buy or sell action from the trade UI."""
+        if not self.trade_ui_active or not self.trade_ui_npc_target:
+            return
+
+        merchant_npc = self.trade_ui_npc_target
         merchant_building = self.buildings_by_id.get(merchant_npc.work_building_id)
-        merchant_true_inventory = merchant_building.building_inventory if merchant_building else merchant_npc.npc_inventory
         merchant_village = self._get_village_for_npc(merchant_npc)
 
-        if ctx["active_panel"] == "PLAYER": # Player is selling
-            if not ctx["player_inventory_snapshot"]: return
-            item_key, _, price = ctx["player_inventory_snapshot"][ctx["player_item_index"]]
+        # Determine merchant's actual inventory (store or personal)
+        merchant_true_inventory = {}
+        if merchant_building and merchant_building.building_type == "general_store":
+            merchant_true_inventory = merchant_building.building_inventory
+        else:
+            merchant_true_inventory = merchant_npc.npc_inventory
+
+        merchant_money = merchant_true_inventory.get("money", 0)
+
+        if self.trade_ui_player_selling: # Player is selling
+            if not self.trade_ui_player_inventory_snapshot: return
+            item_key, _, price = self.trade_ui_player_inventory_snapshot[self.trade_ui_player_item_index]
 
             if self.player.has_item(item_key):
-                if merchant_npc.money >= price:
+                if merchant_money >= price:
                     if self.player.remove_item(item_key, 1):
                         self.player.money += price
                         merchant_true_inventory[item_key] = merchant_true_inventory.get(item_key, 0) + 1
-                        merchant_npc.money -= price
-                        self.add_message_to_chat_log(f"Sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price}.")
+                        merchant_true_inventory["money"] = merchant_money - price
+                        self.add_message_to_chat_log(f"You sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
                         if merchant_village:
-                             merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) + 1
+                            merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) + 1
+                    else:
+                        self.add_message_to_chat_log("Error: Could not remove item from inventory.")
                 else:
-                    self.add_message_to_chat_log(f"{merchant_npc.name} cannot afford that.")
+                    self.add_message_to_chat_log(f"{merchant_npc.name} doesn't have enough money to buy that.")
             else:
-                self.add_message_to_chat_log("You no longer have that item.")
+                self.add_message_to_chat_log("Error: You don't have that item to sell (inventory mismatch).")
 
-        elif ctx["active_panel"] == "MERCHANT": # Player is buying
-            if not ctx["merchant_inventory_snapshot"]: return
-            item_key, _, price = ctx["merchant_inventory_snapshot"][ctx["merchant_item_index"]]
+        else: # Player is buying (viewing merchant's items)
+            if not self.trade_ui_merchant_inventory_snapshot: return
+            item_key, _, price = self.trade_ui_merchant_inventory_snapshot[self.trade_ui_merchant_item_index]
 
-            if self.player.money >= price:
-                if merchant_true_inventory.get(item_key, 0) > 0:
+            if merchant_true_inventory.get(item_key, 0) > 0:
+                if self.player.money >= price:
                     merchant_true_inventory[item_key] -= 1
                     if merchant_true_inventory[item_key] <= 0:
                         del merchant_true_inventory[item_key]
+                    merchant_true_inventory["money"] = merchant_money + price
 
                     self.player.add_item(item_key, 1)
                     self.player.money -= price
-                    self.add_message_to_chat_log(f"Bought 1 {ITEM_DEFINITIONS[item_key]['name']} for {price}.")
+                    self.add_message_to_chat_log(f"You bought 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
                     if merchant_village:
                         merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) - 1
                 else:
-                    self.add_message_to_chat_log("That item is no longer in stock.")
+                    self.add_message_to_chat_log("You don't have enough money for that.")
             else:
-                self.add_message_to_chat_log("You cannot afford that.")
-
-        # After any transaction, refresh the inventories to reflect the change
-        self.initialize_trade_session(merchant_npc)
+                self.add_message_to_chat_log(f"Error: {merchant_npc.name} doesn't have that item in stock (inventory mismatch).")
 
 
     def player_attempt_toggle_door(self, target_x: int, target_y: int) -> bool:
@@ -4840,78 +4950,38 @@ class World:
 
         return max(1, dynamic_price) # Ensure price is at least 1
 
-    def player_is_near_workstation(self, workstation_key: str) -> bool:
-        """Checks if the player is adjacent to a required workstation tile."""
-        if not workstation_key: return True # No workstation required
-
-        for dx in range(-1, 2):
-            for dy in range(-1, 2):
-                if dx == 0 and dy == 0: continue
-                tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
-                if tile and tile.properties.get("workstation_type") == workstation_key:
-                    return True
-        return False
-
-    def player_can_craft(self, item_key: str) -> tuple[bool, str]:
-        """Checks if the player can craft an item, returning status and a reason message."""
-        item_def = ITEM_DEFINITIONS.get(item_key, {})
-        recipe_reqs = item_def.get("crafting_recipe")
-
-        if not recipe_reqs:
-            return False, "No recipe."
-
-        # Check ingredients
-        for res_key, qty_needed in recipe_reqs.items():
-            if not self.player.has_item(res_key, qty_needed):
-                res_name = ITEM_DEFINITIONS.get(res_key, {}).get("name", res_key)
-                return False, f"Missing ingredients: {res_name}"
-
-        # Check workstation
-        workstation_key = item_def.get("workstation")
-        if workstation_key and not self.player_is_near_workstation(workstation_key):
-            station_name = ITEM_DEFINITIONS.get(workstation_key,{}).get("name", workstation_key)
-            return False, f"Requires workstation: {station_name}"
-
-        return True, "Can craft."
-
-    def populate_craftable_recipes(self):
-        """Populates the list of all recipes, including ones the player can't craft yet."""
-        self.crafting_menu_context["craftable_recipes"] = []
-        for item_key, item_def in ITEM_DEFINITIONS.items():
-            if "crafting_recipe" in item_def:
-                recipe_data = {
-                    "item_key": item_key,
-                    "recipe": item_def["crafting_recipe"]
-                }
-                if "workstation" in item_def:
-                    recipe_data["workstation"] = item_def["workstation"]
-                self.crafting_menu_context["craftable_recipes"].append(recipe_data)
-
-        # Sort alphabetically for consistent display
-        self.crafting_menu_context["craftable_recipes"].sort(key=lambda r: ITEM_DEFINITIONS[r["item_key"]].get("name", r["item_key"]))
-
     def craft_item(self, item_key: str):
-        """Crafts an item if the player has all required resources and is near any required workstation."""
-        can_craft, reason = self.player_can_craft(item_key)
-
-        if not can_craft:
-            self.add_message_to_chat_log(f"Cannot craft: {reason}")
+        """Crafts an item if the player has the required resources."""
+        if item_key not in ITEM_DEFINITIONS:
+            self.add_message_to_chat_log(f"You don't know how to craft '{item_key}'.")
             return
 
-        item_def = ITEM_DEFINITIONS.get(item_key, {})
-        recipe = item_def.get("crafting_recipe", {})
+        recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe", {})
+        if not recipe:
+            self.add_message_to_chat_log(f"There is no recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
+            return
 
-        # Consume resources
+        can_craft = True
         for resource_key, required_qty in recipe.items():
-            if not self.player.remove_item(resource_key, required_qty):
-                # This check is a safeguard; player_can_craft should prevent this.
-                self.add_message_to_chat_log(f"Error: Failed to consume {resource_key}. Crafting aborted.")
-                # TODO: Implement rollback of already consumed items if one fails mid-process.
-                return
+            if not self.player.has_item(resource_key, required_qty):
+                self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
+                can_craft = False
+                break
 
-        # Add crafted item
-        self.player.add_item(item_key, 1)
-        self.add_message_to_chat_log(f"You crafted a {item_def['name']}!")
+        if can_craft:
+            # Consume resources
+            for resource_key, required_qty in recipe.items():
+                if not self.player.remove_item(resource_key, required_qty):
+                    # This should not happen if has_item check passed, but as a safeguard:
+                    self.add_message_to_chat_log(f"Error consuming {resource_key} for crafting. Aborted.")
+                    return
+
+            # Add crafted item
+            self.player.add_item(item_key, 1)
+            self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
+        else:
+            # Message about missing resources already shown by has_item check.
+            pass
 
 
     def use_item(self, item_key: str):
@@ -4919,6 +4989,11 @@ class World:
         item_def = ITEM_DEFINITIONS.get(item_key)
         if not item_def:
             self.add_message_to_chat_log(f"You don't know how to use '{item_key}'.")
+            return
+
+        # Handle equipping armor
+        if "armor" in item_def.get("item_type_tags", []):
+            self.player.equip_armor(item_key)
             return
 
         # Check if trying to use (extinguish) an active light source by "using" its lit state key

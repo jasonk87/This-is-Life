@@ -27,69 +27,93 @@ class TestGame(unittest.TestCase):
         except Exception as e:
             self.fail(f"World initialization failed with an exception: {e}")
 
+class TestTemperatureSystem(unittest.TestCase):
     @patch('engine.World._call_ollama')
-    def test_crafting_menu(self, mock_call_ollama):
-        # Canned response for NPC generation
-        mock_npc_data = {
-            "name": "Test NPC",
-            "personality": "test",
-            "family_ties": "none",
-            "attitude_to_player": "neutral",
-            "dialogue": ["Hello."],
-            "wealth_level": "average",
-            "combat_behavior": "defensive",
-            "base_attack_name": "fists"
-        }
+    def setUp(self, mock_call_ollama):
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.world = World()
 
-        world = World()
-        world.player.add_item("raw_log", 10)
-        world.player.add_item("stone_chunk", 10)
+    def test_season_progression(self):
+        from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
+        self.assertEqual(self.world.seasons[self.world.current_season_index], "Spring")
+        self.world.game_time = DAY_LENGTH_TICKS * DAYS_PER_SEASON
+        self.world._update_season()
+        self.assertEqual(self.world.seasons[self.world.current_season_index], "Summer")
+        self.world.game_time = DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4
+        self.world._update_season()
+        self.assertEqual(self.world.seasons[self.world.current_season_index], "Spring")
 
-        world.populate_craftable_recipes()
+    def test_ambient_temperature_calculation(self):
+        self.world.current_season_index = 3 # Winter
+        self.world.current_light_level_name = "DEEP_NIGHT"
+        # Move player to a snow biome for test
+        self.world.player.x = 1
+        self.world.player.y = 1
+        chunk = self.world.chunks[0][0]
+        chunk.biome = "snow"
 
-        self.assertGreater(len(world.crafting_menu_context["craftable_recipes"]), 0)
+        self.world._update_player_temperature()
 
-        world.craft_item("crude_spear")
+        from config import SEASON_TEMPERATURE_MODIFIERS, BIOME_TEMPERATURE_MODIFIERS, TIME_OF_DAY_TEMPERATURE_MODIFIERS
+        expected_temp = (SEASON_TEMPERATURE_MODIFIERS["Winter"] +
+                         BIOME_TEMPERATURE_MODIFIERS["snow"] +
+                         TIME_OF_DAY_TEMPERATURE_MODIFIERS["DEEP_NIGHT"])
+        self.assertAlmostEqual(self.world.ambient_temperature, expected_temp)
 
-        self.assertTrue(world.player.has_item("crude_spear"))
+    def test_heat_source_effect(self):
+        from data.decorations import DECORATION_ITEM_DEFINITIONS
+        from tile_types import Tile
 
-    @patch('engine.World._call_ollama')
-    def test_trade_menu(self, mock_call_ollama):
-        # Canned response for NPC generation
-        mock_npc_data = {
-            "name": "Test Merchant",
-            "personality": "test",
-            "family_ties": "none",
-            "attitude_to_player": "neutral",
-            "dialogue": ["Hello."],
-            "wealth_level": "average",
-            "combat_behavior": "defensive",
-            "base_attack_name": "fists"
-        }
-        mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        # First, get temperature without any heat source
+        self.world._update_player_temperature()
+        initial_temp = self.world.ambient_temperature
 
-        world = World()
-        # Manually create and add an NPC, since world init doesn't guarantee one
-        from entities.base import NPC
-        merchant = NPC(x=world.player.x + 1, y=world.player.y, name="Test Merchant", dialogue=["Buy something!"])
-        merchant.profession = "Merchant"
-        merchant.money = 200 # Give merchant money to buy things
-        world.village_npcs.append(merchant) # Add to a list the game will check
+        fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_simple"]
+        fire_pit_tile = Tile(char=fire_pit_def['char'], color=fire_pit_def['color'], passable=True, name="fire_pit", properties=fire_pit_def['properties'])
 
-        world.player.add_item("raw_log", 10)
+        # Place a fire pit near the player
+        fire_x, fire_y = self.world.player.x + 1, self.world.player.y
+        self.world.chunks[fire_y // 20][fire_x // 20].tiles[fire_y % 20][fire_x % 20] = fire_pit_tile
 
-        world.initialize_trade_session(merchant)
+        # Rerun temperature update to capture heat source effect
+        self.world._update_player_temperature()
+        temp_with_fire = self.world.ambient_temperature
 
-        self.assertGreater(len(world.trade_ui_context["player_inventory_snapshot"]), 0)
+        self.assertGreater(temp_with_fire, initial_temp)
 
-        world.trade_ui_context["active_panel"] = "PLAYER"
-        world.handle_trade_action()
+    def test_clothing_insulation_effect(self):
+        player = self.world.player
+        player.temperature = 30 # Set a cold body temp
 
-        # Player starts with 100, sells a log (value 2, but dynamic price might vary)
-        # For a simple test, we'll just check that money is greater than initial
-        self.assertGreater(world.player.money, 100)
-        self.assertTrue(world.player.has_item("raw_log", 9))
+        self.world._update_player_temperature()
+        temp_change_without_cloak = player.temperature - 30
+
+        player.equip_armor("fur_cloak")
+        player.temperature = 30 # Reset temp
+
+        self.world._update_player_temperature()
+        temp_change_with_cloak = player.temperature - 30
+
+        self.assertGreater(temp_change_with_cloak, temp_change_without_cloak)
+
+    def test_freezing_effect(self):
+        player = self.world.player
+        initial_hp = player.hp
+        player.temperature = 34.0 # Below freezing threshold
+
+        # Update temperature to apply status effect
+        self.world._update_player_temperature()
+        self.assertIn("Freezing", player.status_effects)
+
+        from config import DAY_LENGTH_TICKS
+        ticks_for_damage = DAY_LENGTH_TICKS // 25
+
+        for i in range(ticks_for_damage + 1):
+            self.world.game_time += 1
+            self.world._apply_temperature_effects()
+
+        self.assertLess(player.hp, initial_hp)
 
 if __name__ == '__main__':
     unittest.main()

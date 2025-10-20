@@ -101,9 +101,12 @@ DECORATION_ITEM_DEFINITIONS = {
         "color": COLORS["grey"],
         "passable": True, # Can walk over it when unlit
         "blocks_fov": False,
-        "item_type_tags": ["interactable", "light_source_potential"],
+        "item_type_tags": ["interactable", "light_source_potential", "heat_source"],
         "properties": {
-            "interaction_hint": "light_fire" # Conceptual action
+            "heat_source": True,
+            "interaction_hint": "light_fire", # Conceptual action
+            "heat_source_radius": 3,
+            "heat_intensity": 15.0 # Degrees Celsius to add to ambient temp
         }
     },
     "corpse_humanoid": {

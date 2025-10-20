@@ -13,48 +13,6 @@ from data.items import ITEM_DEFINITIONS
 from rendering.console_renderer import draw
 
 
-def execute_interaction(world: World, action: str):
-    """Executes the selected interaction action."""
-    ctx = world.interaction_context
-    selected_entity_data = ctx["target_entities"][ctx["selected_entity_index"]]["data"]
-
-    if action == "Chop":
-        world.player_attempt_chop_tree(ctx["x"], ctx["y"])
-    elif action == "Toggle Door":
-        world.player_attempt_toggle_door(ctx["x"], ctx["y"])
-    elif action == "Talk":
-        if isinstance(selected_entity_data, world.NPC):
-            world.chat_ui_target_npc = selected_entity_data
-            world.chat_ui_mode = "talk"
-            world.start_npc_dialogue(selected_entity_data)
-            world.chat_ui_active = True
-            world.needs_text_input = True # Signal main loop to start text input
-    elif action == "Trade":
-        if isinstance(selected_entity_data, world.NPC) and selected_entity_data.profession == "Merchant":
-            world.initialize_trade_session(selected_entity_data)
-            world.trade_ui_active = True
-            world.game_state = "TRADE_MENU" # Set game state
-    elif action == "Attack":
-        if isinstance(selected_entity_data, world.NPC):
-            world.player_attempt_attack(selected_entity_data)
-    elif action == "Pick up":
-        # Simplified for now, assumes picking up the first item if multiple are on the tile
-        item_to_pickup = world.items_on_map.get((ctx["x"], ctx["y"]), [{}])[0]
-        if item_to_pickup:
-            if world.remove_item_from_map(item_to_pickup["item_key"], item_to_pickup["quantity"], ctx["x"], ctx["y"]):
-                world.player.add_item(item_to_pickup["item_key"], item_to_pickup["quantity"])
-                item_name = world.ITEM_DEFINITIONS.get(item_to_pickup["item_key"], {}).get("name", "item")
-                world.add_message_to_chat_log(f"You pick up the {item_name}.")
-    elif action == "Claim House":
-        if isinstance(selected_entity_data, world.Building):
-            selected_entity_data.player_owned = True
-            world.add_message_to_chat_log(f"You have claimed this {selected_entity_data.building_type} as your own!")
-    # "Examine" can be handled separately or integrated if it has a specific action
-
-    # Close the interaction menu after an action is taken
-    ctx["active"] = False
-
-
 def open_interaction_menu(world: World, x: int, y: int):
     """Opens the interaction menu for a specific tile."""
     entities = world._get_interactables_at(x, y)
@@ -127,6 +85,9 @@ def main():
 
 
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
+            world._update_season()
+            world._update_player_temperature()
+            world._apply_temperature_effects()
             world._update_light_level_and_fov() # Update light level and FOV radius
             world._update_world_environment()
             world.update_fov() # Update FOV maps for player and NPCs
@@ -135,17 +96,6 @@ def main():
             world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
             if world.game_time % 100 == 0: # Update economy every 100 ticks
                 world._update_economy()
-
-            # --- Player Path Following ---
-            if world.player.current_path:
-                if len(world.player.current_path) > 1:
-                    next_x, next_y = world.player.current_path[1]
-                    dx = next_x - world.player.x
-                    dy = next_y - world.player.y
-                    world.handle_player_movement(dx, dy)
-                    world.player.current_path.pop(0)
-                else:
-                    world.player.current_path = [] # Path finished
 
             # --- Drawing ---
             if world.game_state == "PLAYER_DEAD":
@@ -171,8 +121,7 @@ def main():
                         return # Exit on any key press
             else:
                 # --- Camera Calculation ---
-                map_view_width = SCREEN_WIDTH_TILES - (SCREEN_WIDTH_TILES // 4)
-                camera_x = world.player.x - map_view_width // 2
+                camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
                 camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
 
                 draw(console, world, camera_x, camera_y)
@@ -192,67 +141,46 @@ def main():
 
                 if isinstance(event, tcod.event.MouseButtonDown):
                     if event.button == tcod.event.BUTTON_RIGHT:
-                        map_view_width = SCREEN_WIDTH_TILES - (SCREEN_WIDTH_TILES // 4)
-                        camera_x = world.player.x - map_view_width // 2
+                        camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
                         camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
                         mouse_world_x = camera_x + world.mouse_x
                         mouse_world_y = camera_y + world.mouse_y
                         open_interaction_menu(world, mouse_world_x, mouse_world_y)
-                    elif event.button == tcod.event.BUTTON_LEFT:
-                        if world.interaction_context["active"]:
-                            ctx = world.interaction_context
-                            menu_x = world.mouse_x + 1
-                            menu_y = world.mouse_y + 1
-
-                            action_start_y = menu_y + 1 + len(ctx["target_entities"]) + 1 # Frame, entities, separator
-
-                            if action_start_y <= event.tile.y < action_start_y + len(ctx["available_actions"]):
-                                clicked_action_index = event.tile.y - action_start_y
-                                if 0 <= clicked_action_index < len(ctx["available_actions"]):
-                                    selected_action = ctx["available_actions"][clicked_action_index]
-                                    execute_interaction(world, selected_action)
-                                    if world.needs_text_input:
-                                        context.start_text_input()
-                                        world.needs_text_input = False
-                        elif not world.chat_ui_active and not world.trade_ui_active: # Not clicking on any UI, so it's a map click
-                            camera_x = world.player.x - (SCREEN_WIDTH_TILES - SCREEN_WIDTH_TILES // 4) // 2
-                            camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
-                            target_x = camera_x + event.tile.x
-                            target_y = camera_y + event.tile.y
-
-                            if 0 <= target_x < WORLD_WIDTH and 0 <= target_y < WORLD_HEIGHT:
-                                path = world.calculate_path(world.player.x, world.player.y, target_x, target_y)
-                                if path:
-                                    world.player.current_path = path
-
 
                 if isinstance(event, tcod.event.TextInput):
                     if world.chat_ui_active: # Only process text input if chat UI is active
                         world.chat_ui_input_line += event.text
 
                 elif isinstance(event, tcod.event.KeyDown):
-                    # --- Game State: Trade Menu ---
-                    if world.game_state == "TRADE_MENU":
-                        ctx = world.trade_ui_context
+                    # --- UI Mode: Trade UI Active ---
+                    if world.trade_ui_active:
                         if event.sym == tcod.event.KeySym.ESCAPE:
-                            world.game_state = "PLAYING"
                             world.trade_ui_active = False
                             world.add_message_to_chat_log("Trade cancelled.")
+                            world.trade_ui_npc_target = None
                         elif event.sym == tcod.event.KeySym.TAB:
-                            ctx["active_panel"] = "MERCHANT" if ctx["active_panel"] == "PLAYER" else "PLAYER"
+                            world.trade_ui_player_selling = not world.trade_ui_player_selling
+                            if world.trade_ui_player_selling: world.trade_ui_player_item_index = 0
+                            else: world.trade_ui_merchant_item_index = 0
                         elif event.sym == tcod.event.KeySym.UP:
-                            if ctx["active_panel"] == "PLAYER" and ctx["player_inventory_snapshot"]:
-                                ctx["player_item_index"] = (ctx["player_item_index"] - 1) % len(ctx["player_inventory_snapshot"])
-                            elif ctx["active_panel"] == "MERCHANT" and ctx["merchant_inventory_snapshot"]:
-                                ctx["merchant_item_index"] = (ctx["merchant_item_index"] - 1) % len(ctx["merchant_inventory_snapshot"])
+                            if world.trade_ui_player_selling:
+                                if world.trade_ui_player_inventory_snapshot:
+                                    world.trade_ui_player_item_index = (world.trade_ui_player_item_index - 1) % len(world.trade_ui_player_inventory_snapshot)
+                            else: # Merchant view
+                                if world.trade_ui_merchant_inventory_snapshot:
+                                    world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index - 1) % len(world.trade_ui_merchant_inventory_snapshot)
                         elif event.sym == tcod.event.KeySym.DOWN:
-                            if ctx["active_panel"] == "PLAYER" and ctx["player_inventory_snapshot"]:
-                                ctx["player_item_index"] = (ctx["player_item_index"] + 1) % len(ctx["player_inventory_snapshot"])
-                            elif ctx["active_panel"] == "MERCHANT" and ctx["merchant_inventory_snapshot"]:
-                                ctx["merchant_item_index"] = (ctx["merchant_item_index"] + 1) % len(ctx["merchant_inventory_snapshot"])
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            world.handle_trade_action()
-                            # The handle_trade_action now refreshes the session, keeping indices in bounds.
+                            if world.trade_ui_player_selling:
+                                if world.trade_ui_player_inventory_snapshot:
+                                    world.trade_ui_player_item_index = (world.trade_ui_player_item_index + 1) % len(world.trade_ui_player_inventory_snapshot)
+                            else: # Merchant view
+                                if world.trade_ui_merchant_inventory_snapshot:
+                                    world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index + 1) % len(world.trade_ui_merchant_inventory_snapshot)
+                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E: # Buy/Sell selected item
+                            world.handle_trade_action() # New method in engine.py to process the transaction
+                            # After action, re-initialize to refresh snapshots and indices
+                            if world.trade_ui_active: # If trade didn't auto-close
+                                world.initialize_trade_session()
 
                     # --- UI Mode: Chat UI Active ---
                     elif world.chat_ui_active:
@@ -354,58 +282,19 @@ def main():
                         elif event.sym == tcod.event.KeySym.ESCAPE:
                             ctx["active"] = False
 
-                    # --- UI Mode: Inventory Menu Active (or toggling it) ---
+                    # --- UI Mode: Info Menu Active (or toggling it) ---
                     elif event.sym == tcod.event.KeySym.I:
-                        if world.game_state == "PLAYING":
-                            world.game_state = "INVENTORY_MENU"
-                            world.inventory_menu_context["active"] = True
-                        elif world.game_state == "INVENTORY_MENU":
-                            world.game_state = "PLAYING"
-                            world.inventory_menu_context["active"] = False
-
-                    # --- Game State: Inventory Menu ---
-                    elif world.game_state == "INVENTORY_MENU":
-                        if event.sym == tcod.event.KeySym.UP:
-                            if world.player.inventory:
-                                world.inventory_menu_context["selected_item_index"] = \
-                                    (world.inventory_menu_context["selected_item_index"] - 1) % len(world.player.inventory)
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.player.inventory:
-                                world.inventory_menu_context["selected_item_index"] = \
-                                    (world.inventory_menu_context["selected_item_index"] + 1) % len(world.player.inventory)
-                        elif event.sym == tcod.event.KeySym.ESCAPE:
-                            world.game_state = "PLAYING"
-                            world.inventory_menu_context["active"] = False
-
-                    # --- Game State: Crafting Menu ---
-                    elif world.game_state == "CRAFTING_MENU":
-                        if event.sym == tcod.event.KeySym.UP:
-                            if world.crafting_menu_context["craftable_recipes"]:
-                                world.crafting_menu_context["selected_recipe_index"] = \
-                                    (world.crafting_menu_context["selected_recipe_index"] - 1) % len(world.crafting_menu_context["craftable_recipes"])
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.crafting_menu_context["craftable_recipes"]:
-                                world.crafting_menu_context["selected_recipe_index"] = \
-                                    (world.crafting_menu_context["selected_recipe_index"] + 1) % len(world.crafting_menu_context["craftable_recipes"])
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            if world.crafting_menu_context["craftable_recipes"]:
-                                selected_recipe = world.crafting_menu_context["craftable_recipes"][world.crafting_menu_context["selected_recipe_index"]]
-                                world.craft_item(selected_recipe["item_key"])
-                                # Refresh the list to update craftable status
-                                world.populate_craftable_recipes()
-                        elif event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.C:
-                            world.game_state = "PLAYING"
-                            world.crafting_menu_context["active"] = False
+                        # This check ensures info menu doesn't open if other modal UIs are active
+                        if not world.chat_ui_active and not world.trade_ui_active and not world.interaction_menu_active: # Added trade_ui_active check
+                             world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
 
                     # --- Game State: Playing (No other UI is active) ---
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
                             dx, dy = move_keys[event.sym]
                             world.handle_player_movement(dx, dy)
-                        elif event.sym == tcod.event.KeySym.C:
-                            world.populate_craftable_recipes()
-                            world.game_state = "CRAFTING_MENU"
-                            world.crafting_menu_context["active"] = True
+                        elif event.sym == tcod.event.KeySym.C: # Craft healing salve
+                            world.craft_item("healing_salve")
                         elif event.sym == tcod.event.KeySym.S: # Craft crude spear
                             world.craft_item("crude_spear")
                         elif event.sym == tcod.event.KeySym.X: # Craft wooden shield

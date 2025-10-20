@@ -175,6 +175,7 @@ class Player:
         self.is_jailed: bool = False
         self.jail_cell_coords: tuple[int, int] | None = None
         self.jail_time_remaining: int = 0
+        self.current_path = []
 
 
     def take_damage(self, amount: int):
@@ -311,6 +312,7 @@ class World:
         self.game_state = "PLAYING"
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
+        self.needs_text_input = False # Flag to signal the main loop to start text input
 
         # New Interaction Context
         self.interaction_context = {

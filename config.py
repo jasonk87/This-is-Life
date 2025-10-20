@@ -81,3 +81,19 @@ LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
 DEFAULT_HEARING_RADIUS = 12 # How far the player can hear standard volume speech.
 DEFAULT_SPEECH_VOLUME = 10  # How far standard NPC speech travels.
 # Speech is heard if distance <= player.hearing_radius AND distance <= npc.speech_volume.
+
+# --- Minimap Settings ---
+MINIMAP_WIDTH = 20
+MINIMAP_HEIGHT = 15
+MINIMAP_X = SCREEN_WIDTH_TILES - MINIMAP_WIDTH - 1
+MINIMAP_Y = SCREEN_HEIGHT_TILES - MINIMAP_HEIGHT - 1
+
+MINIMAP_COLORS = {
+    "player": (255, 255, 0),
+    "npc": (255, 0, 0),
+    "wall": (100, 100, 100),
+    "road": (150, 120, 80),
+    "water": (0, 0, 255),
+    "grass": (0, 150, 0),
+    "default": (50, 50, 50)
+}

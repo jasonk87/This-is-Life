@@ -36,6 +36,51 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
     console.print(x=panel_x + 2, y=y_offset, string=f"Time: {world.current_light_level_name}")
 
 
+def draw_minimap(console: tcod.console.Console, world) -> None:
+    """Draws a minimap in the corner of the screen."""
+    from config import MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y, MINIMAP_COLORS
+
+    minimap_console = tcod.console.Console(MINIMAP_WIDTH, MINIMAP_HEIGHT, order="F")
+    minimap_console.draw_frame(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT, title="Minimap", fg=(255, 255, 255))
+
+    map_center_x = world.player.x
+    map_center_y = world.player.y
+
+    for y_minimap in range(1, MINIMAP_HEIGHT - 1):
+        for x_minimap in range(1, MINIMAP_WIDTH - 1):
+            x_world = map_center_x - (MINIMAP_WIDTH // 2) + x_minimap
+            y_world = map_center_y - (MINIMAP_HEIGHT // 2) + y_minimap
+
+            if 0 <= x_world < WORLD_WIDTH and 0 <= y_world < WORLD_HEIGHT and world.explored_map[x_world, y_world]:
+                tile = world.get_tile_at(x_world, y_world)
+                if tile:
+                    color = MINIMAP_COLORS["default"]
+                    if "wall" in tile.name.lower():
+                        color = MINIMAP_COLORS["wall"]
+                    elif "road" in tile.name.lower():
+                        color = MINIMAP_COLORS["road"]
+                    elif "water" in tile.name.lower():
+                        color = MINIMAP_COLORS["water"]
+                    elif "plains" in tile.name.lower() or "grass" in tile.name.lower():
+                        color = MINIMAP_COLORS["grass"]
+                    minimap_console.bg[x_minimap, y_minimap] = color
+
+    # Draw NPCs
+    for npc in world.npcs + world.village_npcs:
+        if world.player_fov_map[npc.x, npc.y]:
+            x_minimap = npc.x - map_center_x + (MINIMAP_WIDTH // 2)
+            y_minimap = npc.y - map_center_y + (MINIMAP_HEIGHT // 2)
+            if 1 <= x_minimap < MINIMAP_WIDTH -1 and 1 <= y_minimap < MINIMAP_HEIGHT -1:
+                minimap_console.bg[x_minimap, y_minimap] = MINIMAP_COLORS["npc"]
+
+    # Draw player
+    player_x_minimap = MINIMAP_WIDTH // 2
+    player_y_minimap = MINIMAP_HEIGHT // 2
+    minimap_console.bg[player_x_minimap, player_y_minimap] = MINIMAP_COLORS["player"]
+
+    minimap_console.blit(console, MINIMAP_X, MINIMAP_Y, 0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT)
+
+
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
     console.clear()
@@ -115,6 +160,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     draw_trade_ui(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
     draw_status_panel(console, world)
+    draw_minimap(console, world)
 
 
 def draw_weather_overlay(console: tcod.console.Console, world) -> None:

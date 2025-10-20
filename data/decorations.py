@@ -104,7 +104,8 @@ DECORATION_ITEM_DEFINITIONS = {
         "item_type_tags": ["interactable"],
         "properties": {
             "interaction_hint": "light_fire",
-            "lights_to": "fire_pit_simple_lit"
+            "lights_to": "fire_pit_simple_lit",
+            "requires_item_to_light": "flint_and_steel"
         }
     },
     "fire_pit_simple_lit": {

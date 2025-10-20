@@ -900,7 +900,7 @@ class World:
 
         weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
         movement_cost_modifier = weather_effects.get("slows_movement", 1.0)
-        base_cost = int(1 * movement_cost_modifier)
+        base_cost = round(1 * movement_cost_modifier)
 
         # Create a numpy array for pathfinding compatible with tcod.path functions
         # Cost array: 0 for wall, 1 for floor.
@@ -1657,9 +1657,85 @@ class World:
                             elif path: # Path is just the destination, they are already next to it
                                 npc.current_path = [] # Stand still
                         else:
-                            # No heat source found, wander sadly
+                            # No lit heat source found, try to light one
+                            if npc.has_item("flint_and_steel"):
+                                unlit_fire_coords = self._find_nearest_unlit_fire_pit(npc)
+                                if unlit_fire_coords:
+                                    npc.current_task = "going_to_light_fire"
+                                    npc.task_target_coords = unlit_fire_coords
+                                    # Path to adjacent tile to light it
+                                    path = self.calculate_path(npc.x, npc.y, unlit_fire_coords[0], unlit_fire_coords[1])
+                                    if path and len(path) > 1:
+                                        target_tile = path[-2] if len(path) > 1 else path[-1]
+                                        npc.current_path = self.calculate_path(npc.x, npc.y, target_tile[0], target_tile[1])
+                                        npc.current_destination_coords = target_tile
+                                        self.add_message_to_chat_log(f"{npc.name} is going to light a fire.")
+                                    elif path: # Already next to it
+                                        if self.npc_attempt_light_fire(npc, unlit_fire_coords[0], unlit_fire_coords[1]):
+                                            npc.current_task = "warming_up" # New task to just stay near fire
+                                else:
+                                    # No unlit fire pit found, try to huddle indoors
+                                    shelter_building = self.buildings_by_id.get(npc.home_building_id) or self._find_nearest_tavern(npc)
+                                    if shelter_building:
+                                        npc.current_task = "huddling_indoors"
+                                        shelter_coords = (shelter_building.global_center_x, shelter_building.global_center_y)
+                                        path = self.calculate_path(npc.x, npc.y, shelter_coords[0], shelter_coords[1])
+                                        if path:
+                                            npc.current_path = path
+                                            npc.current_destination_coords = shelter_coords
+                                            self.add_message_to_chat_log(f"{npc.name} is going indoors to escape the cold.")
+                                        else:
+                                            npc.current_task = "wandering_cold" # No path to shelter
+                                    else:
+                                        npc.current_task = "wandering_cold"
+                                        self.add_message_to_chat_log(f"{npc.name} is cold but can't find or light a fire.")
+                            else:
+                                # No heat source found and no flint, try to huddle indoors
+                                shelter_building = self.buildings_by_id.get(npc.home_building_id) or self._find_nearest_tavern(npc)
+                                if shelter_building:
+                                    npc.current_task = "huddling_indoors"
+                                    shelter_coords = (shelter_building.global_center_x, shelter_building.global_center_y)
+                                    path = self.calculate_path(npc.x, npc.y, shelter_coords[0], shelter_coords[1])
+                                    if path:
+                                        npc.current_path = path
+                                        npc.current_destination_coords = shelter_coords
+                                        self.add_message_to_chat_log(f"{npc.name} is going indoors to escape the cold.")
+                                    else:
+                                        npc.current_task = "wandering_cold" # No path to shelter
+                                else:
+                                    npc.current_task = "wandering_cold"
+                                    self.add_message_to_chat_log(f"{npc.name} is cold but can't find a fire.")
+                    needs_based_action_taken = True
+
+                elif npc.current_task == "going_to_light_fire":
+                    if npc.task_target_coords and (npc.x, npc.y) == npc.current_destination_coords:
+                        # Arrived at the spot next to the unlit fire
+                        unlit_fire_x, unlit_fire_y = npc.task_target_coords
+                        if self.npc_attempt_light_fire(npc, unlit_fire_x, unlit_fire_y):
+                            npc.current_task = "warming_up" # Or just idle, seeking_warmth will make them stay
+                            npc.current_path = []
+                            npc.current_destination_coords = None
+                        else:
+                            # Failed to light, maybe out of flint?
                             npc.current_task = "wandering_cold"
-                            self.add_message_to_chat_log(f"{npc.name} is cold but can't find a fire.")
+                    needs_based_action_taken = True
+
+                elif npc.current_task == "warming_up":
+                    if "Freezing" not in npc.status_effects:
+                        npc.current_task = npc.previous_task or "idle"
+                        npc.previous_task = None
+                        npc.leisure_timer = 0 # Reset timer
+                    elif npc.leisure_timer > 0:
+                        npc.leisure_timer -= 1
+                    elif npc.leisure_timer <= 0: # Timer expired but still cold
+                        npc.current_task = "seeking_warmth" # Re-evaluate
+                    needs_based_action_taken = True
+
+                elif npc.current_task == "huddling_indoors":
+                    if "Freezing" not in npc.status_effects:
+                        npc.current_task = npc.previous_task or "idle"
+                        npc.previous_task = None
+                    # No timer, will stay until not freezing or schedule changes
                     needs_based_action_taken = True
 
 
@@ -2957,6 +3033,56 @@ class World:
 
         return final_closest_coords
 
+    def _find_nearest_unlit_fire_pit(self, npc: NPC) -> tuple[int, int] | None:
+        """Finds the global coordinates of the nearest unlit fire pit an NPC could light."""
+        search_radius = 15
+        min_dist_sq = float('inf')
+        closest_unlit_fire_coords = None
+
+        potential_pits = []
+
+        # 1. Search in a radius around the NPC
+        for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+            for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and tile.properties.get("interaction_hint") == "light_fire":
+                        potential_pits.append((x,y))
+
+        # 2. Check NPC's home for an unlit fire
+        home_building = self.buildings_by_id.get(npc.home_building_id)
+        if home_building:
+            for y_offset in range(home_building.height):
+                for x_offset in range(home_building.width):
+                    world_x = home_building.global_origin_x + x_offset
+                    world_y = home_building.global_origin_y + y_offset
+                    tile = self.get_tile_at(world_x, world_y)
+                    if tile and tile.properties.get("interaction_hint") == "light_fire":
+                         potential_pits.append((world_x, world_y))
+
+        # 3. Check the nearest tavern for an unlit fire
+        tavern = self._find_nearest_tavern(npc)
+        if tavern:
+            for y_offset in range(tavern.height):
+                for x_offset in range(tavern.width):
+                    world_x = tavern.global_origin_x + x_offset
+                    world_y = tavern.global_origin_y + y_offset
+                    tile = self.get_tile_at(world_x, world_y)
+                    if tile and tile.properties.get("interaction_hint") == "light_fire":
+                         potential_pits.append((world_x, world_y))
+
+
+        # Find the closest among all found candidates
+        final_closest_coords = None
+        min_dist_sq_final = float('inf')
+        for x, y in set(potential_pits): # Use set to remove duplicates
+            dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+            if dist_sq < min_dist_sq_final:
+                min_dist_sq_final = dist_sq
+                final_closest_coords = (x, y)
+
+        return final_closest_coords
+
     def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
         """
         Searches an inventory for food and consumes one item if found.
@@ -3805,6 +3931,30 @@ class World:
                 return False
         return False # Not a door
 
+    def npc_attempt_light_fire(self, npc: NPC, fire_pit_x: int, fire_pit_y: int) -> bool:
+        """Handles an NPC's attempt to light a fire. Returns True on success."""
+        target_tile = self.get_tile_at(fire_pit_x, fire_pit_y)
+
+        if not (target_tile and target_tile.properties.get("interaction_hint") == "light_fire"):
+            return False
+
+        required_item = target_tile.properties.get("requires_item_to_light")
+        if not (required_item and npc.has_item(required_item)):
+            # self.add_message_to_chat_log(f"{npc.name} wants to light a fire but lacks {required_item}.")
+            return False
+
+        lights_to_key = target_tile.properties.get("lights_to")
+        if not lights_to_key or lights_to_key not in DECORATION_ITEM_DEFINITIONS:
+            return False
+
+        new_lit_fire_def = DECORATION_ITEM_DEFINITIONS[lights_to_key]
+        self._change_map_tile((fire_pit_x, fire_pit_y), new_lit_fire_def)
+        self.add_message_to_chat_log(f"{npc.name} lights the fire pit.")
+        # Sound of lighting a fire
+        self.emit_sound(fire_pit_x, fire_pit_y, "light_fire", volume=8, source_entity_id=npc.id)
+
+        return True
+
     def initialize_trade_session(self):
         """Populates snapshots of player and merchant inventories for the trade UI."""
         if not self.trade_ui_active or not self.trade_ui_npc_target:
@@ -4379,6 +4529,14 @@ class World:
                     if random.random() < 0.5 and "iron_helmet" in ITEM_DEFINITIONS: # 50% chance for guards/aggressive to also have helmet
                         npc.npc_inventory["iron_helmet"] = npc.npc_inventory.get("iron_helmet", 0) + 1
                         npc.equipped_armor_head = "iron_helmet"
+
+                # Give some NPCs flint and steel, especially in cold climates
+                flint_chance = 0.25 # Base 25% chance
+                if chunk.biome in ["mountain", "snow"]:
+                    flint_chance = 0.75 # 75% chance in cold biomes
+
+                if random.random() < flint_chance:
+                    npc.add_item("flint_and_steel", 1)
 
 
                 self.village_npcs.append(npc)
@@ -5188,7 +5346,7 @@ class World:
         if destination_tile and destination_tile.passable:
             weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
             movement_cost = weather_effects.get("slows_movement", 1.0)
-            self.player.movement_timer = int(1 * movement_cost) # Set cooldown
+            self.player.movement_timer = round(1 * movement_cost) # Set cooldown
 
             self.player.x, self.player.y = new_x, new_y
             self.player.last_dx, self.player.last_dy = dx, dy # Store last move

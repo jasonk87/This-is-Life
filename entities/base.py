@@ -100,6 +100,14 @@ class NPC:
     def get_dialogue(self):
         return self.dialogue
 
+    def add_item(self, item_key_to_add: str, quantity: int = 1):
+        """Adds an item to the NPC's inventory."""
+        self.npc_inventory[item_key_to_add] = self.npc_inventory.get(item_key_to_add, 0) + quantity
+
+    def has_item(self, item_key_to_check: str, quantity: int = 1) -> bool:
+        """Checks if the NPC has a certain quantity of an item."""
+        return self.npc_inventory.get(item_key_to_check, 0) >= quantity
+
     def recalculate_stats(self):
         """Recalculates NPC stats based on equipped items."""
         self.clothing_insulation = 0.0

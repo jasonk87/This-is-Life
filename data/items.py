@@ -139,7 +139,7 @@ ITEM_DEFINITIONS = {
         "description": "A crudely made axe with a stone head. Good for chopping wood.",
         "char": "/",
         "color": COLORS["dark_slate_gray"],
-        "value": 100,
+        "value": 25,
         "weight": 7,
         "stackable": False,
         "item_type_tags": ["tool", "weapon", "melee", "axe"],
@@ -323,37 +323,17 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "reforestation"],
     },
-    "raw_meat": {
-        "name": "Raw Meat",
-        "description": "A cut of raw meat. Should be cooked before eating.",
+     "raw_meat_scrap": { # Already defined, ensure it's here for completeness of food section
+        "name": "Raw Meat Scrap",
+        "description": "A piece of raw meat. Needs cooking.",
         "char": "m",
         "color": COLORS["crimson"],
-        "value": 2,
+        "value": 1,
         "weight": 0.5,
         "stackable": True,
-        "item_type_tags": ["resource", "food_ingredient_raw"],
-        "on_use": { # Eating raw meat is possible but not ideal
-            "reduces_hunger": 10,
-            "effects": [{"type": "food_poisoning", "chance": 0.5, "duration": 100}]
-        }
+        "item_type_tags": ["resource", "food_ingredient_raw"]
     },
-    "cooked_meat": {
-        "name": "Cooked Meat",
-        "description": "A properly cooked piece of meat. Restorative and safe.",
-        "char": "m",
-        "color": COLORS["dark_orange"],
-        "value": 8,
-        "weight": 0.4,
-        "stackable": True,
-        "item_type_tags": ["consumable", "food"],
-        "cooking_recipe": {
-            "ingredients": {"raw_meat": 1},
-            "station": "cooking_station" # Requires a tile with interaction_hint: 'cook'
-        },
-        "on_use": {
-            "reduces_hunger": 40
-        }
-    },
+
 
     # --- Weapons ---
     "rusty_sword": {
@@ -511,11 +491,8 @@ ITEM_DEFINITIONS = {
             "max_durability": 60
         },
         "crafting_recipe": {
-            "ingredients": {
-                "iron_ingot": 2,
-                "raw_log": 1
-            },
-            "station": "craft"
+            "iron_ingot": 2,
+            "raw_log": 1
         },
     },
     "iron_breastplate": {
@@ -548,43 +525,7 @@ ITEM_DEFINITIONS = {
         "on_use": {
             "reduces_hunger": 20
         }
-    },
-
-    # --- Building Kits ---
-    "stone_foundation_kit": {
-        "name": "Stone Foundation Kit",
-        "description": "A kit to lay a single stone foundation tile.",
-        "char": "K",
-        "color": COLORS["grey"],
-        "value": 15,
-        "weight": 20,
-        "stackable": True,
-        "item_type_tags": ["buildable"],
-        "crafting_recipe": {
-            "ingredients": {"stone_chunk": 5}
-        },
-        "on_use_place": {
-            "becomes_tile_key": "stone_foundation",
-            "allowed_on_tile_names": ["Plains", "Tall Grass"]
-        }
-    },
-    "wood_wall_kit": {
-        "name": "Wood Wall Kit",
-        "description": "A kit to construct a single wooden wall section.",
-        "char": "K",
-        "color": COLORS["saddlebrown"],
-        "value": 20,
-        "weight": 15,
-        "stackable": True,
-        "item_type_tags": ["buildable"],
-        "crafting_recipe": {
-            "ingredients": {"wooden_plank": 4}
-        },
-        "on_use_place": {
-            "becomes_tile_key": "wood_wall",
-            "allowed_on_tile_names": ["Stone Foundation"]
-        },
-    },
+    }
 }
 
 # Standardize 'type' to 'item_type_tags' and ensure all items have item_type_tags

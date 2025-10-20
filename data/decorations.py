@@ -103,19 +103,7 @@ DECORATION_ITEM_DEFINITIONS = {
         "blocks_fov": False,
         "item_type_tags": ["interactable", "light_source_potential"],
         "properties": {
-            "interaction_hint": "cook"
-        }
-    },
-    "anvil": {
-        "name": "Anvil",
-        "description": "A heavy iron block for smithing.",
-        "char": "A",
-        "color": COLORS["dark_slate_gray"],
-        "passable": False,
-        "blocks_fov": False,
-        "item_type_tags": ["interactable", "crafting_station"],
-        "properties": {
-            "interaction_hint": "craft"
+            "interaction_hint": "light_fire" # Conceptual action
         }
     },
     "corpse_humanoid": {

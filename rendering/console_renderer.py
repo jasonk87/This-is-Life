@@ -1,7 +1,40 @@
 import tcod
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
-from data.weather import WEATHER_TYPES
+from data.environment import WEATHER_TYPES
+from data.factions import FACTIONS
+
+def draw_status_panel(console: tcod.console.Console, world) -> None:
+    """Draws a dedicated panel for player status."""
+    panel_width = SCREEN_WIDTH_TILES // 4
+    panel_height = SCREEN_HEIGHT_TILES
+    panel_x = SCREEN_WIDTH_TILES - panel_width
+
+    console.draw_frame(x=panel_x, y=0, width=panel_width, height=panel_height, title="STATUS", clear=False)
+
+    y_offset = 2
+    # Health
+    console.print(x=panel_x + 2, y=y_offset, string=f"HP: {world.player.hp} / {world.player.max_hp}")
+    y_offset += 2
+
+    # Hunger and Thirst
+    console.print(x=panel_x + 2, y=y_offset, string=f"Hunger: {world.player.hunger_level_msg if world.player.hunger_level_msg else 'Full'}")
+    y_offset += 1
+    console.print(x=panel_x + 2, y=y_offset, string=f"Thirst: {world.player.thirst_level_msg if world.player.thirst_level_msg else 'Quenched'}")
+    y_offset += 2
+
+    # Reputation
+    console.print(x=panel_x + 2, y=y_offset, string="Reputation:")
+    y_offset += 1
+    for faction_id, score in world.player.reputation.items():
+        faction_name = FACTIONS.get(faction_id, {}).get("name", faction_id)
+        console.print(x=panel_x + 3, y=y_offset, string=f"- {faction_name}: {score}")
+        y_offset += 1
+    y_offset += 2
+
+    # Time of Day
+    console.print(x=panel_x + 2, y=y_offset, string=f"Time: {world.current_light_level_name}")
+
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
@@ -11,9 +44,10 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
     # --- World Rendering (if not in a full-screen menu) ---
     if game_state == "PLAYING" or game_state == "BUILD_MODE" or game_state == "INFO_MENU":
+        map_view_width = console.width - (SCREEN_WIDTH_TILES // 4)
         # --- Draw Map Tiles and Items ---
         for y_screen in range(console.height):
-            for x_screen in range(console.width):
+            for x_screen in range(map_view_width):
                 x_world, y_world = camera_x + x_screen, camera_y + y_screen
 
                 # Skip drawing if the coordinate is outside the world bounds
@@ -30,15 +64,6 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
                     tile = world.get_tile_at(x_world, y_world)
                     if tile:
                         tile_char, tile_fg = tile.char, tile.color
-                        # Apply weather color modifier
-                        weather_def = WEATHER_TYPES[world.current_weather]
-                        if tile.name.lower() in weather_def["color_modifier"]:
-                            mod = weather_def["color_modifier"][tile.name.lower()]
-                            tile_fg = (
-                                max(0, min(255, tile_fg[0] + mod[0])),
-                                max(0, min(255, tile_fg[1] + mod[1])),
-                                max(0, min(255, tile_fg[2] + mod[2])),
-                            )
                 elif is_explored:
                     tile = world.get_tile_at(x_world, y_world)
                     if tile:
@@ -78,16 +103,6 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
         draw_build_mode_ui(console, world, camera_x, camera_y)
 
     draw_chat_log(console, world)
-    # --- Ghost Tile for Build Mode ---
-    if world.build_mode_active and world.ghost_tile:
-        # The ghost_tile has its target world coords on it. Convert to screen coords.
-        ghost_screen_x = world.ghost_tile.x
-        ghost_screen_y = world.ghost_tile.y
-        # The renderer needs to know where to draw it relative to the console, not camera
-        # The mouse x,y are already screen coordinates
-        if 0 <= ghost_screen_x < console.width and 0 <= ghost_screen_y < console.height:
-            console.print(x=ghost_screen_x, y=ghost_screen_y, string=chr(world.ghost_tile.char), fg=world.ghost_tile.color)
-
     draw_interaction_menu(console, world, camera_x, camera_y)
     # --- Weather Overlay ---
     draw_weather_overlay(console, world)
@@ -95,10 +110,12 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     draw_chat_ui(console, world)
     draw_trade_ui(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
+    draw_status_panel(console, world)
 
 
 def draw_weather_overlay(console: tcod.console.Console, world) -> None:
     """Draws a visual effect over the screen for the current weather."""
+    from data.environment import WEATHER_TYPES
     import random
 
     weather_key = world.current_weather
@@ -134,6 +151,7 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
     cursor_world_x = camera_x + world.mouse_x
     cursor_world_y = camera_y + world.mouse_y
 
+    season_name = world.current_season['name']
     weather_name = WEATHER_TYPES[world.current_weather]['name']
 
     tile_info = ""
@@ -142,7 +160,7 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
         if cursor_tile:
             tile_info = f"| {cursor_tile.name}"
 
-    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {weather_name} {tile_info}"
+    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name}, {weather_name} {tile_info}"
 
     text_width = len(cursor_info_text)
     border_width = text_width + 2

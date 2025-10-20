@@ -94,11 +94,6 @@ def main():
             if world.game_time % 100 == 0: # Update economy every 100 ticks
                 world._update_economy()
 
-            world._update_village_construction()
-
-            if world.build_mode_active:
-                world.update_ghost_tile(world.mouse_x, world.mouse_y)
-
             # --- Drawing ---
             if world.game_state == "PLAYER_DEAD":
                 console.clear()
@@ -123,7 +118,8 @@ def main():
                         return # Exit on any key press
             else:
                 # --- Camera Calculation ---
-                camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
+                map_view_width = SCREEN_WIDTH_TILES - (SCREEN_WIDTH_TILES // 4)
+                camera_x = world.player.x - map_view_width // 2
                 camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
 
                 draw(console, world, camera_x, camera_y)
@@ -338,20 +334,11 @@ def main():
                                     world.add_message_to_chat_log("Exited build mode.")
                                     world.ghost_furniture_tile = None
                             else:
-                world.toggle_build_mode()
-        elif event.sym == tcod.event.KeySym.C:
-            if world.build_mode_active:
-                world.cycle_build_mode_item()
-            else:
-                world.craft_item("healing_salve")
+                                world.add_message_to_chat_log("You can only build inside a house you own.")
                         elif event.sym == tcod.event.KeySym.E:
                             target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
                             open_interaction_menu(world, target_x, target_y)
-        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.KP_ENTER:
-            if world.build_mode_active:
-                target_x, target_y = world.mouse_x, world.mouse_y
-                world.player_attempt_place_buildable(target_x, target_y)
 
                     # --- Game State: Build Mode ---
                     elif world.game_state == "BUILD_MODE":

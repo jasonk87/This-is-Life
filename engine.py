@@ -11,9 +11,16 @@ from config import (
     WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
     NOISE_SCALE, NOISE_OCTAVES, NOISE_PERSISTENCE, NOISE_LACUNARITY,
     ELEVATION_DEEP_WATER, ELEVATION_WATER, ELEVATION_MOUNTAIN, ELEVATION_SNOW,
+    # NPC Scheduling Configs
     USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
-    WORK_START_TIME_RATIO, WORK_END_TIME_RATIO, LIGHT_LEVEL_PERIODS,
+    WORK_START_TIME_RATIO, WORK_END_TIME_RATIO,
+    # Reputation Configs
+    INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
+    REP_CRIMINAL, REP_HERO,
+    # FOV and Light Level Configs
+    DAY_LENGTH_TICKS, LIGHT_LEVEL_PERIODS,
     FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK,
+    # Auditory Perception Configs
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME
 )
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
@@ -24,11 +31,9 @@ from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
 from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data
-from data.factions import FACTIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
-from data.weather import WEATHER_TYPES
 
 import json
 import uuid
@@ -122,20 +127,7 @@ class Chunk:
         self.is_generated = False
         self.village = None # To store Village object if POI is a village
 
-class ConstructionSite:
-    def __init__(self, x, y, width, height, building_type, village):
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        self.building_type = building_type
-        self.village = village
-        self.progress = 0
-        self.required_materials = {
-            "stone_foundation": width * height,
-            "wood_wall": 2 * (width + height) - 4
-        }
-        self.assigned_builder_id = None
+
 
 class Player:
     def __init__(self, x, y):
@@ -147,7 +139,10 @@ class Player:
         self.inventory: list[dict] = []
         self.max_hp = 30
         self.hp = self.max_hp
-        self.reputation = {faction_id: 0 for faction_id in FACTIONS.keys()}
+        self.reputation = {
+            REP_CRIMINAL: INITIAL_CRIMINAL_POINTS,
+            REP_HERO: INITIAL_HERO_POINTS,
+        }
         self.last_dx = 0 # For facing direction
         self.last_dy = -1 # Default facing up
 
@@ -180,8 +175,6 @@ class Player:
         self.is_jailed: bool = False
         self.jail_cell_coords: tuple[int, int] | None = None
         self.jail_time_remaining: int = 0
-        self.active_quests = {}
-        self.completed_quests = []
 
 
     def take_damage(self, amount: int):
@@ -284,18 +277,19 @@ class Player:
             return self.inventory[index]
         return None
 
-    def adjust_reputation(self, faction_id: str, amount: int):
-        """Adjusts the player's reputation with a specific faction."""
-        if faction_id in self.reputation:
-            self.reputation[faction_id] += amount
-            # Optional: Add clamping to a min/max value, e.g., -100 to 100
-            # self.reputation[faction_id] = max(-100, min(self.reputation[faction_id], 100))
-            if hasattr(self, 'world_ref') and self.world_ref:
-                faction_name = FACTIONS.get(faction_id, {}).get("name", faction_id)
-                self.world_ref.add_message_to_chat_log(f"Reputation with {faction_name} changed by {amount:+}. (New total: {self.reputation[faction_id]})")
+    def adjust_reputation(self, rep_type: str, amount: int):
+        """Adjusts the player's reputation of a specific type."""
+        if rep_type in self.reputation:
+            self.reputation[rep_type] += amount
+            # Could add clamping here if REP_MIN/MAX_VALUE were used
+            # self.reputation[rep_type] = max(REP_MIN_VALUE, min(self.reputation[rep_type], REP_MAX_VALUE))
+            # print(f"Player reputation updated: {rep_type} changed by {amount} to {self.reputation[rep_type]}") # For now, print to console
+            if hasattr(self, 'world_ref') and self.world_ref: # Access world_ref if it exists
+                self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.reputation[rep_type]})")
         else:
+            # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
             if hasattr(self, 'world_ref') and self.world_ref:
-                self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust reputation with unknown faction '{faction_id}'")
+                 self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
 
 
 class World:
@@ -312,7 +306,6 @@ class World:
         self.npcs = []
         self.village_npcs = []
         self.buildings_by_id = {}
-        self.construction_sites = []
         self.mouse_x = 0
         self.mouse_y = 0
         self.game_state = "PLAYING"
@@ -331,10 +324,12 @@ class World:
         }
 
         # Build Mode State
-        self.build_mode_active = False
-        self.buildable_item_keys = ["stone_foundation_kit", "wood_wall_kit"]
         self.build_mode_selected_item_index: int = 0
-        self.ghost_tile: Tile | None = None # For rendering placement preview
+        # Define some placeable items (keys from DECORATION_ITEM_DEFINITIONS)
+        self.placeable_furniture_keys: list[str] = [
+            "wooden_chair", "wooden_table", "bed_simple", "chest_wooden", "wall_shelf", "fire_pit_simple"
+        ]
+        self.ghost_furniture_tile: Tile | None = None # For rendering placement preview
 
         # Chat UI State
         self.chat_ui_active = False
@@ -369,14 +364,6 @@ class World:
 
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
-
-        # Weather system state
-        self.current_weather = "clear"
-        self.weather_timer = 0
-        self.weather_duration = random.randint(
-            WEATHER_TYPES["clear"]["min_duration"],
-            WEATHER_TYPES["clear"]["max_duration"]
-        )
 
         self._find_starting_position()
 
@@ -1181,9 +1168,9 @@ class World:
                         # Check if at the sheriff's office
                         if (npc.x, npc.y) == npc.task_target_coords:
                             self.add_message_to_chat_log(f"{npc.name} reports your crimes to the authorities!")
-                            self.player.adjust_reputation("law_and_order", -10)
-                            self.player.adjust_reputation("common_folk", -5)
-                            npc.current_task = "idle"
+                            self.player.bounty += 50 # Example bounty increase
+                            self.add_message_to_chat_log(f"Your bounty has increased by 50. Total bounty: {self.player.bounty}.")
+                            npc.current_task = "idle" # Or return to previous task
                             npc.task_target_coords = None
                         else:
                             # Path to the sheriff's office if not already pathing
@@ -1624,11 +1611,12 @@ class World:
 
             # --- Sheriff / Guard Hostility Check ---
             if npc.profession in ["Sheriff", "Guard"] and not npc.is_hostile_to_player:
-                if self.player.reputation.get("law_and_order", 0) <= -50: # Reputation threshold for arrest
+                if self.player.bounty >= 100: # Bounty threshold for arrest
                     # Check if player is visible to the Sheriff/Guard
                     if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
                         self.add_message_to_chat_log(f"{npc.name} spots you and moves to arrest you for your crimes!")
                         npc.is_hostile_to_player = True
+                        # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
 
             # After all task decisions and path assignments:
             # If NPC is at work, handle specific work sub-tasks or general production.
@@ -1717,29 +1705,17 @@ class World:
             # For chopping, we find a dynamic tree target near the building.
             # The work_building itself is passed to help center the search.
             return self._find_nearest_tree_for_chopping(npc, work_building)
-        elif target_zone_tag == "lumber_mill" or (npc.profession == "Builder" and sub_task_data["id"] == "fetch_wood"):
+        elif target_zone_tag == "lumber_mill":
             # For fetching wood, find the nearest lumber mill
             lumber_mill = self._find_nearest_lumber_mill(npc)
             if lumber_mill:
                 return (lumber_mill.global_center_x, lumber_mill.global_center_y)
-            return None
-        elif target_zone_tag == "mine" or (npc.profession == "Builder" and sub_task_data["id"] == "fetch_stone"):
-            # For fetching stone, find the nearest mine
-            mine = self._find_nearest_mine(npc)
-            if mine:
-                return (mine.global_center_x, mine.global_center_y)
             return None
         elif target_zone_tag == "farm":
             # For fetching wheat, find the nearest farm
             farm = self._find_nearest_farm(npc)
             if farm:
                 return (farm.global_center_x, farm.global_center_y)
-            return None
-        elif npc.profession == "Builder" and sub_task_data["id"] in ["lay_foundation", "build_walls"]:
-            # Find the construction site this builder is assigned to
-            site = next((s for s in self.construction_sites if s.assigned_builder_id == npc.id), None)
-            if site:
-                return (site.x, site.y) # Target the top-left corner of the site
             return None
         elif target_zone_tag == "mill":
             # For fetching flour, find the nearest mill
@@ -2022,50 +1998,6 @@ class World:
                             work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} milled some flour.")
 
-                    elif npc.profession == "Builder":
-                        if completed_sub_task_id == "fetch_stone":
-                            mine = self._find_nearest_mine(npc)
-                            if mine and mine.building_inventory.get("stone_chunk", 0) > 0:
-                                mine.building_inventory["stone_chunk"] -= 1
-                                npc.add_item("stone_chunk", 1)
-                                self.add_message_to_chat_log(f"{npc.name} acquired stone for the construction.")
-                        elif completed_sub_task_id == "fetch_wood":
-                            lumber_mill = self._find_nearest_lumber_mill(npc)
-                            if lumber_mill and lumber_mill.building_inventory.get("wooden_plank", 0) > 0:
-                                lumber_mill.building_inventory["wooden_plank"] -= 1
-                                npc.add_item("wooden_plank", 1)
-                                self.add_message_to_chat_log(f"{npc.name} acquired wood for the construction.")
-                        elif completed_sub_task_id == "lay_foundation":
-                            site = next((s for s in self.construction_sites if s.assigned_builder_id == npc.id), None)
-                            if site and npc.has_item("stone_chunk"):
-                                npc.remove_item("stone_chunk", 1)
-                                # Lay one foundation tile
-                                foundation_laid_count = sum(1 for y in range(site.height) for x in range(site.width) if self.get_tile_at(site.x + x, site.y + y).name == "Stone Foundation")
-                                if foundation_laid_count < site.width * site.height:
-                                    tile_x = site.x + foundation_laid_count % site.width
-                                    tile_y = site.y + foundation_laid_count // site.width
-                                    self._change_map_tile((tile_x, tile_y), TILE_DEFINITIONS["stone_foundation"])
-                                    self.add_message_to_chat_log(f"{npc.name} lays a foundation stone.")
-                        elif completed_sub_task_id == "build_walls":
-                            site = next((s for s in self.construction_sites if s.assigned_builder_id == npc.id), None)
-                            if site and npc.has_item("wooden_plank"):
-                                npc.remove_item("wooden_plank", 1)
-                                # Build one wall tile
-                                wall_built_count = sum(1 for y in range(site.height) for x in range(site.width) if self.get_tile_at(site.x + x, site.y + y).name == "Wood Wall")
-                                if wall_built_count < 2 * (site.width + site.height) - 4:
-                                     # This logic is simplified and just builds walls around the perimeter
-                                    x, y = 0, 0 # placeholder
-                                    if wall_built_count < site.width:
-                                        x, y = site.x + wall_built_count, site.y
-                                    elif wall_built_count < site.width + site.height - 1:
-                                        x, y = site.x + site.width - 1, site.y + (wall_built_count - site.width + 1)
-                                    elif wall_built_count < site.width * 2 + site.height - 2:
-                                        x, y = site.x + (site.width - (wall_built_count - (site.width + site.height - 2))), site.y + site.height - 1
-                                    else:
-                                        x, y = site.x, site.y + (site.height - (wall_built_count - (site.width * 2 + site.height - 3)))
-                                    self._change_map_tile((x, y), TILE_DEFINITIONS["wood_wall"])
-                                    self.add_message_to_chat_log(f"{npc.name} raises a section of wall.")
-
                     elif npc.profession == "Farmer":
                         target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
                         original_tile_name = target_tile_obj.name if target_tile_obj else "None"
@@ -2346,9 +2278,10 @@ class World:
             return
 
         # --- ARREST LOGIC ---
-        if npc.profession in ["Sheriff", "Guard"] and self.player.reputation.get("law_and_order", 0) <= -50 and not self.player.is_jailed:
+        if npc.profession in ["Sheriff", "Guard"] and self.player.bounty >= 100 and not self.player.is_jailed:
             self.add_message_to_chat_log(f"{npc.name} apprehends you! You are under arrest.")
             self.serve_jail_time()
+            # Stop the NPC's hostile actions after arrest
             npc.is_hostile_to_player = False
             npc.current_task = "idle"
             npc.current_path = []
@@ -2528,8 +2461,18 @@ class World:
         return closest_mill
 
     def _get_village_for_npc(self, npc: NPC) -> Village | None:
-        """Finds the village object that an NPC belongs to."""
-        return npc.village
+        """Finds the village object that an NPC belongs to, typically via their home."""
+        if not npc.home_building_id:
+            return None
+        # This is inefficient and relies on iterating all chunks.
+        # A future optimization would be to cache npc -> village mapping.
+        for y_idx, row in enumerate(self.chunks):
+            for x_idx, chk in enumerate(row):
+                if chk.village:
+                    # Check if the building object is in this village's list of buildings
+                    if self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
+                        return chk.village
+        return None
 
     def _find_nearest_building_of_type(self, npc: NPC, building_type: str) -> Building | None:
         """Finds the nearest building of a specific type in the NPC's village."""
@@ -2625,22 +2568,6 @@ class World:
                 if len(self.chat_ui_history) > self.chat_ui_max_history:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
-
-    def _update_weather(self):
-        """Updates the current weather and handles transitions."""
-        self.weather_timer += 1
-        if self.weather_timer >= self.weather_duration:
-            current_weather_def = WEATHER_TYPES[self.current_weather]
-            transitions = current_weather_def["transitions"]
-
-            new_weather_key = random.choices(list(transitions.keys()), list(transitions.values()), k=1)[0]
-
-            if new_weather_key != self.current_weather:
-                self.current_weather = new_weather_key
-                new_weather_def = WEATHER_TYPES[new_weather_key]
-                self.weather_duration = random.randint(new_weather_def["min_duration"], new_weather_def["max_duration"])
-                self.weather_timer = 0
-                self.add_message_to_chat_log(f"The weather changes to {new_weather_def['name']}.")
 
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
@@ -2748,10 +2675,9 @@ class World:
         self.player.jail_time_remaining = 500 # Set jail time
         self.add_message_to_chat_log("You've been thrown in jail!")
 
-        # Reset reputation with law and common folk
-        self.player.adjust_reputation("law_and_order", -self.player.reputation.get("law_and_order", 0))
-        self.player.adjust_reputation("common_folk", -self.player.reputation.get("common_folk", 0))
-        self.add_message_to_chat_log("Your reputation with the locals and the law has been reset.")
+        # Reduce bounty
+        self.player.bounty = 0
+        self.add_message_to_chat_log("Your bounty has been cleared.")
 
         self.update_fov() # Update FOV from new position
 
@@ -2867,16 +2793,13 @@ class World:
 
         if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
             chunk = self.chunks[chunk_y][chunk_x]
-            if not chunk.is_generated:
-                self._generate_chunk_detail(chunk, chunk_x, chunk_y)
-
-            if chunk.tiles:
+            if chunk and chunk.tiles:
                 new_tile = Tile(
                     char=new_tile_def["char"],
                     color=new_tile_def["color"],
                     passable=new_tile_def["passable"],
                     name=new_tile_def["name"],
-                    properties=new_tile_def.get("properties", {}).copy()
+                    properties=new_tile_def.get("properties", {})
                 )
                 if original_tree_type:
                     new_tile.original_tree_type = original_tree_type
@@ -3046,7 +2969,8 @@ class World:
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
             player_social_skill=self.player.social_skill,
-            player_reputation_str=json.dumps(self.player.reputation),
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0),
             player_persuasion_goal_text=player_goal_text
         )
 
@@ -3367,8 +3291,7 @@ class World:
         if witness.profession in ["Guard", "Sheriff"]:
             self.add_message_to_chat_log(f"{witness.name} shouts, 'Stop right there, criminal scum!'")
             witness.is_hostile_to_player = True
-            self.player.adjust_reputation("law_and_order", -10)
-            self.player.adjust_reputation("common_folk", -5)
+            # Combat AI will take over on the next tick
             return
 
         # Reaction based on personality
@@ -3382,10 +3305,9 @@ class World:
                 self.add_message_to_chat_log(f"{witness.name} gasps, 'I'm reporting this to the sheriff!'")
                 witness.current_task = "going_to_report_crime"
                 witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
-                witness.current_path = []
-                self.player.adjust_reputation("law_and_order", -5)
-                self.player.adjust_reputation("common_folk", -2)
+                witness.current_path = [] # Clear path for new destination
             else:
+                # No sheriff's office, maybe they just shout or flee?
                 self.add_message_to_chat_log(f"{witness.name} yells, 'Someone stop them!' but doesn't know where to go.")
         else:
             # Other personalities might just stare, disapprove, or ignore it for now
@@ -3449,7 +3371,7 @@ class World:
         for item_key, quantity in player_inventory_aggregated.items():
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
-                price = self.get_dynamic_price(item_key, merchant_village, is_selling=True)
+                price = self.get_dynamic_price(item_key, merchant_village)
                 self.trade_ui_player_inventory_snapshot.append((item_key, quantity, price))
 
         # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
@@ -3462,10 +3384,10 @@ class World:
             merchant_inventory_source = self.trade_ui_npc_target.npc_inventory
 
         for item_key, quantity in merchant_inventory_source.items():
-            if item_key == "money": continue
+            if item_key == "money": continue # Don't list merchant's money as a sellable item
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
-                price = self.get_dynamic_price(item_key, merchant_village, is_selling=False)
+                price = self.get_dynamic_price(item_key, merchant_village)
                 self.trade_ui_merchant_inventory_snapshot.append((item_key, quantity, price))
 
         # Sort by name for consistent display
@@ -3490,7 +3412,7 @@ class World:
 
         merchant_money = merchant_true_inventory.get("money", 0)
 
-        if self.trade_ui_player_selling:
+        if self.trade_ui_player_selling: # Player is selling
             if not self.trade_ui_player_inventory_snapshot: return
             item_key, _, price = self.trade_ui_player_inventory_snapshot[self.trade_ui_player_item_index]
 
@@ -3503,7 +3425,6 @@ class World:
                         self.add_message_to_chat_log(f"You sold 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
                         if merchant_village:
                             merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) + 1
-                        self.player.adjust_reputation("merchants_guild", 1) # Increase reputation
                     else:
                         self.add_message_to_chat_log("Error: Could not remove item from inventory.")
                 else:
@@ -3511,7 +3432,7 @@ class World:
             else:
                 self.add_message_to_chat_log("Error: You don't have that item to sell (inventory mismatch).")
 
-        else:
+        else: # Player is buying (viewing merchant's items)
             if not self.trade_ui_merchant_inventory_snapshot: return
             item_key, _, price = self.trade_ui_merchant_inventory_snapshot[self.trade_ui_merchant_item_index]
 
@@ -3527,10 +3448,8 @@ class World:
                     self.add_message_to_chat_log(f"You bought 1 {ITEM_DEFINITIONS[item_key]['name']} for {price} money.")
                     if merchant_village:
                         merchant_village.supply[item_key] = merchant_village.supply.get(item_key, 0) - 1
-                    self.player.adjust_reputation("merchants_guild", 1)
                 else:
                     self.add_message_to_chat_log("You don't have enough money for that.")
-                    self.player.adjust_reputation("merchants_guild", -1)
             else:
                 self.add_message_to_chat_log(f"Error: {merchant_npc.name} doesn't have that item in stock (inventory mismatch).")
 
@@ -3587,7 +3506,8 @@ class World:
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
-            player_reputation_str=json.dumps(self.player.reputation)
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0)
         )
         greeting = self._call_ollama(prompt)
         if not greeting:
@@ -3597,8 +3517,6 @@ class World:
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
-
-        self._check_and_offer_quests(npc_target)
 
     def continue_npc_dialogue(self, npc_target: NPC, player_input_text: str):
         """Continues dialogue with an NPC based on player input and history."""
@@ -3623,7 +3541,8 @@ class World:
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
-            player_reputation_str=json.dumps(self.player.reputation),
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0),
             conversation_history=history_str,
             player_input=player_input_text
         )
@@ -3654,7 +3573,8 @@ class World:
                 npc_profession=npc_target.profession,
                 npc_personality=npc_target.personality,
                 npc_attitude=npc_target.attitude_to_player,
-                player_reputation_str=json.dumps(self.player.reputation),
+                player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
+                player_hero_points=self.player.reputation.get(REP_HERO,0),
                 quantity_needed=quantity_needed,
                 item_name_plural=item_name_plural,
                 reward_amount=reward_amount
@@ -3672,32 +3592,20 @@ class World:
             }
             self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
 
-        self._check_and_offer_quests(npc_target)
+        # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
+        # This is a simplified trigger; more robust would be keyword matching or LLM intent.
+        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
+           "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
+
+            quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
+            if quest_def:
+                offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
+                self.chat_ui_history.append((npc_target.name, offer_dialogue))
+                self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
+                self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
-
-
-    def _check_and_offer_quests(self, npc_target: NPC):
-        """Checks if an NPC should offer any faction quests to the player."""
-        if not self.pending_quest_offer: # Only check for new quests if one isn't already pending
-            for quest_id, quest_def in QUEST_DEFINITIONS.items():
-                required_faction = quest_def.get("required_faction")
-                if not required_faction:
-                    continue
-
-                # Check if the NPC belongs to the required faction
-                if required_faction in npc_target.factions:
-                    # Check reputation, completion status, and active status
-                    if (self.player.reputation.get(required_faction, 0) >= quest_def.get("required_reputation", 0) and
-                            quest_id not in self.player.active_quests and
-                            quest_id not in self.player.completed_quests):
-
-                        offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
-                        self.chat_ui_history.append((npc_target.name, offer_dialogue))
-                        self.pending_quest_offer = {"quest_id": quest_id, "npc_offerer_id": npc_target.id}
-                        self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
-                        break # Offer one quest at a time
 
 
     def _call_ollama(self, prompt: str) -> str:
@@ -3714,24 +3622,30 @@ class World:
             )
             response.raise_for_status() # Raise an exception for HTTP errors
             full_response = response.json()["response"]
-            # Attempt to extract JSON from markdown code block if present
+            # Attempt to extract JSON from markdown code block
             json_start = full_response.find("```json")
             if json_start != -1:
                 json_end = full_response.find("```", json_start + len("```json"))
                 if json_end != -1:
-                    # Return the content of the JSON block
-                    return full_response[json_start + len("```json"):json_end].strip()
+                    json_str = full_response[json_start + len("```json"):json_end].strip()
+                    try:
+                        json.loads(json_str) # Validate JSON
+                        return json_str
+                    except json.JSONDecodeError:
+                        pass # Fall through to try parsing full response
 
-            # If no JSON block, return the full response.
-            # Callers that expect JSON are responsible for parsing and error handling.
-            return full_response
+            # If no markdown block or invalid JSON in block, try parsing full response
+            try:
+                json.loads(full_response) # Validate JSON
+                return full_response
+            except json.JSONDecodeError:
+                return "" # Return empty string if not valid JSON
         except requests.exceptions.RequestException as e:
             print(f"Error communicating with Ollama: {e}")
             return ""
 
     def _update_world_environment(self):
         """Handles time-based environmental changes like tree regrowth."""
-        self._update_weather()
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
@@ -3859,7 +3773,8 @@ class World:
             # Fetch player reputation to pass to the prompt
             player_rep = self.player.reputation
             prompt = LLM_PROMPTS["npc_personality"].format(
-                player_reputation_str=json.dumps(self.player.reputation),
+                player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+                player_hero_points=player_rep.get(REP_HERO, 0),
                 # Potentially add name_hint, personality_hint etc. if we want more specific NPC roles
                 name_hint="", personality_hint="", family_ties_hint="", attitude_to_player_hint=""
             )
@@ -3896,8 +3811,7 @@ class World:
                     dialogue=npc_data.get("dialogue", ["Greetings."]),
                     personality=npc_data.get("personality", "commoner"),
                     family_ties=npc_data.get("family_ties", "none"),
-                    attitude_to_player=npc_data.get("attitude_to_player", "neutral"),
-                    village=village
+                    attitude_to_player=npc_data.get("attitude_to_player", "neutral")
                 )
 
                 # Assign wealth (randomly for now) - This is now part of LLM prompt for personality
@@ -3973,13 +3887,6 @@ class World:
                 else:
                     npc.profession = "Unemployed"
 
-                # Assign factions based on profession
-                npc.factions = ["common_folk"] # Everyone is part of the common folk
-                if npc.profession in ["Merchant", "Carpenter", "Blacksmith", "Miller", "Baker"]:
-                    npc.factions.append("merchants_guild")
-                if npc.profession in ["Sheriff", "Guard"]:
-                    npc.factions.append("law_and_order")
-
                 # If NPC is a Merchant and assigned to a general store, pre-populate store inventory
                 if npc.profession == "Merchant" and work_building and work_building.building_type == "general_store":
                     # Add some starting cash for the store to buy items
@@ -4046,10 +3953,11 @@ class World:
                 # Ambient speech might be general, or react to player if nearby and reputation is notable
                 prompt = (
                     f"NPC {npc.name} (Personality: {npc.personality}, Attitude to Player: {npc.attitude_to_player}, Family: {npc.family_ties}) "
-                    f"is going about their day. The player's reputation with various factions is represented by this JSON object: {json.dumps(player_rep)}. "
+                    f"is going about their day. The player's reputation is: "
+                    f"Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}. "
                     f"Generate a short, in-character ambient thought or statement from {npc.name}. "
                     f"It could be about their current (unspecified) activity, the village, a general thought, "
-                    f"or a comment related to the player if their reputation is particularly high or low with a relevant faction, and the player is assumed to be generally known or nearby. "
+                    f"or a comment related to the player if their reputation is particularly high or low and the player is assumed to be generally known or nearby. "
                     f"Keep it concise."
                 )
                 llm_dialogue = self._call_ollama(prompt)
@@ -4191,7 +4099,7 @@ class World:
             # Use LLM for dynamic dialogue
             player_rep = self.player.reputation
             prompt = (
-                f"The player (Reputation: {json.dumps(player_rep)}) "
+                f"The player (Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}) "
                 f"approaches {closest_npc.name}. "
                 f"{closest_npc.name} is {closest_npc.personality}, their family ties are '{closest_npc.family_ties}', "
                 f"and their current attitude towards the player is '{closest_npc.attitude_to_player}'. "
@@ -4372,8 +4280,6 @@ class World:
         capital_hall_w, capital_hall_h = 9, 7
         capital_hall_x = road_x - capital_hall_w - 2
         capital_hall_y = road_y - capital_hall_h // 2
-        capital_hall_x = max(0, min(capital_hall_x, CHUNK_SIZE - capital_hall_w))
-        capital_hall_y = max(0, min(capital_hall_y, CHUNK_SIZE - capital_hall_h))
         capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h,
                                 building_type="capital_hall", category="civic",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4385,8 +4291,6 @@ class World:
         jail_w, jail_h = 7, 5
         jail_x = road_x + 2
         jail_y = road_y - jail_h // 2
-        jail_x = max(0, min(jail_x, CHUNK_SIZE - jail_w))
-        jail_y = max(0, min(jail_y, CHUNK_SIZE - jail_h))
         jail = Building(jail_x, jail_y, jail_w, jail_h,
                         building_type="jail", category="civic",
                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4398,8 +4302,6 @@ class World:
         sheriff_office_w, sheriff_office_h = 7, 5
         sheriff_office_x = road_x + 2
         sheriff_office_y = jail_y + jail_h + 2
-        sheriff_office_x = max(0, min(sheriff_office_x, CHUNK_SIZE - sheriff_office_w))
-        sheriff_office_y = max(0, min(sheriff_office_y, CHUNK_SIZE - sheriff_office_h))
         sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h,
                                   building_type="sheriff_office", category="civic_workplace",
                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4605,8 +4507,6 @@ class World:
         blacksmith_w, blacksmith_h = 7, 6
         blacksmith_x = road_x + 2
         blacksmith_y = road_y + 2
-        blacksmith_x = max(0, min(blacksmith_x, CHUNK_SIZE - blacksmith_w))
-        blacksmith_y = max(0, min(blacksmith_y, CHUNK_SIZE - blacksmith_h))
         blacksmith_shop = Building(blacksmith_x, blacksmith_y, blacksmith_w, blacksmith_h,
                                    building_type="blacksmith_shop", category="industrial_workplace",
                                    global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
@@ -4848,6 +4748,7 @@ class World:
             # This means sounds last for one full game tick cycle.
             self.sound_events.clear()
 
+
             # Check if the player moved onto a flower
             if destination_tile.char == ord('*'): # This was likely for herb_generic
                 # Add a herb_generic to the player's inventory
@@ -4864,177 +4765,6 @@ class World:
                 self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
                     plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], plains_def.get("properties", {})
                 )
-
-    def _update_village_construction(self):
-        """Periodically checks if new construction projects should be started."""
-        if self.game_time % 500 != 0: # Check every 500 ticks
-            return
-
-        for y_chunk in range(self.chunk_height):
-            for x_chunk in range(self.chunk_width):
-                chunk = self.chunks[y_chunk][x_chunk]
-                if chunk.village:
-                    village = chunk.village
-                    homeless_npcs = [npc for npc in self.village_npcs if not npc.home_building_id and self._get_village_for_npc(npc) == village]
-
-                    if len(homeless_npcs) > 0:
-                        # Check if there is already a construction site for a house
-                        house_under_construction = any(site.building_type == "house" for site in self.construction_sites if site.village == village)
-                        if not house_under_construction:
-                            self.add_message_to_chat_log(f"The village of {village.lore.split('.')[0]} has decided to build a new house for its homeless.")
-                            # Find a suitable location for the new house
-                            # This is a placeholder, a more robust system would find a clear, flat area
-                            new_house_x = random.randint(1, CHUNK_SIZE - 10)
-                            new_house_y = random.randint(1, CHUNK_SIZE - 10)
-
-                            new_site = ConstructionSite(new_house_x, new_house_y, 7, 5, "house", village)
-                            self.construction_sites.append(new_site)
-
-                            # Find and assign a builder
-                            builder_npc = next((npc for npc in self.village_npcs if npc.profession == "Builder" and self._get_village_for_npc(npc) == village), None)
-                            if builder_npc:
-                                new_site.assigned_builder_id = builder_npc.id
-                                builder_npc.work_building_id = None # Unassign from any current work
-                                builder_npc.current_task = "assigned_to_build"
-                                self.add_message_to_chat_log(f"{builder_npc.name} has been assigned to build the new house.")
-                            else:
-                                self.add_message_to_chat_log("There are no builders in the village to construct the new house.")
-
-    def _check_for_completed_construction(self):
-        """Checks for and finalizes completed construction sites."""
-        for site in self.construction_sites[:]:
-            interior_foundation_count = 0
-            perimeter_piece_count = 0
-            has_door = False
-
-            for y_offset in range(site.height):
-                for x_offset in range(site.width):
-                    tile = self.get_tile_at(site.x + x_offset, site.y + y_offset)
-                    is_perimeter = x_offset == 0 or x_offset == site.width - 1 or y_offset == 0 or y_offset == site.height - 1
-
-                    if is_perimeter:
-                        if tile.name == "Wood Wall":
-                            perimeter_piece_count += 1
-                        elif tile.properties.get("is_door"):
-                            perimeter_piece_count += 1
-                            has_door = True
-                    else: # Is interior
-                        if tile.name == "Stone Foundation":
-                            interior_foundation_count += 1
-
-            expected_perimeter_pieces = 2 * (site.width + site.height) - 4
-            expected_interior_foundations = (site.width - 2) * (site.height - 2)
-
-            if interior_foundation_count >= expected_interior_foundations and perimeter_piece_count >= expected_perimeter_pieces and has_door:
-                self.add_message_to_chat_log(f"A new {site.building_type} has been completed in {site.village.lore.split('.')[0]}!")
-
-                # Convert site to building
-                new_building = Building(site.x, site.y, site.width, site.height, site.building_type, "residential", 0, 0)
-                site.village.add_building(new_building)
-                self.buildings_by_id[new_building.id] = new_building
-
-                # Assign a homeless NPC to the new house
-                homeless_npc = next((npc for npc in self.village_npcs if not npc.home_building_id and self._get_village_for_npc(npc) == site.village), None)
-                if homeless_npc:
-                    new_building.residents.append(homeless_npc)
-                    homeless_npc.home_building_id = new_building.id
-                    self.add_message_to_chat_log(f"{homeless_npc.name} has moved into the new house.")
-
-                # Clean up
-                self.construction_sites.remove(site)
-                builder_npc = next((npc for npc in self.village_npcs if npc.id == site.assigned_builder_id), None)
-                if builder_npc:
-                    builder_npc.current_task = "idle"
-
-    def toggle_build_mode(self):
-        """Toggles the player's build mode on or off."""
-        self.build_mode_active = not self.build_mode_active
-        if self.build_mode_active:
-            self.add_message_to_chat_log("Build mode enabled. Press 'C' to cycle items, 'Enter' to place.")
-        else:
-            self.add_message_to_chat_log("Build mode disabled.")
-            self.ghost_tile = None # Clear ghost tile when exiting build mode
-
-    def cycle_build_mode_item(self):
-        """Cycles through the available buildable items."""
-        if not self.build_mode_active:
-            return
-        self.build_mode_selected_item_index = (self.build_mode_selected_item_index + 1) % len(self.buildable_item_keys)
-        selected_item_key = self.buildable_item_keys[self.build_mode_selected_item_index]
-        item_name = ITEM_DEFINITIONS.get(selected_item_key, {}).get("name", "Unknown")
-        self.add_message_to_chat_log(f"Selected buildable: {item_name}")
-
-    def update_ghost_tile(self, target_x, target_y):
-        """Updates the ghost tile for placement preview."""
-        if not self.build_mode_active:
-            self.ghost_tile = None
-            return
-
-        selected_item_key = self.buildable_item_keys[self.build_mode_selected_item_index]
-        item_def = ITEM_DEFINITIONS.get(selected_item_key)
-        if not item_def:
-            self.ghost_tile = None
-            return
-
-        becomes_tile_key = item_def.get("on_use_place", {}).get("becomes_tile_key")
-        if not becomes_tile_key:
-            self.ghost_tile = None
-            return
-
-        new_tile_def = TILE_DEFINITIONS.get(becomes_tile_key)
-        if not new_tile_def:
-            self.ghost_tile = None
-            return
-
-        # Create a temporary tile for rendering the ghost
-        # The color is modified to be semi-transparent
-        ghost_color = (*new_tile_def["color"], 128) # Adding an alpha value
-        self.ghost_tile = Tile(
-            char=new_tile_def["char"],
-            color=ghost_color,
-            passable=new_tile_def["passable"],
-            name=new_tile_def["name"],
-            properties=new_tile_def.get("properties", {})
-        )
-        # Store target coordinates on the ghost tile object for the renderer
-        self.ghost_tile.x = target_x
-        self.ghost_tile.y = target_y
-
-    def player_attempt_place_buildable(self, target_x: int, target_y: int):
-        """Handles the player's attempt to place a buildable item."""
-        if not self.build_mode_active:
-            return
-
-        selected_item_key = self.buildable_item_keys[self.build_mode_selected_item_index]
-        if not self.player.has_item(selected_item_key):
-            self.add_message_to_chat_log(f"You don't have any {ITEM_DEFINITIONS[selected_item_key]['name']} to build with.")
-            return
-
-        item_def = ITEM_DEFINITIONS.get(selected_item_key)
-        if not item_def: return
-
-        place_info = item_def.get("on_use_place")
-        if not place_info: return
-
-        allowed_on_names = place_info.get("allowed_on_tile_names", [])
-        target_tile = self.get_tile_at(target_x, target_y)
-
-        if not target_tile or target_tile.name not in allowed_on_names:
-            self.add_message_to_chat_log(f"You can't build that on a {target_tile.name if target_tile else 'invalid tile'}.")
-            return
-
-        becomes_tile_key = place_info.get("becomes_tile_key")
-        if not becomes_tile_key: return
-
-        new_tile_def = TILE_DEFINITIONS.get(becomes_tile_key)
-        if not new_tile_def: return
-
-        if self.player.remove_item(selected_item_key, 1):
-            self._change_map_tile((target_x, target_y), new_tile_def)
-            self.add_message_to_chat_log(f"You placed a {new_tile_def['name']}.")
-            self.update_fov() # Update FOV in case a wall was built
-        else:
-            self.add_message_to_chat_log("Error: Could not remove build item from inventory.")
 
     def emit_sound(self, origin_x: int, origin_y: int, sound_type: str, volume: int, source_entity_id: int | None = None):
         """Emits a sound event that NPCs might react to."""
@@ -5064,74 +4794,35 @@ class World:
                         for item_key, quantity in building.building_inventory.items():
                             village.supply[item_key] = village.supply.get(item_key, 0) + quantity
 
-    def get_dynamic_price(self, item_key: str, village: Village, is_selling: bool = False) -> int:
-        """
-        Calculates the dynamic price of an item based on village supply, demand,
-        and player's reputation with the merchants' guild.
-        'is_selling' is True if the player is selling to the merchant, False if buying.
-        """
+    def get_dynamic_price(self, item_key: str, village: Village) -> int:
+        """Calculates the dynamic price of an item based on village supply and demand."""
         base_price = ITEM_DEFINITIONS.get(item_key, {}).get("value", 0)
         if not village:
             return base_price
 
-        supply = village.supply.get(item_key, 1)
+        supply = village.supply.get(item_key, 1)  # Avoid division by zero
         demand = village.demand.get(item_key, 1)
 
+        # Simple formula: price = base_price * (demand / supply)
+        # Add clamping to prevent extreme prices
         price_modifier = max(0.2, min(5.0, demand / supply))
+        dynamic_price = int(base_price * price_modifier)
 
-        # Reputation modifier
-        rep_modifier = 1.0
-        merchant_rep = self.player.reputation.get("merchants_guild", 0)
-        # Example: a 50% discount/surcharge at max/min reputation
-        rep_effect = (merchant_rep / 100.0) * 0.50
-
-        if is_selling:
-            # Higher reputation means merchants pay you more
-            rep_modifier += rep_effect
-        else:
-            # Higher reputation means you pay less
-            rep_modifier -= rep_effect
-
-        dynamic_price = int(base_price * price_modifier * rep_modifier)
-
-        return max(1, dynamic_price)
+        return max(1, dynamic_price) # Ensure price is at least 1
 
     def craft_item(self, item_key: str):
-        """Crafts an item if the player has the required resources and is near the correct station."""
+        """Crafts an item if the player has the required resources."""
         if item_key not in ITEM_DEFINITIONS:
             self.add_message_to_chat_log(f"You don't know how to craft '{item_key}'.")
             return
 
-        recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe")
+        recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe", {})
         if not recipe:
             self.add_message_to_chat_log(f"There is no recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
             return
 
-        # Check for crafting station
-        required_station = recipe.get("station")
-        if required_station:
-            station_found = False
-            for dx in range(-1, 2):
-                for dy in range(-1, 2):
-                    if dx == 0 and dy == 0: continue
-                    tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
-                    if tile and hasattr(tile, "properties") and tile.properties.get("interaction_hint") == required_station:
-                        station_found = True
-                        break
-                if station_found:
-                    break
-
-            if not station_found:
-                self.add_message_to_chat_log(f"You need to be near a {required_station} to craft this.")
-                return
-
-        ingredients = recipe.get("ingredients", {})
-        if not ingredients:
-            self.add_message_to_chat_log("This recipe has no ingredients.")
-            return
-
         can_craft = True
-        for resource_key, required_qty in ingredients.items():
+        for resource_key, required_qty in recipe.items():
             if not self.player.has_item(resource_key, required_qty):
                 self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
                 can_craft = False
@@ -5139,57 +4830,18 @@ class World:
 
         if can_craft:
             # Consume resources
-            for resource_key, required_qty in ingredients.items():
+            for resource_key, required_qty in recipe.items():
                 if not self.player.remove_item(resource_key, required_qty):
+                    # This should not happen if has_item check passed, but as a safeguard:
                     self.add_message_to_chat_log(f"Error consuming {resource_key} for crafting. Aborted.")
                     return
 
             # Add crafted item
             self.player.add_item(item_key, 1)
             self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
-
-    def cook_item(self, item_key: str):
-        """Cooks an item if the player has the required resources and is near a cooking station."""
-        if item_key not in ITEM_DEFINITIONS:
-            self.add_message_to_chat_log(f"You don't know how to cook '{item_key}'.")
-            return
-
-        recipe = ITEM_DEFINITIONS[item_key].get("cooking_recipe")
-        if not recipe:
-            self.add_message_to_chat_log(f"There is no cooking recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
-            return
-
-        # Check for cooking station
-        station_found = False
-        for dx in range(-1, 2):
-            for dy in range(-1, 2):
-                if dx == 0 and dy == 0: continue
-                tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
-                if tile and hasattr(tile, "properties") and tile.properties.get("interaction_hint") == "cook":
-                    station_found = True
-                    break
-            if station_found:
-                break
-
-        if not station_found:
-            self.add_message_to_chat_log("You need to be near a fire to cook.")
-            return
-
-        can_cook = True
-        for resource_key, required_qty in recipe["ingredients"].items():
-            if not self.player.has_item(resource_key, required_qty):
-                self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
-                can_cook = False
-                break
-
-        if can_cook:
-            # Consume resources
-            for resource_key, required_qty in recipe["ingredients"].items():
-                self.player.remove_item(resource_key, required_qty)
-
-            # Add cooked item
-            self.player.add_item(item_key, 1)
-            self.add_message_to_chat_log(f"You cooked a {ITEM_DEFINITIONS[item_key]['name']}!")
+        else:
+            # Message about missing resources already shown by has_item check.
+            pass
 
 
     def use_item(self, item_key: str):
@@ -5366,9 +5018,6 @@ class World:
         elif active_quest_data["type"] == "fetch":
             if self.player.has_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"]):
                 is_complete = True
-        elif active_quest_data["type"] == "action":
-            if active_quest_data.get("progress", 0) >= active_quest_data.get("action_count", 0):
-                is_complete = True
 
         dialogue_key = "dialogue_complete_report" if is_complete else "dialogue_incomplete_report"
         npc_dialogue = quest_def.get(dialogue_key, "...")
@@ -5406,10 +5055,6 @@ class World:
                 self.player.add_item(item_key, qty)
                 item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
                 self.add_message_to_chat_log(f"You received {qty}x {item_name}.")
-
-            reward_reputation = quest_def.get("reward_reputation", {})
-            for faction_id, amount in reward_reputation.items():
-                self.player.adjust_reputation(faction_id, amount)
 
             log_completion_msg = quest_def.get("completion_message_log", f"Quest '{active_quest_data['title']}' completed.")
             self.add_message_to_chat_log(log_completion_msg)

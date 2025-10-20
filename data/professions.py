@@ -270,19 +270,6 @@ PROFESSIONS = {
             }
         ],
         "default_sub_task_sequence": ["fish_at_spot", "store_fish"]
-    },
-    "Builder": {
-        "display_name": "Builder",
-        "wage": 25,
-        "description": "Constructs new buildings for the village.",
-        "work_building_categories": ["Construction Site"],
-        "sub_tasks": [
-            {"id": "fetch_stone", "display_name": "Fetching Stone", "duration_ticks": 20, "action_verb": "gathering"},
-            {"id": "lay_foundation", "display_name": "Laying Foundation", "duration_ticks": 50, "action_verb": "building"},
-            {"id": "fetch_wood", "display_name": "Fetching Wood", "duration_ticks": 20, "action_verb": "gathering"},
-            {"id": "build_walls", "display_name": "Building Walls", "duration_ticks": 60, "action_verb": "building"}
-        ],
-        "default_sub_task_sequence": ["fetch_stone", "lay_foundation", "fetch_wood", "build_walls"]
     }
     # More professions can be added here
 }

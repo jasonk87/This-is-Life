@@ -31,9 +31,9 @@ def execute_interaction(world: World, action: str):
             world.needs_text_input = True # Signal main loop to start text input
     elif action == "Trade":
         if isinstance(selected_entity_data, world.NPC) and selected_entity_data.profession == "Merchant":
-            world.trade_ui_npc_target = selected_entity_data
-            world.initialize_trade_session()
+            world.initialize_trade_session(selected_entity_data)
             world.trade_ui_active = True
+            world.game_state = "TRADE_MENU" # Set game state
     elif action == "Attack":
         if isinstance(selected_entity_data, world.NPC):
             world.player_attempt_attack(selected_entity_data)
@@ -231,35 +231,28 @@ def main():
                         world.chat_ui_input_line += event.text
 
                 elif isinstance(event, tcod.event.KeyDown):
-                    # --- UI Mode: Trade UI Active ---
-                    if world.trade_ui_active:
+                    # --- Game State: Trade Menu ---
+                    if world.game_state == "TRADE_MENU":
+                        ctx = world.trade_ui_context
                         if event.sym == tcod.event.KeySym.ESCAPE:
+                            world.game_state = "PLAYING"
                             world.trade_ui_active = False
                             world.add_message_to_chat_log("Trade cancelled.")
-                            world.trade_ui_npc_target = None
                         elif event.sym == tcod.event.KeySym.TAB:
-                            world.trade_ui_player_selling = not world.trade_ui_player_selling
-                            if world.trade_ui_player_selling: world.trade_ui_player_item_index = 0
-                            else: world.trade_ui_merchant_item_index = 0
+                            ctx["active_panel"] = "MERCHANT" if ctx["active_panel"] == "PLAYER" else "PLAYER"
                         elif event.sym == tcod.event.KeySym.UP:
-                            if world.trade_ui_player_selling:
-                                if world.trade_ui_player_inventory_snapshot:
-                                    world.trade_ui_player_item_index = (world.trade_ui_player_item_index - 1) % len(world.trade_ui_player_inventory_snapshot)
-                            else: # Merchant view
-                                if world.trade_ui_merchant_inventory_snapshot:
-                                    world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index - 1) % len(world.trade_ui_merchant_inventory_snapshot)
+                            if ctx["active_panel"] == "PLAYER" and ctx["player_inventory_snapshot"]:
+                                ctx["player_item_index"] = (ctx["player_item_index"] - 1) % len(ctx["player_inventory_snapshot"])
+                            elif ctx["active_panel"] == "MERCHANT" and ctx["merchant_inventory_snapshot"]:
+                                ctx["merchant_item_index"] = (ctx["merchant_item_index"] - 1) % len(ctx["merchant_inventory_snapshot"])
                         elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.trade_ui_player_selling:
-                                if world.trade_ui_player_inventory_snapshot:
-                                    world.trade_ui_player_item_index = (world.trade_ui_player_item_index + 1) % len(world.trade_ui_player_inventory_snapshot)
-                            else: # Merchant view
-                                if world.trade_ui_merchant_inventory_snapshot:
-                                    world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index + 1) % len(world.trade_ui_merchant_inventory_snapshot)
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E: # Buy/Sell selected item
-                            world.handle_trade_action() # New method in engine.py to process the transaction
-                            # After action, re-initialize to refresh snapshots and indices
-                            if world.trade_ui_active: # If trade didn't auto-close
-                                world.initialize_trade_session()
+                            if ctx["active_panel"] == "PLAYER" and ctx["player_inventory_snapshot"]:
+                                ctx["player_item_index"] = (ctx["player_item_index"] + 1) % len(ctx["player_inventory_snapshot"])
+                            elif ctx["active_panel"] == "MERCHANT" and ctx["merchant_inventory_snapshot"]:
+                                ctx["merchant_item_index"] = (ctx["merchant_item_index"] + 1) % len(ctx["merchant_inventory_snapshot"])
+                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
+                            world.handle_trade_action()
+                            # The handle_trade_action now refreshes the session, keeping indices in bounds.
 
                     # --- UI Mode: Chat UI Active ---
                     elif world.chat_ui_active:
@@ -361,19 +354,58 @@ def main():
                         elif event.sym == tcod.event.KeySym.ESCAPE:
                             ctx["active"] = False
 
-                    # --- UI Mode: Info Menu Active (or toggling it) ---
+                    # --- UI Mode: Inventory Menu Active (or toggling it) ---
                     elif event.sym == tcod.event.KeySym.I:
-                        # This check ensures info menu doesn't open if other modal UIs are active
-                        if not world.chat_ui_active and not world.trade_ui_active and not world.interaction_menu_active: # Added trade_ui_active check
-                             world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
+                        if world.game_state == "PLAYING":
+                            world.game_state = "INVENTORY_MENU"
+                            world.inventory_menu_context["active"] = True
+                        elif world.game_state == "INVENTORY_MENU":
+                            world.game_state = "PLAYING"
+                            world.inventory_menu_context["active"] = False
+
+                    # --- Game State: Inventory Menu ---
+                    elif world.game_state == "INVENTORY_MENU":
+                        if event.sym == tcod.event.KeySym.UP:
+                            if world.player.inventory:
+                                world.inventory_menu_context["selected_item_index"] = \
+                                    (world.inventory_menu_context["selected_item_index"] - 1) % len(world.player.inventory)
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            if world.player.inventory:
+                                world.inventory_menu_context["selected_item_index"] = \
+                                    (world.inventory_menu_context["selected_item_index"] + 1) % len(world.player.inventory)
+                        elif event.sym == tcod.event.KeySym.ESCAPE:
+                            world.game_state = "PLAYING"
+                            world.inventory_menu_context["active"] = False
+
+                    # --- Game State: Crafting Menu ---
+                    elif world.game_state == "CRAFTING_MENU":
+                        if event.sym == tcod.event.KeySym.UP:
+                            if world.crafting_menu_context["craftable_recipes"]:
+                                world.crafting_menu_context["selected_recipe_index"] = \
+                                    (world.crafting_menu_context["selected_recipe_index"] - 1) % len(world.crafting_menu_context["craftable_recipes"])
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            if world.crafting_menu_context["craftable_recipes"]:
+                                world.crafting_menu_context["selected_recipe_index"] = \
+                                    (world.crafting_menu_context["selected_recipe_index"] + 1) % len(world.crafting_menu_context["craftable_recipes"])
+                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
+                            if world.crafting_menu_context["craftable_recipes"]:
+                                selected_recipe = world.crafting_menu_context["craftable_recipes"][world.crafting_menu_context["selected_recipe_index"]]
+                                world.craft_item(selected_recipe["item_key"])
+                                # Refresh the list to update craftable status
+                                world.populate_craftable_recipes()
+                        elif event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.C:
+                            world.game_state = "PLAYING"
+                            world.crafting_menu_context["active"] = False
 
                     # --- Game State: Playing (No other UI is active) ---
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
                             dx, dy = move_keys[event.sym]
                             world.handle_player_movement(dx, dy)
-                        elif event.sym == tcod.event.KeySym.C: # Craft healing salve
-                            world.craft_item("healing_salve")
+                        elif event.sym == tcod.event.KeySym.C:
+                            world.populate_craftable_recipes()
+                            world.game_state = "CRAFTING_MENU"
+                            world.crafting_menu_context["active"] = True
                         elif event.sym == tcod.event.KeySym.S: # Craft crude spear
                             world.craft_item("crude_spear")
                         elif event.sym == tcod.event.KeySym.X: # Craft wooden shield

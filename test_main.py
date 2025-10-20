@@ -69,7 +69,7 @@ class TestTemperatureSystem(unittest.TestCase):
         self.world._update_player_temperature()
         initial_temp = self.world.ambient_temperature
 
-        fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_simple"]
+        fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_simple_lit"]
         fire_pit_tile = Tile(char=fire_pit_def['char'], color=fire_pit_def['color'], passable=True, name="fire_pit", properties=fire_pit_def['properties'])
 
         # Place a fire pit near the player

@@ -83,6 +83,7 @@ class NPC:
         self.hearing_radius: int = DEFAULT_HEARING_RADIUS # Standard hearing range for NPCs
 
         self.woodcutter_search_radius: int = 15 # Specific to woodcutter AI
+        self.is_sheltered: bool = False
 
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
         self.task_target_entity_id: int | None = None

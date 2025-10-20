@@ -33,6 +33,7 @@ COLORS = {
     "crimson": (220, 20, 60),
     "light_sepia": (208, 188, 142),
     "sienna": (160, 82, 45),
+    "orange": (255, 165, 0),
 }
 
 # --- Tile Definitions (Back to ASCII!) ---

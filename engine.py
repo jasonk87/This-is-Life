@@ -39,6 +39,7 @@ from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data
 from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
+from data.environment import WEATHER_TYPES
 
 import json
 import uuid
@@ -188,6 +189,7 @@ class Player:
         self.status_effects: list[str] = [] # e.g., "Freezing", "Overheating"
         self.is_wet: bool = False
         self.wetness_timer: int = 0
+        self.is_sheltered: bool = False
         self.equipped_armor: dict[str, str | None] = {
             "head": None,
             "body": None,
@@ -372,6 +374,7 @@ class World:
         self.current_season_index: int = 0
         self.current_day: int = 0
         self.ambient_temperature: float = 20.0 # Default starting temp
+        self.current_weather: str = "clear"
 
         # New Interaction Context
         self.interaction_context = {
@@ -491,6 +494,79 @@ class World:
             season_name = self.seasons[self.current_season_index]
             self.add_message_to_chat_log(f"The season has changed to {season_name}.")
 
+    def _update_weather(self):
+        """Periodically updates the world's weather."""
+        # For now, a simple chance to change every N ticks
+        if self.game_time % 500 != 0:
+            return
+
+        possible_weathers = ["clear", "rain", "snow"]
+        # Weather probabilities based on season
+        season_name = self.seasons[self.current_season_index]
+        if season_name == "Spring":
+            weights = [0.6, 0.4, 0.0] # More rain, no snow
+        elif season_name == "Summer":
+            weights = [0.8, 0.2, 0.0] # Less rain
+        elif season_name == "Autumn":
+            weights = [0.5, 0.4, 0.1] # Rain and a little snow
+        elif season_name == "Winter":
+            weights = [0.4, 0.1, 0.5] # Lots of snow
+        else:
+            weights = [0.7, 0.2, 0.1] # Default
+
+        new_weather = random.choices(possible_weathers, weights=weights, k=1)[0]
+
+        if new_weather != self.current_weather:
+            self.current_weather = new_weather
+            self.add_message_to_chat_log(f"The weather has changed to {self.current_weather}.")
+
+            # Handle immediate effects of weather change
+            if self.current_weather in ["rain", "snow"]:
+                self._extinguish_all_outdoor_fires()
+
+
+    def _extinguish_all_outdoor_fires(self):
+        """Puts out all fires that are not inside a building."""
+        fire_pit_lit_def = DECORATION_ITEM_DEFINITIONS.get("fire_pit_simple_lit")
+        if not fire_pit_lit_def:
+            return
+
+        extinguishes_to_key = fire_pit_lit_def.get("properties", {}).get("extinguishes_to")
+        if not extinguishes_to_key:
+            return
+
+        unlit_def = DECORATION_ITEM_DEFINITIONS.get(extinguishes_to_key)
+        if not unlit_def:
+            return
+
+        extinguished_count = 0
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if not chunk.is_generated:
+                    continue
+
+                for y_local in range(CHUNK_SIZE):
+                    for x_local in range(CHUNK_SIZE):
+                        tile = chunk.tiles[y_local][x_local]
+                        if tile.name == fire_pit_lit_def["name"]:
+                            world_x = x_chunk * CHUNK_SIZE + x_local
+                            world_y = y_chunk * CHUNK_SIZE + y_local
+
+                            # Check if the tile is inside any building
+                            is_inside = False
+                            for building in self.buildings_by_id.values():
+                                if building.contains_global_coords(world_x, world_y):
+                                    is_inside = True
+                                    break
+
+                            if not is_inside:
+                                self._change_map_tile((world_x, world_y), unlit_def)
+                                extinguished_count += 1
+
+        if extinguished_count > 0:
+            self.add_message_to_chat_log("The rain has extinguished the outdoor fires.")
+
     def _update_player_temperature(self):
         """Calculates ambient temperature and updates player's body temperature."""
         player = self.player
@@ -505,9 +581,10 @@ class World:
 
         time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
 
-        # More modifiers can be added (e.g., elevation, weather)
+        weather_def = WEATHER_TYPES.get(self.current_weather, {})
+        weather_temp_mod = weather_def.get("effects", {}).get("temperature_modifier", 0.0)
 
-        ambient_temp = base_temp + biome_temp_mod + time_of_day_mod
+        ambient_temp = base_temp + biome_temp_mod + time_of_day_mod + weather_temp_mod
 
         # Check for nearby heat sources
         heat_source_bonus = 0.0
@@ -531,6 +608,30 @@ class World:
         # Simplified model: player temperature moves towards a target equilibrium
         player.recalculate_stats() # Recalculate insulation from armor
         total_insulation = player.base_temperature_resistance + player.clothing_insulation
+
+        # Check if player is sheltered
+        player.is_sheltered = False
+        building_at_player = self.get_building_at(player.x, player.y)
+        if building_at_player:
+            player.is_sheltered = True
+
+        # Apply wetness if raining and not sheltered
+        weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
+        if weather_effects.get("applies_wetness") and not player.is_sheltered:
+            if not player.is_wet:
+                self.add_message_to_chat_log("You are getting wet from the rain.")
+            player.is_wet = True
+            player.wetness_timer = 200 # ~4 weather updates to dry off
+
+        # Wetness effect
+        if player.is_wet:
+            total_insulation *= 0.5 # Wetness reduces insulation effectiveness
+            if player.wetness_timer > 0 and not (weather_effects.get("applies_wetness") and not player.is_sheltered):
+                player.wetness_timer -= 1
+            elif player.wetness_timer <= 0:
+                player.is_wet = False
+                self.add_message_to_chat_log("You have dried off.")
+
         target_temp_equilibrium = self.ambient_temperature + total_insulation
 
         # Rate of change based on difference between current body temp and equilibrium
@@ -540,6 +641,8 @@ class World:
 
         # 3. Apply Effects
         player.status_effects.clear()
+        if player.is_wet:
+            player.status_effects.append("Wet")
         if player.temperature < 35.0: # Hypothermia threshold
             player.status_effects.append("Freezing")
             # Apply damage or other penalties
@@ -1302,6 +1405,42 @@ class World:
 
                 needs_based_action_taken = False
 
+                # --- Weather Reaction ---
+                is_bad_weather = self.current_weather in ["rain", "snow"]
+                npc.is_sheltered = self.get_building_at(npc.x, npc.y) is not None
+
+                # If weather was bad but is now clear, and NPC was seeking shelter or waiting out the storm
+                if not is_bad_weather and npc.previous_task and npc.current_task in ["seeking_shelter", "idle", "at home", "socializing", "at the well"]:
+                    self.add_message_to_chat_log(f"The weather has cleared. {npc.name} gets back to what they were doing.")
+                    npc.current_task = npc.previous_task
+                    npc.previous_task = None
+                    # The regular scheduling logic will now handle pathing for the restored task.
+                    # We should clear any existing path that might have been for sheltering.
+                    npc.current_path = []
+                    npc.current_destination_coords = None
+
+                if is_bad_weather and not npc.is_sheltered and npc.current_task not in ["seeking_shelter", "going_home"]:
+                    npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
+                    npc.current_task = "seeking_shelter"
+                    self.add_message_to_chat_log(f"{npc.name} is seeking shelter from the {self.current_weather}.")
+
+                    # Find nearest shelter (home or tavern)
+                    shelter_building = self.buildings_by_id.get(npc.home_building_id) if npc.home_building_id else self._find_nearest_tavern(npc)
+
+                    if shelter_building:
+                        shelter_coords = (shelter_building.global_center_x, shelter_building.global_center_y)
+                        path = self.calculate_path(npc.x, npc.y, shelter_coords[0], shelter_coords[1])
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = shelter_coords
+                        else:
+                            npc.current_task = "idle_confused" # Can't find path to shelter
+                    else:
+                        npc.current_task = "wandering" # No shelter found, just wander miserably
+
+                    needs_based_action_taken = True
+
+
                 # --- Crime Reporting Task ---
                 if npc.current_task == "going_to_report_crime":
                     if npc.task_target_coords:
@@ -1628,27 +1767,29 @@ class World:
                     elif is_leisure_time and npc.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
                         if npc.leisure_timer > 0:
                             npc.leisure_timer -= 1
-                        elif random.random() < 0.05: # 5% chance to go to the tavern
-                            tavern = self._find_nearest_tavern(npc)
-                            if tavern:
-                                new_task_label = "going to tavern"
-                                destination_coords = (tavern.global_center_x, tavern.global_center_y)
-                        elif random.random() < 0.05: # 5% chance to visit a friend
-                            friend = random.choice([n for n in self.village_npcs if n.id != npc.id])
-                            if friend and friend.home_building_id:
-                                friend_home = self.buildings_by_id.get(friend.home_building_id)
-                                if friend_home:
-                                    new_task_label = "visiting friend"
-                                    destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
-                                    npc.task_target_entity_id = friend.id
-                                    npc.leisure_timer = random.randint(100, 300) # Stay for a while
-                        elif random.random() < 0.05: # 5% chance to go fishing
-                            npc_village = self._get_village_for_npc(npc)
-                            if npc_village and "fishing_spot" in npc_village.interaction_points:
-                                fishing_spot = random.choice(npc_village.interaction_points["fishing_spot"])
-                                new_task_label = "fishing"
-                                destination_coords = fishing_spot
-                                npc.leisure_timer = random.randint(100, 300)
+                        # NPCs should only start new outdoor leisure activities if the weather is clear.
+                        elif not is_bad_weather:
+                            if random.random() < 0.05: # 5% chance to go to the tavern
+                                tavern = self._find_nearest_tavern(npc)
+                                if tavern:
+                                    new_task_label = "going to tavern"
+                                    destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                            elif random.random() < 0.05: # 5% chance to visit a friend
+                                friend = random.choice([n for n in self.village_npcs if n.id != npc.id])
+                                if friend and friend.home_building_id:
+                                    friend_home = self.buildings_by_id.get(friend.home_building_id)
+                                    if friend_home:
+                                        new_task_label = "visiting friend"
+                                        destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
+                                        npc.task_target_entity_id = friend.id
+                                        npc.leisure_timer = random.randint(100, 300) # Stay for a while
+                            elif random.random() < 0.05: # 5% chance to go fishing
+                                npc_village = self._get_village_for_npc(npc)
+                                if npc_village and "fishing_spot" in npc_village.interaction_points:
+                                    fishing_spot = random.choice(npc_village.interaction_points["fishing_spot"])
+                                    new_task_label = "fishing"
+                                    destination_coords = fishing_spot
+                                    npc.leisure_timer = random.randint(100, 300)
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home to sleep"]:

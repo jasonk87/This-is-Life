@@ -99,14 +99,28 @@ DECORATION_ITEM_DEFINITIONS = {
         "description": "A ring of stones for a small fire.",
         "char": "o",
         "color": COLORS["grey"],
-        "passable": True, # Can walk over it when unlit
+        "passable": True,
         "blocks_fov": False,
-        "item_type_tags": ["interactable", "light_source_potential", "heat_source"],
+        "item_type_tags": ["interactable"],
+        "properties": {
+            "interaction_hint": "light_fire",
+            "lights_to": "fire_pit_simple_lit"
+        }
+    },
+    "fire_pit_simple_lit": {
+        "name": "Lit Fire Pit",
+        "description": "A crackling fire.",
+        "char": "o",
+        "color": COLORS["orange"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "heat_source"],
         "properties": {
             "heat_source": True,
-            "interaction_hint": "light_fire", # Conceptual action
-            "heat_source_radius": 3,
-            "heat_intensity": 15.0 # Degrees Celsius to add to ambient temp
+            "interaction_hint": "extinguish",
+            "heat_source_radius": 4,
+            "heat_intensity": 20.0,
+            "extinguishes_to": "fire_pit_simple"
         }
     },
     "corpse_humanoid": {

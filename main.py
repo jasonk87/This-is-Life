@@ -6,7 +6,7 @@ import tcod.tileset
 import os
 from engine import World
 from config import (
-    SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT,
+    SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES,
     REP_CRIMINAL, REP_HERO # Import reputation keys
 )
 from data.items import ITEM_DEFINITIONS

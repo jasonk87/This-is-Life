@@ -30,9 +30,17 @@ class TestGame(unittest.TestCase):
 class TestTemperatureSystem(unittest.TestCase):
     @patch('engine.World._call_ollama')
     def setUp(self, mock_call_ollama):
+        from engine import Chunk
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         mock_call_ollama.return_value = json.dumps(mock_npc_data)
         self.world = World()
+        # Pre-populate a chunk for the tests to use, avoiding KeyErrors
+        self.world.chunks[(0, 0)] = Chunk("plains")
+        # Initialize the tiles for this chunk to avoid errors when placing items
+        from tile_types import Tile
+        from data.tiles import TILE_DEFINITIONS
+        plains_def = TILE_DEFINITIONS["plains"]
+        self.world.chunks[(0, 0)].tiles = [[Tile(plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"]) for _ in range(20)] for _ in range(20)]
 
     def test_season_progression(self):
         from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
@@ -50,8 +58,8 @@ class TestTemperatureSystem(unittest.TestCase):
         # Move player to a snow biome for test
         self.world.player.x = 1
         self.world.player.y = 1
-        chunk = self.world.chunks[0][0]
-        chunk.biome = "snow"
+        self.world.chunks[(0, 0)].biome = "snow"
+
 
         self.world._update_player_temperature()
 
@@ -65,6 +73,11 @@ class TestTemperatureSystem(unittest.TestCase):
         from data.decorations import DECORATION_ITEM_DEFINITIONS
         from tile_types import Tile
 
+        # Set a deterministic state for the test
+        self.world.player.x = 10
+        self.world.player.y = 10
+        self.world.current_season_index = 0 # Spring
+
         # First, get temperature without any heat source
         self.world._update_player_temperature()
         initial_temp = self.world.ambient_temperature
@@ -74,7 +87,7 @@ class TestTemperatureSystem(unittest.TestCase):
 
         # Place a fire pit near the player
         fire_x, fire_y = self.world.player.x + 1, self.world.player.y
-        self.world.chunks[fire_y // 20][fire_x // 20].tiles[fire_y % 20][fire_x % 20] = fire_pit_tile
+        self.world.chunks[(fire_y // 20, fire_x // 20)].tiles[fire_y % 20][fire_x % 20] = fire_pit_tile
 
         # Rerun temperature update to capture heat source effect
         self.world._update_player_temperature()

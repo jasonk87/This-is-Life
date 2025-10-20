@@ -8,7 +8,7 @@ import time
 from entities.base import NPC, DireWolf # Added DireWolf
 from entities.tree import Tree, OakTree, AppleTree, PearTree # Tree classes seem partially defined/used.
 from config import (
-    WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
+    POI_DENSITY, CHUNK_SIZE,
     NOISE_SCALE, NOISE_OCTAVES, NOISE_PERSISTENCE, NOISE_LACUNARITY,
     ELEVATION_DEEP_WATER, ELEVATION_WATER, ELEVATION_MOUNTAIN, ELEVATION_SNOW,
     # NPC Scheduling Configs
@@ -354,13 +354,11 @@ class World:
     """World class now uses a generator for a more complex map."""
     def __init__(self):
         self.chat_log = [] # Stores chat messages
-        self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
-        self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
-        self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
+        self.player = Player(CHUNK_SIZE // 2, CHUNK_SIZE // 2)
         self.player.world_ref = self
         self.pending_quest_offer: dict | None = None # For quests offered by NPCs before player accepts
-        self.generator = WorldGenerator(self.chunk_width, self.chunk_height)
-        self.chunks = self._initialize_chunks()
+        self.generator = WorldGenerator(200, 200) # Placeholder size, not used for bounds
+        self.chunks = {} # Changed from list of lists to a dictionary
         self.npcs = []
         self.village_npcs = []
         self.buildings_by_id = {}
@@ -422,26 +420,17 @@ class World:
         self.current_fov_radius = FOV_RADIUS_DAY # Default
 
         # Initialize FOV related maps
-        self.player_fov_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F")
-        self.npc_fov_maps: dict[int, np.ndarray] = {}
-        self.explored_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=False, order="F")
-        self.transparency_map = np.full((WORLD_WIDTH, WORLD_HEIGHT), fill_value=True, order="F")
-
+        self.player_fov_map: set[tuple[int, int]] = set()
+        self.npc_fov_maps: dict[int, set[tuple[int, int]]] = {}
+        self.explored_map: set[tuple[int, int]] = set()
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
 
         self._find_starting_position()
 
-        # Build transparency map - this is expensive on init as it forces all chunks to generate.
-        # Consider dynamic updates or pre-generation if performance becomes an issue.
-        for x_map in range(WORLD_WIDTH):
-            for y_map in range(WORLD_HEIGHT):
-                tile = self.get_tile_at(x_map, y_map) # Forces chunk generation
-                if tile and tile.blocks_fov:
-                    self.transparency_map[x_map, y_map] = False
-
         self._update_light_level_and_fov() # Initialize based on game time 0
-        self.update_fov() # Initial FOV calculation
+        # Defer initial FOV calculation until the first game tick after player is placed.
+        # self.update_fov()
         self._update_player_hunger_thirst(initial_setup=True) # Initial status update
 
     def _update_player_hunger_thirst(self, initial_setup=False):
@@ -534,18 +523,16 @@ class World:
 
     def _water_crops(self):
         """Increases the growth progress of all growing crops."""
-        for y_chunk in range(self.chunk_height):
-            for x_chunk in range(self.chunk_width):
-                chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
-                    continue
+        for (chunk_x, chunk_y), chunk in self.chunks.items():
+            if not chunk.is_generated:
+                continue
 
-                for y_local in range(CHUNK_SIZE):
-                    for x_local in range(CHUNK_SIZE):
-                        tile = chunk.tiles[y_local][x_local]
-                        if tile.name == "Growing Wheat Crop":
-                            if "growth_progress" in tile.properties:
-                                tile.properties["growth_progress"] += 5
+            for y_local in range(CHUNK_SIZE):
+                for x_local in range(CHUNK_SIZE):
+                    tile = chunk.tiles[y_local][x_local]
+                    if tile.name == "Growing Wheat Crop":
+                        if "growth_progress" in tile.properties:
+                            tile.properties["growth_progress"] += 5
 
 
     def _extinguish_all_outdoor_fires(self):
@@ -563,29 +550,27 @@ class World:
             return
 
         extinguished_count = 0
-        for y_chunk in range(self.chunk_height):
-            for x_chunk in range(self.chunk_width):
-                chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
-                    continue
+        for (chunk_x, chunk_y), chunk in self.chunks.items():
+            if not chunk.is_generated:
+                continue
 
-                for y_local in range(CHUNK_SIZE):
-                    for x_local in range(CHUNK_SIZE):
-                        tile = chunk.tiles[y_local][x_local]
-                        if tile.name == fire_pit_lit_def["name"]:
-                            world_x = x_chunk * CHUNK_SIZE + x_local
-                            world_y = y_chunk * CHUNK_SIZE + y_local
+            for y_local in range(CHUNK_SIZE):
+                for x_local in range(CHUNK_SIZE):
+                    tile = chunk.tiles[y_local][x_local]
+                    if tile.name == fire_pit_lit_def["name"]:
+                        world_x = chunk_x * CHUNK_SIZE + x_local
+                        world_y = chunk_y * CHUNK_SIZE + y_local
 
-                            # Check if the tile is inside any building
-                            is_inside = False
-                            for building in self.buildings_by_id.values():
-                                if building.contains_global_coords(world_x, world_y):
-                                    is_inside = True
-                                    break
+                        # Check if the tile is inside any building
+                        is_inside = False
+                        for building in self.buildings_by_id.values():
+                            if building.contains_global_coords(world_x, world_y):
+                                is_inside = True
+                                break
 
-                            if not is_inside:
-                                self._change_map_tile((world_x, world_y), unlit_def)
-                                extinguished_count += 1
+                        if not is_inside:
+                            self._change_map_tile((world_x, world_y), unlit_def)
+                            extinguished_count += 1
 
         if extinguished_count > 0:
             self.add_message_to_chat_log("The rain has extinguished the outdoor fires.")
@@ -608,19 +593,17 @@ class World:
         else:
             return # No change needed
 
-        for y_chunk in range(self.chunk_height):
-            for x_chunk in range(self.chunk_width):
-                chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
-                    continue
+        for (chunk_x, chunk_y), chunk in self.chunks.items():
+            if not chunk.is_generated:
+                continue
 
-                for y_local in range(CHUNK_SIZE):
-                    for x_local in range(CHUNK_SIZE):
-                        tile = chunk.tiles[y_local][x_local]
-                        if tile.name == from_name:
-                            world_x = x_chunk * CHUNK_SIZE + x_local
-                            world_y = y_chunk * CHUNK_SIZE + y_local
-                            self._change_map_tile((world_x, world_y), to_def)
+            for y_local in range(CHUNK_SIZE):
+                for x_local in range(CHUNK_SIZE):
+                    tile = chunk.tiles[y_local][x_local]
+                    if tile.name == from_name:
+                        world_x = chunk_x * CHUNK_SIZE + x_local
+                        world_y = chunk_y * CHUNK_SIZE + y_local
+                        self._change_map_tile((world_x, world_y), to_def)
 
     def _update_player_temperature(self):
         """Calculates ambient temperature and updates player's body temperature."""
@@ -631,8 +614,22 @@ class World:
         base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
 
         player_tile = self.get_tile_at(player.x, player.y)
-        player_chunk = self.chunks[player.y // CHUNK_SIZE][player.x // CHUNK_SIZE]
-        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(player_chunk.biome, 0)
+        chunk_x = player.x // CHUNK_SIZE
+        chunk_y = player.y // CHUNK_SIZE
+
+        # Ensure the chunk exists before accessing it, get_tile_at should have created it
+        player_chunk = self.chunks.get((chunk_x, chunk_y))
+
+        if player_chunk:
+            biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(player_chunk.biome, 0)
+        else:
+            # Fallback if chunk somehow doesn't exist after get_tile_at
+            # This might happen if get_tile_at's generation logic has issues or is mocked.
+            # For a test environment, this might point to needing to pre-create the chunk.
+            # For live code, this would be a more serious error.
+            # Defaulting to 0 modifier.
+            biome_temp_mod = 0
+            print(f"Warning: Player's chunk ({chunk_x}, {chunk_y}) not found during temperature update.")
 
         time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
 
@@ -645,17 +642,16 @@ class World:
         heat_source_bonus = 0.0
         for y in range(player.y - 5, player.y + 6):
             for x in range(player.x - 5, player.x + 6):
-                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
-                    tile = self.get_tile_at(x, y)
-                    if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
-                        radius = tile.properties.get("heat_source_radius", 0)
-                        intensity = tile.properties.get("heat_intensity", 0)
-                        distance = max(abs(player.x - x), abs(player.y - y))
-                        if distance <= radius:
-                            # Simple linear falloff
-                            heat_bonus = intensity * (1 - (distance / radius))
-                            if heat_bonus > heat_source_bonus:
-                                heat_source_bonus = heat_bonus
+                tile = self.get_tile_at(x, y)
+                if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
+                    radius = tile.properties.get("heat_source_radius", 0)
+                    intensity = tile.properties.get("heat_intensity", 0)
+                    distance = max(abs(player.x - x), abs(player.y - y))
+                    if distance <= radius:
+                        # Simple linear falloff
+                        heat_bonus = intensity * (1 - (distance / radius))
+                        if heat_bonus > heat_source_bonus:
+                            heat_source_bonus = heat_bonus
 
         self.ambient_temperature = ambient_temp + heat_source_bonus
 
@@ -729,8 +725,14 @@ class World:
         season_name = self.seasons[self.current_season_index]
         base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
 
-        npc_chunk = self.chunks[npc.y // CHUNK_SIZE][npc.x // CHUNK_SIZE]
-        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(npc_chunk.biome, 0)
+        chunk_x = npc.x // CHUNK_SIZE
+        chunk_y = npc.y // CHUNK_SIZE
+        npc_chunk = self.chunks.get((chunk_x, chunk_y))
+
+        if npc_chunk:
+            biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(npc_chunk.biome, 0)
+        else:
+            biome_temp_mod = 0
 
         time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
 
@@ -744,16 +746,15 @@ class World:
         # A smaller radius check for NPCs to reduce performance impact
         for y in range(npc.y - 4, npc.y + 5):
             for x in range(npc.x - 4, npc.x + 5):
-                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
-                    tile = self.get_tile_at(x, y)
-                    if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
-                        radius = tile.properties.get("heat_source_radius", 0)
-                        intensity = tile.properties.get("heat_intensity", 0)
-                        distance = max(abs(npc.x - x), abs(npc.y - y))
-                        if distance <= radius:
-                            heat_bonus = intensity * (1 - (distance / radius))
-                            if heat_bonus > heat_source_bonus:
-                                heat_source_bonus = heat_bonus
+                tile = self.get_tile_at(x, y)
+                if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
+                    radius = tile.properties.get("heat_source_radius", 0)
+                    intensity = tile.properties.get("heat_intensity", 0)
+                    distance = max(abs(npc.x - x), abs(npc.y - y))
+                    if distance <= radius:
+                        heat_bonus = intensity * (1 - (distance / radius))
+                        if heat_bonus > heat_source_bonus:
+                            heat_source_bonus = heat_bonus
 
         effective_ambient_temp = ambient_temp + heat_source_bonus
 
@@ -814,58 +815,105 @@ class World:
 
     def update_fov(self) -> None:
         """
-        Updates the player's field of view map and explored tiles.
-        Also updates FOV for all NPCs.
+        Updates the player's and NPCs' field of view maps and explored tiles.
+        Now uses dynamic, local transparency maps for infinite world compatibility.
         """
-        # Player FOV
+        # --- Player FOV ---
         base_ambient_fov_radius = self.current_fov_radius
         effective_player_fov_radius = base_ambient_fov_radius
 
         if self.player.equipped_light_item_key and self.player.current_personal_light_radius > 0:
-            # Check for burnout if it has a duration
-            is_active = True
-            if self.player.light_source_active_until_tick != -1 and \
-               self.game_time >= self.player.light_source_active_until_tick:
-                is_active = False # Burnt out, specific burnout logic is handled elsewhere
-                                  # but for FOV calc, it's not providing light now.
-
+            is_active = self.player.light_source_active_until_tick == -1 or self.game_time < self.player.light_source_active_until_tick
             if is_active:
                 effective_player_fov_radius = max(base_ambient_fov_radius, self.player.current_personal_light_radius)
 
-        self.player_fov_map = tcod.map.compute_fov(
-            self.transparency_map,
-            (self.player.x, self.player.y),
-            radius=effective_player_fov_radius, # Use the effective radius
-            algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST # A common algorithm
-        )
-        # Update explored map
-        self.explored_map |= self.player_fov_map
+        # 1. Create a local transparency map around the player
+        fov_diameter = effective_player_fov_radius * 2 + 1
+        local_transparency_map = np.full((fov_diameter, fov_diameter), fill_value=True, order="F")
 
-        # NPC FOVs
-        self.npc_fov_maps.clear() # Clear previous NPC FOV maps
-        for npc in self.village_npcs + self.npcs: # Iterate all relevant NPCs
+        # Top-left corner of the local map in world coordinates
+        map_origin_x = self.player.x - effective_player_fov_radius
+        map_origin_y = self.player.y - effective_player_fov_radius
+
+        for local_y in range(fov_diameter):
+            for local_x in range(fov_diameter):
+                world_x = map_origin_x + local_x
+                world_y = map_origin_y + local_y
+                tile = self.get_tile_at(world_x, world_y)
+                if tile and not tile.transparent:
+                    local_transparency_map[local_y, local_x] = False
+
+        # 2. Compute FOV on the local map
+        # The player's position on the local map is always the center
+        local_player_x = effective_player_fov_radius
+        local_player_y = effective_player_fov_radius
+
+        visible_local_tiles = tcod.map.compute_fov(
+            local_transparency_map,
+            (local_player_y, local_player_x), # tcod expects (y, x)
+            radius=effective_player_fov_radius,
+            algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST
+        )
+
+        # 3. Convert local visible coordinates to global and update sets
+        self.player_fov_map.clear()
+        visible_indices = np.where(visible_local_tiles)
+        for i in range(len(visible_indices[0])):
+            local_y, local_x = visible_indices[0][i], visible_indices[1][i]
+            global_x = map_origin_x + local_x
+            global_y = map_origin_y + local_y
+            self.player_fov_map.add((global_x, global_y))
+
+        # 4. Update explored map
+        self.explored_map.update(self.player_fov_map)
+
+
+        # --- NPC FOVs ---
+        self.npc_fov_maps.clear()
+        for npc in self.village_npcs + self.npcs:
             if npc.is_dead:
                 continue
-            # NPCs use the same global FOV radius for now, can be customized later
-            npc_fov_radius = self.current_fov_radius # Or npc.perception_radius if defined
-            self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
-                self.transparency_map,
-                (npc.x, npc.y),
+
+            npc_fov_radius = self.current_fov_radius
+            npc_fov_diameter = npc_fov_radius * 2 + 1
+            local_npc_transparency_map = np.full((npc_fov_diameter, npc_fov_diameter), fill_value=True, order="F")
+
+            npc_map_origin_x = npc.x - npc_fov_radius
+            npc_map_origin_y = npc.y - npc_fov_radius
+
+            for local_y in range(npc_fov_diameter):
+                for local_x in range(npc_fov_diameter):
+                    world_x = npc_map_origin_x + local_x
+                    world_y = npc_map_origin_y + local_y
+                    tile = self.get_tile_at(world_x, world_y)
+                    if tile and not tile.transparent:
+                        local_npc_transparency_map[local_y, local_x] = False
+
+            local_npc_x = npc_fov_radius
+            local_npc_y = npc_fov_radius
+
+            visible_npc_tiles_local = tcod.map.compute_fov(
+                local_npc_transparency_map,
+                (local_npc_y, local_npc_x),
                 radius=npc_fov_radius,
                 algorithm=tcod.FOV_SYMMETRIC_SHADOWCAST
             )
 
+            npc_fov_set = set()
+            visible_npc_indices = np.where(visible_npc_tiles_local)
+            for i in range(len(visible_npc_indices[0])):
+                local_y, local_x = visible_npc_indices[0][i], visible_npc_indices[1][i]
+                global_x = npc_map_origin_x + local_x
+                global_y = npc_map_origin_y + local_y
+                npc_fov_set.add((global_x, global_y))
+
+            self.npc_fov_maps[npc.id] = npc_fov_set
+
             # NPC Item Perception within their FOV
             npc.perceived_item_tiles.clear()
-            if npc.id in self.npc_fov_maps: # Should always be true if just computed
-                fov_map_for_npc = self.npc_fov_maps[npc.id]
-                # Iterate through coordinates that are visible to the NPC
-                # np.where returns a tuple of arrays, one for each dimension
-                visible_y_coords, visible_x_coords = np.where(fov_map_for_npc)
-                for i in range(len(visible_x_coords)):
-                    vx, vy = visible_x_coords[i], visible_y_coords[i]
-                    if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
-                        npc.perceived_item_tiles.append((vx,vy))
+            for vx, vy in npc_fov_set:
+                 if (vx, vy) in self.items_on_map and self.items_on_map[(vx, vy)]:
+                    npc.perceived_item_tiles.append((vx, vy))
 
 
     def _update_light_level_and_fov(self):
@@ -909,25 +957,6 @@ class World:
         # if self.game_time % 10 == 0: # Log less frequently
         #     print(f"Time: {self.game_time}, Ratio: {time_ratio:.2f}, Light: {self.current_light_level_name}, FOV: {self.current_fov_radius}")
 
-
-    def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
-        """
-        Callback for tcod.path.AStar.
-        Returns movement cost from (old_x, old_y) to (new_x, new_y).
-        """
-        if not (0 <= new_x < WORLD_WIDTH and 0 <= new_y < WORLD_HEIGHT):
-            return 0  # Impassable (out of bounds)
-
-        tile = self.get_tile_at(new_x, new_y)
-        if not tile or not tile.passable:
-            return 0  # Impassable
-
-        # Diagonal movement cost can be higher if desired, e.g., sqrt(2) or 1.414
-        # For simplicity, we'll use 1 for cardinal and diagonal.
-        # tcod's AStar handles cardinal/diagonal based on graph/diagnal params.
-        return 1
-
-
     def calculate_path(self, start_x: int, start_y: int, end_x: int, end_y: int) -> list[tuple[int, int]]:
         """
         Calculates a path from (start_x, start_y) to (end_x, end_y) using A*.
@@ -952,39 +981,41 @@ class World:
         # for a grid, but it's good practice if more complex graph structures arise.
         # For now, we can directly use the AStar with `cost` and `diagonal` parameters.
 
-        weather_effects = WEATHER_TYPES.get(self.current_weather, {}).get("effects", {})
-        movement_cost_modifier = weather_effects.get("slows_movement", 1.0)
-        base_cost = round(1 * movement_cost_modifier)
+        # Define the search area for pathfinding. It should encompass start and end points.
+        margin = 10 # Add a margin to handle paths that go around obstacles
+        min_x = min(start_x, end_x) - margin
+        max_x = max(start_x, end_x) + margin
+        min_y = min(start_y, end_y) - margin
+        max_y = max(start_y, end_y) + margin
 
-        # Create a numpy array for pathfinding compatible with tcod.path functions
-        # Cost array: 0 for wall, 1 for floor.
-        cost = np.full((WORLD_HEIGHT, WORLD_WIDTH), fill_value=base_cost, dtype=np.int8)
-        for y_coord in range(WORLD_HEIGHT):
-            for x_coord in range(WORLD_WIDTH):
-                tile = self.get_tile_at(x_coord,y_coord)
+        width = max_x - min_x + 1
+        height = max_y - min_y + 1
+
+        # Create a local cost map for the search area
+        cost = np.full((height, width), fill_value=1, dtype=np.int8)
+
+        for y in range(height):
+            for x in range(width):
+                world_x = min_x + x
+                world_y = min_y + y
+                tile = self.get_tile_at(world_x, world_y)
                 if not tile or not tile.passable:
-                    cost[y_coord,x_coord] = 0 # Wall (0 means impassable for tcod.path)
-                elif tile.is_hazard:
-                    hazard_cost_value = 50 # Default high cost for generic hazard
-                    if tile.hazard_type == "fire_trap_active":
-                        hazard_cost_value = 100 # Fire is very undesirable
-                    elif tile.hazard_type == "water_deep":
-                        hazard_cost_value = 75 # Deep water also very undesirable
-                    # Ensure cost fits within int8 if tcod expects signed, typically positive costs are fine.
-                    # tcod path cost array: 0 for wall, >0 for walkable. Higher is more costly.
-                    cost[y_coord,x_coord] = np.int8(min(hazard_cost_value, 127)) # Max for signed int8 if needed, else 255 for unsigned. Let's keep it reasonable.
-                else:
-                    cost[y_coord,x_coord] = 1 # Standard floor cost
+                    cost[y, x] = 0  # Impassable
 
-        astar = tcod.path.AStar(cost=cost, diagonal=1.41) # Allow diagonal movement with cost sqrt(2)
+        # Adjust start and end coordinates to be local to the cost map
+        local_start_x = start_x - min_x
+        local_start_y = start_y - min_y
+        local_end_x = end_x - min_x
+        local_end_y = end_y - min_y
+
+        astar = tcod.path.AStar(cost=cost, diagonal=1.41)
 
         try:
-            path_indices = astar.get_path(start_x, start_y, end_x, end_y)
-            # Convert list of [y,x] numpy arrays to list of (x,y) tuples
-            path_coords = [(int(p[1]), int(p[0])) for p in path_indices]
+            path_indices = astar.get_path(local_start_x, local_start_y, local_end_x, local_end_y)
+            # Convert local path coordinates back to global coordinates
+            path_coords = [(min_x + p[1], min_y + p[0]) for p in path_indices]
             return path_coords
-        except IndexError: # tcod can raise this if start/end are identical or other issues
-            # self.add_message_to_chat_log(f"Pathfinding error or no path from ({start_x},{start_y}) to ({end_x},{end_y})")
+        except IndexError:
             return []
 
     def _update_npc_movement(self):
@@ -1040,10 +1071,6 @@ class World:
                         flee_target_x = npc.x + random.randint(-flee_distance, flee_distance)
                         flee_target_y = npc.y + random.randint(-flee_distance, flee_distance)
 
-                    # Clamp to world bounds
-                    flee_target_x = max(0, min(WORLD_WIDTH - 1, flee_target_x))
-                    flee_target_y = max(0, min(WORLD_HEIGHT - 1, flee_target_y))
-
                     # Check if target is passable, if not, try to find a nearby one (simplified for now)
                     flee_tile = self.get_tile_at(flee_target_x, flee_target_y)
                     if not (flee_tile and flee_tile.passable):
@@ -1052,8 +1079,6 @@ class World:
                         for _ in range(5): # Try 5 alternatives
                             alt_x = flee_target_x + random.randint(-3,3)
                             alt_y = flee_target_y + random.randint(-3,3)
-                            alt_x = max(0, min(WORLD_WIDTH - 1, alt_x))
-                            alt_y = max(0, min(WORLD_HEIGHT - 1, alt_y))
                             alt_tile = self.get_tile_at(alt_x, alt_y)
                             if alt_tile and alt_tile.passable:
                                 flee_target_x, flee_target_y = alt_x, alt_y
@@ -1154,8 +1179,8 @@ class World:
 
                             # Log pickup if player can perceive it
                             dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
-                            can_player_see_pickup = (npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]) or \
-                                                    (self.player_fov_map[npc.x, npc.y]) # If player sees NPC or NPC sees player (simplified)
+                            can_player_see_pickup = (npc.id in self.npc_fov_maps and (self.player.x, self.player.y) in self.npc_fov_maps[npc.id]) or \
+                                                    ((npc.x, npc.y) in self.player_fov_map) # If player sees NPC or NPC sees player (simplified)
 
                             if dist_to_player <= self.player.hearing_radius or can_player_see_pickup:
                                 self.add_message_to_chat_log(f"{npc.name} picks up a {item_name}.")
@@ -1343,9 +1368,6 @@ class World:
         for dx, dy in adj_offsets:
             adj_x, adj_y = target_x + dx, target_y + dy
 
-            if not (0 <= adj_x < WORLD_WIDTH and 0 <= adj_y < WORLD_HEIGHT):
-                continue # Out of bounds
-
             tile = self.get_tile_at(adj_x, adj_y)
             if not (tile and tile.passable):
                 continue # Not passable
@@ -1411,9 +1433,6 @@ class World:
             for spot_dx, spot_dy in perimeter_offsets_this_radius:
                 spot_x, spot_y = npc.x + spot_dx, npc.y + spot_dy
 
-                if not (0 <= spot_x < WORLD_WIDTH and 0 <= spot_y < WORLD_HEIGHT):
-                    continue
-
                 spot_tile = self.get_tile_at(spot_x, spot_y)
                 if not (spot_tile and spot_tile.passable):
                     continue
@@ -1435,8 +1454,6 @@ class World:
                         if adj_dx_neighbor == 0 and adj_dy_neighbor == 0: continue
 
                         cover_obj_x, cover_obj_y = spot_x + adj_dx_neighbor, spot_y + adj_dy_neighbor
-                        if not (0 <= cover_obj_x < WORLD_WIDTH and 0 <= cover_obj_y < WORLD_HEIGHT): continue
-
                         cover_obj_tile = self.get_tile_at(cover_obj_x, cover_obj_y)
                         if not cover_obj_tile: continue
 
@@ -1873,7 +1890,7 @@ class World:
                                 # Log reasoning if player can hear/see (simplified check)
                                 dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
                                 if dist_to_player <= self.player.hearing_radius and dist_to_player <= npc.speech_volume and \
-                                   (npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]): # visible
+                                   (npc.id in self.npc_fov_maps and (self.player.x, self.player.y) in self.npc_fov_maps[npc.id]): # visible
                                     self.add_message_to_chat_log(f"({reasoning})")
 
 
@@ -2135,7 +2152,7 @@ class World:
             if npc.profession in ["Sheriff", "Guard"] and not npc.is_hostile_to_player:
                 if self.player.bounty >= 100: # Bounty threshold for arrest
                     # Check if player is visible to the Sheriff/Guard
-                    if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
+                    if npc.id in self.npc_fov_maps and (self.player.x, self.player.y) in self.npc_fov_maps[npc.id]:
                         self.add_message_to_chat_log(f"{npc.name} spots you and moves to arrest you for your crimes!")
                         npc.is_hostile_to_player = True
                         # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
@@ -2188,9 +2205,6 @@ class World:
             current_ring_min_dist_sq = float('inf')
 
             for x, y in list(set(coords_in_ring)): # Use set to remove duplicates from ring generation
-                if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
-                    continue
-
                 tile = self.get_tile_at(x, y)
                 if isinstance(tile, Tree) and tile.is_choppable:
                     # Check if this tree is targeted by another NPC for chopping
@@ -2681,9 +2695,8 @@ class World:
 
         # Determine if NPC can see the player
         can_see_player = False
-        if npc.id in self.npc_fov_maps and \
-           0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT:
-            can_see_player = self.npc_fov_maps[npc.id][player.x, player.y]
+        if npc.id in self.npc_fov_maps:
+            can_see_player = (player.x, player.y) in self.npc_fov_maps[npc.id]
 
         if not can_see_player:
             player_last_action_desc = "player disappeared from sight"
@@ -3051,13 +3064,12 @@ class World:
         # 1. Search in a radius around the NPC
         for y in range(npc.y - search_radius, npc.y + search_radius + 1):
             for x in range(npc.x - search_radius, npc.x + search_radius + 1):
-                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
-                    tile = self.get_tile_at(x, y)
-                    if tile and tile.properties.get("heat_source"):
-                        dist_sq = (npc.x - x)**2 + (npc.y - y)**2
-                        if dist_sq < min_dist_sq:
-                            min_dist_sq = dist_sq
-                            closest_heat_source_coords = (x, y)
+                tile = self.get_tile_at(x, y)
+                if tile and tile.properties.get("heat_source"):
+                    dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                    if dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                        closest_heat_source_coords = (x, y)
 
         # After radius search, check known buildings
         candidate_coords = []
@@ -3098,10 +3110,9 @@ class World:
         # 1. Search in a radius around the NPC
         for y in range(npc.y - search_radius, npc.y + search_radius + 1):
             for x in range(npc.x - search_radius, npc.x + search_radius + 1):
-                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
-                    tile = self.get_tile_at(x, y)
-                    if tile and tile.properties.get("interaction_hint") == "light_fire":
-                        potential_pits.append((x,y))
+                tile = self.get_tile_at(x, y)
+                if tile and tile.properties.get("interaction_hint") == "light_fire":
+                    potential_pits.append((x,y))
 
         # 2. Check NPC's home for an unlit fire
         home_building = self.buildings_by_id.get(npc.home_building_id)
@@ -3205,6 +3216,26 @@ class World:
                 if len(self.chat_ui_history) > self.chat_ui_max_history:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
+
+    def _get_witnesses_to_action(self, x: int, y: int, action_type: str) -> list[NPC]:
+        """Finds NPCs who can see a location and would consider the action a crime."""
+        witnesses = []
+        for npc in self.village_npcs:
+            if npc.is_dead:
+                continue
+
+            # Check if the NPC can see the location of the crime
+            if npc.id in self.npc_fov_maps and (x, y) in self.npc_fov_maps[npc.id]:
+                # Simple logic for now: most villagers will witness most crimes.
+                # Future: More nuanced logic based on NPC personality, relationship to player, etc.
+                if action_type in ["assault", "lockpicking", "theft"]:
+                    # Guards and Sheriffs will always be witnesses
+                    if npc.profession in ["Guard", "Sheriff"]:
+                        witnesses.append(npc)
+                    # For other NPCs, maybe a chance based on personality
+                    elif npc.personality not in ["careless", "fearful"]: # Example personalities who might not report
+                        witnesses.append(npc)
+        return witnesses
 
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
@@ -3442,8 +3473,6 @@ class World:
                     new_tile.original_tree_type = original_tree_type
 
                 chunk.tiles[local_y][local_x] = new_tile
-                # Update transparency map
-                self.transparency_map[x, y] = not new_tile.blocks_fov
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
@@ -3890,33 +3919,6 @@ class World:
                 return building_obj
         return None
 
-    def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
-        """
-        Finds NPCs who witness a criminal act.
-        A witness must have line of sight to the action.
-        """
-        witnesses = []
-        # Combine all NPCs who could be witnesses
-        potential_witnesses = self.village_npcs + self.npcs
-
-        for npc in potential_witnesses:
-            if npc.is_dead:
-                continue
-
-            # Check if NPC can see the tile where the action occurred
-            can_see_action = False
-            if npc.id in self.npc_fov_maps:
-                fov_map = self.npc_fov_maps[npc.id]
-                if 0 <= action_x < WORLD_WIDTH and 0 <= action_y < WORLD_HEIGHT:
-                    if fov_map[action_x, action_y]:
-                        can_see_action = True
-
-            if can_see_action:
-                # Simple logic for now: if they can see it, they are a witness.
-                # Future: Could add personality checks (e.g., some ignore theft, some are brave/cowardly)
-                witnesses.append(npc)
-
-        return witnesses
 
     def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player, victim: NPC | None = None):
         """Determines how an NPC reacts to witnessing a crime."""
@@ -4336,8 +4338,6 @@ class World:
 
                                     if new_tree:
                                         chunk.tiles[y_local][x_local] = new_tree
-                                        # Also update the global transparency map for FOV
-                                        self.transparency_map[world_x, world_y] = True # Trees are not transparent
 
 
                         # Sapling growth into tree
@@ -4359,7 +4359,6 @@ class World:
 
                                 if new_tree:
                                     chunk.tiles[y_local][x_local] = new_tree
-                                    self.transparency_map[world_x, world_y] = False
 
                         elif tile.name == "Growing Wheat Crop":
                             if "growth_progress" in tile.properties and "growth_target" in tile.properties:
@@ -4465,10 +4464,6 @@ class World:
                     # Place NPC at the global center of their home building
                     npc_x = home_building.global_center_x
                     npc_y = home_building.global_center_y
-
-                # Ensure NPC is within world bounds (still good practice)
-                npc_x = max(0, min(WORLD_WIDTH - 1, npc_x))
-                npc_y = max(0, min(WORLD_HEIGHT - 1, npc_y))
 
                 # Assign workplace (optional)
                 work_building = None
@@ -4793,66 +4788,35 @@ class World:
             print("No one to talk to nearby.")
             self.last_talked_to_npc = None
 
-    def _initialize_chunks(self):
-        """Initializes chunk data based on the world generator's macro map."""
-        chunks = [[None for _ in range(self.chunk_width)] for _ in range(self.chunk_height)]
-        for y in range(self.chunk_height):
-            for x in range(self.chunk_width):
-                biome = self.generator.get_biome_at(x, y)
-                poi_type = self.generator.get_poi_at(x, y, biome)
-                chunks[y][x] = Chunk(biome, poi_type)
-        return chunks
-
     def _find_starting_position(self):
-        """Finds a suitable starting tile for the player, searching from the center."""
-        center_x, center_y = self.player.x, self.player.y
-        if self.get_tile_at(center_x, center_y) and self.get_tile_at(center_x, center_y).passable:
+        """Finds a suitable starting tile for the player, searching outwards from the initial position."""
+        x, y = self.player.x, self.player.y
+
+        # Check initial spot
+        tile = self.get_tile_at(x, y)
+        if tile and tile.passable:
             return
 
-        # First, try to find a plains tile
-        for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
-            for x_offset in range(-r, r + 1):
-                for y_sign in [-1, 1]:
-                    tx, ty = center_x + x_offset, center_y + (r * y_sign)
-                    chunk_x, chunk_y = tx // CHUNK_SIZE, ty // CHUNK_SIZE
-                    if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
-                        chunk = self.chunks[chunk_y][chunk_x]
-                        if chunk.biome == "plains":
-                            tile = self.get_tile_at(tx, ty)
-                            if tile and tile.passable:
-                                self.player.x, self.player.y = tx, ty
-                                return
-            for y_offset in range(-r + 1, r):
-                for x_sign in [-1, 1]:
-                    tx, ty = center_x + (r * x_sign), center_y + y_offset
-                    chunk_x, chunk_y = tx // CHUNK_SIZE, ty // CHUNK_SIZE
-                    if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
-                        chunk = self.chunks[chunk_y][chunk_x]
-                        if chunk.biome == "plains":
-                            tile = self.get_tile_at(tx, ty)
-                            if tile and tile.passable:
-                                self.player.x, self.player.y = tx, ty
-                                return
+        # Spiral search outwards
+        dx, dy = 1, 0
+        steps_in_segment = 1
+        turn_count = 0
 
-        # If no plains tile found, search for any passable tile
-        for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
-            # Check top and bottom rows of the expanding search box
-            for x_offset in range(-r, r + 1):
-                for y_sign in [-1, 1]:
-                    tx, ty = center_x + x_offset, center_y + (r * y_sign)
-                    tile = self.get_tile_at(tx, ty)
-                    if tile and tile.passable:
-                        self.player.x, self.player.y = tx, ty
-                        return
-            # Check left and right columns
-            for y_offset in range(-r + 1, r):
-                for x_sign in [-1, 1]:
-                    tx, ty = center_x + (r * x_sign), center_y + y_offset
-                    tile = self.get_tile_at(tx, ty)
-                    if tile and tile.passable:
-                        self.player.x, self.player.y = tx, ty
-                        return
-        print("Warning: No passable starting tile found. Player may be stuck.")
+        for _ in range(5000): # Limit search to avoid infinite loops
+            for _ in range(steps_in_segment):
+                x, y = x + dx, y + dy
+                tile = self.get_tile_at(x, y)
+                if tile and tile.passable:
+                    self.player.x, self.player.y = x, y
+                    return
+
+            # Turn
+            dx, dy = -dy, dx
+            turn_count += 1
+            if turn_count % 2 == 0:
+                steps_in_segment += 1
+
+        print("Warning: No passable starting tile found after extensive search.")
 
     def _generate_chunk_detail(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the detailed tiles for a chunk based on its biome and POI."""
@@ -4892,8 +4856,6 @@ class World:
                                     tiles[y_local][x_local] = AppleTree(tree_x_world, tree_y_world)
                                 else: # 30% are Pear
                                     tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
-                                # Update transparency map for the new tree
-                                self.transparency_map[tree_x_world, tree_y_world] = False # Trees block FOV
                             elif random.random() < 0.01: # 1% chance for a sapling
                                 sapling_def = TILE_DEFINITIONS["sapling"]
                                 tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
@@ -5367,24 +5329,28 @@ class World:
             )
 
     def get_tile_at(self, x, y):
-        if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
-            return None
         chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
         local_x, local_y = x % CHUNK_SIZE, y % CHUNK_SIZE
-        
-        if not (0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height):
-            return None
 
-        chunk = self.chunks[chunk_y][chunk_x]
-        if not chunk.is_generated:
-            self._generate_chunk_detail(chunk, chunk_x, chunk_y) # Pass chunk_x, chunk_y
+        if (chunk_x, chunk_y) not in self.chunks:
+            # Chunk does not exist, so generate it
+            biome = self.generator.get_biome_at(chunk_x, chunk_y)
+            poi_type = self.generator.get_poi_at(chunk_x, chunk_y, biome)
+            new_chunk = Chunk(biome, poi_type)
+            self._generate_chunk_detail(new_chunk, chunk_x, chunk_y)
+            self.chunks[(chunk_x, chunk_y)] = new_chunk
+
+        # Now the chunk is guaranteed to exist
+        chunk = self.chunks[(chunk_x, chunk_y)]
+        if not chunk.tiles: # Should not happen if generation is correct
+            return None
         return chunk.tiles[local_y][local_x]
 
     def get_building_at(self, x, y):
         chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
         local_x, local_y = x % CHUNK_SIZE, y % CHUNK_SIZE
-        chunk = self.chunks[chunk_y][chunk_x]
-        if chunk.poi_type == "village" and chunk.village:
+        chunk = self.chunks.get((chunk_x, chunk_y))
+        if chunk and chunk.poi_type == "village" and chunk.village:
             for building in chunk.village.buildings:
                 if building.x <= local_x < building.x + building.width and \
                    building.y <= local_y < building.y + building.height:

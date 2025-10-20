@@ -1,6 +1,6 @@
 import tcod
 import random
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
+from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
 from data.items import ITEM_DEFINITIONS
 from data.environment import WEATHER_TYPES
 
@@ -106,12 +106,10 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
             for x_screen in range(map_view_width):
                 x_world, y_world = camera_x + x_screen, camera_y + y_screen
 
-                # Skip drawing if the coordinate is outside the world bounds
-                if not (0 <= x_world < WORLD_WIDTH and 0 <= y_world < WORLD_HEIGHT):
-                    continue
-
-                is_visible = world.player_fov_map[x_world, y_world]
-                is_explored = world.explored_map[x_world, y_world]
+                # This needs to be updated to handle potentially out-of-bounds access gracefully
+                # For now, we rely on FOV map size to implicitly handle this.
+                is_visible = (x_world, y_world) in world.player_fov_map
+                is_explored = (x_world, y_world) in world.explored_map
 
                 tile_char, tile_fg, tile_bg = None, None, (0, 0, 0)
 
@@ -141,7 +139,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
         # --- Draw NPCs ---
         for npc in world.npcs + world.village_npcs:
-            if 0 <= npc.x < WORLD_WIDTH and 0 <= npc.y < WORLD_HEIGHT and world.player_fov_map[npc.x, npc.y]:
+            if (npc.x, npc.y) in world.player_fov_map:
                 npc_screen_x = npc.x - camera_x
                 npc_screen_y = npc.y - camera_y
                 if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:
@@ -178,13 +176,12 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
     weather_display_name = WEATHER_TYPES.get(world.current_weather, {}).get("name", world.current_weather.capitalize())
 
     tile_info = ""
-    if 0 <= cursor_world_x < WORLD_WIDTH and 0 <= cursor_world_y < WORLD_HEIGHT:
-        # Only show tile info if the cursor is within the main map view
-        map_view_width = console.width - (SCREEN_WIDTH_TILES // 4)
-        if world.mouse_x < map_view_width:
-            cursor_tile = world.get_tile_at(cursor_world_x, cursor_world_y)
-            if cursor_tile:
-                tile_info = f"| {cursor_tile.name}"
+    # Only show tile info if the cursor is within the main map view
+    map_view_width = console.width - (SCREEN_WIDTH_TILES // 4)
+    if world.mouse_x < map_view_width:
+        cursor_tile = world.get_tile_at(cursor_world_x, cursor_world_y)
+        if cursor_tile:
+            tile_info = f"| {cursor_tile.name}"
 
     cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name} | {weather_display_name} {tile_info}"
 
@@ -247,10 +244,8 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
     cursor_world_x = camera_x + world.mouse_x
     cursor_world_y = camera_y + world.mouse_y
 
-    tile_name = "Void"
-    if 0 <= cursor_world_x < WORLD_WIDTH and 0 <= cursor_world_y < WORLD_HEIGHT:
-        tile_at_cursor = world.get_tile_at(cursor_world_x, cursor_world_y)
-        tile_name = tile_at_cursor.name if tile_at_cursor else "Unknown"
+    tile_at_cursor = world.get_tile_at(cursor_world_x, cursor_world_y)
+    tile_name = tile_at_cursor.name if tile_at_cursor else "Void"
     main_console.print(x=menu_x + 3, y=ui_y, string=f"Tile: ({cursor_world_x},{cursor_world_y}) {tile_name}", fg=(200,200,200))
     ui_y += 1
 
@@ -264,7 +259,7 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
         if npc_at_cursor: break
 
     if npc_at_cursor:
-        if 0 <= npc_at_cursor.x < WORLD_WIDTH and 0 <= npc_at_cursor.y < WORLD_HEIGHT and world.player_fov_map[npc_at_cursor.x, npc_at_cursor.y]:
+        if (npc_at_cursor.x, npc_at_cursor.y) in world.player_fov_map:
              main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
              # ... (the rest of the NPC info is okay)
 

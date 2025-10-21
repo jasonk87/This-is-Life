@@ -1,6 +1,6 @@
 import tcod
 import random
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
+from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
 from data.environment import WEATHER_TYPES
 
@@ -68,38 +68,8 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
 
     # Status Effects (if any)
     if world.player.status_effects:
-        status_color_map = {
-            "Freezing": (100, 100, 255),
-            "Overheating": (255, 100, 100),
-            "Wet": (170, 170, 220),
-        }
-        default_color = (255, 100, 100)
-
-        base_x = panel_x + 3
-        y = y_offset
-
-        full_status_string = f"({', '.join(world.player.status_effects)})"
-
-        # Print the string with a default color
-        console.print(x=base_x, y=y, string=full_status_string, fg=(200,200,200))
-
-        # Recolor the specific status words
-        current_x = base_x + 1
-        for status in world.player.status_effects:
-            color = status_color_map.get(status, default_color)
-            for i in range(len(status)):
-                if current_x + i < console.width:
-                    console.fg[current_x + i, y] = color
-            current_x += len(status) + 2
-
-def is_visible(world, x, y):
-    """Checks if a given world coordinate is visible to the player."""
-    fov_map = world.player_fov_map
-    fov_min_x = world.fov_min_x
-    fov_min_y = world.fov_min_y
-    if fov_min_x <= x < fov_min_x + fov_map.shape[1] and fov_min_y <= y < fov_min_y + fov_map.shape[0]:
-        return fov_map[y - fov_min_y, x - fov_min_x]
-    return False
+        status_str = ", ".join(world.player.status_effects)
+        console.print(x=panel_x + 3, y=y_offset, string=f"({status_str})", fg=(255, 100, 100))
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
@@ -115,13 +85,17 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
             for x_screen in range(map_view_width):
                 x_world, y_world = camera_x + x_screen, camera_y + y_screen
 
-                visible = is_visible(world, x_world, y_world)
-                is_explored = (x_world, y_world) in world.explored_map
+                # Skip drawing if the coordinate is outside the world bounds
+                if not (0 <= x_world < WORLD_WIDTH and 0 <= y_world < WORLD_HEIGHT):
+                    continue
+
+                is_visible = world.player_fov_map[x_world, y_world]
+                is_explored = world.explored_map[x_world, y_world]
 
                 tile_char, tile_fg, tile_bg = None, None, (0, 0, 0)
 
                 # Get tile appearance
-                if visible:
+                if is_visible:
                     tile = world.get_tile_at(x_world, y_world)
                     if tile:
                         tile_char, tile_fg = tile.char, tile.color
@@ -135,7 +109,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
                     console.rgb[x_screen, y_screen] = (tile_char, tile_fg, tile_bg)
 
                 # Draw items on top of tiles if visible
-                if visible and (x_world, y_world) in world.items_on_map:
+                if is_visible and (x_world, y_world) in world.items_on_map:
                     items_at_loc = world.items_on_map[(x_world, y_world)]
                     if items_at_loc:
                         top_item_key = items_at_loc[0]["item_key"]
@@ -146,7 +120,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
         # --- Draw NPCs ---
         for npc in world.npcs + world.village_npcs:
-            if is_visible(world, npc.x, npc.y):
+            if 0 <= npc.x < WORLD_WIDTH and 0 <= npc.y < WORLD_HEIGHT and world.player_fov_map[npc.x, npc.y]:
                 npc_screen_x = npc.x - camera_x
                 npc_screen_y = npc.y - camera_y
                 if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:
@@ -179,23 +153,22 @@ def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera
     cursor_world_y = camera_y + world.mouse_y
 
     season_name = world.seasons[world.current_season_index]
-    # Fetch weather name from WEATHER_TYPES for consistent capitalization and display
-    weather_display_name = WEATHER_TYPES.get(world.current_weather, {}).get("name", world.current_weather.capitalize())
+    weather_name = getattr(world, 'current_weather', 'clear').capitalize()
 
     tile_info = ""
-    # Only show tile info if the cursor is within the main map view
-    map_view_width = console.width - (SCREEN_WIDTH_TILES // 4)
-    if world.mouse_x < map_view_width:
+    if 0 <= cursor_world_x < WORLD_WIDTH and 0 <= cursor_world_y < WORLD_HEIGHT:
         cursor_tile = world.get_tile_at(cursor_world_x, cursor_world_y)
         if cursor_tile:
             tile_info = f"| {cursor_tile.name}"
 
-    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name} | {weather_display_name} {tile_info}"
+    cursor_info_text = f"({cursor_world_x}, {cursor_world_y}) | {season_name} | {weather_name} {tile_info}"
 
-    # Simple info bar at the bottom
-    info_bar_y = console.height - 1
-    console.print(x=0, y=info_bar_y, string=" " * console.width, bg=(20, 20, 20))
-    console.print(x=1, y=info_bar_y, string=cursor_info_text, fg=(200, 200, 200), bg=(20, 20, 20))
+    text_width = len(cursor_info_text)
+    border_width = text_width + 2
+    border_height = 3
+
+    console.draw_frame(x=0, y=0, width=border_width, height=border_height, clear=False, fg=(255, 255, 255), bg=(0, 0, 0))
+    console.print(x=1, y=1, string=cursor_info_text, fg=(255, 0, 0))
 
 def draw_chat_log(console: tcod.console.Console, world) -> None:
     chat_width = console.width // 2
@@ -251,8 +224,10 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
     cursor_world_x = camera_x + world.mouse_x
     cursor_world_y = camera_y + world.mouse_y
 
-    tile_at_cursor = world.get_tile_at(cursor_world_x, cursor_world_y)
-    tile_name = tile_at_cursor.name if tile_at_cursor else "Void"
+    tile_name = "Void"
+    if 0 <= cursor_world_x < WORLD_WIDTH and 0 <= cursor_world_y < WORLD_HEIGHT:
+        tile_at_cursor = world.get_tile_at(cursor_world_x, cursor_world_y)
+        tile_name = tile_at_cursor.name if tile_at_cursor else "Unknown"
     main_console.print(x=menu_x + 3, y=ui_y, string=f"Tile: ({cursor_world_x},{cursor_world_y}) {tile_name}", fg=(200,200,200))
     ui_y += 1
 
@@ -266,7 +241,7 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
         if npc_at_cursor: break
 
     if npc_at_cursor:
-        if is_visible(world, npc_at_cursor.x, npc_at_cursor.y):
+        if 0 <= npc_at_cursor.x < WORLD_WIDTH and 0 <= npc_at_cursor.y < WORLD_HEIGHT and world.player_fov_map[npc_at_cursor.x, npc_at_cursor.y]:
              main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
              # ... (the rest of the NPC info is okay)
 

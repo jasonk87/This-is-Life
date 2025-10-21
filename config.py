@@ -1,6 +1,8 @@
 # game/config.py
 
 # --- World Settings ---
+WORLD_WIDTH = 200  # in tiles
+WORLD_HEIGHT = 200 # in tiles
 CHUNK_SIZE = 20    # in tiles
 
 # --- POI Settings ---

@@ -6,7 +6,7 @@ import tcod.tileset
 import os
 from engine import World
 from config import (
-    SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES,
+    SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT,
     REP_CRIMINAL, REP_HERO # Import reputation keys
 )
 from data.items import ITEM_DEFINITIONS
@@ -83,13 +83,14 @@ def main():
                     world._change_map_tile((door_x, door_y), open_door_def)
                     world.player.jail_cell_coords = None
 
-            world._update_player_movement_timer()
+
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
             world._update_season()
             world._update_player_temperature()
             world._apply_temperature_effects()
             world._update_light_level_and_fov() # Update light level and FOV radius
             world._update_world_environment()
+            world._update_weather()
             world.update_fov() # Update FOV maps for player and NPCs
             world._update_npc_schedules() # New: Update NPC schedules (includes combat AI decisions)
             world._update_npc_movement() # Update NPC movement (includes combat movement/action execution)
@@ -292,7 +293,9 @@ def main():
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
                             dx, dy = move_keys[event.sym]
-                            world.handle_player_movement(dx, dy)
+                            action_cost = world.handle_player_movement(dx, dy)
+                            if action_cost > 0:
+                                world.game_time += action_cost - 1
                         elif event.sym == tcod.event.KeySym.C: # Craft healing salve
                             world.craft_item("healing_salve")
                         elif event.sym == tcod.event.KeySym.S: # Craft crude spear

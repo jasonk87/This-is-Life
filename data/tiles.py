@@ -33,7 +33,6 @@ COLORS = {
     "crimson": (220, 20, 60),
     "light_sepia": (208, 188, 142),
     "sienna": (160, 82, 45),
-    "orange": (255, 165, 0),
 }
 
 # --- Tile Definitions (Back to ASCII!) ---
@@ -60,13 +59,15 @@ TILE_DEFINITIONS = {
         "char": "#",
         "color": COLORS["wall_fg"],
         "passable": False,
-        "name": "Wood Wall"
+        "name": "Wood Wall",
+        "properties": {"provides_shelter": True}
     },
     "stone_wall": {
         "char": "#",
         "color": COLORS["grey"],
         "passable": False,
-        "name": "Stone Wall"
+        "name": "Stone Wall",
+        "properties": {"provides_shelter": True}
     },
     "door": {
         "char": "+",
@@ -109,7 +110,8 @@ TILE_DEFINITIONS = {
         "char": "*",
         "color": COLORS["snow_fg"],
         "passable": True,
-        "name": "Snow"
+        "name": "Snow",
+        "properties": {"movement_cost": 2}
     },
     "tall_grass": {
         "char": "}",
@@ -133,7 +135,8 @@ TILE_DEFINITIONS = {
         "char": "#",
         "color": (150, 150, 150), # Grey stone
         "passable": False,
-        "name": "Capital Hall Wall"
+        "name": "Capital Hall Wall",
+        "properties": {"provides_shelter": True}
     },
     "jail_bars": {
         "char": "=",
@@ -146,7 +149,7 @@ TILE_DEFINITIONS = {
         "color": (120, 100, 80), # Brownish grey
         "passable": False,
         "name": "Sheriff Office Wall",
-        "properties": {"provides_cover_value": 0.7} # Walls provide good cover
+        "properties": {"provides_cover_value": 0.7, "provides_shelter": True}
     },
     "tree_generic": { # Example if we had a distinct tree tile
         "char": "T",
@@ -253,28 +256,5 @@ TILE_DEFINITIONS["mature_wheat_crop"] = {
         "harvest_yield_item_key": "wheat",
         "harvest_yield_quantity": 2,
         "becomes_on_harvest_key": "tilled_soil"
-    }
-}
-
-TILE_DEFINITIONS["wheat_growing"] = {
-    "char": "w",
-    "color": COLORS["yellow_green"],
-    "passable": True,
-    "name": "Growing Wheat Crop",
-    "properties": {
-        "is_harvestable": False,
-        "growth_progress": 0,
-        "growth_target": 100,
-        "evolves_to": "mature_wheat_crop"
-    }
-}
-
-TILE_DEFINITIONS["ice"] = {
-    "char": "~",
-    "color": COLORS["light_blue"],
-    "passable": True,
-    "name": "Ice",
-    "properties": {
-        "original_tile": None
     }
 }

@@ -476,20 +476,6 @@ ITEM_DEFINITIONS = {
             "raw_log": 2
         },
     },
-    "flint_and_steel": {
-        "name": "Flint and Steel",
-        "description": "Used to start fires. A crucial survival tool.",
-        "char": "f",
-        "color": COLORS["dark_slate_gray"],
-        "value": 20,
-        "weight": 0.5,
-        "stackable": False,
-        "item_type_tags": ["tool"],
-        "properties": {
-            "tool_type": "fire_starter",
-            "max_durability": 15
-        }
-    },
     "iron_sword": {
         "name": "Iron Sword",
         "description": "A simple but effective iron sword.",

@@ -45,14 +45,6 @@ class NPC:
         self.thirst: int = 0
         self.max_thirst: int = 100
 
-        # Temperature and Weather
-        self.temperature: float = 37.0
-        self.base_temperature_resistance: float = 0.0
-        self.clothing_insulation: float = 0.0
-        self.status_effects: list[str] = []
-        self.is_wet: bool = False
-        self.wetness_timer: int = 0
-
         # Combat Attributes (Phase 5.3)
         self.max_hp = 20  # Default max HP
         self.hp = self.max_hp
@@ -91,7 +83,6 @@ class NPC:
         self.hearing_radius: int = DEFAULT_HEARING_RADIUS # Standard hearing range for NPCs
 
         self.woodcutter_search_radius: int = 15 # Specific to woodcutter AI
-        self.is_sheltered: bool = False
 
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
         self.task_target_entity_id: int | None = None
@@ -99,30 +90,6 @@ class NPC:
 
     def get_dialogue(self):
         return self.dialogue
-
-    def add_item(self, item_key_to_add: str, quantity: int = 1):
-        """Adds an item to the NPC's inventory."""
-        self.npc_inventory[item_key_to_add] = self.npc_inventory.get(item_key_to_add, 0) + quantity
-
-    def has_item(self, item_key_to_check: str, quantity: int = 1) -> bool:
-        """Checks if the NPC has a certain quantity of an item."""
-        return self.npc_inventory.get(item_key_to_check, 0) >= quantity
-
-    def recalculate_stats(self):
-        """Recalculates NPC stats based on equipped items."""
-        self.clothing_insulation = 0.0
-
-        # Check body armor
-        if self.equipped_armor_body and self.equipped_armor_body in ITEM_DEFINITIONS:
-            item_def = ITEM_DEFINITIONS[self.equipped_armor_body]
-            if "properties" in item_def:
-                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
-
-        # Check head armor
-        if self.equipped_armor_head and self.equipped_armor_head in ITEM_DEFINITIONS:
-            item_def = ITEM_DEFINITIONS[self.equipped_armor_head]
-            if "properties" in item_def:
-                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
 
     def take_damage(self, amount: int, world):
         if self.is_dead:

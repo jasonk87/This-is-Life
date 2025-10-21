@@ -101,27 +101,27 @@ DECORATION_ITEM_DEFINITIONS = {
         "color": COLORS["grey"],
         "passable": True,
         "blocks_fov": False,
-        "item_type_tags": ["interactable"],
+        "item_type_tags": ["interactable", "light_source_potential"],
         "properties": {
             "interaction_hint": "light_fire",
-            "lights_to": "fire_pit_simple_lit",
-            "requires_item_to_light": "flint_and_steel"
+            "becomes_lit": "fire_pit_lit"
         }
     },
-    "fire_pit_simple_lit": {
+    "fire_pit_lit": {
         "name": "Lit Fire Pit",
-        "description": "A crackling fire.",
-        "char": "o",
-        "color": COLORS["orange"],
+        "description": "A crackling fire burns brightly.",
+        "char": "O",
+        "color": COLORS["flame"],
         "passable": False,
         "blocks_fov": False,
-        "item_type_tags": ["interactable", "heat_source"],
+        "item_type_tags": ["interactable", "light_source_active", "heat_source"],
         "properties": {
             "heat_source": True,
-            "interaction_hint": "extinguish",
+            "is_lit": True,
+            "light_radius": 5,
+            "extinguishes_to": "fire_pit_simple",
             "heat_source_radius": 4,
-            "heat_intensity": 20.0,
-            "extinguishes_to": "fire_pit_simple"
+            "heat_intensity": 25.0
         }
     },
     "corpse_humanoid": {

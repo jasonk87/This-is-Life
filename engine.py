@@ -1474,14 +1474,20 @@ class World:
                     npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                     npc.current_task = "seeking_warmth"
                     heat_source_coords = self._find_nearest_heat_source(npc)
+                    print(f"DEBUG: NPC {npc.name} is seeking warmth. Nearest heat source: {heat_source_coords}")
                     if heat_source_coords:
                         dest_x, dest_y = self._find_best_adjacent_tile(heat_source_coords[0], heat_source_coords[1], npc)
+                        print(f"DEBUG: Best adjacent tile to heat source: ({dest_x}, {dest_y})")
                         if dest_x is not None:
                             path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
                             if path:
                                 npc.current_path = path
                                 npc.current_destination_coords = (dest_x, dest_y)
+                                print(f"DEBUG: Path found for {npc.name} to ({dest_x}, {dest_y}). Path length: {len(path)}")
+                            else:
+                                print(f"DEBUG: No path found for {npc.name} from ({npc.x}, {npc.y}) to ({dest_x}, {dest_y})")
                         else:
+                            print(f"DEBUG: No adjacent tile found for heat source at {heat_source_coords}")
                             # Fallback: huddle indoors at home
                             home_building = self.buildings_by_id.get(npc.home_building_id)
                             if home_building:
@@ -1491,6 +1497,8 @@ class World:
                                     npc.current_path = path
                                     npc.current_destination_coords = home_coords
                                     npc.current_task = "huddling_indoors"
+                    else:
+                        print(f"DEBUG: No heat source found for {npc.name}")
 
                 # --- Weather-based Shelter Seeking ---
                 is_bad_weather = self.weather in ["rain", "snow"]
@@ -4245,47 +4253,15 @@ class World:
 
                 npc.attack_range = 1 # Default melee
 
-                # Assign profession based on work building
+                # Assign profession based on work building and culture
+                professions = list(profession_weights.keys())
+                weights = list(profession_weights.values())
+                chosen_profession = random.choices(professions, weights=weights, k=1)[0]
+
                 if work_building:
                     npc.work_building_id = work_building.id
-                    work_building.occupants.append(npc) # Store NPC object for now
-                    # Simple profession mapping
-                    if work_building.building_type == "sheriff_office":
-                        npc.profession = "Sheriff"
-                    elif work_building.building_type == "capital_hall":
-                        npc.profession = "Town Official"
-                    elif work_building.building_type == "general_store" or \
-                         "shop" in work_building.building_type or \
-                         "market" in work_building.building_type:
-                        npc.profession = "Merchant"
-                    elif work_building.building_type == "tavern":
-                        npc.profession = "Tavern Keeper"
-                    elif work_building.building_type == "lumber_mill":
-                        # Could have multiple roles at a lumber mill, e.g. Foreman and Woodcutter
-                        # For now, let's make the first NPC assigned to a lumber_mill the "Foreman" (quest giver)
-                        # and subsequent ones "Woodcutter" (producer). This is a simple heuristic.
-                        is_foreman_assigned_to_mill = any(
-                            other_npc.profession == "Lumber Mill Foreman" and other_npc.work_building_id == work_building.id
-                            for other_npc in self.village_npcs + self.npcs # Check all existing npcs
-                        )
-                        if not is_foreman_assigned_to_mill:
-                            npc.profession = "Lumber Mill Foreman"
-                        else:
-                            npc.profession = "Woodcutter"
-                    elif work_building.building_type == "farm": # Assuming farm type from production step
-                         npc.profession = "Farmer"
-                    elif work_building.building_type == "mine": # Assuming mine type
-                         npc.profession = "Miner"
-                    elif work_building.building_type == "carpenter_shop":
-                        npc.profession = "Carpenter"
-                    elif work_building.building_type == "mill":
-                        npc.profession = "Miller"
-                    elif work_building.building_type == "bakery":
-                        npc.profession = "Baker"
-                    elif work_building.building_type == "fishing_hut":
-                        npc.profession = "Fisherman"
-                    else:
-                        npc.profession = work_building.building_type.replace("_", " ").title()
+                    work_building.occupants.append(npc)
+                    npc.profession = chosen_profession
                 else:
                     npc.profession = "Unemployed"
 

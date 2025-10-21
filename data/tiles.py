@@ -246,6 +246,17 @@ TILE_DEFINITIONS["tilled_soil"] = {
     "name": "Tilled Soil",
     "properties": {}
 }
+TILE_DEFINITIONS["wheat_growing"] = {
+    "char": "i",
+    "color": (144, 238, 144), # Light green
+    "passable": True,
+    "name": "Growing Wheat",
+    "properties": {
+        "growth_progress": 0,
+        "growth_needed": 100, # Example value
+        "evolves_to": "mature_wheat_crop"
+    }
+}
 TILE_DEFINITIONS["mature_wheat_crop"] = {
     "char": "W",
     "color": (255, 223, 0),  # Golden yellow

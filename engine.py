@@ -443,6 +443,56 @@ class World:
         self.update_fov() # Initial FOV calculation
         self._update_player_hunger_thirst(initial_setup=True) # Initial status update
 
+    def _update_npc_temperature(self, npc: NPC):
+        """Calculates ambient temperature at NPC's location and updates their body temperature."""
+        # 1. Calculate Ambient Temperature at NPC's location
+        season_name = self.seasons[self.current_season_index]
+        base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
+
+        npc_chunk = self.chunks[npc.y // CHUNK_SIZE][npc.x // CHUNK_SIZE]
+        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(npc_chunk.biome, 0)
+
+        time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
+
+        ambient_temp = base_temp + biome_temp_mod + time_of_day_mod
+
+        # Check for nearby heat sources
+        heat_source_bonus = 0.0
+        # Reduced radius for performance, as this runs for every NPC
+        for y in range(npc.y - 3, npc.y + 4):
+            for x in range(npc.x - 3, npc.x + 4):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and hasattr(tile, 'properties') and tile.properties.get("heat_source"):
+                        radius = tile.properties.get("heat_source_radius", 0)
+                        intensity = tile.properties.get("heat_intensity", 0)
+                        distance = max(abs(npc.x - x), abs(npc.y - y))
+                        if distance <= radius:
+                            heat_bonus = intensity * (1 - (distance / radius))
+                            if heat_bonus > heat_source_bonus:
+                                heat_source_bonus = heat_bonus
+
+        ambient_temp_at_npc = ambient_temp + heat_source_bonus
+
+        # 2. Update NPC Temperature
+        npc.recalculate_stats()
+        total_insulation = npc.base_temperature_resistance + npc.clothing_insulation
+
+        # NPCs don't get "wet" for now, simplifying the model
+        target_temp_equilibrium = ambient_temp_at_npc + total_insulation
+
+        temp_diff = target_temp_equilibrium - npc.temperature
+        change_rate = 0.05
+        npc.temperature += temp_diff * change_rate
+
+        # 3. Apply Effects
+        npc.status_effects.clear()
+        if npc.temperature < 35.0:
+            npc.status_effects.append("Freezing")
+        elif npc.temperature > 38.5:
+            npc.status_effects.append("Overheating")
+
+
     def _update_player_hunger_thirst(self, initial_setup=False):
         """Updates player hunger and thirst, applies effects, and sets status messages."""
         player = self.player
@@ -619,7 +669,7 @@ class World:
                     return False # Open to the void
 
                 tile = self.get_tile_at(px, py)
-                if tile and tile.properties.get("provides_shelter"):
+                if tile and hasattr(tile, 'properties') and tile.properties.get("provides_shelter"):
                     found_shelter_in_direction = True
                     break # This ray is blocked, check next direction
 
@@ -1162,6 +1212,41 @@ class World:
     def _get_time_of_day_str(self, game_time_tick: int, day_length: int) -> str:
         """Converts a game tick to a descriptive time of day string."""
         time_ratio = (game_time_tick % day_length) / day_length
+
+    def _find_best_adjacent_tile(self, target_x: int, target_y: int, entity) -> tuple[int | None, int | None]:
+        """
+        Finds a passable, unoccupied, adjacent tile to the target for the entity to move to.
+        Prefers tiles closer to the entity if multiple are valid.
+        """
+        potential_spots = []
+        # Check cardinal directions first
+        for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+            adj_x, adj_y = target_x + dx, target_y + dy
+
+            # Basic validation
+            if not (0 <= adj_x < WORLD_WIDTH and 0 <= adj_y < WORLD_HEIGHT):
+                continue
+            tile = self.get_tile_at(adj_x, adj_y)
+            if not (tile and tile.passable):
+                continue
+
+            # Check for occupancy
+            occupied = False
+            for npc in self.village_npcs + self.npcs:
+                if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.is_dead:
+                    occupied = True
+                    break
+            if occupied:
+                continue
+
+            dist_sq = (entity.x - adj_x)**2 + (entity.y - adj_y)**2
+            potential_spots.append({'x': adj_x, 'y': adj_y, 'dist_sq': dist_sq})
+
+        if not potential_spots:
+            return None, None
+
+        potential_spots.sort(key=lambda s: s['dist_sq'])
+        return potential_spots[0]['x'], potential_spots[0]['y']
         if 0 <= time_ratio < 0.1: return "Dead of Night"
         if 0.1 <= time_ratio < 0.25: return "Early Morning"
         if 0.25 <= time_ratio < 0.45: return "Morning"
@@ -1312,7 +1397,11 @@ class World:
             if npc.is_dead:
                 continue
 
-            # --- NPC NEEDS UPDATE ---
+            current_time_in_day = self.game_time % DAY_LENGTH_TICKS
+            time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
+
+            # --- NPC NEEDS AND STATUS UPDATE ---
+            self._update_npc_temperature(npc) # Update temperature first
             if npc.profession != "Creature":
                 npc.hunger = min(npc.max_hunger, npc.hunger + 2)
                 npc.thirst = min(npc.max_thirst, npc.thirst + 3)
@@ -1372,6 +1461,29 @@ class World:
                  npc.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player",
                                           "holding_position_combat", "combat_action_use_healing_item",
                                           "combat_action_move_to_cover", "investigating_sound"]:
+
+                # --- Temperature-based Warmth Seeking (High Priority) ---
+                if "Freezing" in npc.status_effects and npc.current_task != "seeking_warmth":
+                    npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
+                    npc.current_task = "seeking_warmth"
+                    heat_source_coords = self._find_nearest_heat_source(npc)
+                    if heat_source_coords:
+                        dest_x, dest_y = self._find_best_adjacent_tile(heat_source_coords[0], heat_source_coords[1], npc)
+                        if dest_x is not None:
+                            path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                            if path:
+                                npc.current_path = path
+                                npc.current_destination_coords = (dest_x, dest_y)
+                    else:
+                        # Fallback: huddle indoors at home
+                        home_building = self.buildings_by_id.get(npc.home_building_id)
+                        if home_building:
+                            home_coords = (home_building.global_center_x, home_building.global_center_y)
+                            path = self.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
+                            if path:
+                                npc.current_path = path
+                                npc.current_destination_coords = home_coords
+                                npc.current_task = "huddling_indoors"
 
                 # --- Weather-based Shelter Seeking ---
                 is_bad_weather = self.weather in ["rain", "snow"]
@@ -3826,9 +3938,66 @@ class World:
             print(f"Error communicating with Ollama: {e}")
             return ""
 
+    def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
+        """Finds the nearest lit heat source for an NPC."""
+        closest_source_coords = None
+        min_dist_sq = float('inf')
+
+        # 1. Check a radius around the NPC
+        for y in range(npc.y - 10, npc.y + 11):
+            for x in range(npc.x - 10, npc.x + 11):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and hasattr(tile, 'properties') and tile.properties.get("heat_source"):
+                        dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                        if dist_sq < min_dist_sq:
+                            min_dist_sq = dist_sq
+                            closest_source_coords = (x, y)
+
+        # 2. Check NPC's home for heat sources
+        home_building = self.buildings_by_id.get(npc.home_building_id)
+        if home_building:
+            for y in range(home_building.global_origin_y, home_building.global_origin_y + home_building.height):
+                for x in range(home_building.global_origin_x, home_building.global_origin_x + home_building.width):
+                    tile = self.get_tile_at(x, y)
+                    if tile and hasattr(tile, 'properties') and tile.properties.get("heat_source"):
+                        dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                        if dist_sq < min_dist_sq:
+                            min_dist_sq = dist_sq
+                            closest_source_coords = (x, y)
+
+        # 3. Check the local tavern
+        tavern = self._find_nearest_tavern(npc)
+        if tavern:
+            for y in range(tavern.global_origin_y, tavern.global_origin_y + tavern.height):
+                for x in range(tavern.global_origin_x, tavern.global_origin_x + tavern.width):
+                    tile = self.get_tile_at(x, y)
+                    if tile and hasattr(tile, 'properties') and tile.properties.get("heat_source"):
+                        dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                        if dist_sq < min_dist_sq:
+                            min_dist_sq = dist_sq
+                            closest_source_coords = (x, y)
+
+        return closest_source_coords
+
+    def _water_crops(self):
+        """Increments the growth of crops when it rains."""
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if not chunk.is_generated:
+                    continue
+
+                for y_local in range(CHUNK_SIZE):
+                    for x_local in range(CHUNK_SIZE):
+                        tile = chunk.tiles[y_local][x_local]
+                        if tile and tile.name == "Growing Wheat":
+                            tile.properties["growth_progress"] += 5 # Example growth increment
+
     def _update_weather(self):
         """Handles weather effects, like rain extinguishing fires."""
         if self.weather == "rain":
+            self._water_crops()
             for y_chunk in range(self.chunk_height):
                 for x_chunk in range(self.chunk_width):
                     chunk = self.chunks[y_chunk][x_chunk]
@@ -3903,6 +4072,17 @@ class World:
                                 if new_tree:
                                     chunk.tiles[y_local][x_local] = new_tree
                                     self.transparency_map[world_x, world_y] = True # Update transparency map
+
+                        # Crop growth
+                        elif tile.name == "Growing Wheat":
+                            if tile.properties["growth_progress"] >= tile.properties["growth_needed"]:
+                                evolves_to_key = tile.properties.get("evolves_to")
+                                if evolves_to_key:
+                                    new_tile_def = TILE_DEFINITIONS.get(evolves_to_key)
+                                    if new_tile_def:
+                                        world_x = x_chunk * CHUNK_SIZE + x_local
+                                        world_y = y_chunk * CHUNK_SIZE + y_local
+                                        self._change_map_tile((world_x, world_y), new_tile_def)
 
 
     def _populate_npcs(self):

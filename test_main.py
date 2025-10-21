@@ -153,5 +153,121 @@ class TestTemperatureSystem(unittest.TestCase):
         self.assertEqual(extinguished_tile.name, "Simple Fire Pit")
 
 
+class TestAgriculturalSystem(unittest.TestCase):
+    @patch('engine.World._call_ollama')
+    def setUp(self, mock_call_ollama):
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.world = World()
+
+    def test_rain_waters_crops_and_they_grow(self):
+        from data.tiles import TILE_DEFINITIONS
+        from tile_types import Tile
+
+        # 1. Place a growing wheat tile
+        crop_x, crop_y = self.world.player.x + 2, self.world.player.y
+        growing_def = TILE_DEFINITIONS["wheat_growing"]
+        # Use .copy() on properties to avoid modifying the global definition
+        growing_tile = Tile(char=growing_def['char'], color=growing_def['color'], passable=True, name="Growing Wheat", properties=growing_def['properties'].copy())
+
+        chunk_x, chunk_y = crop_x // 20, crop_y // 20
+        local_x, local_y = crop_x % 20, crop_y % 20
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = growing_tile
+
+        self.assertEqual(self.world.get_tile_at(crop_x, crop_y).name, "Growing Wheat")
+        self.assertEqual(self.world.get_tile_at(crop_x, crop_y).properties["growth_progress"], 0)
+
+        # 2. Make it rain for enough ticks to water the plant to maturity
+        self.world.weather = "rain"
+        watering_increment = 5 # From _water_crops
+        growth_needed = growing_def['properties']['growth_needed']
+        updates_needed = (growth_needed // watering_increment) + 1
+
+        for _ in range(updates_needed):
+            self.world._update_weather()
+
+        # Verify progress has been made
+        self.assertGreater(self.world.get_tile_at(crop_x, crop_y).properties["growth_progress"], 0)
+
+        # 3. Call the environment update to trigger the evolution
+        self.world._update_world_environment()
+
+        # 4. Assert the crop is now mature
+        mature_tile = self.world.get_tile_at(crop_x, crop_y)
+        self.assertIsNotNone(mature_tile)
+        self.assertEqual(mature_tile.name, "Mature Wheat Crop")
+
+
+class TestNPCBehaviorSystem(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+
+        self.world = World()
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_npc_seeks_warmth_when_freezing(self):
+        from data.decorations import DECORATION_ITEM_DEFINITIONS
+        from data.tiles import TILE_DEFINITIONS
+        from tile_types import Tile
+        from entities.base import NPC
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 1. Create a freezing environment and an NPC
+        self.world.current_season_index = 3 # Winter
+        npc = NPC(x=self.world.player.x + 5, y=self.world.player.y, name="Test NPC")
+        self.world.village_npcs.append(npc)
+
+        # 2. Ensure a clear path and place a heat source
+        fire_x, fire_y = npc.x + 3, npc.y
+        plains_def = TILE_DEFINITIONS["plains"]
+        plains_tile = Tile(char=plains_def['char'], color=plains_def['color'], passable=True, name="Plains", properties={})
+
+        # Also clear the NPC's starting tile
+        self.world.get_tile_at(npc.x, npc.y) # Ensure chunk is generated
+        c_chunk_x, c_chunk_y = npc.x // 20, npc.y // 20
+        c_local_x, c_local_y = npc.x % 20, npc.y % 20
+        self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
+
+        # Clear a path for the NPC
+        for i in range(1, 3): # up to the destination tile
+            clear_x, clear_y = npc.x + i, npc.y
+            self.world.get_tile_at(clear_x, clear_y) # Ensure chunk is generated
+            c_chunk_x, c_chunk_y = clear_x // 20, clear_y // 20
+            c_local_x, c_local_y = clear_x % 20, clear_y % 20
+            self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
+
+        fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_lit"]
+        fire_pit_tile = Tile(char=fire_pit_def['char'], color=fire_pit_def['color'], passable=False, name="fire_pit_lit", properties=fire_pit_def['properties'].copy())
+
+        chunk_x, chunk_y = fire_x // 20, fire_y // 20
+        local_x, local_y = fire_x % 20, fire_y % 20
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = fire_pit_tile
+
+        # 3. Manually update NPC temperature to freezing
+        npc.temperature = 34.0
+        self.world._update_npc_temperature(npc)
+        self.assertIn("Freezing", npc.status_effects)
+
+        # 4. Advance time to ensure the schedule update runs
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 5. Run the NPC schedule update
+        self.world._update_npc_schedules()
+
+        # 6. Assert that the NPC is now seeking warmth and pathfinding to the fire
+        self.assertEqual(npc.current_task, "seeking_warmth")
+        self.assertIsNotNone(npc.current_path)
+        # The path destination should be adjacent to the fire, not on it, because the fire is not passable.
+        path_dest = npc.current_destination_coords
+        self.assertIsNotNone(path_dest)
+        self.assertTrue(abs(path_dest[0] - fire_x) + abs(path_dest[1] - fire_y) == 1)
+
+
 if __name__ == '__main__':
     unittest.main()

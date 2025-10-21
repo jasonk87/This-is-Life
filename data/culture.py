@@ -48,7 +48,8 @@ CULTURES = {
                 "its annual harvest festival",
                 "the exceptionally potent ale brewed in its tavern"
             ]
-        }
+        },
+        "unique_buildings": []
     },
     "forest_folk": {
         "name": "Forest Folk",
@@ -98,7 +99,8 @@ CULTURES = {
                 "the glowing flora that illuminates the village at night",
                 "the strange, musical language of the villagers"
             ]
-        }
+        },
+        "unique_buildings": ["moon_well", "herbalist_hut"]
     },
     "mountain_clan": {
         "name": "Mountain Clan",
@@ -148,6 +150,7 @@ CULTURES = {
                 "the shimmering gems that adorn their halls",
                 "the stoic, and untrusting nature of the clansfolk"
             ]
-        }
+        },
+        "unique_buildings": ["great_hall", "clan_forge"]
     }
 }

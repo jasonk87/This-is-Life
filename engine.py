@@ -1474,20 +1474,14 @@ class World:
                     npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                     npc.current_task = "seeking_warmth"
                     heat_source_coords = self._find_nearest_heat_source(npc)
-                    print(f"DEBUG: NPC {npc.name} is seeking warmth. Nearest heat source: {heat_source_coords}")
                     if heat_source_coords:
                         dest_x, dest_y = self._find_best_adjacent_tile(heat_source_coords[0], heat_source_coords[1], npc)
-                        print(f"DEBUG: Best adjacent tile to heat source: ({dest_x}, {dest_y})")
                         if dest_x is not None:
                             path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
                             if path:
                                 npc.current_path = path
                                 npc.current_destination_coords = (dest_x, dest_y)
-                                print(f"DEBUG: Path found for {npc.name} to ({dest_x}, {dest_y}). Path length: {len(path)}")
-                            else:
-                                print(f"DEBUG: No path found for {npc.name} from ({npc.x}, {npc.y}) to ({dest_x}, {dest_y})")
                         else:
-                            print(f"DEBUG: No adjacent tile found for heat source at {heat_source_coords}")
                             # Fallback: huddle indoors at home
                             home_building = self.buildings_by_id.get(npc.home_building_id)
                             if home_building:
@@ -1497,8 +1491,6 @@ class World:
                                     npc.current_path = path
                                     npc.current_destination_coords = home_coords
                                     npc.current_task = "huddling_indoors"
-                    else:
-                        print(f"DEBUG: No heat source found for {npc.name}")
 
                 # --- Weather-based Shelter Seeking ---
                 is_bad_weather = self.weather in ["rain", "snow"]
@@ -5040,6 +5032,50 @@ class World:
             chunk.village.add_building(house)
             self.buildings_by_id[house.id] = house
             self._draw_building(tiles, house, culture)
+
+        # Generate unique building
+        if culture["unique_buildings"]:
+            unique_building_type = random.choice(culture["unique_buildings"])
+            if unique_building_type == "great_hall":
+                gh_w, gh_h = 12, 8
+                gh_x = road_x - gh_w // 2
+                gh_y = road_y - gh_h - 2
+                great_hall = Building(gh_x, gh_y, gh_w, gh_h,
+                                      building_type="great_hall", category="civic",
+                                      global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                chunk.village.add_building(great_hall)
+                self.buildings_by_id[great_hall.id] = great_hall
+                self._draw_building(tiles, great_hall, culture)
+            elif unique_building_type == "moon_well":
+                mw_w, mw_h = 5, 5
+                mw_x = road_x - mw_w // 2
+                mw_y = road_y - mw_h // 2
+                moon_well = Building(mw_x, mw_y, mw_w, mw_h,
+                                     building_type="moon_well", category="civic",
+                                     global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                chunk.village.add_building(moon_well)
+                self.buildings_by_id[moon_well.id] = moon_well
+                self._draw_building(tiles, moon_well, culture)
+            elif unique_building_type == "herbalist_hut":
+                hh_w, hh_h = 7, 6
+                hh_x = random.randint(1, CHUNK_SIZE - hh_w - 1)
+                hh_y = random.randint(1, CHUNK_SIZE - hh_h - 1)
+                herbalist_hut = Building(hh_x, hh_y, hh_w, hh_h,
+                                         building_type="herbalist_hut", category="commercial_workplace",
+                                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                chunk.village.add_building(herbalist_hut)
+                self.buildings_by_id[herbalist_hut.id] = herbalist_hut
+                self._draw_building(tiles, herbalist_hut, culture)
+            elif unique_building_type == "clan_forge":
+                cf_w, cf_h = 9, 7
+                cf_x = road_x - cf_w // 2
+                cf_y = road_y + 2
+                clan_forge = Building(cf_x, cf_y, cf_w, cf_h,
+                                      building_type="clan_forge", category="industrial_workplace",
+                                      global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                chunk.village.add_building(clan_forge)
+                self.buildings_by_id[clan_forge.id] = clan_forge
+                self._draw_building(tiles, clan_forge, culture)
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         self._initialize_economy(chunk.village)

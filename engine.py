@@ -36,6 +36,7 @@ from data.items import ITEM_DEFINITIONS # For checking yielded resources
 from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.prompts import LLM_PROMPTS, OLLAMA_ENDPOINT
+from data.culture import CULTURES
 from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data
 from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
@@ -115,7 +116,10 @@ class Building:
                 self.global_origin_y <= world_y < self.global_origin_y + self.height)
 
 class Village:
-    def __init__(self):
+    def __init__(self, culture_name="default"):
+        self.culture_name = culture_name
+        self.culture = CULTURES.get(culture_name, CULTURES["default"])
+        self.name = "Unnamed Village"
         self.buildings = []
         self.lore = "No lore generated yet."
         self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
@@ -1223,6 +1227,9 @@ class World:
         for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
             adj_x, adj_y = target_x + dx, target_y + dy
 
+            if (adj_x, adj_y) == (entity.x, entity.y):
+                continue
+
             # Basic validation
             if not (0 <= adj_x < WORLD_WIDTH and 0 <= adj_y < WORLD_HEIGHT):
                 continue
@@ -1474,16 +1481,16 @@ class World:
                             if path:
                                 npc.current_path = path
                                 npc.current_destination_coords = (dest_x, dest_y)
-                    else:
-                        # Fallback: huddle indoors at home
-                        home_building = self.buildings_by_id.get(npc.home_building_id)
-                        if home_building:
-                            home_coords = (home_building.global_center_x, home_building.global_center_y)
-                            path = self.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
-                            if path:
-                                npc.current_path = path
-                                npc.current_destination_coords = home_coords
-                                npc.current_task = "huddling_indoors"
+                        else:
+                            # Fallback: huddle indoors at home
+                            home_building = self.buildings_by_id.get(npc.home_building_id)
+                            if home_building:
+                                home_coords = (home_building.global_center_x, home_building.global_center_y)
+                                path = self.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
+                                if path:
+                                    npc.current_path = path
+                                    npc.current_destination_coords = home_coords
+                                    npc.current_task = "huddling_indoors"
 
                 # --- Weather-based Shelter Seeking ---
                 is_bad_weather = self.weather in ["rain", "snow"]
@@ -4136,17 +4143,18 @@ class World:
                     for item_key, qty in consumes.items():
                         village.demand[item_key] = village.demand.get(item_key, 0) + 5 # Baseline demand of 5 for each required resource
 
-    def _populate_village_npcs(self, chunk: Chunk, village: Village, chunk_coord_x: int, chunk_coord_y: int): # Added chunk_coord_x, chunk_coord_y
+    def _populate_village_npcs(self, chunk: Chunk, village: Village, chunk_coord_x: int, chunk_coord_y: int):
         """Populates a village with NPCs, assigning them homes and potentially jobs."""
-        # chunk_global_start_x and chunk_global_start_y are now implicitly handled by Building.global_center_x/y
-        # No longer need to calculate chunk_global_start_x/y here from chunk_coord_x/y for NPC placement if using building centers.
+        culture = village.culture
+        naming_scheme = culture["naming_scheme"]
+        profession_weights = culture["professions"]
 
         num_npcs = random.randint(max(1, len(village.buildings) // 2), len(village.buildings))
         if not village.buildings:
             num_npcs = 0
 
         residential_buildings = [b for b in village.buildings if b.category == "residential"]
-        workplace_buildings = [b for b in village.buildings if "workplace" in b.category] # e.g., "civic_workplace", "commercial_workplace"
+        workplace_buildings = [b for b in village.buildings if "workplace" in b.category]
 
         available_homes = list(residential_buildings)
         available_workplaces = list(workplace_buildings)
@@ -4154,13 +4162,23 @@ class World:
         random.shuffle(available_workplaces)
 
         for i in range(num_npcs):
+            # Generate culturally-appropriate name
+            if random.random() < 0.5:
+                first_name = random.choice(naming_scheme["npc_male_first_names"])
+            else:
+                first_name = random.choice(naming_scheme["npc_female_first_names"])
+            last_name = random.choice(naming_scheme["npc_last_names"])
+            name_hint = f"{first_name} {last_name}"
+
             # Fetch player reputation to pass to the prompt
             player_rep = self.player.reputation
             prompt = LLM_PROMPTS["npc_personality"].format(
                 player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
                 player_hero_points=player_rep.get(REP_HERO, 0),
-                # Potentially add name_hint, personality_hint etc. if we want more specific NPC roles
-                name_hint="", personality_hint="", family_ties_hint="", attitude_to_player_hint=""
+                name_hint=name_hint,
+                personality_hint="",
+                family_ties_hint="",
+                attitude_to_player_hint=""
             )
             llm_response = self._call_ollama(prompt)
             try:
@@ -4564,17 +4582,20 @@ class World:
         if chunk.is_generated: return
 
         if chunk.poi_type == "village":
-            chunk.village = Village()
-            # Generate village lore
-            prompt = LLM_PROMPTS["village_lore"]
-            lore_response = self._call_ollama(prompt)
-            if lore_response:
-                chunk.village.lore = lore_response.strip()
-                # self.add_message_to_chat_log(f"Village Lore for {chunk_coord_x},{chunk_coord_y}: {chunk.village.lore[:50]}...") # Log snippet
-            else:
-                chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
+            # Assign a culture to the village
+            culture_name = random.choice(list(CULTURES.keys()))
+            chunk.village = Village(culture_name)
+            culture = chunk.village.culture
+
+            # Generate village lore using cultural elements
+            lore_elements = culture["lore_elements"]
+            origin = random.choice(lore_elements["origin_stories"])
+            struggle = random.choice(lore_elements["struggles"])
+            characteristic = random.choice(lore_elements["unique_characteristics"])
+            lore = f"{origin} The village is known for {characteristic}, but currently faces challenges with {struggle}."
+            chunk.village.lore = lore
             
-            tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
+            tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y, culture)
         else:
             # Generate the base biome tiles
             biome_def = TILE_DEFINITIONS[chunk.biome]
@@ -4620,7 +4641,12 @@ class World:
         chunk.tiles = tiles
         chunk.is_generated = True
 
-    def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+    def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int, culture: dict):
+        # Generate village name
+        name_scheme = culture["naming_scheme"]
+        village_name = f"{random.choice(name_scheme['village_prefixes'])} {random.choice(name_scheme['village_suffixes'])}"
+        chunk.village.name = village_name
+
         tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
         # Add a pond to the village
@@ -4669,7 +4695,7 @@ class World:
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(capital_hall)
         self.buildings_by_id[capital_hall.id] = capital_hall
-        self._draw_building(tiles, capital_hall, "capital_hall_wall")
+        self._draw_building(tiles, capital_hall, culture)
 
         # Generate Jail
         jail_w, jail_h = 7, 5
@@ -4680,7 +4706,7 @@ class World:
                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(jail)
         self.buildings_by_id[jail.id] = jail
-        self._draw_building(tiles, jail, "jail_bars")
+        self._draw_building(tiles, jail, culture)
 
         # Generate Sheriff's Office
         sheriff_office_w, sheriff_office_h = 7, 5
@@ -4691,7 +4717,7 @@ class World:
                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(sheriff_office)
         self.buildings_by_id[sheriff_office.id] = sheriff_office
-        self._draw_building(tiles, sheriff_office, "sheriff_office_wall")
+        self._draw_building(tiles, sheriff_office, culture)
 
         # Generate General Store
         store_w, store_h = 8, 6
@@ -4706,7 +4732,7 @@ class World:
                                  global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(general_store)
         self.buildings_by_id[general_store.id] = general_store
-        self._draw_building(tiles, general_store, "wood_wall")
+        self._draw_building(tiles, general_store, culture)
 
         # Generate Tavern
         tavern_w, tavern_h = 9, 7
@@ -4739,7 +4765,7 @@ class World:
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
             chunk.village.add_building(tavern)
             self.buildings_by_id[tavern.id] = tavern
-            self._draw_building(tiles, tavern, "wood_wall")
+            self._draw_building(tiles, tavern, culture)
 
         # Generate Lumber Mill (example producer workplace)
         lumber_mill_w, lumber_mill_h = 7, 7
@@ -4755,7 +4781,7 @@ class World:
                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(lumber_mill)
         self.buildings_by_id[lumber_mill.id] = lumber_mill
-        self._draw_building(tiles, lumber_mill, "wood_wall")
+        self._draw_building(tiles, lumber_mill, culture)
 
         # Define work zones for the lumber mill after it's drawn
         # These coordinates are GLOBAL world coordinates
@@ -4815,7 +4841,7 @@ class World:
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(carpenter_shop)
         self.buildings_by_id[carpenter_shop.id] = carpenter_shop
-        self._draw_building(tiles, carpenter_shop, "wood_wall")
+        self._draw_building(tiles, carpenter_shop, culture)
 
         # Generate Windmill
         windmill_w, windmill_h = 7, 7
@@ -4826,7 +4852,7 @@ class World:
                             global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(windmill)
         self.buildings_by_id[windmill.id] = windmill
-        self._draw_building(tiles, windmill, "wood_wall")
+        self._draw_building(tiles, windmill, culture)
 
         grinding_stone_coords_global = []
         if windmill.width > 2 and windmill.height > 2:
@@ -4846,7 +4872,7 @@ class World:
                           global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(bakery)
         self.buildings_by_id[bakery.id] = bakery
-        self._draw_building(tiles, bakery, "wood_wall")
+        self._draw_building(tiles, bakery, culture)
 
         oven_coords_global = []
         if bakery.width > 2 and bakery.height > 2:
@@ -4866,7 +4892,7 @@ class World:
                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(mine)
         self.buildings_by_id[mine.id] = mine
-        self._draw_building(tiles, mine, "stone_wall")
+        self._draw_building(tiles, mine, culture)
 
         # Define work zones for the Mine
         mine_face_coords_global = []
@@ -4896,7 +4922,7 @@ class World:
                                    global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
         chunk.village.add_building(blacksmith_shop)
         self.buildings_by_id[blacksmith_shop.id] = blacksmith_shop
-        self._draw_building(tiles, blacksmith_shop, "stone_wall")
+        self._draw_building(tiles, blacksmith_shop, culture)
 
         # Define work zones for the Blacksmith Shop
         forge_coords_global = []
@@ -4933,7 +4959,7 @@ class World:
                                    global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
             chunk.village.add_building(farm_building)
             self.buildings_by_id[farm_building.id] = farm_building
-            self._draw_building(tiles, farm_building, "wood_wall") # Farmhouse uses wood wall
+            self._draw_building(tiles, farm_building, culture) # Farmhouse uses wood wall
 
             # Define "field_patch" zone for the farm
             field_patch_coords_global = []
@@ -4954,7 +4980,7 @@ class World:
                     # A more robust version would check tiles[field_start_local_y + r_y][field_start_local_x + r_x]
                     # to ensure it's a suitable type before adding to field_patch.
                     if 0 <= field_start_local_x + r_x < CHUNK_SIZE and \
-                       0 <= field_start_local_y + r_y < CHUNK_SIZE:
+                        0 <= field_start_local_y + r_y < CHUNK_SIZE:
 
                         # Ensure the field tiles are initially plains (or similar farmable land)
                         # For now, we just define the zone. The farmer will till plains tiles within it.
@@ -4969,7 +4995,7 @@ class World:
 
             # Pre-populate farm with some seeds for the farmer to use
             if "wheat_seeds" in ITEM_DEFINITIONS:
-                 farm_building.building_inventory["wheat_seeds"] = random.randint(5, 15)
+                    farm_building.building_inventory["wheat_seeds"] = random.randint(5, 15)
 
 
         # Generate Fishing Hut
@@ -4995,7 +5021,7 @@ class World:
                     fishing_hut = Building(hut_x, hut_y, hut_w, hut_h, building_type="fishing_hut", category="industrial_workplace", global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
                     chunk.village.add_building(fishing_hut)
                     self.buildings_by_id[fishing_hut.id] = fishing_hut
-                    self._draw_building(tiles, fishing_hut, "wood_wall")
+                    self._draw_building(tiles, fishing_hut, culture)
 
                     # Designate a fishing spot
                     for i in range(-2, hut_h + 2):
@@ -5037,25 +5063,33 @@ class World:
                              global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
             chunk.village.add_building(house)
             self.buildings_by_id[house.id] = house
-            self._draw_building(tiles, house, "wood_wall")
+            self._draw_building(tiles, house, culture)
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         self._initialize_economy(chunk.village)
         return tiles
 
-    def _draw_building(self, tiles, building, wall_tile_key):
+    def _draw_building(self, tiles, building, culture):
+        building_style = culture["building_styles"].get(building.category, culture["building_styles"]["residential"])
+        wall_tile_key = building_style["wall"]
+        floor_tile_key = building_style["floor"]
+        roof_tile_key = building_style["roof"]
+
         for i in range(building.height):
             for j in range(building.width):
                 is_border = i == 0 or i == building.height - 1 or j == 0 or j == building.width - 1
+                is_roof = i == 0
                 is_window = (i == 1 and j == 0) or (i == 1 and j == building.width - 1) or \
                             (i == building.height - 2 and j == 0) or (i == building.height - 2 and j == building.width - 1)
 
-                if is_border:
+                if is_roof:
+                    tiles[building.y + i][building.x + j] = Tile(DECORATION_ITEM_DEFINITIONS[roof_tile_key]["char"], DECORATION_ITEM_DEFINITIONS[roof_tile_key]["color"], DECORATION_ITEM_DEFINITIONS[roof_tile_key]["passable"], DECORATION_ITEM_DEFINITIONS[roof_tile_key]["name"])
+                elif is_border:
                     tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS[wall_tile_key]["char"], TILE_DEFINITIONS[wall_tile_key]["color"], TILE_DEFINITIONS[wall_tile_key]["passable"], TILE_DEFINITIONS[wall_tile_key]["name"])
                 elif is_window and building.building_type == "house": # Only houses have windows for now
                     tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS["window"]["char"], TILE_DEFINITIONS["window"]["color"], TILE_DEFINITIONS["window"]["passable"], TILE_DEFINITIONS["window"]["name"])
                 else:
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS["wood_floor"]["char"], TILE_DEFINITIONS["wood_floor"]["color"], TILE_DEFINITIONS["wood_floor"]["passable"], TILE_DEFINITIONS["wood_floor"]["name"])
+                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS[floor_tile_key]["char"], TILE_DEFINITIONS[floor_tile_key]["color"], TILE_DEFINITIONS[floor_tile_key]["passable"], TILE_DEFINITIONS[floor_tile_key]["name"])
 
         # Place door for houses and capital hall
         if building.building_type in ["house", "capital_hall", "sheriff_office", "jail"]:

@@ -524,4 +524,58 @@ Example - Do Nothing:
 
 JSON Decision:
 """
+,
+    "generate_village_layout": """\
+You are an AI assistant designing a fantasy village layout.
+
+**Village Context:**
+- Biome: {biome}
+- Lore: {lore}
+
+**Task:**
+Generate a JSON object describing the layout of buildings for this village. The village is situated in a {CHUNK_SIZE}x{CHUNK_SIZE} area.
+Create a list of buildings, including their type, size, and suggested placement.
+
+**Available Building Types:**
+- Residential: `house`
+- Commercial: `tavern`, `general_store`, `bakery`
+- Industrial: `lumber_mill`, `carpenter_shop`, `mill`, `mine`, `blacksmith_shop`, `fishing_hut`
+- Civic: `capital_hall`, `jail`, `sheriff_office`
+- Agricultural: `farm`
+
+**Placement Instructions:**
+- Use a `placement_hint` to suggest where each building should go. Examples: "near the center", "on the outskirts", "close to the forest edge", "next to the river".
+- Provide a `width` and `height` for each building. Keep them reasonable (e.g., between 5 and 10).
+
+**Constraints:**
+- The number of buildings should be between 5 and 15.
+- The village should feel organic and logical. For example, a `lumber_mill` might be on the outskirts near a forest, a `fishing_hut` near water.
+- The variety of buildings should reflect the village's lore. A mining town should have a `mine` and `blacksmith_shop`. A farming community should have a `farm` and a `mill`.
+
+**Example Output:**
+{{
+  "buildings": [
+    {{
+      "type": "tavern",
+      "width": 8,
+      "height": 6,
+      "placement_hint": "near the center, a social hub"
+    }},
+    {{
+      "type": "blacksmith_shop",
+      "width": 7,
+      "height": 7,
+      "placement_hint": "on the outskirts, with a forge visible"
+    }},
+    {{
+      "type": "house",
+      "width": 6,
+      "height": 5,
+      "placement_hint": "a small cluster of homes north of the center"
+    }}
+  ]
+}}
+
+JSON Output:
+"""
 }

@@ -92,6 +92,15 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
                     console.fg[current_x + i, y] = color
             current_x += len(status) + 2
 
+def is_visible(world, x, y):
+    """Checks if a given world coordinate is visible to the player."""
+    fov_map = world.player_fov_map
+    fov_min_x = world.fov_min_x
+    fov_min_y = world.fov_min_y
+    if fov_min_x <= x < fov_min_x + fov_map.shape[1] and fov_min_y <= y < fov_min_y + fov_map.shape[0]:
+        return fov_map[y - fov_min_y, x - fov_min_x]
+    return False
+
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
     console.clear()
@@ -106,15 +115,13 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
             for x_screen in range(map_view_width):
                 x_world, y_world = camera_x + x_screen, camera_y + y_screen
 
-                # This needs to be updated to handle potentially out-of-bounds access gracefully
-                # For now, we rely on FOV map size to implicitly handle this.
-                is_visible = (x_world, y_world) in world.player_fov_map
+                visible = is_visible(world, x_world, y_world)
                 is_explored = (x_world, y_world) in world.explored_map
 
                 tile_char, tile_fg, tile_bg = None, None, (0, 0, 0)
 
                 # Get tile appearance
-                if is_visible:
+                if visible:
                     tile = world.get_tile_at(x_world, y_world)
                     if tile:
                         tile_char, tile_fg = tile.char, tile.color
@@ -128,7 +135,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
                     console.rgb[x_screen, y_screen] = (tile_char, tile_fg, tile_bg)
 
                 # Draw items on top of tiles if visible
-                if is_visible and (x_world, y_world) in world.items_on_map:
+                if visible and (x_world, y_world) in world.items_on_map:
                     items_at_loc = world.items_on_map[(x_world, y_world)]
                     if items_at_loc:
                         top_item_key = items_at_loc[0]["item_key"]
@@ -139,7 +146,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
         # --- Draw NPCs ---
         for npc in world.npcs + world.village_npcs:
-            if (npc.x, npc.y) in world.player_fov_map:
+            if is_visible(world, npc.x, npc.y):
                 npc_screen_x = npc.x - camera_x
                 npc_screen_y = npc.y - camera_y
                 if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:
@@ -259,7 +266,7 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
         if npc_at_cursor: break
 
     if npc_at_cursor:
-        if (npc_at_cursor.x, npc_at_cursor.y) in world.player_fov_map:
+        if is_visible(world, npc_at_cursor.x, npc_at_cursor.y):
              main_console.print(x=menu_x + 3, y=ui_y, string=f"NPC: {npc_at_cursor.name}", fg=(180, 180, 255))
              # ... (the rest of the NPC info is okay)
 

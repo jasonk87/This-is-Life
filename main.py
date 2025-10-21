@@ -86,7 +86,6 @@ def main():
             world._update_player_movement_timer()
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
             world._update_season()
-            world._update_weather()
             world._update_player_temperature()
             world._apply_temperature_effects()
             world._update_light_level_and_fov() # Update light level and FOV radius

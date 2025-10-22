@@ -352,6 +352,22 @@ def main():
                         if not world.chat_ui_active and not world.trade_ui_active and not world.interaction_menu_active: # Added trade_ui_active check
                              world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
 
+                    # --- Game State: Crafting Menu ---
+                    elif world.game_state == "CRAFTING_MENU":
+                        ctx = world.crafting_menu_context
+                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.C:
+                            world.game_state = "PLAYING"
+                        elif event.sym == tcod.event.KeySym.UP:
+                            if ctx["all_recipes"]:
+                                ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] - 1) % len(ctx["all_recipes"])
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            if ctx["all_recipes"]:
+                                ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] + 1) % len(ctx["all_recipes"])
+                        elif event.sym == tcod.event.KeySym.RETURN:
+                            if 0 <= ctx["selected_recipe_index"] < len(ctx["all_recipes"]):
+                                selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
+                                world.craft_item(selected_key)
+
                     # --- Game State: Playing (No other UI is active) ---
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
@@ -359,8 +375,17 @@ def main():
                             action_cost = world.handle_player_movement(dx, dy)
                             if action_cost > 0:
                                 world.game_time += action_cost - 1
-                        elif event.sym == tcod.event.KeySym.C: # Craft healing salve
-                            world.craft_item("healing_salve")
+                        elif event.sym == tcod.event.KeySym.C:
+                            world.game_state = "CRAFTING_MENU"
+                            # Populate recipes when opening the menu
+                            world.crafting_menu_context["all_recipes"] = [
+                                key for key, definition in ITEM_DEFINITIONS.items()
+                                if "crafting_recipe" in definition
+                            ]
+                            # Sort recipes alphabetically by name
+                            world.crafting_menu_context["all_recipes"].sort(
+                                key=lambda k: ITEM_DEFINITIONS[k].get("name", k)
+                            )
                         elif event.sym == tcod.event.KeySym.S: # Craft crude spear
                             world.craft_item("crude_spear")
                         elif event.sym == tcod.event.KeySym.X: # Craft wooden shield

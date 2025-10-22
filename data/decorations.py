@@ -74,6 +74,18 @@ DECORATION_ITEM_DEFINITIONS = {
             "interaction_hint": "sit"
         }
     },
+    "workbench": {
+        "name": "Workbench",
+        "description": "A bench for crafting items.",
+        "char": "W",
+        "color": COLORS["dark_orange"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "workbench"
+        }
+    },
      "wooden_table": {
         "name": "Wooden Table",
         "description": "A sturdy wooden table.",

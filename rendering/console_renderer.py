@@ -145,6 +145,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     draw_interaction_menu(console, world, camera_x, camera_y)
     draw_chat_ui(console, world)
     draw_trade_ui(console, world)
+    draw_crafting_menu(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
     draw_status_panel(console, world)
 
@@ -292,6 +293,65 @@ def draw_chat_ui(console: tcod.console.Console, world) -> None:
 def draw_trade_ui(console: tcod.console.Console, world) -> None:
     if not world.trade_ui_active: return
     # ... (this function is full-screen overlay, no camera coords needed)
+
+def draw_crafting_menu(console: tcod.console.Console, world) -> None:
+    """Draws the crafting menu UI."""
+    if world.game_state != "CRAFTING_MENU":
+        return
+
+    menu_width = 50
+    menu_height = 30
+    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
+    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
+
+    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="Crafting", clear=True)
+
+    ctx = world.crafting_menu_context
+    recipes = ctx["all_recipes"]
+    selected_index = ctx["selected_recipe_index"]
+    scroll_offset = ctx["scroll_offset"]
+
+    # Recipe List
+    list_height = menu_height - 4
+    for i in range(list_height):
+        recipe_index = scroll_offset + i
+        if recipe_index >= len(recipes):
+            break
+
+        recipe_key = recipes[recipe_index]
+        item_def = ITEM_DEFINITIONS.get(recipe_key, {})
+        item_name = item_def.get("name", recipe_key)
+
+        can_craft = world.player_can_craft(recipe_key)
+
+        fg = (255, 255, 0) if recipe_index == selected_index else ((0, 255, 0) if can_craft else (255, 0, 0))
+        prefix = "> " if recipe_index == selected_index else "  "
+        console.print(x=menu_x + 2, y=menu_y + 2 + i, string=f"{prefix}{item_name}", fg=fg)
+
+    # Recipe Details
+    details_x = menu_x + 25
+    console.draw_rect(x=details_x - 1, y=menu_y + 1, width=1, height=menu_height - 2, ch=ord('|')) # Vertical line separator
+
+    if 0 <= selected_index < len(recipes):
+        selected_key = recipes[selected_index]
+        selected_def = ITEM_DEFINITIONS.get(selected_key, {})
+        selected_name = selected_def.get("name", selected_key)
+
+        console.print(x=details_x + 1, y=menu_y + 2, string=selected_name, fg=(255, 255, 255))
+        console.print(x=details_x + 1, y=menu_y + 4, string="Ingredients:", fg=(255, 255, 255))
+
+        y_offset = menu_y + 5
+        recipe = selected_def.get("crafting_recipe", {})
+        if not recipe:
+            console.print(x=details_x + 2, y=y_offset, string="(No recipe)", fg=(128, 128, 128))
+        else:
+            for ingredient_key, required_qty in recipe.items():
+                ingredient_name = ITEM_DEFINITIONS.get(ingredient_key, {}).get("name", ingredient_key)
+                has_enough = world.player.has_item(ingredient_key, required_qty)
+                fg = (0, 255, 0) if has_enough else (255, 0, 0)
+                console.print(x=details_x + 2, y=y_offset, string=f"- {ingredient_name}: {required_qty}", fg=fg)
+                y_offset += 1
+
 
 def draw_build_mode_ui(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     if not world.ghost_furniture_tile: return

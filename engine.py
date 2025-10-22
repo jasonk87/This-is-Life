@@ -430,6 +430,13 @@ class World:
         self.trade_ui_player_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
         self.trade_ui_merchant_inventory_snapshot = [] # List of (item_key, quantity, price) tuples
 
+        # Crafting Menu State
+        self.crafting_menu_context = {
+            "selected_recipe_index": 0,
+            "scroll_offset": 0,
+            "all_recipes": [] # This will be populated when the menu is opened
+        }
+
         # Items on the ground
         self.items_on_map: dict[tuple[int, int], list[dict]] = {} # Key: (x,y), Value: list of {"item_key": str, "quantity": int}
 
@@ -5598,38 +5605,54 @@ class World:
 
         return max(1, dynamic_price) # Ensure price is at least 1
 
+    def _is_player_near_workstation(self, required_workstation: str) -> bool:
+        """Checks if the player is adjacent to a required workstation."""
+        if not required_workstation:
+            return True # No workstation required
+
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+                tile = self.get_tile_at(self.player.x + dx, self.player.y + dy)
+                if tile and hasattr(tile, 'properties') and tile.properties.get("workstation_type") == required_workstation:
+                    return True
+        return False
+
     def craft_item(self, item_key: str):
-        """Crafts an item if the player has the required resources."""
+        """Crafts an item if the player has the required resources and provides feedback on failure."""
         if item_key not in ITEM_DEFINITIONS:
             self.add_message_to_chat_log(f"You don't know how to craft '{item_key}'.")
             return
 
-        recipe = ITEM_DEFINITIONS[item_key].get("crafting_recipe", {})
+        item_def = ITEM_DEFINITIONS[item_key]
+        recipe = item_def.get("crafting_recipe", {})
         if not recipe:
-            self.add_message_to_chat_log(f"There is no recipe for '{ITEM_DEFINITIONS[item_key]['name']}'.")
+            self.add_message_to_chat_log(f"There is no recipe for '{item_def['name']}'.")
             return
 
-        can_craft = True
+        # Check for ingredients first
         for resource_key, required_qty in recipe.items():
             if not self.player.has_item(resource_key, required_qty):
-                self.add_message_to_chat_log(f"You don't have enough {ITEM_DEFINITIONS[resource_key]['name']}. (Need {required_qty})")
-                can_craft = False
-                break
+                resource_name = ITEM_DEFINITIONS.get(resource_key, {}).get("name", resource_key)
+                self.add_message_to_chat_log(f"You don't have enough {resource_name}. (Need {required_qty})")
+                return
 
-        if can_craft:
-            # Consume resources
-            for resource_key, required_qty in recipe.items():
-                if not self.player.remove_item(resource_key, required_qty):
-                    # This should not happen if has_item check passed, but as a safeguard:
-                    self.add_message_to_chat_log(f"Error consuming {resource_key} for crafting. Aborted.")
-                    return
+        # Check for workstation
+        required_workstation = item_def.get("required_workstation")
+        if required_workstation and not self._is_player_near_workstation(required_workstation):
+            self.add_message_to_chat_log(f"You need to be near a {required_workstation} to craft this.")
+            return
 
-            # Add crafted item
-            self.player.add_item(item_key, 1)
-            self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
-        else:
-            # Message about missing resources already shown by has_item check.
-            pass
+        # All checks passed, proceed to consume resources and craft
+        for resource_key, required_qty in recipe.items():
+            if not self.player.remove_item(resource_key, required_qty):
+                self.add_message_to_chat_log(f"Error consuming {resource_key} for crafting. Aborted.")
+                return
+
+        # Add crafted item
+        self.player.add_item(item_key, 1)
+        self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
 
 
     def use_item(self, item_key: str):
@@ -5735,6 +5758,28 @@ class World:
 
         # Fallback if no specific use effect handled
         self.add_message_to_chat_log(f"You can't figure out how to use the {item_def.get('name', item_key)} right now.")
+
+    def player_can_craft(self, item_key: str) -> bool:
+        """Checks if the player has the resources and is near the required workstation to craft an item."""
+        if item_key not in ITEM_DEFINITIONS:
+            return False
+
+        item_def = ITEM_DEFINITIONS[item_key]
+        recipe = item_def.get("crafting_recipe", {})
+        if not recipe:
+            return False
+
+        # Check for ingredients
+        for resource_key, required_qty in recipe.items():
+            if not self.player.has_item(resource_key, required_qty):
+                return False
+
+        # Check for workstation
+        required_workstation = item_def.get("required_workstation")
+        if required_workstation and not self._is_player_near_workstation(required_workstation):
+            return False
+
+        return True
 
     def drop_item_on_map(self, item_key: str, quantity: int, x: int, y: int):
         """Drops an item or stack of items onto the map at specified coordinates."""

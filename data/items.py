@@ -111,6 +111,34 @@ ITEM_DEFINITIONS = {
         "crafting_recipe": {
             "raw_log": 1
         },
+        "required_workstation": "workbench"
+    },
+    "workbench": {
+        "name": "Workbench",
+        "description": "A sturdy bench for crafting items.",
+        "char": "W",
+        "color": COLORS["dark_orange"],
+        "value": 50,
+        "weight": 20,
+        "stackable": False,
+        "item_type_tags": ["furniture", "workstation"],
+        "crafting_recipe": {
+            "raw_log": 5
+        }
+    },
+    "wooden_chair": {
+        "name": "Wooden Chair",
+        "description": "A simple wooden chair.",
+        "char": "h",
+        "color": COLORS["saddlebrown"],
+        "value": 10,
+        "weight": 5,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 4
+        },
+        "required_workstation": "workbench"
     },
     "lumber_processed": {
         "name": "Processed Lumber",
@@ -156,6 +184,7 @@ ITEM_DEFINITIONS = {
             "stone_chunk": 2,
             "raw_log": 1
         },
+        "required_workstation": "workbench"
     },
     "broken_tool_handle": {
         "name": "Broken Tool Handle",

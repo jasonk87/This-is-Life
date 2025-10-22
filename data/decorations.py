@@ -86,6 +86,30 @@ DECORATION_ITEM_DEFINITIONS = {
             "workstation_type": "workbench"
         }
     },
+    "forge": {
+        "name": "Forge",
+        "description": "A hearth for heating metal.",
+        "char": "F",
+        "color": COLORS["dark_orange"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "forge"
+        }
+    },
+    "anvil": {
+        "name": "Anvil",
+        "description": "A heavy iron block for shaping metal.",
+        "char": "A",
+        "color": COLORS["dark_slate_gray"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "anvil"
+        }
+    },
      "wooden_table": {
         "name": "Wooden Table",
         "description": "A sturdy wooden table.",

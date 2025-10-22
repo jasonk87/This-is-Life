@@ -86,6 +86,11 @@ ITEM_DEFINITIONS = {
         "weight": 8,
         "stackable": True,
         "item_type_tags": ["component", "metal"],
+        "crafting_recipe": {
+            "iron_ore": 2,
+            "coal": 1
+        },
+        "required_workstation": "forge"
     },
     "coal": {
         "name": "Coal",
@@ -126,6 +131,34 @@ ITEM_DEFINITIONS = {
             "raw_log": 5
         }
     },
+    "forge": {
+        "name": "Forge",
+        "description": "A hearth for heating metal.",
+        "char": "F",
+        "color": COLORS["dark_orange"],
+        "value": 100,
+        "weight": 100,
+        "stackable": False,
+        "item_type_tags": ["furniture", "workstation"],
+        "crafting_recipe": {
+            "stone_chunk": 10
+        },
+        "required_workstation": "workbench"
+    },
+    "anvil": {
+        "name": "Anvil",
+        "description": "A heavy iron block for shaping metal.",
+        "char": "A",
+        "color": COLORS["dark_slate_gray"],
+        "value": 150,
+        "weight": 150,
+        "stackable": False,
+        "item_type_tags": ["furniture", "workstation"],
+        "crafting_recipe": {
+            "iron_ingot": 5
+        },
+        "required_workstation": "workbench"
+    },
     "wooden_chair": {
         "name": "Wooden Chair",
         "description": "A simple wooden chair.",
@@ -137,6 +170,35 @@ ITEM_DEFINITIONS = {
         "item_type_tags": ["furniture"],
         "crafting_recipe": {
             "wooden_plank": 4
+        },
+        "required_workstation": "workbench"
+    },
+    "wooden_table": {
+        "name": "Wooden Table",
+        "description": "A sturdy wooden table.",
+        "char": "T",
+        "color": COLORS["saddlebrown"],
+        "value": 20,
+        "weight": 10,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 6
+        },
+        "required_workstation": "workbench"
+    },
+    "bed_simple": {
+        "name": "Simple Bed",
+        "description": "A simple bed with a straw mattress.",
+        "char": "B",
+        "color": COLORS["tan"],
+        "value": 30,
+        "weight": 15,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 8,
+            "raw_log": 4
         },
         "required_workstation": "workbench"
     },
@@ -553,6 +615,7 @@ ITEM_DEFINITIONS = {
             "iron_ingot": 2,
             "raw_log": 1
         },
+        "required_workstation": "anvil"
     },
     "iron_breastplate": {
         "name": "Iron Breastplate",
@@ -569,8 +632,9 @@ ITEM_DEFINITIONS = {
             "max_durability": 100
         },
         "crafting_recipe": {
-            "iron_ingot": 5,
+            "iron_ingot": 5
         },
+        "required_workstation": "anvil"
     },
     "fur_cloak": {
         "name": "Fur Cloak",

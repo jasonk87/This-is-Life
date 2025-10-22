@@ -120,6 +120,8 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
 
         # --- Draw NPCs ---
         for npc in world.npcs + world.village_npcs:
+            if world.player.is_riding and world.player.riding_animal_id == npc.id:
+                continue
             if 0 <= npc.x < WORLD_WIDTH and 0 <= npc.y < WORLD_HEIGHT and world.player_fov_map[npc.x, npc.y]:
                 npc_screen_x = npc.x - camera_x
                 npc_screen_y = npc.y - camera_y

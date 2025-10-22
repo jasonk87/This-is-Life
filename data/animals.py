@@ -23,7 +23,8 @@ ANIMAL_DEFINITIONS = {
         },
         "tameable": True,
         "taming_difficulty": 5,
-        "favorite_food": "apple"
+        "favorite_food": "apple",
+        "rideable": True
     },
     "wolf": {
         "name": "Wolf",

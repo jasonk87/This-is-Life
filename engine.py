@@ -210,6 +210,10 @@ class Player:
             "feet": None
         }
 
+        # Riding state
+        self.is_riding: bool = False
+        self.riding_animal_id: int | None = None
+
 
     def take_damage(self, amount: int):
         self.hp -= amount
@@ -3014,6 +3018,12 @@ class World:
 
         if entity_type == "npc":
             if isinstance(entity_data, Animal):
+                animal_def = ANIMAL_DEFINITIONS.get(entity_data.animal_type, {})
+                if animal_def.get("rideable") and entity_data.is_tame and entity_data.owner == self.player:
+                    if self.player.is_riding and self.player.riding_animal_id == entity_data.id:
+                        actions.append("Dismount")
+                    else:
+                        actions.append("Ride")
                 actions.append("Feed")
                 actions.append("Attack")
             else: # It's a humanoid NPC
@@ -3258,7 +3268,12 @@ class World:
 
         for item_key, loot_info in loot_table.items():
             if random.random() < loot_info.get("chance", 0):
-                quantity = random.randint(loot_info["quantity"][0], loot_info["quantity"][1])
+                quantity_info = loot_info["quantity"]
+                if isinstance(quantity_info, list) and len(quantity_info) == 2:
+                    quantity = random.randint(quantity_info[0], quantity_info[1])
+                else:
+                    quantity = int(quantity_info)
+
                 if quantity > 0:
                     self.player.add_item(item_key, quantity)
                     item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
@@ -3304,6 +3319,58 @@ class World:
             animal_npc.behavior = "Follow-Owner"
         else:
             self.add_message_to_chat_log(f"The {animal_npc.name} ate the {food_name} but is still wary of you.")
+
+    def player_attempt_ride_animal(self, animal_npc: Animal):
+        """Handles the player's attempt to ride an animal."""
+        if self.player.is_riding:
+            self.add_message_to_chat_log("You are already riding something.")
+            return
+
+        animal_def = ANIMAL_DEFINITIONS.get(animal_npc.animal_type)
+        if not (animal_def and animal_def.get("rideable") and animal_npc.is_tame and animal_npc.owner == self.player):
+            self.add_message_to_chat_log(f"You can't ride the {animal_npc.name}.")
+            return
+
+        self.player.is_riding = True
+        self.player.riding_animal_id = animal_npc.id
+        animal_npc.is_being_ridden = True
+        animal_npc.rider_id = self.player.id
+
+        # Move player to the animal's location
+        self.player.x = animal_npc.x
+        self.player.y = animal_npc.y
+        self.update_fov() # Update FOV from new position
+
+        self.add_message_to_chat_log(f"You mount the {animal_npc.name}.")
+        # The animal should stop its current path when mounted
+        animal_npc.current_path = []
+        animal_npc.current_destination_coords = None
+
+    def player_attempt_dismount(self, animal_npc: Animal):
+        """Handles the player's attempt to dismount an animal."""
+        if not self.player.is_riding or self.player.riding_animal_id != animal_npc.id:
+            self.add_message_to_chat_log("You are not riding this animal.")
+            return
+
+        # Find a safe spot to dismount to (adjacent and passable)
+        dismount_x, dismount_y = self._find_best_adjacent_tile(animal_npc.x, animal_npc.y, self.player)
+
+        if dismount_x is None:
+            self.add_message_to_chat_log("There is no space to dismount here.")
+            return
+
+        # Update states
+        self.player.is_riding = False
+        self.player.riding_animal_id = None
+        animal_npc.is_being_ridden = False
+        animal_npc.rider_id = None
+
+        # Move player
+        self.player.x = dismount_x
+        self.player.y = dismount_y
+        self.update_fov()
+
+        self.add_message_to_chat_log(f"You dismount the {animal_npc.name}.")
 
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
             original_tree_type = target_tile.tree_type
@@ -5295,6 +5362,26 @@ class World:
         if self.player.is_sitting:
             self.player_attempt_stand_up()
             return 1 # Standing up costs a turn
+
+        if self.player.is_riding:
+            riding_animal = next((npc for npc in self.npcs if npc.id == self.player.riding_animal_id), None)
+            if riding_animal:
+                new_x, new_y = riding_animal.x + dx, riding_animal.y + dy
+                destination_tile = self.get_tile_at(new_x, new_y)
+                if destination_tile and destination_tile.passable:
+                    riding_animal.x = new_x
+                    riding_animal.y = new_y
+                    self.player.x = new_x
+                    self.player.y = new_y
+                    self.update_fov()
+                    return int(destination_tile.properties.get("movement_cost", 1))
+                else:
+                    return 0 # No movement if blocked
+            else:
+                # Fallback in case the animal ID is somehow invalid
+                self.player.is_riding = False
+                self.player.riding_animal_id = None
+                return 0
 
         new_x, new_y = self.player.x + dx, self.player.y + dy
         destination_tile = self.get_tile_at(new_x, new_y)

@@ -36,6 +36,10 @@ class Animal(NPC):
         self.tameness = 0
         self.owner = None
 
+        # --- Riding Attributes ---
+        self.is_being_ridden: bool = False
+        self.rider_id: int | None = None
+
     def get_dialogue(self):
         # Animals don't have dialogue in the same way NPCs do.
         return None

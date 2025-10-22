@@ -3111,6 +3111,12 @@ class World:
             if entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
                 actions.append("Claim House")
 
+        # Add a "Shear" action for shearable animals
+        if entity_type == "npc" and isinstance(entity_data, Animal):
+            animal_def = ANIMAL_DEFINITIONS.get(entity_data.animal_type, {})
+            if "shearable" in animal_def:
+                actions.append("Shear")
+
         actions.append("Examine") # Universal action
         return actions
 
@@ -3413,6 +3419,41 @@ class World:
         # The animal should stop its current path when mounted
         animal_npc.current_path = []
         animal_npc.current_destination_coords = None
+
+    def player_attempt_shear(self, animal_npc: Animal):
+        """Handles the player's attempt to shear a sheep."""
+        if not isinstance(animal_npc, Animal) or "shearable" not in ANIMAL_DEFINITIONS.get(animal_npc.animal_type, {}):
+            self.add_message_to_chat_log("You can't shear that.")
+            return
+
+        animal_def = ANIMAL_DEFINITIONS[animal_npc.animal_type]
+        shearable_def = animal_def["shearable"]
+        regrowth_days = shearable_def["regrowth_days"]
+        days_since_shorn = (self.game_time - animal_npc.last_shorn_time) // DAY_LENGTH_TICKS
+
+        if days_since_shorn < regrowth_days:
+            self.add_message_to_chat_log(f"The {animal_npc.name} is not woolly enough to be shorn yet.")
+            return
+
+        # Check for shears tool
+        if not self.player.has_item("shears"):
+            self.add_message_to_chat_log("You need shears to shear a sheep.")
+            return
+
+        quantity_info = shearable_def["quantity"]
+        if isinstance(quantity_info, list) and len(quantity_info) == 2:
+            quantity = random.randint(quantity_info[0], quantity_info[1])
+        else:
+            quantity = int(quantity_info)
+
+        if quantity > 0:
+            item_yield_key = shearable_def["item_yield"]
+            self.player.add_item(item_yield_key, quantity)
+            item_name = ITEM_DEFINITIONS.get(item_yield_key, {}).get("name", item_yield_key)
+            self.add_message_to_chat_log(f"You shear the {animal_npc.name} and get {quantity}x {item_name}.")
+            animal_npc.last_shorn_time = self.game_time
+        else:
+            self.add_message_to_chat_log(f"You attempt to shear the {animal_npc.name}, but get no wool.")
 
     def player_attempt_dismount(self, animal_npc: Animal):
         """Handles the player's attempt to dismount an animal."""

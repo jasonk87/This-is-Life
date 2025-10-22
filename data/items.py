@@ -444,6 +444,26 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "leather"],
     },
+    "raw_mutton": {
+        "name": "Raw Mutton",
+        "description": "A cut of raw sheep meat.",
+        "char": "m",
+        "color": COLORS["crimson"],
+        "value": 6,
+        "weight": 2,
+        "stackable": True,
+        "item_type_tags": ["resource", "food_ingredient_raw"],
+    },
+    "raw_wool": {
+        "name": "Raw Wool",
+        "description": "A fluffy bundle of raw, unprocessed wool.",
+        "char": "u",
+        "color": (255, 255, 240),
+        "value": 10,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["resource", "fiber"],
+    },
      "raw_meat_scrap": { # Already defined, ensure it's here for completeness of food section
         "name": "Raw Meat Scrap",
         "description": "A piece of raw meat. Needs cooking.",
@@ -690,6 +710,72 @@ ITEM_DEFINITIONS = {
             "stone_chunk": 1,
             "raw_log": 1
         },
+    },
+    "shears": {
+        "name": "Shears",
+        "description": "A tool for shearing wool from sheep.",
+        "char": "s",
+        "color": COLORS["silver"],
+        "value": 40,
+        "weight": 2,
+        "stackable": False,
+        "item_type_tags": ["tool"],
+        "properties": {
+            "tool_type": "shears",
+            "max_durability": 25
+        },
+        "crafting_recipe": {
+            "iron_ingot": 2
+        },
+        "required_workstation": "anvil"
+    },
+    "loom": {
+        "name": "Loom",
+        "description": "A device for weaving thread into cloth.",
+        "char": "L",
+        "color": COLORS["saddlebrown"],
+        "value": 75,
+        "weight": 30,
+        "stackable": False,
+        "item_type_tags": ["furniture", "workstation"],
+        "crafting_recipe": {
+            "wooden_plank": 10
+        },
+        "required_workstation": "workbench"
+    },
+    "cloth": {
+        "name": "Cloth",
+        "description": "A piece of woven cloth.",
+        "char": "c",
+        "color": (220, 220, 220),
+        "value": 25,
+        "weight": 0.5,
+        "stackable": True,
+        "item_type_tags": ["component", "fabric"],
+        "crafting_recipe": {
+            "raw_wool": 2
+        },
+        "required_workstation": "loom"
+    },
+    "cloth_tunic": {
+        "name": "Cloth Tunic",
+        "description": "A simple tunic made of woven cloth.",
+        "char": "t",
+        "color": (220, 220, 220),
+        "value": 50,
+        "weight": 2,
+        "stackable": False,
+        "item_type_tags": ["armor", "body"],
+        "equip_slot": "body",
+        "properties": {
+            "defense_bonus": 0,
+            "insulation": 5.0,
+            "max_durability": 40
+        },
+        "crafting_recipe": {
+            "cloth": 4
+        },
+        "required_workstation": "loom"
     }
 }
 

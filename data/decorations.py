@@ -110,6 +110,18 @@ DECORATION_ITEM_DEFINITIONS = {
             "workstation_type": "anvil"
         }
     },
+    "loom": {
+        "name": "Loom",
+        "description": "A device for weaving thread into cloth.",
+        "char": "L",
+        "color": COLORS["saddlebrown"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "loom"
+        }
+    },
      "wooden_table": {
         "name": "Wooden Table",
         "description": "A sturdy wooden table.",

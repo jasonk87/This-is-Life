@@ -45,6 +45,9 @@ class Animal(NPC):
         self.is_pregnant: bool = False
         self.pregnancy_timer: int = 0
 
+        # --- Shearing Attributes ---
+        self.last_shorn_time: int = -100000 # Set to a long time ago initially
+
     def get_dialogue(self):
         # Animals don't have dialogue in the same way NPCs do.
         return None

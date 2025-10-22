@@ -46,5 +46,36 @@ ANIMAL_DEFINITIONS = {
                 "quantity": 1
             }
         }
+    },
+    "sheep": {
+        "name": "Sheep",
+        "char": "s",
+        "color": (255, 255, 240),
+        "max_hp": 8,
+        "behavior": "Wander-Flee",
+        "hostile": False,
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.01,
+        "base_attack_name": "headbutt",
+        "base_attack_damage_dice": "1d2",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_mutton": {
+                "chance": 1.0,
+                "quantity": [1, 2]
+            }
+        },
+        "tameable": True,
+        "taming_difficulty": 3,
+        "favorite_food": "wheat",
+        "rideable": False,
+        "can_mate": True,
+        "mating_season": "Spring",
+        "gestation_period_days": 5,
+        "shearable": {
+            "item_yield": "raw_wool",
+            "quantity": [1, 3],
+            "regrowth_days": 7
+        }
     }
 }

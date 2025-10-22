@@ -69,6 +69,9 @@ def execute_interaction(world: World, context_handler):
     elif selected_action == "Dismount":
         if selected_entity_dict["type"] == "npc":
             world.player_attempt_dismount(entity_data)
+    elif selected_action == "Shear":
+        if selected_entity_dict["type"] == "npc":
+            world.player_attempt_shear(entity_data)
     elif selected_action == "Trade":
         if selected_entity_dict["type"] == "npc" and entity_data.profession == "Merchant":
             world.trade_ui_npc_target = entity_data

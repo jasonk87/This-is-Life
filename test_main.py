@@ -269,5 +269,87 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         self.assertTrue(abs(path_dest[0] - fire_x) + abs(path_dest[1] - fire_y) == 1)
 
 
+class TestClothProductionSystem(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+
+        self.world = World(seed=1) # Use a fixed seed
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_full_cloth_production_cycle(self):
+        from entities.animal import Animal
+        from data.decorations import DECORATION_ITEM_DEFINITIONS
+        from tile_types import Tile
+        from data.items import ITEM_DEFINITIONS
+
+        # --- 1. Shearing ---
+        # Add a sheep and shears for the player
+        sheep = Animal(x=self.world.player.x + 1, y=self.world.player.y, name="Sheep", animal_type="sheep")
+        self.world.npcs.append(sheep)
+
+        # Player needs to craft shears first
+        self.world.player.add_item("iron_ingot", 2)
+        anvil_def = DECORATION_ITEM_DEFINITIONS["anvil"]
+        anvil_tile = Tile(char=anvil_def['char'], color=anvil_def['color'], passable=False, name="Anvil", properties=anvil_def['properties'].copy())
+        anvil_x, anvil_y = self.world.player.x + 1, self.world.player.y + 1
+
+        chunk_x, chunk_y = anvil_x // 20, anvil_y // 20
+        local_x, local_y = anvil_x % 20, anvil_y % 20
+        self.world.get_tile_at(anvil_x, anvil_y)
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = anvil_tile
+
+        self.world.craft_item("shears")
+        self.assertTrue(self.world.player.has_item("shears"))
+
+        # Shear the sheep
+        self.world.player_attempt_shear(sheep)
+
+        # Check for wool
+        self.assertTrue(self.world.player.has_item("raw_wool"))
+
+        # Find wool in inventory to check quantity
+        wool_indices = self.world.player.get_item_instance_indices("raw_wool")
+        self.assertTrue(wool_indices)
+        initial_wool_quantity = self.world.player.inventory[wool_indices[0]].get("quantity", 0)
+        self.assertGreater(initial_wool_quantity, 0)
+
+        # Check that sheep can't be shorn again immediately
+        self.world.player_attempt_shear(sheep)
+        current_wool_quantity = self.world.player.inventory[wool_indices[0]].get("quantity", 0)
+        self.assertEqual(initial_wool_quantity, current_wool_quantity)
+
+
+        # --- 2. Crafting ---
+        # Add a loom
+        loom_def = DECORATION_ITEM_DEFINITIONS["loom"]
+        loom_tile = Tile(char=loom_def['char'], color=loom_def['color'], passable=False, name="Loom", properties=loom_def['properties'].copy())
+        loom_x, loom_y = self.world.player.x - 1, self.world.player.y - 1
+
+        chunk_x, chunk_y = loom_x // 20, loom_y // 20
+        local_x, local_y = loom_x % 20, loom_y % 20
+        self.world.get_tile_at(loom_x, loom_y) # Ensure chunk generated
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = loom_tile
+
+        # Craft cloth
+        self.world.player.add_item("raw_wool", 10) # Ensure enough wool
+        self.world.craft_item("cloth")
+        self.assertTrue(self.world.player.has_item("cloth"))
+
+        # Craft tunic
+        self.world.player.add_item("cloth", 10) # Ensure enough cloth
+        self.world.craft_item("cloth_tunic")
+        self.assertTrue(self.world.player.has_item("cloth_tunic"))
+
+        # --- 3. Equipping ---
+        initial_insulation = self.world.player.clothing_insulation
+        self.world.player.equip_armor("cloth_tunic")
+        self.assertGreater(self.world.player.clothing_insulation, initial_insulation)
+
 if __name__ == '__main__':
     unittest.main()

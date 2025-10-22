@@ -40,6 +40,11 @@ class Animal(NPC):
         self.is_being_ridden: bool = False
         self.rider_id: int | None = None
 
+        # --- Mating Attributes ---
+        self.gender: str = "female" # Default to female for now
+        self.is_pregnant: bool = False
+        self.pregnancy_timer: int = 0
+
     def get_dialogue(self):
         # Animals don't have dialogue in the same way NPCs do.
         return None

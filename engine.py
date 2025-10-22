@@ -1475,6 +1475,30 @@ class World:
 
             # --- Animal Behavior (Non-Hostile) ---
             elif isinstance(npc, Animal) and not npc.is_hostile_to_player:
+                # --- Pregnancy and Birth ---
+                if npc.is_pregnant:
+                    npc.pregnancy_timer -= 1
+                    if npc.pregnancy_timer <= 0:
+                        npc.is_pregnant = False
+                        # Find a spot for the baby
+                        spawn_x, spawn_y = self._find_best_adjacent_tile(npc.x, npc.y, npc)
+                        if spawn_x is not None:
+                            animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
+                            new_animal = Animal(spawn_x, spawn_y, name=f"Baby {npc.animal_type}", animal_type=npc.animal_type)
+                            new_animal.char = ord(animal_def.get("char", 'a').lower())
+                            new_animal.color = animal_def.get("color") # Same color for now
+                            new_animal.max_hp = animal_def.get("max_hp", 10) // 2 # Baby has half HP
+                            new_animal.hp = new_animal.max_hp
+                            new_animal.behavior = "Wander-Flee" # Babies are timid
+                            new_animal.gender = random.choice(["male", "female"])
+
+                            self.npcs.append(new_animal)
+                            self.add_message_to_chat_log(f"A baby {npc.animal_type} has been born!")
+                        else:
+                            # Could not find a place for the baby, maybe try again next tick
+                            npc.pregnancy_timer = 1 # Try again very soon
+
+
                 if npc.behavior == "Follow-Owner" and npc.owner == self.player:
                     distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
                     follow_distance = 3 # Start following if further than this
@@ -1514,6 +1538,43 @@ class World:
                         npc.current_task = "idle"
                         npc.current_path = []
                         npc.current_destination_coords = None
+                # --- Mating Behavior ---
+                animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
+                current_season = self.seasons[self.current_season_index]
+
+                if animal_def.get("can_mate") and animal_def.get("mating_season") == current_season and not npc.is_pregnant:
+                    if npc.current_task not in ["seeking_mate", "mating"]:
+                        # Find a mate
+                        for other_npc in self.npcs:
+                            if isinstance(other_npc, Animal) and other_npc.id != npc.id and \
+                               other_npc.animal_type == npc.animal_type and other_npc.gender != npc.gender and \
+                               not other_npc.is_pregnant:
+
+                                distance_to_mate = math.sqrt((npc.x - other_npc.x)**2 + (npc.y - other_npc.y)**2)
+                                if distance_to_mate < 20: # Search radius for a mate
+                                    npc.current_task = "seeking_mate"
+                                    npc.task_target_entity_id = other_npc.id
+                                    break
+
+                    if npc.current_task == "seeking_mate" and npc.task_target_entity_id:
+                        mate = next((n for n in self.npcs if n.id == npc.task_target_entity_id), None)
+                        if mate:
+                            distance_to_mate = math.sqrt((npc.x - mate.x)**2 + (npc.y - mate.y)**2)
+                            if distance_to_mate <= 1:
+                                # Mate found, initiate mating
+                                if npc.gender == "female":
+                                    npc.is_pregnant = True
+                                    npc.pregnancy_timer = animal_def.get("gestation_period_days", 7) * DAY_LENGTH_TICKS
+                                    self.add_message_to_chat_log(f"A wild {npc.animal_type} has become pregnant.")
+                                npc.current_task = "idle" # Or some post-mating behavior
+                            else:
+                                # Path towards mate
+                                target_x, target_y = self._find_best_adjacent_tile(mate.x, mate.y, npc)
+                                if target_x is not None:
+                                    path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                                    if path:
+                                        npc.current_path = path
+                                        npc.current_destination_coords = (target_x, target_y)
 
             # Standard scheduling logic ONLY if NOT hostile by default (e.g. not a Creature) AND not investigating a sound
             elif npc.profession != "Creature" and not npc.is_hostile_to_player and \
@@ -4842,6 +4903,7 @@ class World:
                                         new_animal.base_attack_name = animal_def["base_attack_name"]
                                         new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
                                         new_animal.combat_behavior = animal_def["combat_behavior"]
+                                        new_animal.gender = random.choice(["male", "female"])
                                         self.npcs.append(new_animal)
         chunk.tiles = tiles
         chunk.is_generated = True

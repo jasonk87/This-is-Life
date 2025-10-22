@@ -24,7 +24,10 @@ ANIMAL_DEFINITIONS = {
         "tameable": True,
         "taming_difficulty": 5,
         "favorite_food": "apple",
-        "rideable": True
+        "rideable": True,
+        "can_mate": True,
+        "mating_season": "Autumn",
+        "gestation_period_days": 7
     },
     "wolf": {
         "name": "Wolf",

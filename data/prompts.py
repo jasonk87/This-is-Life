@@ -535,4 +535,67 @@ Example 1: These stones once formed a watchtower, guarding a kingdom now lost to
 Example 2: A small, devout community once prayed in this lonely place before they vanished without a trace.
 Example 3: The crumbling walls of a warlord's fortress, it has stood empty for a thousand years.
 """,
+    "npc_witness_reaction": """\
+You are an AI determining an NPC's reaction to witnessing a crime.
+
+**Witness NPC:**
+- Name: {witness_name}
+- Personality: {witness_personality} (e.g., lawful, cowardly, greedy, loyal, indifferent)
+- Profession: {witness_profession} (e.g., Sheriff, Guard, Farmer, Merchant)
+- Attitude towards Criminal (Player): {witness_attitude_to_criminal}
+- Attitude towards Victim: {witness_attitude_to_victim}
+
+**Crime Details:**
+- Crime Type: {crime_type} (e.g., "assault", "murder", "theft", "lockpicking")
+- Criminal's Name: {criminal_name} (The Player)
+- Victim's Name: {victim_name} (Can be "None" if it's a victimless crime like lockpicking a chest)
+
+**Task:**
+Based on the witness's personality, profession, and attitudes, decide their most likely reaction to the crime.
+
+**Available Reactions:**
+1.  "become_hostile": Attack the criminal. (Likely for Guards, or brave/loyal NPCs defending a friend).
+2.  "report_crime": Run to the nearest authority (e.g., Sheriff's office). (Likely for lawful or civic-minded NPCs who are not brave enough to intervene directly).
+3.  "flee": Run away in fear. (Likely for cowardly NPCs or those witnessing a particularly brutal crime).
+4.  "admonish": Verbally confront the criminal without becoming hostile. (For NPCs who disapprove but won't risk a fight).
+5.  "ignore": Do nothing. (For indifferent, greedy, or criminal-minded NPCs, or if they dislike the victim more than the criminal).
+
+**Decision Factors:**
+- **Profession:** A Sheriff or Guard should almost always react with "become_hostile" or "report_crime".
+- **Personality:** A 'lawful' NPC will likely "report_crime". A 'cowardly' one will "flee". A 'greedy' one might "ignore" it unless they see personal gain. A 'loyal' NPC will defend friends ("become_hostile").
+- **Attitude to Criminal:** A 'friendly' or 'admiring' attitude makes "ignore" or "admonish" more likely. A 'hostile' attitude makes "become_hostile" or "report_crime" more likely.
+- **Attitude to Victim:** If the witness is 'friendly' towards the victim, they are more likely to intervene ("become_hostile" or "report_crime"). If they are 'hostile' towards the victim, they are more likely to "ignore" the crime.
+- **Crime Type:** Murder is more likely to provoke a strong reaction ("flee", "report_crime") than petty theft.
+
+**Output Format (JSON):**
+Return a JSON object with the chosen reaction and a short, in-character dialogue line expressing their reaction.
+- "reaction": string (must be one of the available reactions listed above)
+- "dialogue": string (what the NPC shouts or mutters upon witnessing the act)
+
+Example 1 (Guard witnesses assault):
+{{
+  "reaction": "become_hostile",
+  "dialogue": "Stop right there, criminal scum!"
+}}
+
+Example 2 (Cowardly villager witnesses assault):
+{{
+  "reaction": "flee",
+  "dialogue": "By the gods! I'm getting out of here!"
+}}
+
+Example 3 (Lawful merchant witnesses theft from a rival):
+{{
+  "reaction": "report_crime",
+  "dialogue": "I'm telling the sheriff what you've done!"
+}}
+
+Example 4 (Friend of the victim witnesses assault):
+{{
+  "reaction": "become_hostile",
+  "dialogue": "Get away from them, you brute!"
+}}
+
+JSON Decision:
+"""
 }

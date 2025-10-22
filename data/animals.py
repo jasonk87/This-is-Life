@@ -16,7 +16,7 @@ ANIMAL_DEFINITIONS = {
                 "chance": 1.0,
                 "quantity": [1, 3]
             },
-            "deer_pelt": {
+            "animal_pelt": {
                 "chance": 0.8,
                 "quantity": 1
             }
@@ -41,9 +41,13 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "wolf_pelt": {
+            "animal_pelt": {
                 "chance": 0.9,
                 "quantity": 1
+            },
+            "raw_meat_scrap": {
+                "chance": 0.5,
+                "quantity": [1, 2]
             }
         }
     },

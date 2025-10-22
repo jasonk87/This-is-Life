@@ -209,18 +209,24 @@ class Player:
             "hands": None,
             "feet": None
         }
+        self.defense_bonus: int = 0
 
         # Riding state
         self.is_riding: bool = False
         self.riding_animal_id: int | None = None
 
 
-    def take_damage(self, amount: int):
-        self.hp -= amount
+    def take_damage(self, amount: int) -> int:
+        """Applies damage to the player after accounting for armor, returns actual damage dealt."""
+        effective_damage = max(0, amount - self.defense_bonus)
+        self.hp -= effective_damage
         if self.hp < 0:
             self.hp = 0
-        if self.hp <=0 and hasattr(self, 'world_ref') and self.world_ref: # Check if world_ref exists
-             self.world_ref.game_state = "PLAYER_DEAD"
+
+        if self.hp <= 0 and hasattr(self, 'world_ref') and self.world_ref:
+            self.world_ref.game_state = "PLAYER_DEAD"
+
+        return effective_damage
 
     def equip_armor(self, item_key: str):
         item_def = ITEM_DEFINITIONS.get(item_key)
@@ -252,11 +258,13 @@ class Player:
     def recalculate_stats(self):
         """Recalculates player stats based on equipped items."""
         self.clothing_insulation = 0.0
+        self.defense_bonus = 0
         for slot, item_key in self.equipped_armor.items():
             if item_key:
                 item_def = ITEM_DEFINITIONS.get(item_key)
                 if item_def and "properties" in item_def:
                     self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+                    self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
 
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None):
         item_def = ITEM_DEFINITIONS.get(item_key_to_add)
@@ -2100,11 +2108,9 @@ class World:
             # If NPC is at work, handle specific work sub-tasks or general production.
             # This is also where NPCs who have arrived at work ("at work") will start their sub-task logic.
             if npc.current_task == "at work" or npc.current_task.startswith("Working ("): # Check both generic and specific working tasks
-                # Attempt to handle detailed sub-tasks first
-                if self._handle_npc_work_sub_tasks(npc):
-                    pass # Sub-task logic handled it, potentially setting a more specific task display
-                else: # Fallback to general production if no sub-tasks defined or applicable for this NPC/profession
-                    self._handle_npc_production(npc)
+                # Sub-task logic is now the primary driver of production.
+                # The old _handle_npc_production is removed.
+                self._handle_npc_work_sub_tasks(npc)
 
             if npc.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'):
                 if hasattr(npc, 'original_char_before_sleep'): # Ensure it exists before trying to access
@@ -2788,9 +2794,15 @@ class World:
         if npc.profession in ["Guard", "Sheriff"]: npc_melee_skill += 2
         npc_melee_skill = max(1, min(10, npc_melee_skill))
 
-        # Conceptual player toughness
-        player_toughness_desc = "average"
-        # TODO: Update player_toughness_desc based on player's equipped armor
+        # Updated player toughness description using the recalculated defense_bonus
+        player_toughness_desc = "unarmored"
+        if player.defense_bonus > 8:
+            player_toughness_desc = "heavily armored"
+        elif player.defense_bonus > 4:
+            player_toughness_desc = "armored"
+        elif player.defense_bonus > 0:
+            player_toughness_desc = "lightly armored"
+
 
         prompt = LLM_PROMPTS["adjudicate_npc_attack"].format(
             npc_name=npc.name,
@@ -2818,8 +2830,12 @@ class World:
             self.emit_sound(npc.x, npc.y, "combat_attack", volume=10, source_entity_id=npc.id) # Emit attack sound
 
             if hit and damage_dealt > 0:
-                player.take_damage(damage_dealt)
-                self.add_message_to_chat_log(f"You take {damage_dealt} damage! Your HP is now {player.hp}/{player.max_hp}.")
+                actual_damage = player.take_damage(damage_dealt)
+                if actual_damage > 0:
+                    self.add_message_to_chat_log(f"You take {actual_damage} damage! Your HP is now {player.hp}/{player.max_hp}.")
+                else:
+                    self.add_message_to_chat_log(f"Your armor absorbs the blow!")
+
                 if player.hp <= 0:
                     self.add_message_to_chat_log("You have been defeated!")
                     self.game_state = "PLAYER_DEAD"
@@ -3198,49 +3214,6 @@ class World:
                 if len(self.chat_ui_history) > self.chat_ui_max_history:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
-
-
-    def _handle_npc_production(self, npc: NPC):
-        """Handles abstract resource production for an NPC at their workplace."""
-        # Check if current task is "at work" OR starts with "Working ("
-        if not npc.work_building_id or not (npc.current_task == "at work" or npc.current_task.startswith("Working (")):
-            return
-
-        work_building = self.buildings_by_id.get(npc.work_building_id)
-        if not work_building:
-            return
-
-        # Production logic based on profession - simple chance per ~100 ticks
-        # This runs every NPC_SCHEDULE_UPDATE_INTERVAL if they are "at work".
-        # To make it less frequent, add another modulo check or a dedicated timer.
-        # For now, let's assume this is called when NPC is at work.
-        # We'll add a random chance to produce to simulate time passing / work being done.
-
-        produced_item_key = None
-        produced_quantity = 0
-        production_chance = 0.1 # 10% chance each time this is checked while "at work"
-
-        if npc.profession == "Woodcutter" or work_building.building_type == "lumber_mill": # Assuming a lumber_mill type
-            if random.random() < production_chance:
-                produced_item_key = "log"
-                produced_quantity = random.randint(1, 3)
-        elif npc.profession == "Farmer" or work_building.building_type == "farm": # Assuming a farm type
-             if random.random() < production_chance:
-                produced_item_key = "wheat"
-                produced_quantity = random.randint(2, 5)
-        elif npc.profession == "Miner" or work_building.building_type == "mine": # Assuming a mine type
-             if random.random() < production_chance:
-                produced_item_key = "iron_ore" # Could also be stone_chunk
-                produced_quantity = random.randint(1, 2)
-
-        if produced_item_key and produced_quantity > 0:
-            current_qty = work_building.building_inventory.get(produced_item_key, 0)
-            work_building.building_inventory[produced_item_key] = current_qty + produced_quantity
-            # self.add_message_to_chat_log(
-            #     f"{npc.name} ({npc.profession}) produced {produced_quantity} {ITEM_DEFINITIONS[produced_item_key]['name']} "
-            #     f"at {work_building.building_type}."
-            # ) # This can be very spammy, enable for debug
-
 
     def _get_chunk_from_building(self, building_to_find: Building) -> tuple[Chunk | None, int, int]:
         """Finds the chunk a building belongs to and its global starting coords."""
@@ -3696,11 +3669,20 @@ class World:
 
         player_melee_skill = getattr(self.player, 'melee_skill', 5)
 
+        # Determine NPC toughness description based on their defense bonus
+        npc_toughness_desc = "unarmored"
+        if target_npc.defense_bonus > 8:
+            npc_toughness_desc = "heavily armored"
+        elif target_npc.defense_bonus > 4:
+            npc_toughness_desc = "armored"
+        elif target_npc.defense_bonus > 0:
+            npc_toughness_desc = "lightly armored"
+
         prompt = LLM_PROMPTS["adjudicate_player_attack"].format(
             player_weapon_name=player_weapon_name,
             player_melee_skill=player_melee_skill,
             npc_name=target_npc.name,
-            npc_toughness=target_npc.toughness
+            npc_toughness=npc_toughness_desc
         )
 
         response_str = self._call_ollama(prompt)
@@ -3810,9 +3792,8 @@ class World:
         items_dropped_messages = []
         # Animal loot is now handled by butchering, so we only handle humanoid drops here.
         if not isinstance(dead_npc, Animal):
-            # Standard humanoid NPC drop logic
             # Drop items from inventory
-            for item_key, quantity in list(dead_npc.npc_inventory.items()): # Use list() for safe iteration if modifying dict
+            for item_key, quantity in list(dead_npc.npc_inventory.items()):
                 if item_key == "money": continue
                 if quantity > 0:
                     self.drop_item_on_map(item_key, quantity, dead_npc.x, dead_npc.y)
@@ -3822,10 +3803,22 @@ class World:
             # Chance to drop equipped items
             equipped_to_check = [dead_npc.equipped_weapon, dead_npc.equipped_armor_body, dead_npc.equipped_armor_head]
             for equipped_item_key in equipped_to_check:
-                if equipped_item_key and random.random() < 0.75: # 75% chance to drop an equipped item
-                    self.drop_item_on_map(equipped_item_key, 1, dead_npc.x, dead_npc.y)
-                    item_name = ITEM_DEFINITIONS.get(equipped_item_key, {}).get("name", equipped_item_key)
-                    items_dropped_messages.append(f"1x {item_name} (equipped)")
+                if equipped_item_key:
+                    item_def = ITEM_DEFINITIONS.get(equipped_item_key, {})
+                    base_drop_chance = 0.75
+                    value = item_def.get("value", 0)
+                    # Reduce drop chance for more valuable items
+                    if value > 50:
+                        drop_chance = base_drop_chance - 0.25
+                    elif value > 25:
+                        drop_chance = base_drop_chance - 0.1
+                    else:
+                        drop_chance = base_drop_chance
+
+                    if random.random() < drop_chance:
+                        self.drop_item_on_map(equipped_item_key, 1, dead_npc.x, dead_npc.y)
+                        item_name = item_def.get("name", equipped_item_key)
+                        items_dropped_messages.append(f"1x {item_name} (equipped)")
 
             if items_dropped_messages:
                 self.add_message_to_chat_log(f"{dead_npc.name} dropped: {', '.join(items_dropped_messages)}.")
@@ -5580,36 +5573,68 @@ class World:
         return witnesses
 
     def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player, victim: NPC | None = None):
-        """Determines how an NPC reacts to witnessing a crime."""
-        # Prevent reaction chaining or if already hostile
-        if witness.is_hostile_to_player or witness.current_task in ["fleeing_from_player", "going_to_report_crime"]:
+        """Determines how an NPC reacts to witnessing a crime using an LLM prompt."""
+        if witness.is_hostile_to_player or witness.current_task in ["fleeing_from_player", "going_to_report_crime", "combat_action_flee_from_player"]:
             return
 
-        # Guards, Sheriffs, etc., become hostile immediately
-        if witness.profession in ["Guard", "Sheriff"]:
-            self.add_message_to_chat_log(f"{witness.name} shouts, 'Stop right there, criminal scum!'")
-            witness.is_hostile_to_player = True
-            # Combat AI will take over on the next tick
-            return
-
-        # Reaction based on personality
-        if witness.personality == "cowardly":
-            self.add_message_to_chat_log(f"{witness.name} shrieks and runs away in fear!")
-            witness.current_task = "combat_action_flee_from_player" # Use the existing flee logic
-            witness.current_path = [] # Clear path to force recalculation
-        elif witness.personality in ["lawful", "civic-minded", "gossipy"]:
-            sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
-            if sheriff_office:
-                self.add_message_to_chat_log(f"{witness.name} gasps, 'I'm reporting this to the sheriff!'")
-                witness.current_task = "going_to_report_crime"
-                witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
-                witness.current_path = [] # Clear path for new destination
+        victim_name = "N/A"
+        witness_attitude_to_victim = "N/A"
+        if victim:
+            victim_name = victim.name
+            # A more complex social model would have NPC->NPC attitudes. For now, use a placeholder.
+            # We can infer it slightly based on professions (e.g., two guards are likely allies).
+            if witness.profession == victim.profession and witness.profession not in ["Unemployed", "Farmer"]:
+                 witness_attitude_to_victim = "friendly"
             else:
-                # No sheriff's office, maybe they just shout or flee?
-                self.add_message_to_chat_log(f"{witness.name} yells, 'Someone stop them!' but doesn't know where to go.")
-        else:
-            # Other personalities might just stare, disapprove, or ignore it for now
-            self.add_message_to_chat_log(f"{witness.name} stares in disbelief.")
+                 witness_attitude_to_victim = "neutral"
+
+
+        prompt = LLM_PROMPTS["npc_witness_reaction"].format(
+            witness_name=witness.name,
+            witness_personality=witness.personality,
+            witness_profession=witness.profession,
+            witness_attitude_to_criminal=witness.attitude_to_player,
+            witness_attitude_to_victim=witness_attitude_to_victim,
+            crime_type=crime_type,
+            criminal_name=criminal.char, # Using '@' for player for now
+            victim_name=victim_name
+        )
+
+        response_str = self._call_ollama(prompt)
+        if not response_str:
+            self.add_message_to_chat_log(f"{witness.name} seems confused by what they saw. (LLM Error)")
+            return
+
+        try:
+            response_json = json.loads(response_str)
+            reaction = response_json.get("reaction")
+            dialogue = response_json.get("dialogue", f"{witness.name} gasps!")
+
+            self.add_message_to_chat_log(dialogue) # Show the witness's verbal reaction
+
+            if reaction == "become_hostile":
+                witness.is_hostile_to_player = True
+                # Combat AI will take over.
+            elif reaction == "report_crime":
+                sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
+                if sheriff_office:
+                    witness.current_task = "going_to_report_crime"
+                    witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
+                    witness.current_path = [] # Clear path for new destination
+                else:
+                    self.add_message_to_chat_log(f"{witness.name} wants to report the crime but doesn't know where the sheriff is.")
+            elif reaction == "flee":
+                witness.current_task = "combat_action_flee_from_player"
+                witness.current_path = [] # Force path recalculation
+            elif reaction == "admonish":
+                # For now, admonishing is just the dialogue. Could lower reputation slightly.
+                pass
+            elif reaction == "ignore":
+                # Do nothing.
+                pass
+
+        except json.JSONDecodeError:
+            self.add_message_to_chat_log(f"{witness.name} seems unsure how to react. (LLM Format Error: {response_str})")
 
     def _update_economy(self):
         """Periodically updates the supply and demand of all villages."""

@@ -424,25 +424,28 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"],
     },
-    "deer_pelt": {
-        "name": "Deer Pelt",
-        "description": "The hide of a deer.",
+    "animal_pelt": {
+        "name": "Animal Pelt",
+        "description": "The uncured hide of an animal, with fur intact.",
         "char": "p",
         "color": COLORS["saddlebrown"],
-        "value": 15,
+        "value": 10,
         "weight": 3,
         "stackable": True,
         "item_type_tags": ["resource", "leather"],
     },
-    "wolf_pelt": {
-        "name": "Wolf Pelt",
-        "description": "The furred hide of a wolf.",
-        "char": "p",
-        "color": COLORS["dark_slate_gray"],
-        "value": 20,
-        "weight": 4,
+    "tanned_leather": {
+        "name": "Tanned Leather",
+        "description": "Cured and treated animal hide, suitable for crafting.",
+        "char": "L",
+        "color": COLORS["dark_amber"],
+        "value": 25,
+        "weight": 2,
         "stackable": True,
-        "item_type_tags": ["resource", "leather"],
+        "item_type_tags": ["component", "leather"],
+        "crafting_recipe": {
+            "animal_pelt": 2
+        },
     },
     "raw_mutton": {
         "name": "Raw Mutton",
@@ -672,7 +675,7 @@ ITEM_DEFINITIONS = {
             "max_durability": 80
         },
         "crafting_recipe": {
-            "raw_meat_scrap": 5, # placeholder for fur/hide
+            "tanned_leather": 5,
         },
     },
     "fish": {

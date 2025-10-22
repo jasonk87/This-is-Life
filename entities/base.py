@@ -100,12 +100,18 @@ class NPC:
     def recalculate_stats(self):
         """Recalculates NPC stats based on equipped items."""
         self.clothing_insulation = 0.0
-        # For now, NPCs don't have armor, but this is where the logic would go
-        # Example:
-        # if self.equipped_armor_body:
-        #     item_def = ITEM_DEFINITIONS.get(self.equipped_armor_body)
-        #     if item_def and "properties" in item_def:
-        #         self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+        self.defense_bonus = 0
+        if self.equipped_armor_body:
+            item_def = ITEM_DEFINITIONS.get(self.equipped_armor_body)
+            if item_def and "properties" in item_def:
+                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+                self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
+        if self.equipped_armor_head:
+            item_def = ITEM_DEFINITIONS.get(self.equipped_armor_head)
+            if item_def and "properties" in item_def:
+                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+                self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
+
 
     def add_item(self, item_key: str, quantity: int = 1):
         """Adds an item to the NPC's inventory."""

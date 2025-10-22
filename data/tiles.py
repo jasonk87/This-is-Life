@@ -276,71 +276,21 @@ TILE_DEFINITIONS["mature_wheat_crop"] = {
     }
 }
 
-# New building materials for different cultures
-TILE_DEFINITIONS["log_wall"] = {
-    "char": "O",
-    "color": COLORS["saddlebrown"],
-    "passable": False,
-    "name": "Log Wall",
-    "properties": {"provides_shelter": True}
-}
 
-TILE_DEFINITIONS["wattle_and_daub_wall"] = {
-    "char": "#",
-    "color": COLORS["tan"],
-    "passable": False,
-    "name": "Wattle and Daub Wall",
-    "properties": {"provides_shelter": True}
-}
-
-TILE_DEFINITIONS["living_wood_wall"] = {
-    "char": "Y",
-    "color": COLORS["dark_amber"],
-    "passable": False,
-    "name": "Living Wood Wall",
-    "properties": {"provides_shelter": True}
-}
-
-TILE_DEFINITIONS["hewn_stone_wall"] = {
-    "char": "#",
-    "color": COLORS["dark_slate_gray"],
-    "passable": False,
-    "name": "Hewn Stone Wall",
-    "properties": {"provides_shelter": True}
-}
-
-TILE_DEFINITIONS["fortress_stone_wall"] = {
-    "char": "X",
-    "color": COLORS["darkest_grey"],
-    "passable": False,
-    "name": "Fortress Stone Wall",
-    "properties": {"provides_shelter": True}
-}
-
-TILE_DEFINITIONS["mossy_stone_floor"] = {
-    "char": ".",
-    "color": COLORS["dark_sepia"],
-    "passable": True,
-    "name": "Mossy Stone Floor"
-}
-
-TILE_DEFINITIONS["polished_stone_floor"] = {
-    "char": ".",
-    "color": COLORS["silver"],
-    "passable": True,
-    "name": "Polished Stone Floor"
-}
-
-TILE_DEFINITIONS["dirt_floor"] = {
-    "char": ".",
+TILE_DEFINITIONS["bridge_ns"] = {
+    "name": "Bridge",
+    "char": "|",
     "color": COLORS["saddlebrown"],
     "passable": True,
-    "name": "Dirt Floor"
+    "blocks_fov": False,
+    "properties": {"movement_cost": 1}
 }
 
-TILE_DEFINITIONS["stone_floor"] = {
-    "char": ".",
-    "color": COLORS["grey"],
+TILE_DEFINITIONS["bridge_ew"] = {
+    "name": "Bridge",
+    "char": "=",
+    "color": COLORS["saddlebrown"],
     "passable": True,
-    "name": "Stone Floor"
+    "blocks_fov": False,
+    "properties": {"movement_cost": 1}
 }

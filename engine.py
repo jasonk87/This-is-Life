@@ -3,6 +3,7 @@ import math
 import random
 import numpy as np
 import tcod
+from tcod import libtcodpy
 import tcod.noise
 import requests
 import time
@@ -59,6 +60,55 @@ class WorldGenerator:
             seed=seed
         )
         self.elevation_map = self._generate_noise_map()
+        self.river_paths = self._generate_rivers()
+
+    def _generate_rivers(self):
+        """Generates paths for rivers flowing downhill on the chunk grid."""
+        river_paths = []
+        num_rivers = self.width // 10  # Example: one river every 10 chunks across
+        for _ in range(num_rivers):
+            # Start rivers at high elevation points (not snow)
+            potential_starts = []
+            for _ in range(100): # Try to find a good start point
+                x, y = random.randint(0, self.width - 1), random.randint(0, self.height - 1)
+                elevation = self.elevation_map[y, x]
+                if ELEVATION_MOUNTAIN < elevation < ELEVATION_SNOW:
+                    potential_starts.append((elevation, x, y))
+
+            if not potential_starts:
+                continue
+
+            potential_starts.sort(reverse=True) # Sort by elevation, highest first
+            start_x, start_y = potential_starts[0][1], potential_starts[0][2]
+
+            path = [(start_x, start_y)]
+            current_x, current_y = start_x, start_y
+
+            for _ in range(200): # Max river length in chunks
+                neighbors = []
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        if dx == 0 and dy == 0: continue
+                        nx, ny = current_x + dx, current_y + dy
+                        if 0 <= nx < self.width and 0 <= ny < self.height:
+                            neighbors.append((nx, ny))
+
+                if not neighbors: break
+
+                # Find neighbor with the lowest elevation
+                lowest_neighbor = min(neighbors, key=lambda p: self.elevation_map[p[1], p[0]])
+
+                if self.elevation_map[lowest_neighbor[1], lowest_neighbor[0]] >= self.elevation_map[current_y, current_x]:
+                    break # Flowing uphill or flat, stop river
+
+                current_x, current_y = lowest_neighbor
+                path.append((current_x, current_y))
+
+                if self.elevation_map[current_y, current_x] < ELEVATION_WATER:
+                    break # Reached a large body of water
+
+            river_paths.append(path)
+        return river_paths
 
     def _generate_noise_map(self):
         noise_map = np.zeros((self.height, self.width), dtype=np.float32)
@@ -429,19 +479,42 @@ class World:
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
 
+        # --- World Generation Sequence ---
+        # 1. Generate base terrain for all chunks (without roads)
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                self._generate_chunk_detail(self.chunks[y_chunk][x_chunk], x_chunk, y_chunk)
+
+        # 2. Carve rivers into the base terrain
+        self._carve_rivers_and_lakes()
+
+        # 3. Generate the global road network based on the biome costs
+        self.road_network_chunks = set()
+        self._generate_global_roads()
+
+        # 4. Draw the roads and bridges on top of the terrain with rivers
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                # is_generated will be true from step 1
+                self._draw_road_in_chunk(chunk.tiles, x_chunk, y_chunk)
+
+        # 5. Find a suitable starting position for the player
         self._find_starting_position()
 
-        # Build transparency map - this is expensive on init as it forces all chunks to generate.
-        # Consider dynamic updates or pre-generation if performance becomes an issue.
+        # 6. Build the final transparency map after ALL features are generated
         for x_map in range(WORLD_WIDTH):
             for y_map in range(WORLD_HEIGHT):
-                tile = self.get_tile_at(x_map, y_map) # Forces chunk generation
+                chunk_x, chunk_y = x_map // CHUNK_SIZE, y_map // CHUNK_SIZE
+                local_x, local_y = x_map % CHUNK_SIZE, y_map % CHUNK_SIZE
+                tile = self.chunks[chunk_y][chunk_x].tiles[local_y][local_x]
                 if tile and tile.blocks_fov:
                     self.transparency_map[x_map, y_map] = False
 
-        self._update_light_level_and_fov() # Initialize based on game time 0
-        self.update_fov() # Initial FOV calculation
-        self._update_player_hunger_thirst(initial_setup=True) # Initial status update
+        # --- Final Initialization ---
+        self._update_light_level_and_fov()
+        self.update_fov()
+        self._update_player_hunger_thirst(initial_setup=True)
 
     def _update_npc_temperature(self, npc: NPC):
         """Calculates ambient temperature at NPC's location and updates their body temperature."""
@@ -722,7 +795,6 @@ class World:
             if is_active:
                 effective_player_fov_radius = max(base_ambient_fov_radius, self.player.current_personal_light_radius)
 
-        from tcod import libtcodpy
         self.player_fov_map = tcod.map.compute_fov(
             self.transparency_map,
             (self.player.x, self.player.y),
@@ -2921,6 +2993,81 @@ class World:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
 
+    def _generate_global_roads(self):
+        """Generates a global road network connecting villages using an MST."""
+        village_chunks = []
+        for y in range(self.chunk_height):
+            for x in range(self.chunk_width):
+                if self.chunks[y][x].poi_type == "village":
+                    village_chunks.append((x, y))
+
+        if len(village_chunks) < 2:
+            return
+
+        # Create a cost map for pathfinding on the chunk grid
+        chunk_cost_map = np.ones((self.chunk_height, self.chunk_width), dtype=np.float32)
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                # Check the center tile of the chunk to see if it's a river
+                center_x, center_y = x_chunk * CHUNK_SIZE + CHUNK_SIZE // 2, y_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
+                tile = self.get_tile_at(center_x, center_y)
+                if tile and tile.name == "River":
+                    chunk_cost_map[y_chunk, x_chunk] = 50 # High cost for rivers
+                else:
+                    biome = self.chunks[y_chunk][x_chunk].biome
+                    if biome == "water" or biome == "deep_water":
+                        chunk_cost_map[y_chunk, x_chunk] = 50
+                    elif biome == "mountain" or biome == "snow":
+                        chunk_cost_map[y_chunk, x_chunk] = 10
+                    else:
+                        chunk_cost_map[y_chunk, x_chunk] = 1
+
+        # Kruskal's algorithm for MST
+        edges = []
+        for i in range(len(village_chunks)):
+            for j in range(i + 1, len(village_chunks)):
+                p1 = village_chunks[i]
+                p2 = village_chunks[j]
+                dist_sq = (p1[0] - p2[0])**2 + (p1[1] - p2[1])**2
+                edges.append((dist_sq, p1, p2))
+
+        edges.sort()
+
+        parent = {i: i for i in range(len(village_chunks))}
+        village_to_index = {village: i for i, village in enumerate(village_chunks)}
+
+        def find(i):
+            if parent[i] == i:
+                return i
+            parent[i] = find(parent[i])
+            return parent[i]
+
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_j] = root_i
+                return True
+            return False
+
+        mst_edges = []
+        for _, p1, p2 in edges:
+            if union(village_to_index[p1], village_to_index[p2]):
+                mst_edges.append((p1, p2))
+
+        for start_village, end_village in mst_edges:
+            astar = tcod.path.AStar(cost=chunk_cost_map, diagonal=1.41)
+            start_x, start_y = start_village
+            end_x, end_y = end_village
+
+            try:
+                path_indices = astar.get_path(start_x, start_y, end_x, end_y)
+                for i in range(len(path_indices)):
+                    x, y = int(path_indices[i][1]), int(path_indices[i][0])
+                    self.road_network_chunks.add((x, y))
+            except IndexError:
+                pass
+
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
         entities = []
@@ -4621,6 +4768,38 @@ class World:
         chunk.tiles = tiles
         chunk.is_generated = True
 
+    def _draw_road_in_chunk(self, tiles, chunk_coord_x, chunk_coord_y):
+        """Draws roads and bridges in a chunk if it's part of the road network."""
+        if (chunk_coord_x, chunk_coord_y) in self.road_network_chunks:
+            has_north = (chunk_coord_x, chunk_coord_y - 1) in self.road_network_chunks
+            has_south = (chunk_coord_x, chunk_coord_y + 1) in self.road_network_chunks
+            has_east = (chunk_coord_x + 1, chunk_coord_y) in self.road_network_chunks
+            has_west = (chunk_coord_x - 1, chunk_coord_y) in self.road_network_chunks
+
+            center_x, center_y = CHUNK_SIZE // 2, CHUNK_SIZE // 2
+
+            # Draw segments from edges to center
+            if has_north:
+                for y in range(center_y + 1):
+                    is_water = tiles[y][center_x].name in ["River", "Water"]
+                    tile_def = TILE_DEFINITIONS["bridge_ns"] if is_water else TILE_DEFINITIONS["road"]
+                    tiles[y][center_x] = Tile(tile_def["char"], tile_def["color"], tile_def["passable"], tile_def["name"])
+            if has_south:
+                for y in range(center_y, CHUNK_SIZE):
+                    is_water = tiles[y][center_x].name in ["River", "Water"]
+                    tile_def = TILE_DEFINITIONS["bridge_ns"] if is_water else TILE_DEFINITIONS["road"]
+                    tiles[y][center_x] = Tile(tile_def["char"], tile_def["color"], tile_def["passable"], tile_def["name"])
+            if has_west:
+                for x in range(center_x + 1):
+                    is_water = tiles[center_y][x].name in ["River", "Water"]
+                    tile_def = TILE_DEFINITIONS["bridge_ew"] if is_water else TILE_DEFINITIONS["road"]
+                    tiles[center_y][x] = Tile(tile_def["char"], tile_def["color"], tile_def["passable"], tile_def["name"])
+            if has_east:
+                for x in range(center_x, CHUNK_SIZE):
+                    is_water = tiles[center_y][x].name in ["River", "Water"]
+                    tile_def = TILE_DEFINITIONS["bridge_ew"] if is_water else TILE_DEFINITIONS["road"]
+                    tiles[center_y][x] = Tile(tile_def["char"], tile_def["color"], tile_def["passable"], tile_def["name"])
+
     def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
@@ -4637,27 +4816,19 @@ class World:
         chunk_global_start_x = chunk_coord_x * CHUNK_SIZE
         chunk_global_start_y = chunk_coord_y * CHUNK_SIZE
 
-        # Generate a more structured road network
-        # Main road down the middle
-        road_y = CHUNK_SIZE // 2
-        for x in range(CHUNK_SIZE):
-            tiles[road_y][x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
-        
-        # Cross road
-        road_x = CHUNK_SIZE // 2
-        for y in range(CHUNK_SIZE):
-            tiles[y][road_x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+        # Place well at the center intersection if a road is present
+        road_x, road_y = CHUNK_SIZE // 2, CHUNK_SIZE // 2
+        center_tile_name = tiles[road_y][road_x].name
+        if "Road" in center_tile_name or "Bridge" in center_tile_name:
+            well_local_x, well_local_y = road_x, road_y
+            tiles[well_local_y][well_local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
 
-        # Place well at the center intersection
-        well_local_x, well_local_y = road_x, road_y # These are local to chunk grid
-        tiles[well_local_y][well_local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
-
-        # Store global coordinates of the well
-        global_well_x = chunk_global_start_x + well_local_x
-        global_well_y = chunk_global_start_y + well_local_y
-        if "well" not in chunk.village.interaction_points:
-            chunk.village.interaction_points["well"] = []
-        chunk.village.interaction_points["well"].append((global_well_x, global_well_y))
+            # Store global coordinates of the well
+            global_well_x = chunk_global_start_x + well_local_x
+            global_well_y = chunk_global_start_y + well_local_y
+            if "well" not in chunk.village.interaction_points:
+                chunk.village.interaction_points["well"] = []
+            chunk.village.interaction_points["well"].append((global_well_x, global_well_y))
         # self.add_message_to_chat_log(f"Village well registered at G({global_well_x},{global_well_y})")
 
 
@@ -5096,6 +5267,64 @@ class World:
                    building.y <= local_y < building.y + building.height:
                     return building
         return None
+
+    def _carve_rivers_and_lakes(self):
+        """Carves river paths and lakes into the detailed chunk tilemaps."""
+        river_tile_def = TILE_DEFINITIONS["river"]
+        water_tile_def = TILE_DEFINITIONS["water"]
+
+        for path in self.generator.river_paths:
+            # Carve river
+            for i in range(len(path) - 1):
+                x1, y1 = path[i]
+                x2, y2 = path[i+1]
+
+                # Get all tiles in a line between these two chunk centers
+                line = tcod.los.bresenham((x1 * CHUNK_SIZE + CHUNK_SIZE//2, y1 * CHUNK_SIZE + CHUNK_SIZE//2),
+                                          (x2 * CHUNK_SIZE + CHUNK_SIZE//2, y2 * CHUNK_SIZE + CHUNK_SIZE//2)).tolist()
+
+                for x, y in line:
+                    for rx in range(-1, 2): # Make river 3 tiles wide
+                        for ry in range(-1, 2):
+                            if 0 <= x + rx < WORLD_WIDTH and 0 <= y + ry < WORLD_HEIGHT:
+                                self._change_map_tile((x + rx, y + ry), river_tile_def)
+
+            # Check for lake formation at river end
+            end_x, end_y = path[-1]
+            end_elevation = self.generator.elevation_map[end_y, end_x]
+
+            is_basin = True
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx == 0 and dy == 0: continue
+                    nx, ny = end_x + dx, end_y + dy
+                    if 0 <= nx < self.chunk_width and 0 <= ny < self.chunk_height:
+                        if self.generator.elevation_map[ny, nx] < end_elevation:
+                            is_basin = False
+                            break
+                if not is_basin: break
+
+            if is_basin:
+                fill_queue = [(end_x, end_y)]
+                filled = set(fill_queue)
+
+                while fill_queue:
+                    cx, cy = fill_queue.pop(0)
+
+                    # Convert chunk coords to world tile coords and fill the chunk
+                    for y_local in range(CHUNK_SIZE):
+                        for x_local in range(CHUNK_SIZE):
+                            self._change_map_tile((cx * CHUNK_SIZE + x_local, cy * CHUNK_SIZE + y_local), water_tile_def)
+
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            if dx == 0 and dy == 0: continue
+                            nx, ny = cx + dx, cy + dy
+
+                            if 0 <= nx < self.chunk_width and 0 <= ny < self.chunk_height and \
+                               (nx, ny) not in filled and self.generator.elevation_map[ny, nx] <= end_elevation:
+                                fill_queue.append((nx, ny))
+                                filled.add((nx, ny))
 
     def handle_player_movement(self, dx, dy) -> int:
         if self.player.is_jailed:

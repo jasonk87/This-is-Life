@@ -164,44 +164,4 @@ DECORATION_ITEM_DEFINITIONS = {
             "blocks_fov": False
         }
     },
-    "thatch_roof": {
-        "name": "Thatch Roof",
-        "description": "A simple roof made of straw.",
-        "char": "^",
-        "color": COLORS["khaki"],
-        "passable": False,
-        "blocks_fov": True,
-        "item_type_tags": ["roof"],
-        "properties": {"provides_shelter": True}
-    },
-    "shingle_roof": {
-        "name": "Shingle Roof",
-        "description": "A roof made of wooden shingles.",
-        "char": "^",
-        "color": COLORS["dark_slate_gray"],
-        "passable": False,
-        "blocks_fov": True,
-        "item_type_tags": ["roof"],
-        "properties": {"provides_shelter": True}
-    },
-    "living_leaf_roof": {
-        "name": "Living Leaf Roof",
-        "description": "A roof made of living leaves.",
-        "char": "^",
-        "color": COLORS["light_green"],
-        "passable": False,
-        "blocks_fov": True,
-        "item_type_tags": ["roof"],
-        "properties": {"provides_shelter": True}
-    },
-    "slate_roof": {
-        "name": "Slate Roof",
-        "description": "A roof made of stone slates.",
-        "char": "^",
-        "color": COLORS["darkest_grey"],
-        "passable": False,
-        "blocks_fov": True,
-        "item_type_tags": ["roof"],
-        "properties": {"provides_shelter": True}
-    }
 }

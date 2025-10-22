@@ -524,4 +524,15 @@ Example - Do Nothing:
 
 JSON Decision:
 """
+,
+    "ruin_lore": """
+Generate a short, evocative history for a mysterious ruin discovered in the game world.
+The ruin could have been a fortress, a monastery, a watchtower, or a small settlement.
+The tone should be slightly mysterious and melancholic, hinting at a forgotten story.
+Keep it to one or two sentences.
+
+Example 1: These stones once formed a watchtower, guarding a kingdom now lost to memory.
+Example 2: A small, devout community once prayed in this lonely place before they vanished without a trace.
+Example 3: The crumbling walls of a warlord's fortress, it has stood empty for a thousand years.
+""",
 }

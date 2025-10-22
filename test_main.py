@@ -1,9 +1,8 @@
 
 import unittest
 from unittest.mock import patch
-from engine import World, WorldGenerator
+from engine import World
 import json
-import random
 
 class TestGame(unittest.TestCase):
     @patch('engine.World._call_ollama')

@@ -100,12 +100,6 @@ TILE_DEFINITIONS = {
         "passable": False,
         "name": "Deep Water"
     },
-    "river": {
-        "char": "~",
-        "color": COLORS["light_blue"],
-        "passable": False,
-        "name": "River"
-    },
     "mountain": {
         "char": "^",
         "color": COLORS["mountain_fg"],
@@ -276,21 +270,17 @@ TILE_DEFINITIONS["mature_wheat_crop"] = {
     }
 }
 
-
-TILE_DEFINITIONS["bridge_ns"] = {
-    "name": "Bridge",
-    "char": "|",
-    "color": COLORS["saddlebrown"],
-    "passable": True,
-    "blocks_fov": False,
-    "properties": {"movement_cost": 1}
+TILE_DEFINITIONS["cracked_stone_wall"] = {
+    "char": "#",
+    "color": (105, 105, 105), # DimGray
+    "passable": False,
+    "name": "Cracked Stone Wall",
+    "properties": {"provides_shelter": True, "provides_cover_value": 0.6}
 }
 
-TILE_DEFINITIONS["bridge_ew"] = {
-    "name": "Bridge",
-    "char": "=",
-    "color": COLORS["saddlebrown"],
+TILE_DEFINITIONS["mossy_cobblestone"] = {
+    "char": ".",
+    "color": (85, 107, 47), # DarkOliveGreen
     "passable": True,
-    "blocks_fov": False,
-    "properties": {"movement_cost": 1}
+    "name": "Mossy Cobblestone"
 }

@@ -164,4 +164,14 @@ DECORATION_ITEM_DEFINITIONS = {
             "blocks_fov": False
         }
     },
+    "rubble": {
+        "name": "Rubble",
+        "description": "A pile of fallen stones.",
+        "char": ",",
+        "color": COLORS["grey"],
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["obstacle"],
+        "properties": {"movement_cost": 2}
+    }
 }

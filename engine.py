@@ -3500,7 +3500,8 @@ class World:
         if 0 <= npc_chunk_x < self.chunk_width and 0 <= npc_chunk_y < self.chunk_height:
             chunk = self.chunks[npc_chunk_y][npc_chunk_x]
             if chunk and chunk.tiles:
-                corpse_def = DECORATION_ITEM_DEFINITIONS.get("corpse_humanoid")
+                corpse_key = "corpse_animal" if isinstance(dead_npc, Animal) else "corpse_humanoid"
+                corpse_def = DECORATION_ITEM_DEFINITIONS.get(corpse_key)
                 if corpse_def:
                     chunk.tiles[npc_local_y][npc_local_x] = Tile(
                         char=corpse_def["char"], color=corpse_def["color"],
@@ -3526,26 +3527,40 @@ class World:
         if self.last_talked_to_npc == dead_npc: self.last_talked_to_npc = None
 
         # --- Item Drops ---
-        # Drop items from inventory
         items_dropped_messages = []
-        for item_key, quantity in list(dead_npc.npc_inventory.items()): # Use list() for safe iteration if modifying dict
-            if item_key == "money": # Handle money separately if desired, or drop like other items
-                # For now, let's say money is not physically dropped, but could be looted differently.
-                # Or, add a "coin_pouch" item to drop. For simplicity, skipping physical money drop for now.
-                continue
-            if quantity > 0:
-                # TODO: Implement drop chances here if not 100%
-                self.drop_item_on_map(item_key, quantity, dead_npc.x, dead_npc.y)
-                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                items_dropped_messages.append(f"{quantity}x {item_name}")
+        if isinstance(dead_npc, Animal) and hasattr(dead_npc, 'animal_type'):
+            animal_def = ANIMAL_DEFINITIONS.get(dead_npc.animal_type)
+            if animal_def and "loot_drops" in animal_def:
+                for item_key, drop_details in animal_def["loot_drops"].items():
+                    if random.random() < drop_details["chance"]:
+                        quantity_info = drop_details["quantity"]
+                        if isinstance(quantity_info, list):
+                            quantity = random.randint(quantity_info[0], quantity_info[1])
+                        else:
+                            quantity = quantity_info
 
-        # Chance to drop equipped items
-        equipped_to_check = [dead_npc.equipped_weapon, dead_npc.equipped_armor_body, dead_npc.equipped_armor_head]
-        for equipped_item_key in equipped_to_check:
-            if equipped_item_key and random.random() < 0.75: # 75% chance to drop an equipped item
-                self.drop_item_on_map(equipped_item_key, 1, dead_npc.x, dead_npc.y)
-                item_name = ITEM_DEFINITIONS.get(equipped_item_key, {}).get("name", equipped_item_key)
-                items_dropped_messages.append(f"1x {item_name} (equipped)")
+                        if quantity > 0:
+                            self.drop_item_on_map(item_key, quantity, dead_npc.x, dead_npc.y)
+                            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                            items_dropped_messages.append(f"{quantity}x {item_name}")
+        else:
+            # Standard humanoid NPC drop logic
+            # Drop items from inventory
+            for item_key, quantity in list(dead_npc.npc_inventory.items()): # Use list() for safe iteration if modifying dict
+                if item_key == "money": continue
+                if quantity > 0:
+                    self.drop_item_on_map(item_key, quantity, dead_npc.x, dead_npc.y)
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    items_dropped_messages.append(f"{quantity}x {item_name}")
+
+            # Chance to drop equipped items
+            equipped_to_check = [dead_npc.equipped_weapon, dead_npc.equipped_armor_body, dead_npc.equipped_armor_head]
+            for equipped_item_key in equipped_to_check:
+                if equipped_item_key and random.random() < 0.75: # 75% chance to drop an equipped item
+                    self.drop_item_on_map(equipped_item_key, 1, dead_npc.x, dead_npc.y)
+                    item_name = ITEM_DEFINITIONS.get(equipped_item_key, {}).get("name", equipped_item_key)
+                    items_dropped_messages.append(f"1x {item_name} (equipped)")
+
 
         if items_dropped_messages:
             self.add_message_to_chat_log(f"{dead_npc.name} dropped: {', '.join(items_dropped_messages)}.")

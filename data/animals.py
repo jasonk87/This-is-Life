@@ -10,7 +10,17 @@ ANIMAL_DEFINITIONS = {
         "spawn_chance": 0.01,
         "base_attack_name": "antlers",
         "base_attack_damage_dice": "1d4",
-        "combat_behavior": "cowardly"
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_venison": {
+                "chance": 1.0,
+                "quantity": [1, 3]
+            },
+            "deer_pelt": {
+                "chance": 0.8,
+                "quantity": 1
+            }
+        }
     },
     "wolf": {
         "name": "Wolf",
@@ -22,6 +32,12 @@ ANIMAL_DEFINITIONS = {
         "spawn_chance": 0.005,
         "base_attack_name": "bite",
         "base_attack_damage_dice": "1d6",
-        "combat_behavior": "aggressive"
+        "combat_behavior": "aggressive",
+        "loot_drops": {
+            "wolf_pelt": {
+                "chance": 0.9,
+                "quantity": 1
+            }
+        }
     }
 }

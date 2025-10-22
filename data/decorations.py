@@ -173,5 +173,18 @@ DECORATION_ITEM_DEFINITIONS = {
         "blocks_fov": False,
         "item_type_tags": ["obstacle"],
         "properties": {"movement_cost": 2}
+    },
+    "corpse_animal": {
+        "name": "Animal Corpse",
+        "description": "The remains of an animal.",
+        "char": "%",
+        "color": COLORS["dark_sepia"],
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["corpse", "container"],
+        "properties": {
+            "interaction_hint": "butcher",
+            "decay_timer": 300
+        }
     }
 }

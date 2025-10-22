@@ -100,6 +100,12 @@ TILE_DEFINITIONS = {
         "passable": False,
         "name": "Deep Water"
     },
+    "river": {
+        "char": "~",
+        "color": COLORS["light_blue"],
+        "passable": False,
+        "name": "River"
+    },
     "mountain": {
         "char": "^",
         "color": COLORS["mountain_fg"],

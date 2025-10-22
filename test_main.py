@@ -1,8 +1,9 @@
 
 import unittest
 from unittest.mock import patch
-from engine import World
+from engine import World, WorldGenerator
 import json
+import random
 
 class TestGame(unittest.TestCase):
     @patch('engine.World._call_ollama')
@@ -206,7 +207,7 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
 
-        self.world = World()
+        self.world = World(seed=0)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()

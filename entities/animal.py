@@ -31,6 +31,11 @@ class Animal(NPC):
         self.speech_volume = 3 # Animals are generally quieter than humans
         self.hearing_radius = DEFAULT_HEARING_RADIUS
 
+        # --- Taming Attributes ---
+        self.is_tame = False
+        self.tameness = 0
+        self.owner = None
+
     def get_dialogue(self):
         # Animals don't have dialogue in the same way NPCs do.
         return None

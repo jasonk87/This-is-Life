@@ -1471,30 +1471,45 @@ class World:
 
             # --- Animal Behavior (Non-Hostile) ---
             elif isinstance(npc, Animal) and not npc.is_hostile_to_player:
-                # Handle non-hostile animal behaviors like wandering and fleeing
-                distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
-                flee_radius = 10 # Example radius to start fleeing
+                if npc.behavior == "Follow-Owner" and npc.owner == self.player:
+                    distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                    follow_distance = 3 # Start following if further than this
 
-                if npc.behavior == "Wander-Flee" and distance_to_player < flee_radius:
-                    # Player is too close, initiate fleeing
-                    if npc.current_task != "combat_action_flee_from_player":
-                        npc.current_task = "combat_action_flee_from_player"
-                        npc.current_path = [] # Force path recalculation in _update_npc_movement
-                elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
-                    # Wander randomly if player is not close or if behavior is just wander
-                    if random.random() < 0.2: # 20% chance to wander each update
-                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
-                        potential_x, potential_y = npc.x + dx, npc.y + dy
-                        target_tile = self.get_tile_at(potential_x, potential_y)
-                        if target_tile and target_tile.passable:
-                            npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
-                            npc.current_destination_coords = (potential_x, potential_y)
-                            npc.current_task = "wandering"
-                elif npc.current_task == "combat_action_flee_from_player" and distance_to_player >= flee_radius * 1.5:
-                    # If the animal has fled far enough, it can go back to wandering
-                    npc.current_task = "idle"
-                    npc.current_path = []
-                    npc.current_destination_coords = None
+                    if distance_to_player > follow_distance and not npc.current_path:
+                        # Find a tile adjacent to the player to path to.
+                        target_x, target_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
+
+                        if target_x is not None:
+                            path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                            if path:
+                                npc.current_path = path
+                                npc.current_destination_coords = (target_x, target_y)
+                                npc.current_task = "following"
+                else:
+                    # Handle non-hostile animal behaviors like wandering and fleeing
+                    distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                    flee_radius = 10 # Example radius to start fleeing
+
+                    if npc.behavior == "Wander-Flee" and distance_to_player < flee_radius:
+                        # Player is too close, initiate fleeing
+                        if npc.current_task != "combat_action_flee_from_player":
+                            npc.current_task = "combat_action_flee_from_player"
+                            npc.current_path = [] # Force path recalculation in _update_npc_movement
+                    elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
+                        # Wander randomly if player is not close or if behavior is just wander
+                        if random.random() < 0.2: # 20% chance to wander each update
+                            dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
+                            potential_x, potential_y = npc.x + dx, npc.y + dy
+                            target_tile = self.get_tile_at(potential_x, potential_y)
+                            if target_tile and target_tile.passable:
+                                npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
+                                npc.current_destination_coords = (potential_x, potential_y)
+                                npc.current_task = "wandering"
+                    elif npc.current_task == "combat_action_flee_from_player" and distance_to_player >= flee_radius * 1.5:
+                        # If the animal has fled far enough, it can go back to wandering
+                        npc.current_task = "idle"
+                        npc.current_path = []
+                        npc.current_destination_coords = None
 
             # Standard scheduling logic ONLY if NOT hostile by default (e.g. not a Creature) AND not investigating a sound
             elif npc.profession != "Creature" and not npc.is_hostile_to_player and \
@@ -2998,9 +3013,13 @@ class World:
         entity_data = entity["data"]
 
         if entity_type == "npc":
-            actions.extend(["Talk", "Attack"])
-            if entity_data.profession == "Merchant":
-                actions.append("Trade")
+            if isinstance(entity_data, Animal):
+                actions.append("Feed")
+                actions.append("Attack")
+            else: # It's a humanoid NPC
+                actions.extend(["Talk", "Attack"])
+                if entity_data.profession == "Merchant":
+                    actions.append("Trade")
         elif entity_type == "item":
             actions.append("Pick up")
         elif entity_type == "tile":
@@ -3252,6 +3271,39 @@ class World:
 
         # Replace corpse with bones
         self._change_map_tile((corpse_x, corpse_y), DECORATION_ITEM_DEFINITIONS["bones"])
+
+    def player_attempt_feed_animal(self, animal_npc: Animal):
+        """Handles the player's attempt to feed an animal."""
+        if not isinstance(animal_npc, Animal):
+            self.add_message_to_chat_log("You can't feed that.")
+            return
+
+        animal_def = ANIMAL_DEFINITIONS.get(animal_npc.animal_type)
+        if not animal_def or not animal_def.get("tameable"):
+            self.add_message_to_chat_log(f"The {animal_npc.name} is not interested in being fed.")
+            return
+
+        food_item_key = animal_def.get("favorite_food")
+        taming_difficulty = animal_def.get("taming_difficulty", 5)
+        taming_chance = 1.0 / taming_difficulty
+
+        if not self.player.has_item(food_item_key):
+            food_name = ITEM_DEFINITIONS.get(food_item_key, {}).get("name", food_item_key)
+            self.add_message_to_chat_log(f"You need a {food_name} to feed the {animal_npc.name}.")
+            return
+
+        self.player.remove_item(food_item_key, 1)
+        food_name = ITEM_DEFINITIONS.get(food_item_key, {}).get("name", food_item_key)
+        self.add_message_to_chat_log(f"You offer a {food_name} to the {animal_npc.name}.")
+
+        if random.random() < taming_chance:
+            animal_npc.is_tame = True
+            animal_npc.owner = self.player
+            self.add_message_to_chat_log(f"The {animal_npc.name} seems to trust you now!")
+            # Change behavior to follow owner
+            animal_npc.behavior = "Follow-Owner"
+        else:
+            self.add_message_to_chat_log(f"The {animal_npc.name} ate the {food_name} but is still wary of you.")
 
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
             original_tree_type = target_tile.tree_type

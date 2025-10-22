@@ -20,7 +20,10 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.8,
                 "quantity": 1
             }
-        }
+        },
+        "tameable": True,
+        "taming_difficulty": 5,
+        "favorite_food": "apple"
     },
     "wolf": {
         "name": "Wolf",

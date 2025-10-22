@@ -8,6 +8,8 @@ import tcod.noise
 import requests
 import time
 from entities.base import NPC, DireWolf # Added DireWolf
+from entities.animal import Animal
+from data.animals import ANIMAL_DEFINITIONS
 from entities.tree import Tree, OakTree, AppleTree, PearTree # Tree classes seem partially defined/used.
 from config import (
     WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
@@ -890,7 +892,7 @@ class World:
 
     def _update_npc_movement(self):
         """Updates the position of NPCs based on their current path AND handles execution of some combat actions."""
-        for npc in self.village_npcs: # Later might include self.npcs if they also use this system
+        for npc in self.village_npcs + self.npcs:
             if npc.is_dead:
                 continue
 
@@ -1404,7 +1406,7 @@ class World:
         Periodically updates NPC tasks based on game time and current state.
         Also handles routing to combat AI if NPC is hostile.
         """
-        for npc in self.village_npcs: # Consider self.npcs as well if they become more dynamic
+        for npc in self.village_npcs + self.npcs:
             if npc.is_dead:
                 continue
 
@@ -1466,6 +1468,33 @@ class World:
                     path = self.calculate_path(npc.x, npc.y, npc.current_destination_coords[0], npc.current_destination_coords[1])
                     if path: npc.current_path = path
                     else: npc.current_task = "idle_confused"; npc.current_destination_coords = None
+
+            # --- Animal Behavior (Non-Hostile) ---
+            elif isinstance(npc, Animal) and not npc.is_hostile_to_player:
+                # Handle non-hostile animal behaviors like wandering and fleeing
+                distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                flee_radius = 10 # Example radius to start fleeing
+
+                if npc.behavior == "Wander-Flee" and distance_to_player < flee_radius:
+                    # Player is too close, initiate fleeing
+                    if npc.current_task != "combat_action_flee_from_player":
+                        npc.current_task = "combat_action_flee_from_player"
+                        npc.current_path = [] # Force path recalculation in _update_npc_movement
+                elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
+                    # Wander randomly if player is not close or if behavior is just wander
+                    if random.random() < 0.2: # 20% chance to wander each update
+                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
+                        potential_x, potential_y = npc.x + dx, npc.y + dy
+                        target_tile = self.get_tile_at(potential_x, potential_y)
+                        if target_tile and target_tile.passable:
+                            npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
+                            npc.current_destination_coords = (potential_x, potential_y)
+                            npc.current_task = "wandering"
+                elif npc.current_task == "combat_action_flee_from_player" and distance_to_player >= flee_radius * 1.5:
+                    # If the animal has fled far enough, it can go back to wandering
+                    npc.current_task = "idle"
+                    npc.current_path = []
+                    npc.current_destination_coords = None
 
             # Standard scheduling logic ONLY if NOT hostile by default (e.g. not a Creature) AND not investigating a sound
             elif npc.profession != "Creature" and not npc.is_hostile_to_player and \
@@ -4626,17 +4655,23 @@ class World:
                                 tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
                             elif random.random() < 0.01: # 1% chance for a flower (if not a tree or grass)
                                 tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
-                            elif random.random() < 0.005: # 0.5% chance for a Dire Wolf if not other features
-                                wolf_x_world = chunk_coord_x * CHUNK_SIZE + x_local
-                                wolf_y_world = chunk_coord_y * CHUNK_SIZE + y_local
-                                # Ensure wolf doesn't spawn on player starting position (very rough check)
-                                if not (abs(wolf_x_world - self.player.x) < 5 and abs(wolf_y_world - self.player.y) < 5):
-                                    wolf_name_variant = f"Dire Wolf {random.choice(['Alpha', 'Beta', 'Omega', 'Lone', 'Grim'])}"
-                                    new_wolf = DireWolf(wolf_x_world, wolf_y_world, name=wolf_name_variant)
-                                    self.npcs.append(new_wolf) # Add to general NPC list for updates
-                                    # Note: Does not place a tile for the wolf here, NPC drawing handles it.
-                                    # If wolf was a Tile, it would be: tiles[y_local][x_local] = new_wolf
-                                    # self.add_message_to_chat_log(f"A {wolf_name_variant} has appeared nearby!") # Optional debug/event
+                            # Animal Spawning
+                            for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
+                                if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
+                                    animal_x_world = chunk_coord_x * CHUNK_SIZE + x_local
+                                    animal_y_world = chunk_coord_y * CHUNK_SIZE + y_local
+                                    if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
+                                        new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
+                                        new_animal.char = ord(animal_def["char"])
+                                        new_animal.color = animal_def["color"]
+                                        new_animal.max_hp = animal_def["max_hp"]
+                                        new_animal.hp = new_animal.max_hp
+                                        new_animal.behavior = animal_def.get("behavior")
+                                        new_animal.is_hostile_to_player = animal_def["hostile"]
+                                        new_animal.base_attack_name = animal_def["base_attack_name"]
+                                        new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                        new_animal.combat_behavior = animal_def["combat_behavior"]
+                                        self.npcs.append(new_animal)
         chunk.tiles = tiles
         chunk.is_generated = True
 

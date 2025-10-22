@@ -31,6 +31,63 @@ def open_interaction_menu(world: World, x: int, y: int):
     world.interaction_context["available_actions"] = world._get_actions_for_entity(first_entity)
     world.interaction_context["selected_action_index"] = 0
 
+def execute_interaction(world: World, context_handler):
+    """Executes the selected action from the interaction context."""
+    ctx = world.interaction_context
+    if not ctx["active"]:
+        return
+
+    selected_entity_dict = ctx["target_entities"][ctx["selected_entity_index"]]
+    selected_action = ctx["available_actions"][ctx["selected_action_index"]]
+    target_x = ctx["x"]
+    target_y = ctx["y"]
+    entity_data = selected_entity_dict["data"]
+
+    # Map actions to functions
+    if selected_action == "Chop":
+        world.player_attempt_chop_tree(target_x, target_y)
+    elif selected_action == "Butcher":
+        world.player_attempt_butcher(target_x, target_y)
+    elif selected_action == "Toggle Door":
+        world.player_attempt_toggle_door(target_x, target_y)
+    elif selected_action == "Talk":
+        if selected_entity_dict["type"] == "npc":
+            world.chat_ui_target_npc = entity_data
+            world.chat_ui_mode = "talk"
+            world.start_npc_dialogue(entity_data)
+            world.chat_ui_active = True
+            context_handler.start_text_input()
+    elif selected_action == "Attack":
+        if selected_entity_dict["type"] == "npc":
+            world.player_attempt_attack(entity_data)
+    elif selected_action == "Trade":
+        if selected_entity_dict["type"] == "npc" and entity_data.profession == "Merchant":
+            world.trade_ui_npc_target = entity_data
+            world.initialize_trade_session()
+            world.trade_ui_active = True
+        else:
+            world.add_message_to_chat_log("This person has nothing to trade.")
+    elif selected_action == "Pick up":
+        if selected_entity_dict["type"] == "item":
+            item_key = entity_data["item_key"]
+            quantity = entity_data["quantity"]
+            if world.remove_item_from_map(item_key, quantity, target_x, target_y):
+                world.player.add_item(item_key, quantity)
+                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                world.add_message_to_chat_log(f"You pick up {quantity}x {item_name}.")
+    elif selected_action == "Claim House":
+        if selected_entity_dict["type"] == "building" and entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
+            entity_data.player_owned = True
+            world.add_message_to_chat_log(f"You have claimed this {entity_data.building_type} as your own!")
+        else:
+            world.add_message_to_chat_log("You cannot claim this structure.")
+    elif selected_action == "Examine":
+        # Basic examine for now
+        world.add_message_to_chat_log(f"You see a {selected_entity_dict['name']}.")
+
+    # Close the menu after action, unless it opened another UI like chat
+    if not world.chat_ui_active and not world.trade_ui_active:
+        ctx["active"] = False
 
 def main():
     """Sets up the game and runs the main loop."""
@@ -276,10 +333,7 @@ def main():
                             ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
                             ctx["selected_action_index"] = 0
                         elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            # Execute action
-                            # This part will be complex, mapping action strings to methods
-                            world.add_message_to_chat_log("Action execution not fully implemented yet.")
-                            ctx["active"] = False # Close menu for now
+                            execute_interaction(world, context)
                         elif event.sym == tcod.event.KeySym.ESCAPE:
                             ctx["active"] = False
 

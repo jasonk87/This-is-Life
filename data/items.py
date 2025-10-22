@@ -574,6 +574,29 @@ ITEM_DEFINITIONS = {
         "on_use": {
             "reduces_hunger": 20
         }
+    },
+    "knife_stone": {
+        "name": "Stone Knife",
+        "description": "A sharp piece of stone, useful for skinning and butchering.",
+        "char": "k",
+        "color": COLORS["dark_slate_gray"],
+        "value": 15,
+        "weight": 1,
+        "stackable": False,
+        "item_type_tags": ["tool", "weapon", "melee", "knife"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "tool_type": "knife",
+            "butcher_power": 1,
+            "max_durability": 15,
+            "damage_dice": "1d3",
+            "damage_bonus": 0,
+            "attack_range": 1
+        },
+        "crafting_recipe": {
+            "stone_chunk": 1,
+            "raw_log": 1
+        },
     }
 }
 

@@ -186,5 +186,17 @@ DECORATION_ITEM_DEFINITIONS = {
             "interaction_hint": "butcher",
             "decay_timer": 300
         }
+    },
+    "bones": {
+        "name": "Bones",
+        "description": "A pile of bones.",
+        "char": ";",
+        "color": (245, 245, 220),
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["remains"],
+        "properties": {
+            "decay_timer": 1000
+        }
     }
 }

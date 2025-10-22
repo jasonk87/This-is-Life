@@ -3008,6 +3008,8 @@ class World:
                 actions.append("Chop")
             elif entity_data.properties.get("is_door"):
                 actions.append("Toggle Door")
+            elif entity_data.name == "Animal Corpse":
+                actions.append("Butcher")
         elif entity_type == "building":
             if entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
                 actions.append("Claim House")
@@ -3207,6 +3209,49 @@ class World:
             return
 
         target_tile = self.get_tile_at(tree_x, tree_y)
+
+    def player_attempt_butcher(self, corpse_x: int, corpse_y: int):
+        """Handles the player's attempt to butcher an animal corpse."""
+        # Check for required tool
+        knife_item_key = "knife_stone"
+        if not self.player.has_item(knife_item_key):
+            self.add_message_to_chat_log("You need a knife to butcher a corpse.")
+            return
+
+        target_tile = self.get_tile_at(corpse_x, corpse_y)
+
+        if not (target_tile and target_tile.name == "Animal Corpse"):
+            self.add_message_to_chat_log("There is nothing to butcher here.")
+            return
+
+        animal_type = target_tile.properties.get("animal_type")
+        if not animal_type or animal_type not in ANIMAL_DEFINITIONS:
+            self.add_message_to_chat_log("This corpse is unidentifiable.")
+            # Turn it into bones anyway to clear it
+            self._change_map_tile((corpse_x, corpse_y), DECORATION_ITEM_DEFINITIONS["bones"])
+            return
+
+        self.add_message_to_chat_log(f"You begin butchering the {animal_type}...")
+
+        animal_def = ANIMAL_DEFINITIONS[animal_type]
+        loot_table = animal_def.get("loot_drops", {})
+        items_looted_messages = []
+
+        for item_key, loot_info in loot_table.items():
+            if random.random() < loot_info.get("chance", 0):
+                quantity = random.randint(loot_info["quantity"][0], loot_info["quantity"][1])
+                if quantity > 0:
+                    self.player.add_item(item_key, quantity)
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    items_looted_messages.append(f"{quantity}x {item_name}")
+
+        if items_looted_messages:
+            self.add_message_to_chat_log(f"You recovered: {', '.join(items_looted_messages)}.")
+        else:
+            self.add_message_to_chat_log("You failed to recover anything useful from the carcass.")
+
+        # Replace corpse with bones
+        self._change_map_tile((corpse_x, corpse_y), DECORATION_ITEM_DEFINITIONS["bones"])
 
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
             original_tree_type = target_tile.tree_type
@@ -3503,10 +3548,17 @@ class World:
                 corpse_key = "corpse_animal" if isinstance(dead_npc, Animal) else "corpse_humanoid"
                 corpse_def = DECORATION_ITEM_DEFINITIONS.get(corpse_key)
                 if corpse_def:
+                    # Create a copy of the properties to avoid modifying the template
+                    new_properties = corpse_def.get("properties", {}).copy()
+
+                    # If it's an animal, store its type in the corpse's properties
+                    if isinstance(dead_npc, Animal) and hasattr(dead_npc, 'animal_type'):
+                        new_properties['animal_type'] = dead_npc.animal_type
+
                     chunk.tiles[npc_local_y][npc_local_x] = Tile(
                         char=corpse_def["char"], color=corpse_def["color"],
                         passable=corpse_def["passable"], name=corpse_def["name"],
-                        properties=corpse_def.get("properties", {})
+                        properties=new_properties
                     )
                     corpse_placed_on_map = True
 
@@ -3528,22 +3580,8 @@ class World:
 
         # --- Item Drops ---
         items_dropped_messages = []
-        if isinstance(dead_npc, Animal) and hasattr(dead_npc, 'animal_type'):
-            animal_def = ANIMAL_DEFINITIONS.get(dead_npc.animal_type)
-            if animal_def and "loot_drops" in animal_def:
-                for item_key, drop_details in animal_def["loot_drops"].items():
-                    if random.random() < drop_details["chance"]:
-                        quantity_info = drop_details["quantity"]
-                        if isinstance(quantity_info, list):
-                            quantity = random.randint(quantity_info[0], quantity_info[1])
-                        else:
-                            quantity = quantity_info
-
-                        if quantity > 0:
-                            self.drop_item_on_map(item_key, quantity, dead_npc.x, dead_npc.y)
-                            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                            items_dropped_messages.append(f"{quantity}x {item_name}")
-        else:
+        # Animal loot is now handled by butchering, so we only handle humanoid drops here.
+        if not isinstance(dead_npc, Animal):
             # Standard humanoid NPC drop logic
             # Drop items from inventory
             for item_key, quantity in list(dead_npc.npc_inventory.items()): # Use list() for safe iteration if modifying dict
@@ -3561,11 +3599,10 @@ class World:
                     item_name = ITEM_DEFINITIONS.get(equipped_item_key, {}).get("name", equipped_item_key)
                     items_dropped_messages.append(f"1x {item_name} (equipped)")
 
-
-        if items_dropped_messages:
-            self.add_message_to_chat_log(f"{dead_npc.name} dropped: {', '.join(items_dropped_messages)}.")
-        else:
-            self.add_message_to_chat_log(f"{dead_npc.name} dropped nothing of note.")
+            if items_dropped_messages:
+                self.add_message_to_chat_log(f"{dead_npc.name} dropped: {', '.join(items_dropped_messages)}.")
+            else:
+                self.add_message_to_chat_log(f"{dead_npc.name} dropped nothing of note.")
 
         # After death, emit a sound if appropriate (e.g. a shout or thud)
         # For now, let's assume death itself is not a loud sound unless it's a dramatic one.

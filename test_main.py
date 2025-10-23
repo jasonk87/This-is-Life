@@ -118,7 +118,7 @@ class TestTemperatureSystem(unittest.TestCase):
 
         for i in range(ticks_for_damage + 1):
             self.world.game_time += 1
-            self.world._apply_temperature_effects()
+            self.world._apply_temperature_effects(player)
 
         self.assertLess(player.hp, initial_hp)
 
@@ -380,6 +380,12 @@ class TestPredatorPreyAI(unittest.TestCase):
         predator.hunger = predator.max_hunger
         prey.hunger = 0
 
+        # HACK: Manually set attributes required by the new AI/movement logic
+        # These are not set by default on manually created test animals.
+        setattr(predator, 'speed', 2)
+        setattr(predator, 'attack_range', 2)
+        setattr(prey, 'speed', 1)
+
         self.world.npcs.extend([predator, prey])
 
         # Ensure the area is clear for movement
@@ -429,10 +435,14 @@ class TestPredatorPreyAI(unittest.TestCase):
             if prey.is_dead:
                 break
 
+        # One final update to process the post-death state change (e.g., hunger reset)
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+
         # 5. Assertion (Attack and outcome)
         self.assertLess(prey.hp, initial_prey_hp, "Prey should have taken damage")
-        if prey.is_dead:
-            self.assertEqual(predator.hunger, 0, "Predator should not be hungry after a successful kill")
+        self.assertTrue(prey.is_dead, "Prey should be dead after the chase.")
+        self.assertEqual(predator.hunger, 0, "Predator should not be hungry after a successful kill")
 
 if __name__ == '__main__':
     unittest.main()

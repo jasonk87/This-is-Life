@@ -9,6 +9,7 @@ class NPC:
         self.name = name
         self.char = ord('N') # Default character for NPC
         self.color = (0, 255, 0) # Green color for NPC
+        self.speed = 1
         self.dialogue = dialogue if dialogue is not None else ["Hello!"] # List of dialogue options
         self.personality = personality
         self.family_ties = family_ties

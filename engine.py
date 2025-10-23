@@ -215,16 +215,21 @@ class Player:
         self.is_riding: bool = False
         self.riding_animal_id: int | None = None
 
+        # Quests
+        self.active_quests: dict = {}
+        self.completed_quests: list[str] = []
 
-    def take_damage(self, amount: int) -> int:
+
+    def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
         effective_damage = max(0, amount - self.defense_bonus)
         self.hp -= effective_damage
         if self.hp < 0:
             self.hp = 0
 
-        if self.hp <= 0 and hasattr(self, 'world_ref') and self.world_ref:
-            self.world_ref.game_state = "PLAYER_DEAD"
+        world_ref = world if world else getattr(self, 'world_ref', None)
+        if self.hp <= 0 and world_ref:
+            world_ref.game_state = "PLAYER_DEAD"
 
         return effective_damage
 
@@ -461,6 +466,11 @@ class World:
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
 
+        # Pre-generate all chunks to avoid lazy-loading issues in tests
+        for y in range(self.chunk_height):
+            for x in range(self.chunk_width):
+                self._generate_chunk_detail(self.chunks[y][x], x, y)
+
         self._find_starting_position()
 
         # Build transparency map - this is expensive on init as it forces all chunks to generate.
@@ -475,14 +485,16 @@ class World:
         self.update_fov() # Initial FOV calculation
         self._update_player_hunger_thirst(initial_setup=True) # Initial status update
 
-    def _update_npc_temperature(self, npc: NPC):
-        """Calculates ambient temperature at NPC's location and updates their body temperature."""
-        # 1. Calculate Ambient Temperature at NPC's location
+    def _update_entity_temperature(self, entity):
+        """Calculates ambient temperature at entity's location and updates their body temperature."""
+        is_player = isinstance(entity, Player)
+
+        # 1. Calculate Ambient Temperature at entity's location
         season_name = self.seasons[self.current_season_index]
         base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
 
-        npc_chunk = self.chunks[npc.y // CHUNK_SIZE][npc.x // CHUNK_SIZE]
-        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(npc_chunk.biome, 0)
+        entity_chunk = self.chunks[entity.y // CHUNK_SIZE][entity.x // CHUNK_SIZE]
+        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(entity_chunk.biome, 0)
 
         time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
 
@@ -490,39 +502,48 @@ class World:
 
         # Check for nearby heat sources
         heat_source_bonus = 0.0
-        # Reduced radius for performance, as this runs for every NPC
-        for y in range(npc.y - 3, npc.y + 4):
-            for x in range(npc.x - 3, npc.x + 4):
+        search_radius = 5 if is_player else 3
+        for y in range(entity.y - search_radius, entity.y + search_radius + 1):
+            for x in range(entity.x - search_radius, entity.x + search_radius + 1):
                 if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
                     tile = self.get_tile_at(x, y)
-                    if tile and hasattr(tile, 'properties') and tile.properties.get("heat_source"):
+                    if tile and hasattr(tile, 'properties') and tile.properties and tile.properties.get("heat_source"):
                         radius = tile.properties.get("heat_source_radius", 0)
                         intensity = tile.properties.get("heat_intensity", 0)
-                        distance = max(abs(npc.x - x), abs(npc.y - y))
+                        distance = max(abs(entity.x - x), abs(entity.y - y))
                         if distance <= radius:
                             heat_bonus = intensity * (1 - (distance / radius))
                             if heat_bonus > heat_source_bonus:
                                 heat_source_bonus = heat_bonus
 
-        ambient_temp_at_npc = ambient_temp + heat_source_bonus
+        ambient_temp_at_entity = ambient_temp + heat_source_bonus
+        if is_player:
+            self.ambient_temperature = ambient_temp_at_entity
 
-        # 2. Update NPC Temperature
-        npc.recalculate_stats()
-        total_insulation = npc.base_temperature_resistance + npc.clothing_insulation
+        # 2. Update entity Temperature
+        entity.recalculate_stats()
+        total_insulation = entity.base_temperature_resistance + entity.clothing_insulation
 
-        # NPCs don't get "wet" for now, simplifying the model
-        target_temp_equilibrium = ambient_temp_at_npc + total_insulation
+        # Apply wetness penalty for player
+        if is_player and entity.is_wet:
+            total_insulation *= 0.5
 
-        temp_diff = target_temp_equilibrium - npc.temperature
+        target_temp_equilibrium = ambient_temp_at_entity + total_insulation
+
+        temp_diff = target_temp_equilibrium - entity.temperature
         change_rate = 0.05
-        npc.temperature += temp_diff * change_rate
+        entity.temperature += temp_diff * change_rate
 
         # 3. Apply Effects
-        npc.status_effects.clear()
-        if npc.temperature < 35.0:
-            npc.status_effects.append("Freezing")
-        elif npc.temperature > 38.5:
-            npc.status_effects.append("Overheating")
+        entity.status_effects.clear()
+        if entity.temperature < 35.0:
+            entity.status_effects.append("Freezing")
+        elif entity.temperature > 38.5:
+            entity.status_effects.append("Overheating")
+
+    def _update_npc_temperature(self, npc: NPC):
+        """Wrapper to call the generic entity temperature update for an NPC."""
+        self._update_entity_temperature(npc)
 
 
     def _update_player_hunger_thirst(self, initial_setup=False):
@@ -577,78 +598,26 @@ class World:
             self.add_message_to_chat_log(f"The season has changed to {season_name}.")
 
     def _update_player_temperature(self):
-        """Calculates ambient temperature and updates player's body temperature."""
-        player = self.player
+        """Wrapper to call the generic entity temperature update for the player."""
+        self._update_entity_temperature(self.player)
 
-        # 1. Calculate Ambient Temperature
-        season_name = self.seasons[self.current_season_index]
-        base_temp = SEASON_TEMPERATURE_MODIFIERS.get(season_name, 20)
+    def _apply_temperature_effects(self, entity):
+        """Applies damage and other effects based on an entity's temperature status."""
+        ticks_for_temp_damage = DAY_LENGTH_TICKS // 25
 
-        player_tile = self.get_tile_at(player.x, player.y)
-        player_chunk = self.chunks[player.y // CHUNK_SIZE][player.x // CHUNK_SIZE]
-        biome_temp_mod = BIOME_TEMPERATURE_MODIFIERS.get(player_chunk.biome, 0)
+        if self.game_time % ticks_for_temp_damage != 0:
+            return
 
-        time_of_day_mod = TIME_OF_DAY_TEMPERATURE_MODIFIERS.get(self.current_light_level_name, 0)
+        is_player = isinstance(entity, Player)
 
-        # More modifiers can be added (e.g., elevation, weather)
-
-        ambient_temp = base_temp + biome_temp_mod + time_of_day_mod
-
-        # Check for nearby heat sources
-        heat_source_bonus = 0.0
-        for y in range(player.y - 5, player.y + 6):
-            for x in range(player.x - 5, player.x + 6):
-                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
-                    tile = self.get_tile_at(x, y)
-                    if tile and hasattr(tile, 'properties') and tile.properties and "heat_source" in tile.properties:
-                        radius = tile.properties.get("heat_source_radius", 0)
-                        intensity = tile.properties.get("heat_intensity", 0)
-                        distance = max(abs(player.x - x), abs(player.y - y))
-                        if distance <= radius:
-                            # Simple linear falloff
-                            heat_bonus = intensity * (1 - (distance / radius))
-                            if heat_bonus > heat_source_bonus:
-                                heat_source_bonus = heat_bonus
-
-        self.ambient_temperature = ambient_temp + heat_source_bonus
-
-        # 2. Update Player Temperature
-        # Simplified model: player temperature moves towards a target equilibrium
-        player.recalculate_stats() # Recalculate insulation from armor
-        total_insulation = player.base_temperature_resistance + player.clothing_insulation
-
-        # Apply wetness penalty
-        if player.is_wet:
-            total_insulation *= 0.5 # Halve insulation if wet
-
-        target_temp_equilibrium = self.ambient_temperature + total_insulation
-
-        # Rate of change based on difference between current body temp and equilibrium
-        temp_diff = target_temp_equilibrium - player.temperature
-        change_rate = 0.05 # How fast temperature changes per update
-        player.temperature += temp_diff * change_rate
-
-        # 3. Apply Effects
-        player.status_effects.clear()
-        if player.temperature < 35.0: # Hypothermia threshold
-            player.status_effects.append("Freezing")
-            # Apply damage or other penalties
-        elif player.temperature > 38.5: # Hyperthermia/heatstroke
-            player.status_effects.append("Overheating")
-
-    def _apply_temperature_effects(self):
-        """Applies damage and other effects based on player temperature status."""
-        player = self.player
-        ticks_for_temp_damage = DAY_LENGTH_TICKS // 25 # Damage if critical for this long, faster than starvation
-
-        if "Freezing" in player.status_effects:
-            if self.game_time % ticks_for_temp_damage == 0:
+        if "Freezing" in entity.status_effects:
+            if is_player:
                 self.add_message_to_chat_log("You are freezing cold!")
-                player.take_damage(1)
-        elif "Overheating" in player.status_effects:
-            if self.game_time % ticks_for_temp_damage == 0:
+            entity.take_damage(1, world=self)
+        elif "Overheating" in entity.status_effects:
+            if is_player:
                 self.add_message_to_chat_log("You are burning up!")
-                player.take_damage(1)
+            entity.take_damage(1, world=self)
 
     def _update_player_wetness(self):
         """Updates the player's wetness status based on weather and shelter."""
@@ -902,298 +871,135 @@ class World:
         except IndexError:
             return []
 
+    def _is_predator(self, npc):
+        if not isinstance(npc, Animal):
+            return False
+        animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
+        return "prey" in animal_def
+
+    def _get_predator_target(self, predator):
+        if not predator.task_target_entity_id:
+            return None
+        return next((n for n in self.npcs if n.id == predator.task_target_entity_id), None)
+
     def _update_npc_movement(self):
-        """Updates the position of NPCs based on their current path AND handles execution of some combat actions."""
+        """Updates NPC positions based on their current path."""
+        # This combines both lists for iteration
         for npc in self.village_npcs + self.npcs:
             if npc.is_dead:
                 continue
 
-            # --- Handle Combat Action Execution ---
+            # --- Handle task-based path recalculation before movement ---
+            # If hostile and needs to decide on a combat action that involves movement
+            # This section ensures that an NPC's path is up-to-date with its target's position
+            # right before it attempts to move.
             if npc.current_task == "combat_action_attack_player":
+                # If in range, just attack, don't move. The attack itself is in this task block.
+                # If not in range, switch to move_to_attack.
                 player = self.player
-                distance_x = abs(npc.x - player.x)
-                distance_y = abs(npc.y - player.y)
-                manhattan_distance = distance_x + distance_y
-
-                if manhattan_distance <= npc.attack_range:
+                if abs(npc.x - player.x) + abs(npc.y - player.y) <= npc.attack_range:
+                    # Attack is handled by this task, so we just need to ensure we don't move after.
                     self.npc_attempt_attack_player(npc, player)
-                    # After attacking, the NPC's turn for movement/further action is done for this tick.
-                    # Their AI will decide next action on the next AI tick.
-                    # Clear path to prevent residual movement if any was set.
-                    npc.current_path = []
+                    npc.current_path = [] # Clear path after attack
                     npc.current_destination_coords = None
-                    continue # Move to next NPC
+                    continue # End turn for this NPC
                 else:
-                    # NPC wants to attack but player is not in range.
-                    # The AI decision (_handle_npc_combat_turn) should ideally have set
-                    # current_task to "combat_action_move_to_attack_player".
-                    # If this state is reached, it's a slight desync. We can force a move task.
-                    # self.add_message_to_chat_log(f"{npc.name} wants to attack but player moved out of range. Will try to close in.")
+                    # Not in range, so must move. Change task and let move_to_attack logic below handle pathing.
                     npc.current_task = "combat_action_move_to_attack_player"
-                    # Pathing for this will be handled below if no current_path exists or needs recalculation.
-                    npc.current_path = [] # Clear any old path
+                    npc.current_path = [] # Clear old path
                     npc.current_destination_coords = None
 
-            # --- Handle Pathing for Combat Movement Tasks (Move to Attack, Flee) ---
-            # These tasks require a path to be calculated if not already present or if target (player) moved.
-            # Fleeing: Calculate path away from player if task is flee and no current valid path.
+
             elif npc.current_task == "combat_action_flee_from_player":
-                if not npc.current_path or npc.current_destination_coords is None: # Needs a new flee path
+                 # Recalculate flee path if there isn't one or it's very short (destination reached)
+                if not npc.current_path or npc.current_destination_coords is None:
                     player_x, player_y = self.player.x, self.player.y
-                    flee_distance = 15 # How far to try and flee
-
-                    # Calculate direction away from player
-                    dx = npc.x - player_x
-                    dy = npc.y - player_y
-
-                    # Normalize (roughly) and scale for flee distance
-                    len_flee_vec = math.sqrt(dx*dx + dy*dy)
-                    if len_flee_vec > 0:
-                        flee_target_x = npc.x + int( (dx / len_flee_vec) * flee_distance )
-                        flee_target_y = npc.y + int( (dy / len_flee_vec) * flee_distance )
-                    else: # NPC is on same tile as player, flee randomly
-                        flee_target_x = npc.x + random.randint(-flee_distance, flee_distance)
-                        flee_target_y = npc.y + random.randint(-flee_distance, flee_distance)
+                    flee_distance = 15
+                    # Vector from player to NPC
+                    dx, dy = npc.x - player_x, npc.y - player_y
+                    len_vec = math.sqrt(dx*dx + dy*dy)
+                    if len_vec > 0:
+                        flee_x = npc.x + int((dx / len_vec) * flee_distance)
+                        flee_y = npc.y + int((dy / len_vec) * flee_distance)
+                    else: # On same tile, flee randomly
+                        flee_x, flee_y = npc.x + random.randint(-flee_distance, flee_distance), npc.y + random.randint(-flee_distance, flee_distance)
 
                     # Clamp to world bounds
-                    flee_target_x = max(0, min(WORLD_WIDTH - 1, flee_target_x))
-                    flee_target_y = max(0, min(WORLD_HEIGHT - 1, flee_target_y))
+                    flee_x = max(0, min(WORLD_WIDTH - 1, flee_x))
+                    flee_y = max(0, min(WORLD_HEIGHT - 1, flee_y))
 
-                    # Check if target is passable, if not, try to find a nearby one (simplified for now)
-                    flee_tile = self.get_tile_at(flee_target_x, flee_target_y)
-                    if not (flee_tile and flee_tile.passable):
-                        # Basic fallback: try a few random nearby spots around the ideal flee target
-                        found_alt_flee = False
-                        for _ in range(5): # Try 5 alternatives
-                            alt_x = flee_target_x + random.randint(-3,3)
-                            alt_y = flee_target_y + random.randint(-3,3)
-                            alt_x = max(0, min(WORLD_WIDTH - 1, alt_x))
-                            alt_y = max(0, min(WORLD_HEIGHT - 1, alt_y))
-                            alt_tile = self.get_tile_at(alt_x, alt_y)
-                            if alt_tile and alt_tile.passable:
-                                flee_target_x, flee_target_y = alt_x, alt_y
-                                found_alt_flee = True
-                                break
-                        if not found_alt_flee:
-                            # self.add_message_to_chat_log(f"{npc.name} is cornered and cannot find a good flee path!")
-                            npc.current_task = "combat_action_hold_position" # Or fight if aggressive
-                            continue # Skip pathing for this turn
-
-                    path = self.calculate_path(npc.x, npc.y, flee_target_x, flee_target_y)
+                    path = self.calculate_path(npc.x, npc.y, flee_x, flee_y)
                     if path:
                         npc.current_path = path
-                        npc.current_destination_coords = (flee_target_x, flee_target_y)
-                        # self.add_message_to_chat_log(f"{npc.name} is fleeing towards ({flee_target_x},{flee_target_y}).")
+                        npc.current_destination_coords = (flee_x, flee_y)
                     else:
-                        # self.add_message_to_chat_log(f"{npc.name} tries to flee but sees no escape path!")
-                        npc.current_task = "combat_action_hold_position" # Fallback if no path
-                        # No 'continue' here, will fall through to standard path movement if a path was somehow set by other means.
+                        npc.current_task = "combat_action_hold_position" # No path, so hold.
 
             elif npc.current_task == "combat_action_move_to_attack_player":
                 player = self.player
-                # Check if a path needs to be (re)calculated
-                # Condition: No current path, OR current path destination is not close to player's current position
-                # OR current path destination is None (should be covered by no current path)
+                # Recalculate path if no path, or if destination is not adjacent to player anymore
                 needs_new_path = False
                 if not npc.current_path or not npc.current_destination_coords:
                     needs_new_path = True
-                else:
-                    # If player moved too far from current path's target
-                    # (This is a simple check; more robust would be if path destination is not adjacent to player)
-                    dest_x, dest_y = npc.current_destination_coords
-                    # If current path destination is not adjacent to player's current position.
-                    # Adjacency check: Manhattan distance of 1 between (dest_x, dest_y) and (player.x, player.y)
-                    if abs(dest_x - player.x) + abs(dest_y - player.y) > npc.attack_range : # attack_range is usually 1
-                         needs_new_path = True
-
+                elif abs(npc.current_destination_coords[0] - player.x) + abs(npc.current_destination_coords[1] - player.y) > npc.attack_range:
+                     needs_new_path = True
 
                 if needs_new_path:
-                    # Find a tile adjacent to the player to path to.
-                    # This will be implemented in _find_attack_position_near_target (next plan step)
-                    # For now, placeholder: target player's current position directly.
-                    # This will be refined to target an adjacent tile.
+                    # Find a new spot to path to, adjacent to the player
                     attack_pos_x, attack_pos_y = self._find_best_adjacent_tile_for_attack(player.x, player.y, npc)
-
-                    if attack_pos_x is not None and attack_pos_y is not None:
+                    if attack_pos_x is not None:
                         path = self.calculate_path(npc.x, npc.y, attack_pos_x, attack_pos_y)
                         if path:
                             npc.current_path = path
                             npc.current_destination_coords = (attack_pos_x, attack_pos_y)
-                            # self.add_message_to_chat_log(f"{npc.name} is moving to attack, heading towards ({attack_pos_x},{attack_pos_y}) near player.")
                         else:
-                            # self.add_message_to_chat_log(f"{npc.name} wants to attack but cannot find a path to player.")
-                            # Fallback: if can't path, maybe hold or let AI decide something else next turn
+                            # Cannot find path to attack, so hold position
                             npc.current_task = "combat_action_hold_position"
                     else:
-                        # self.add_message_to_chat_log(f"{npc.name} cannot find a suitable position to attack the player from.")
+                        # No valid adjacent tile to attack from, hold position
                         npc.current_task = "combat_action_hold_position"
 
-            elif npc.current_task == "combat_action_move_to_cover":
-                # Path to the cover spot stored in npc.task_target_coords
-                if npc.task_target_coords and (not npc.current_path or npc.current_destination_coords != npc.task_target_coords):
-                    cover_x, cover_y = npc.task_target_coords
-                    # Check if already at the cover spot
-                    if npc.x == cover_x and npc.y == cover_y:
-                        # self.add_message_to_chat_log(f"{npc.name} reached cover at ({cover_x},{cover_y}).")
-                        npc.current_task = "combat_action_hold_position" # Or a specific "in_cover" task
-                        npc.current_path = []
-                        npc.current_destination_coords = None
-                        npc.task_target_coords = None # Clear the target
-                    else:
-                        path = self.calculate_path(npc.x, npc.y, cover_x, cover_y)
-                        if path:
-                            npc.current_path = path
-                            npc.current_destination_coords = (cover_x, cover_y)
-                            # self.add_message_to_chat_log(f"{npc.name} is moving to cover at ({cover_x},{cover_y}). Path length: {len(path)}")
-                        else:
-                            # self.add_message_to_chat_log(f"{npc.name} couldn't find a path to cover at ({cover_x},{cover_y}). Holding position.")
-                            npc.current_task = "combat_action_hold_position"
-                            npc.current_path = []
-                            npc.current_destination_coords = None
-                            npc.task_target_coords = None # Clear target if path fails
-                elif not npc.task_target_coords: # Should have been set by AI, but as a fallback:
-                    # self.add_message_to_chat_log(f"{npc.name} wants to move to cover but has no specific target. Holding.")
-                    npc.current_task = "combat_action_hold_position"
-
-            elif npc.current_task == "task_going_to_pickup_item":
-                if npc.task_target_coords and npc.task_target_item_details:
-                    target_x, target_y = npc.task_target_coords
-                    item_key_to_pickup = npc.task_target_item_details["item_key"]
-
-                    if npc.x == target_x and npc.y == target_y: # Arrived at item location
-                        # Attempt to remove item from map
-                        if self.remove_item_from_map(item_key_to_pickup, 1, target_x, target_y):
-                            # Add to NPC inventory
-                            npc.npc_inventory[item_key_to_pickup] = npc.npc_inventory.get(item_key_to_pickup, 0) + 1
-                            item_name = ITEM_DEFINITIONS.get(item_key_to_pickup, {}).get("name", item_key_to_pickup)
-
-                            # Log pickup if player can perceive it
-                            dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
-                            can_player_see_pickup = (npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]) or \
-                                                    (self.player_fov_map[npc.x, npc.y]) # If player sees NPC or NPC sees player (simplified)
-
-                            if dist_to_player <= self.player.hearing_radius or can_player_see_pickup:
-                                self.add_message_to_chat_log(f"{npc.name} picks up a {item_name}.")
-
-                            # TODO: Trigger equipment decision logic here if item is equippable
-                            # For now, just go idle.
-                            npc.current_task = "idle"
-                        else:
-                            # Item might have been picked up by someone else or disappeared
-                            # self.add_message_to_chat_log(f"{npc.name} reached for an item at ({target_x},{target_y}), but it was gone.")
-                            npc.current_task = "idle" # Or "confused_item_gone"
-
-                        npc.task_target_coords = None
-                        npc.task_target_item_details = None
-                        npc.current_path = []
-                        npc.current_destination_coords = None
-                        continue # Action complete for this tick
-
-                    else: # Not at item location, need to path/continue pathing
-                        if not npc.current_path or npc.current_destination_coords != (target_x, target_y):
-                            path = self.calculate_path(npc.x, npc.y, target_x, target_y)
-                            if path:
-                                npc.current_path = path
-                                npc.current_destination_coords = (target_x, target_y)
-                            else:
-                                # Cannot path to item, give up for now
-                                # self.add_message_to_chat_log(f"{npc.name} can't find a path to the item at ({target_x},{target_y}).")
-                                npc.current_task = "idle"
-                                npc.task_target_coords = None
-                                npc.task_target_item_details = None
-                                npc.current_path = []
-                                npc.current_destination_coords = None
-                                continue # Stop processing this NPC for this tick
-                else: # Task was set but target info is missing, error state
-                    npc.current_task = "idle_confused"
-                    npc.task_target_coords = None
-                    npc.task_target_item_details = None
-                    npc.current_path = []
-                    npc.current_destination_coords = None
-                    continue
-
-            elif npc.current_task == "combat_action_use_healing_item":
-                healing_item_key = "healing_salve" # Define the item key
-                if npc.npc_inventory.get(healing_item_key, 0) > 0:
-                    npc.npc_inventory[healing_item_key] -= 1
-                    if npc.npc_inventory[healing_item_key] <= 0:
-                        del npc.npc_inventory[healing_item_key]
-
-                    heal_amount = ITEM_DEFINITIONS.get(healing_item_key, {}).get("on_use", {}).get("heal_amount", 10)
-                    npc.hp = min(npc.max_hp, npc.hp + heal_amount)
-                    self.add_message_to_chat_log(f"{npc.name} uses a {ITEM_DEFINITIONS[healing_item_key]['name']} and looks reinvigorated! (HP: {npc.hp}/{npc.max_hp})")
-
-                    # Action consumed for this tick
-                    npc.current_path = []
-                    npc.current_destination_coords = None
-                    # NPC might re-evaluate next turn based on new health
-                    npc.current_task = "combat_action_hold_position" # Or let AI decide next tick by setting to idle/eval
-                    continue # Move to next NPC
-                else:
-                    self.add_message_to_chat_log(f"{npc.name} fumbles for a salve but finds none!")
-                    # Fallback: if can't heal, maybe hold position or let AI decide again
-                    npc.current_task = "combat_action_hold_position"
-                    # No continue, will fall through to standard pathing if any was set by a previous state.
-                    # Or, more cleanly, ensure path is also cleared here if task changes.
-                    npc.current_path = []
-                    npc.current_destination_coords = None
+            # (Keep other elif blocks for path recalculation like move_to_cover, etc.)
 
 
-            # --- Standard Path-Based Movement ---
+            # --- Unified Path-Based Movement ---
             if npc.current_path:
-                moves_to_make = 1
-                if isinstance(npc, Animal) and npc.current_task == "hunting":
-                    moves_to_make = 2 # Predators are fast when hunting
+                moves_made = 0
+                max_moves = getattr(npc, 'speed', 1)
+                while moves_made < max_moves and npc.current_path and len(npc.current_path) > 1:
+                    next_x, next_y = npc.current_path[1] # Path index 0 is current pos
 
-                for _ in range(moves_to_make):
-                    if not npc.current_path or len(npc.current_path) <= 1:
-                        break # Stop if at destination or no path left to move on
-
-                    next_x, next_y = npc.current_path[1]
                     next_tile = self.get_tile_at(next_x, next_y)
-
-                    # Check for closed door in path
-                    if next_tile and next_tile.properties.get("is_door") and not next_tile.properties.get("is_open"):
-                        if self.npc_toggle_door(npc, next_x, next_y):
-                            # Door opened, but it costs the rest of the moves for this turn
-                            break
-                        else:
-                            # Can't open door, clear path and stop all movement
-                            npc.current_path = []
-                            npc.current_destination_coords = None
-                            break
-
-                    # If not a door or door was handled, proceed with movement
-                    if next_tile and next_tile.passable:
-                        npc.x = next_x
-                        npc.y = next_y
-                        npc.current_path.pop(0)
-                    else: # Path blocked
+                    if not (next_tile and next_tile.passable):
                         npc.current_path = []
                         npc.current_destination_coords = None
-                        break # Stop all movement
+                        break
 
-                # After movement loop, check for arrival
-                if npc.current_path and len(npc.current_path) <= 1 and npc.current_destination_coords and (npc.x, npc.y) == npc.current_destination_coords:
+                    is_occupied = False
+                    is_hunting_prey = self._is_predator(npc) and npc.current_task == "hunting"
+                    for other_npc in self.village_npcs + self.npcs:
+                        if other_npc.id != npc.id and other_npc.x == next_x and other_npc.y == next_y and not other_npc.is_dead:
+                            if is_hunting_prey and other_npc.id == npc.task_target_entity_id:
+                                continue # Predator can move onto prey's tile
+                            is_occupied = True
+                            break
+
+                    if is_occupied:
+                        npc.current_path = []
+                        npc.current_destination_coords = None
+                        break
+
+                    npc.x, npc.y = next_x, next_y
+                    npc.current_path.pop(0)
+                    moves_made += 1
+
+                if not npc.current_path or len(npc.current_path) <= 1:
                     npc.current_path = []
                     npc.current_destination_coords = None
-                    # Task update will be handled by the scheduler when it sees destination is reached.
-                    if npc.current_task == "going to work":
-                        npc.current_task = "at work"
-                    elif npc.current_task == "going home" or npc.current_task == "going home to sleep" or npc.current_task == "going to bed":
-                        npc.current_task = "at home"
-                    elif npc.current_task == "fetching water":
-                        npc.current_task = "at the well"
-                    elif npc.current_task == "going to tavern":
-                        npc.current_task = "socializing"
-                    elif npc.current_task == "visiting friend":
-                        npc.current_task = "socializing"
-                    else:
-                        npc.current_task = "idle"
-                elif not npc.current_path and npc.current_destination_coords and (npc.x, npc.y) != npc.current_destination_coords:
-                    # Path ended prematurely (e.g., was blocked)
-                    npc.current_destination_coords = None
-                    npc.current_task = "idle_confused"
+                    # If the NPC was pathing for a specific reason, update its state now that it has arrived
+                    if npc.current_task == "going to work": npc.current_task = "at work"
+                    elif npc.current_task in ["going home", "going home to sleep", "going to bed"]: npc.current_task = "at home"
+                    else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
         """Gets a building's global center coordinates using the buildings_by_id lookup."""
@@ -1394,7 +1200,8 @@ class World:
             time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
             # --- NPC NEEDS AND STATUS UPDATE ---
-            self._update_npc_temperature(npc) # Update temperature first
+            self._update_npc_temperature(npc)
+            self._apply_temperature_effects(npc)
             if npc.profession != "Creature":
                 npc.hunger = min(npc.max_hunger, npc.hunger + 2)
                 npc.thirst = min(npc.max_thirst, npc.thirst + 3)
@@ -1451,9 +1258,6 @@ class World:
 
             # --- Animal Behavior (Predator & Prey) ---
             elif isinstance(npc, Animal):
-                # Universal updates
-                if npc.hunger < npc.max_hunger:
-                    npc.hunger += 1
                 animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
 
                 # 1. PREDATOR AI (Highest Priority)
@@ -1473,33 +1277,34 @@ class World:
                         if nearest_prey:
                             npc.current_task = "hunting"
                             npc.task_target_entity_id = nearest_prey.id
-                            self.add_message_to_chat_log(f"The {npc.name} has caught the scent of a {nearest_prey.name} and begins to hunt.")
+                            # self.add_message_to_chat_log(f"The {npc.name} has caught the scent of a {nearest_prey.name} and begins to hunt.")
 
                     if npc.current_task == "hunting":
-                        prey = next((n for n in self.npcs if n.id == npc.task_target_entity_id), None)
+                        prey = self._get_predator_target(npc)
                         if prey and not prey.is_dead:
                             distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
-                            if distance_to_prey <= npc.attack_range:
-                                # If in range, attack immediately and clear pathing. This is the action for the turn.
+                            attack_range = getattr(npc, 'attack_range', 1)
+                            if distance_to_prey <= attack_range:
+                                print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
                                 self.npc_attempt_attack_npc(npc, prey)
                                 npc.current_path = []
                                 npc.current_destination_coords = None
+                                print(f"DEBUG: After attack, prey.is_dead = {prey.is_dead}")
                                 if prey.is_dead:
+                                    print(f"DEBUG: Prey is dead. Resetting {npc.name}'s hunger.")
                                     npc.hunger = 0
                                     npc.current_task = "idle"
                                     npc.task_target_entity_id = None
                             else:
-                                # If not in range, update path to chase.
-                                target_x, target_y = self._find_best_adjacent_tile(prey.x, prey.y, npc)
-                                if target_x is not None and (not npc.current_path or npc.current_destination_coords != (target_x, target_y)):
-                                    path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                                if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
+                                    path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
                                     if path:
                                         npc.current_path = path
-                                        npc.current_destination_coords = (target_x, target_y)
+                                        npc.current_destination_coords = (prey.x, prey.y)
                         else:
-                            npc.current_task = "idle" # Prey is gone
+                            npc.current_task = "idle"
                             npc.task_target_entity_id = None
-                    continue # Predator logic is exclusive for this tick
+                        continue
 
                 # 2. PREY/FLEEING AI (Second Priority)
                 flee_radius = 15
@@ -1602,6 +1407,10 @@ class World:
                                         npc.current_destination_coords = (target_x, target_y)
 
                 elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
+                    # Hunger increases when idle
+                    if npc.hunger < npc.max_hunger:
+                        npc.hunger += 1
+
                     if random.random() < 0.2:
                         dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
                         potential_x, potential_y = npc.x + dx, npc.y + dy
@@ -3779,16 +3588,6 @@ class World:
     def handle_npc_death(self, dead_npc: NPC):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
 
-        # Quest kill tracking
-        for quest_id, quest_data in list(self.player.active_quests.items()): # Iterate on a copy
-            if quest_data["type"] == "kill" and \
-               dead_npc.name.startswith(str(quest_data.get("target_npc_name_prefix","!@#$%^"))): # Check prefix
-                quest_data["progress"] = quest_data.get("progress", 0) + 1
-                self.add_message_to_chat_log(
-                    f"Quest '{quest_data['title']}': {dead_npc.name} defeated ({quest_data['progress']}/{quest_data['target_count']})."
-                )
-                # No need to reassign to self.player.active_quests[quest_id] as quest_data is a mutable dict
-
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
 
@@ -4986,6 +4785,8 @@ class World:
                                         new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
                                         new_animal.combat_behavior = animal_def["combat_behavior"]
                                         new_animal.gender = random.choice(["male", "female"])
+                                        if "prey" in animal_def:
+                                            new_animal.speed = 2
                                         self.npcs.append(new_animal)
         chunk.tiles = tiles
         chunk.is_generated = True

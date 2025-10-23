@@ -64,6 +64,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_name": "savage bite",
         "base_attack_damage_dice": "1d8",
         "combat_behavior": "aggressive",
+        "fearless": True, # Will not flee from the player
         "loot_drops": {
             "animal_pelt": {
                 "chance": 0.9,

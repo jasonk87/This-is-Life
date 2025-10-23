@@ -1011,6 +1011,13 @@ class World:
     def _get_time_of_day_str(self, game_time_tick: int, day_length: int) -> str:
         """Converts a game tick to a descriptive time of day string."""
         time_ratio = (game_time_tick % day_length) / day_length
+        if 0 <= time_ratio < 0.1: return "Dead of Night"
+        if 0.1 <= time_ratio < 0.25: return "Early Morning"
+        if 0.25 <= time_ratio < 0.45: return "Morning"
+        if 0.45 <= time_ratio < 0.60: return "Midday"
+        if 0.60 <= time_ratio < 0.75: return "Afternoon"
+        if 0.75 <= time_ratio < 0.90: return "Evening"
+        return "Night"
 
     def _find_best_adjacent_tile(self, target_x: int, target_y: int, entity) -> tuple[int | None, int | None]:
         """
@@ -1046,13 +1053,6 @@ class World:
 
         potential_spots.sort(key=lambda s: s['dist_sq'])
         return potential_spots[0]['x'], potential_spots[0]['y']
-        if 0 <= time_ratio < 0.1: return "Dead of Night"
-        if 0.1 <= time_ratio < 0.25: return "Early Morning"
-        if 0.25 <= time_ratio < 0.45: return "Morning"
-        if 0.45 <= time_ratio < 0.60: return "Midday"
-        if 0.60 <= time_ratio < 0.75: return "Afternoon"
-        if 0.75 <= time_ratio < 0.90: return "Evening"
-        return "Night"
 
     def _find_best_adjacent_tile_for_attack(self, target_x: int, target_y: int, attacker_npc: NPC) -> tuple[int | None, int | None]:
         """
@@ -4056,7 +4056,11 @@ class World:
 
 
     def _call_ollama(self, prompt: str) -> str:
-        """Makes a request to the Ollama API and returns the response."""
+        """
+        Makes a request to the Ollama API.
+        Handles both plain text and JSON responses, including extracting JSON from markdown.
+        Returns the raw string response from the LLM, or an empty string on network/API error.
+        """
         try:
             response = requests.post(
                 OLLAMA_ENDPOINT + "/api/generate",
@@ -4065,30 +4069,32 @@ class World:
                     "prompt": prompt,
                     "stream": False
                 },
-                timeout=30 # 30 second timeout
+                timeout=30
             )
-            response.raise_for_status() # Raise an exception for HTTP errors
-            full_response = response.json()["response"]
-            # Attempt to extract JSON from markdown code block
-            json_start = full_response.find("```json")
-            if json_start != -1:
-                json_end = full_response.find("```", json_start + len("```json"))
-                if json_end != -1:
-                    json_str = full_response[json_start + len("```json"):json_end].strip()
-                    try:
-                        json.loads(json_str) # Validate JSON
-                        return json_str
-                    except json.JSONDecodeError:
-                        pass # Fall through to try parsing full response
+            response.raise_for_status()
 
-            # If no markdown block or invalid JSON in block, try parsing full response
-            try:
-                json.loads(full_response) # Validate JSON
-                return full_response
-            except json.JSONDecodeError:
-                return "" # Return empty string if not valid JSON
+            full_response = response.json().get("response", "").strip()
+
+            # Attempt to extract JSON from a markdown code block if present
+            if full_response.startswith("```json"):
+                json_content = full_response.strip().removeprefix("```json").removesuffix("```").strip()
+                try:
+                    # Validate that the extracted content is valid JSON
+                    json.loads(json_content)
+                    return json_content  # Return the valid JSON string
+                except json.JSONDecodeError:
+                    # If not valid JSON, it might be a hallucination. Fall through to return the original full response.
+                    pass
+
+            # If no markdown block, or if the block contained invalid JSON, return the full response.
+            # The caller can then attempt to parse it if they expect JSON, or use it as text.
+            return full_response
+
         except requests.exceptions.RequestException as e:
             print(f"Error communicating with Ollama: {e}")
+            return ""
+        except json.JSONDecodeError as e:
+            print(f"Error decoding the main Ollama API response structure: {e}")
             return ""
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:

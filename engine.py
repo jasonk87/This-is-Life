@@ -4202,6 +4202,15 @@ class World:
 
     def _update_weather(self):
         """Handles weather effects, like rain extinguishing fires."""
+        if self.player.is_jailed and self.player.jail_time_remaining > 0:
+            self.player.jail_time_remaining -= 1
+            if self.player.jail_time_remaining == 0:
+                self.add_message_to_chat_log("Your sentence is over. The guard unlocks the door.")
+                self.player.is_jailed = False
+                door_x, door_y = self.player.jail_cell_coords
+                open_door_def = DECORATION_ITEM_DEFINITIONS["iron_door_open"]
+                self._change_map_tile((door_x, door_y), open_door_def)
+                self.player.jail_cell_coords = None
         if self.weather == "rain":
             self._water_crops()
             for y_chunk in range(self.chunk_height):

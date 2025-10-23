@@ -141,22 +141,10 @@ def main():
             # NPC Updates
             world.game_time += 1 # Increment game time
 
-            # --- Jail Time Update ---
-            if world.player.is_jailed and world.player.jail_time_remaining > 0:
-                world.player.jail_time_remaining -= 1
-                if world.player.jail_time_remaining == 0:
-                    world.add_message_to_chat_log("Your sentence is over. The guard unlocks the door.")
-                    world.player.is_jailed = False
-                    door_x, door_y = world.player.jail_cell_coords
-                    open_door_def = world.DECORATION_ITEM_DEFINITIONS["iron_door_open"]
-                    world._change_map_tile((door_x, door_y), open_door_def)
-                    world.player.jail_cell_coords = None
-
-
             world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
             world._update_season()
             world._update_player_temperature()
-            world._apply_temperature_effects()
+            world._apply_temperature_effects(world.player)
             world._update_light_level_and_fov() # Update light level and FOV radius
             world._update_world_environment()
             world._update_weather()
@@ -402,15 +390,6 @@ def main():
                         # Keybind for using cooked meat scrap - let's use 'U' for "Use food"
                         elif event.sym == tcod.event.KeySym.U:
                             world.use_item("cooked_meat_scrap")
-                        elif event.sym == tcod.event.KeySym.D: # Debug damage
-                            world.player.take_damage(5)
-                            world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}")
-                        elif event.sym == tcod.event.KeySym.K: # Debug criminal rep
-                            world.player.adjust_reputation(REP_CRIMINAL, 10)
-                            world.add_message_to_chat_log(f"Criminal points +10. Total: {world.player.reputation[REP_CRIMINAL]}")
-                        elif event.sym == tcod.event.KeySym.J: # Debug hero rep
-                            world.player.adjust_reputation(REP_HERO, 10)
-                            world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")
                         elif event.sym == tcod.event.KeySym.B: # Toggle Build Mode
                             current_building_at_player = world.get_building_by_tile_coords(world.player.x, world.player.y)
                             if current_building_at_player and current_building_at_player.player_owned:

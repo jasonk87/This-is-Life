@@ -3136,6 +3136,53 @@ class World:
 
         target_tile = self.get_tile_at(tree_x, tree_y)
 
+        if isinstance(target_tile, Tree) and target_tile.is_choppable:
+            original_tree_type = target_tile.tree_type
+            yielded_resources = target_tile.chop()
+
+            if yielded_resources:
+                self.add_message_to_chat_log(f"You chopped the {target_tile.original_name}!")
+                self.emit_sound(tree_x, tree_y, "tree_fall", volume=15, source_entity_id=self.player.id)
+                for resource_key, quantity in yielded_resources.items():
+                    if resource_key in ITEM_DEFINITIONS:
+                        self.player.add_item(resource_key, quantity)
+                        self.add_message_to_chat_log(f"  + {quantity} {ITEM_DEFINITIONS[resource_key]['name']}")
+                    else:
+                        self.add_message_to_chat_log(f"  (Received undefined resource: {resource_key} x{quantity})")
+
+                stump_key = target_tile.becomes_on_chop_key
+                stump_def = TILE_DEFINITIONS.get(stump_key)
+                if stump_def:
+                    self._change_map_tile((tree_x, tree_y), stump_def, original_tree_type=original_tree_type)
+                    new_stump_tile = self.get_tile_at(tree_x, tree_y)
+                    if new_stump_tile:
+                        new_stump_tile.regrowth_timer = 100
+
+                # Handle axe degradation/breaking
+                axe_def = ITEM_DEFINITIONS.get(axe_item_key)
+                if axe_def and not axe_def.get("stackable", False):
+                    degrade_chance = axe_def.get("properties", {}).get("durability_chance_to_degrade", 0.05) # 5% chance
+                    if random.random() < degrade_chance:
+                        axe_indices = self.player.get_item_instance_indices(axe_item_key)
+                        if axe_indices:
+                            axe_to_degrade = self.player.get_item_by_index(axe_indices[0])
+                            if axe_to_degrade and "durability" in axe_to_degrade:
+                                axe_to_degrade["durability"] -= 1
+                                if axe_to_degrade["durability"] <= 0:
+                                    self.player.remove_item(axe_item_key, 1, specific_instance_index=axe_indices[0])
+                                    self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
+                                    if "broken_tool_handle" in ITEM_DEFINITIONS:
+                                        self.player.add_item("broken_tool_handle", 1)
+                                        self.add_message_to_chat_log("You salvaged a broken tool handle.")
+                                else:
+                                    self.add_message_to_chat_log(f"Your {axe_def['name']} shows some wear.")
+            else:
+                self.add_message_to_chat_log("Nothing was yielded from the tree.")
+        elif isinstance(target_tile, Tree) and not target_tile.is_choppable:
+            self.add_message_to_chat_log(f"This {target_tile.name} has already been chopped.")
+        else:
+            self.add_message_to_chat_log("There's nothing to chop there.")
+
     def player_attempt_butcher(self, corpse_x: int, corpse_y: int):
         """Handles the player's attempt to butcher an animal corpse."""
         # Check for required tool
@@ -4243,32 +4290,6 @@ class World:
                                         world_y = y_chunk * CHUNK_SIZE + y_local
                                         self._change_map_tile((world_x, world_y), new_tile_def)
 
-
-    def _populate_npcs(self):
-        # Generate NPCs using LLM
-        num_npcs = random.randint(1, 3) # Example: 1 to 3 NPCs per world
-        for _ in range(num_npcs):
-            prompt = LLM_PROMPTS["npc_personality"]
-            llm_response = self._call_ollama(prompt)
-            try:
-                npc_data = json.loads(llm_response)
-                # Place NPC near player for now, will improve placement later
-                npc_x = self.player.x + random.randint(-5, 5)
-                npc_y = self.player.y + random.randint(-5, 5)
-                self.npcs.append(NPC(
-                    x=npc_x,
-                    y=npc_y,
-                    name=npc_data.get("name", "NPC"),
-                    dialogue=npc_data.get("dialogue", ["Hello!"]),
-                    personality=npc_data.get("personality", "normal"),
-                    family_ties=npc_data.get("family_ties", "none"),
-                    attitude_to_player=npc_data.get("attitude_to_player", "indifferent")
-                ))
-                self.add_message_to_chat_log(f"Generated NPC: {npc_data.get("name", "NPC")}")
-            except json.JSONDecodeError as e:
-                self.add_message_to_chat_log(f"Error parsing LLM response for NPC: {e}")
-                self.add_message_to_chat_log(f"LLM Response: {llm_response}")
-
     def _initialize_economy(self, village: Village):
         """Calculates initial supply and demand for a village."""
         village.supply = {}
@@ -4650,11 +4671,10 @@ class World:
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
             )
             llm_dialogue = self._call_ollama(prompt)
-            # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
-            print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
-            self.last_talked_to_npc = closest_npc # Store for potential follow-up actions like persuasion
+            self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}")
+            self.last_talked_to_npc = closest_npc
         else:
-            print("No one to talk to nearby.")
+            self.add_message_to_chat_log("No one to talk to nearby.")
             self.last_talked_to_npc = None
 
     def _initialize_chunks(self):

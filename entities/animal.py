@@ -48,6 +48,10 @@ class Animal(NPC):
         # --- Shearing Attributes ---
         self.last_shorn_time: int = -100000 # Set to a long time ago initially
 
+        # --- Hunger Attributes ---
+        self.hunger: int = 0
+        self.max_hunger: int = 100 # Default max hunger
+
     def get_dialogue(self):
         # Animals don't have dialogue in the same way NPCs do.
         return None

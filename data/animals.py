@@ -27,7 +27,8 @@ ANIMAL_DEFINITIONS = {
         "rideable": True,
         "can_mate": True,
         "mating_season": "Autumn",
-        "gestation_period_days": 7
+        "gestation_period_days": 7,
+        "predators": ["wolf", "dire_wolf"]
     },
     "wolf": {
         "name": "Wolf",
@@ -49,7 +50,31 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.5,
                 "quantity": [1, 2]
             }
-        }
+        },
+        "prey": ["deer", "sheep"]
+    },
+    "dire_wolf": {
+        "name": "Dire Wolf",
+        "char": "W",
+        "color": (105, 105, 105),
+        "max_hp": 25,
+        "hostile": True,
+        "spawn_biomes": ["mountain", "snow"],
+        "spawn_chance": 0.003,
+        "base_attack_name": "savage bite",
+        "base_attack_damage_dice": "1d8",
+        "combat_behavior": "aggressive",
+        "loot_drops": {
+            "animal_pelt": {
+                "chance": 0.9,
+                "quantity": [1, 2]
+            },
+            "raw_meat_scrap": {
+                "chance": 0.7,
+                "quantity": [2, 4]
+            }
+        },
+        "prey": ["deer", "sheep", "wolf"]
     },
     "sheep": {
         "name": "Sheep",

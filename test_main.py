@@ -235,12 +235,13 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
 
         # Clear a path for the NPC
-        for i in range(1, 3): # up to the destination tile
-            clear_x, clear_y = npc.x + i, npc.y
-            self.world.get_tile_at(clear_x, clear_y) # Ensure chunk is generated
-            c_chunk_x, c_chunk_y = clear_x // 20, clear_y // 20
-            c_local_x, c_local_y = clear_x % 20, clear_y % 20
-            self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
+        for y_offset in range(-2, 3):
+            for x_offset in range(0, 6):
+                clear_x, clear_y = npc.x + x_offset, npc.y + y_offset
+                self.world.get_tile_at(clear_x, clear_y) # Ensure chunk is generated
+                c_chunk_x, c_chunk_y = clear_x // 20, clear_y // 20
+                c_local_x, c_local_y = clear_x % 20, clear_y % 20
+                self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
 
         fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_lit"]
         fire_pit_tile = Tile(char=fire_pit_def['char'], color=fire_pit_def['color'], passable=False, name="fire_pit_lit", properties=fire_pit_def['properties'].copy())
@@ -350,6 +351,88 @@ class TestClothProductionSystem(unittest.TestCase):
         initial_insulation = self.world.player.clothing_insulation
         self.world.player.equip_armor("cloth_tunic")
         self.assertGreater(self.world.player.clothing_insulation, initial_insulation)
+
+class TestPredatorPreyAI(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+
+        # Use a fixed seed for deterministic world generation
+        self.world = World(seed=42)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_predator_hunts_prey_and_prey_flees(self):
+        from entities.animal import Animal
+        from data.tiles import TILE_DEFINITIONS
+        from tile_types import Tile
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 1. Setup: Create predator and prey
+        predator = Animal(x=self.world.player.x + 5, y=self.world.player.y, name="Dire Wolf", animal_type="dire_wolf")
+        prey = Animal(x=self.world.player.x + 10, y=self.world.player.y, name="Sheep", animal_type="sheep")
+
+        # Set predator to be hungry
+        predator.hunger = predator.max_hunger
+        prey.hunger = 0
+
+        self.world.npcs.extend([predator, prey])
+
+        # Ensure the area is clear for movement
+        plains_def = TILE_DEFINITIONS["plains"]
+        plains_tile = Tile(char=plains_def['char'], color=plains_def['color'], passable=True, name="Plains", properties={})
+
+        # Clear a large area to ensure pathfinding works
+        for y_offset in range(-15, 16):
+            for x_offset in range(-10, 41):
+                clear_x, clear_y = self.world.player.x + x_offset, self.world.player.y + y_offset
+                try:
+                    self.world.get_tile_at(clear_x, clear_y)
+                    chunk_x, chunk_y = clear_x // 20, clear_y // 20
+                    local_x, local_y = clear_x % 20, clear_y % 20
+                    self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = plains_tile
+                except IndexError:
+                    pass # Ignore out-of-bounds coordinates
+
+        # 2. Execution & Assertion (Predator starts hunting)
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+
+        self.assertEqual(predator.current_task, "hunting")
+        self.assertTrue(predator.current_path, "Predator should have a path to the prey.")
+        self.assertEqual(predator.task_target_entity_id, prey.id)
+
+        # 3. Execution & Assertion (Prey starts fleeing)
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        # Run schedules again so prey can react to the hunting predator
+        self.world._update_npc_schedules()
+
+        self.assertEqual(prey.current_task, "fleeing")
+        self.assertTrue(prey.current_path, "Prey should have a path to flee.")
+        # Check that prey's path is moving it away from the predator
+        if prey.current_path and len(prey.current_path) > 1:
+            dist_before = (prey.x - predator.x)**2 + (prey.y - predator.y)**2
+            next_pos = prey.current_path[1]
+            dist_after = (next_pos[0] - predator.x)**2 + (next_pos[1] - predator.y)**2
+            self.assertGreater(dist_after, dist_before, "Prey should be moving away from the predator.")
+
+        # 4. Execution (Simulate chase and attack)
+        initial_prey_hp = prey.hp
+        for _ in range(240): # Simulate a few turns
+            self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+            self.world._update_npc_schedules()
+            self.world._update_npc_movement()
+            if prey.is_dead:
+                break
+
+        # 5. Assertion (Attack and outcome)
+        self.assertLess(prey.hp, initial_prey_hp, "Prey should have taken damage")
+        if prey.is_dead:
+            self.assertEqual(predator.hunger, 0, "Predator should not be hungry after a successful kill")
 
 if __name__ == '__main__':
     unittest.main()

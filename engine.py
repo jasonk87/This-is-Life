@@ -852,61 +852,54 @@ class World:
 
     def calculate_path(self, start_x: int, start_y: int, end_x: int, end_y: int) -> list[tuple[int, int]]:
         """
-        Calculates a path from (start_x, start_y) to (end_x, end_y) using A*.
+        Calculates a path from (start_x, start_y) to (end_x, end_y) using A* on a local cost map.
         Returns a list of (x, y) tuples, or an empty list if no path is found.
-        The path includes the start point and end point.
         """
-        # Ensure start and end are within bounds and passable (optional check, A* might handle it)
         start_tile = self.get_tile_at(start_x, start_y)
-        end_tile = self.get_tile_at(end_x, end_y)
-
         if not (start_tile and start_tile.passable):
-            # self.add_message_to_chat_log(f"Pathfinding: Start tile {start_x},{start_y} is not passable.")
             return []
-        if not (end_tile and end_tile.passable):
-            # self.add_message_to_chat_log(f"Pathfinding: End tile {end_x},{end_y} is not passable.")
-            # Allow pathfinding to an impassable tile, character will stop before it.
-            pass
 
+        padding = 15
+        min_x = max(0, min(start_x, end_x) - padding)
+        max_x = min(WORLD_WIDTH - 1, max(start_x, end_x) + padding)
+        min_y = max(0, min(start_y, end_y) - padding)
+        max_y = min(WORLD_HEIGHT - 1, max(start_y, end_y) + padding)
 
-        # Initialize AStar with the world dimensions and cost callback
-        # The tcod.path.CustomGraph is not strictly needed if using the simple cost callback with AStar directly
-        # for a grid, but it's good practice if more complex graph structures arise.
-        # For now, we can directly use the AStar with `cost` and `diagonal` parameters.
+        local_width = max_x - min_x + 1
+        local_height = max_y - min_y + 1
 
-        # Create a numpy array for pathfinding compatible with tcod.path functions
-        # Cost array: 0 for wall, >0 for walkable tiles.
-        cost = np.ones((WORLD_HEIGHT, WORLD_WIDTH), dtype=np.float32)
-        for y_coord in range(WORLD_HEIGHT):
-            for x_coord in range(WORLD_WIDTH):
-                tile = self.get_tile_at(x_coord, y_coord)
+        cost = np.ones((local_height, local_width), dtype=np.float32)
+
+        for y_local in range(local_height):
+            for x_local in range(local_width):
+                x_world, y_world = min_x + x_local, min_y + y_local
+                tile = self.get_tile_at(x_world, y_world)
+
                 if not tile or not tile.passable:
-                    cost[y_coord, x_coord] = 0  # Wall (impassable)
+                    cost[y_local, x_local] = 0
                 else:
-                    # Start with a base cost from tile properties, defaulting to 1.0
                     base_cost = 1.0
                     if hasattr(tile, 'properties') and tile.properties:
                         base_cost = float(tile.properties.get("movement_cost", 1.0))
 
                     if tile.is_hazard:
-                        hazard_cost_value = 50  # Default high cost for generic hazard
-                        if tile.hazard_type == "fire_trap_active":
-                            hazard_cost_value = 100
-                        elif tile.hazard_type == "water_deep":
-                            hazard_cost_value = 75
-                        cost[y_coord, x_coord] = base_cost + hazard_cost_value
+                        hazard_cost_value = 50
+                        if tile.hazard_type == "fire_trap_active": hazard_cost_value = 100
+                        elif tile.hazard_type == "water_deep": hazard_cost_value = 75
+                        cost[y_local, x_local] = base_cost + hazard_cost_value
                     else:
-                        cost[y_coord, x_coord] = base_cost
+                        cost[y_local, x_local] = base_cost
 
-        astar = tcod.path.AStar(cost=cost, diagonal=1.41) # Allow diagonal movement with cost sqrt(2)
+        astar = tcod.path.AStar(cost=cost, diagonal=1.41)
+
+        start_x_local, start_y_local = start_x - min_x, start_y - min_y
+        end_x_local, end_y_local = end_x - min_x, end_y - min_y
 
         try:
-            path_indices = astar.get_path(start_x, start_y, end_x, end_y)
-            # Convert list of [y,x] numpy arrays to list of (x,y) tuples
-            path_coords = [(int(p[1]), int(p[0])) for p in path_indices]
+            path_indices_local = astar.get_path(start_x_local, start_y_local, end_x_local, end_y_local)
+            path_coords = [(min_x + int(p[1]), min_y + int(p[0])) for p in path_indices_local]
             return path_coords
-        except IndexError: # tcod can raise this if start/end are identical or other issues
-            # self.add_message_to_chat_log(f"Pathfinding error or no path from ({start_x},{start_y}) to ({end_x},{end_y})")
+        except IndexError:
             return []
 
     def _update_npc_movement(self):
@@ -1148,75 +1141,43 @@ class World:
 
             # --- Standard Path-Based Movement ---
             if npc.current_path:
-                if not npc.current_destination_coords: # Should not happen if path exists
-                    npc.current_path = []
-                    continue
+                moves_to_make = 1
+                if isinstance(npc, Animal) and npc.current_task == "hunting":
+                    moves_to_make = 2 # Predators are fast when hunting
 
-                # Path includes the starting point, so if len > 1, there's a next step.
-                # If len == 1, it means current_path[0] is the destination itself.
-                if len(npc.current_path) > 1:
+                for _ in range(moves_to_make):
+                    if not npc.current_path or len(npc.current_path) <= 1:
+                        break # Stop if at destination or no path left to move on
+
                     next_x, next_y = npc.current_path[1]
-
                     next_tile = self.get_tile_at(next_x, next_y)
 
                     # Check for closed door in path
                     if next_tile and next_tile.properties.get("is_door") and not next_tile.properties.get("is_open"):
                         if self.npc_toggle_door(npc, next_x, next_y):
-                            # Door opened successfully. NPC waits a turn (door opening takes their action).
-                            # Path remains, they will attempt to move through next turn.
-                            # self.add_message_to_chat_log(f"{npc.name} opened a door, will move next turn.")
-                            # To make them move immediately, we would not return here, but then pathfinding
-                            # might need to be aware of the new passability instantly.
-                            # Simpler for now: opening door costs a turn of movement.
-                            return # End this NPC's movement update for this turn
+                            # Door opened, but it costs the rest of the moves for this turn
+                            break
                         else:
-                            # Failed to open door, path is blocked. Clear path.
-                            # self.add_message_to_chat_log(f"{npc.name}'s path blocked by a stuck door at ({next_x},{next_y}). Path cleared.")
+                            # Can't open door, clear path and stop all movement
                             npc.current_path = []
                             npc.current_destination_coords = None
-                            npc.current_task = "idle_confused" # Or try to repath later
-                            return
+                            break
 
-                    # If not a closed door, or door was opened, proceed with movement if tile is passable
+                    # If not a door or door was handled, proceed with movement
                     if next_tile and next_tile.passable:
                         npc.x = next_x
                         npc.y = next_y
                         npc.current_path.pop(0)
-                    elif not next_tile or not next_tile.passable:
-                        # Path is blocked by something else (not a door they can open)
-                        # self.add_message_to_chat_log(f"{npc.name}'s path blocked at ({next_x},{next_y}). Path cleared.")
+                    else: # Path blocked
                         npc.current_path = []
                         npc.current_destination_coords = None
-                        npc.current_task = "idle_confused"
-                        return
-                    # If next_tile was None (out of bounds), this case is also handled by the above.
+                        break # Stop all movement
 
-                                            # Effectively making current_path[1] the new current_path[0]
-
-                    # If only the destination remains in the path after moving
-                    if len(npc.current_path) == 1 and (npc.x, npc.y) == npc.current_destination_coords:
-                        # self.add_message_to_chat_log(f"{npc.name} reached destination {npc.current_destination_coords} for task {npc.current_task}")
-                        npc.current_path = []
-                        npc.current_destination_coords = None
-                        # Task update will be handled by the scheduler when it sees destination is reached.
-                        if npc.current_task == "going to work":
-                            npc.current_task = "at work"
-                        elif npc.current_task == "going home" or npc.current_task == "going home to sleep" or npc.current_task == "going to bed":
-                            npc.current_task = "at home" # Scheduler will handle transition to sleeping if appropriate
-                        elif npc.current_task == "fetching water":
-                            npc.current_task = "at the well"
-                            # NPC will stay "at the well" until scheduler gives a new task (e.g. "going home")
-                        elif npc.current_task == "going to tavern":
-                            npc.current_task = "socializing"
-                        elif npc.current_task == "visiting friend":
-                            npc.current_task = "socializing"
-                        else:
-                            npc.current_task = "idle"
-
-                elif len(npc.current_path) == 1 and (npc.x, npc.y) == npc.current_path[0] and (npc.x, npc.y) == npc.current_destination_coords :
+                # After movement loop, check for arrival
+                if npc.current_path and len(npc.current_path) <= 1 and npc.current_destination_coords and (npc.x, npc.y) == npc.current_destination_coords:
                     npc.current_path = []
                     npc.current_destination_coords = None
-                    # Similar logic for task update on immediate arrival
+                    # Task update will be handled by the scheduler when it sees destination is reached.
                     if npc.current_task == "going to work":
                         npc.current_task = "at work"
                     elif npc.current_task == "going home" or npc.current_task == "going home to sleep" or npc.current_task == "going to bed":
@@ -1225,14 +1186,14 @@ class World:
                         npc.current_task = "at the well"
                     elif npc.current_task == "going to tavern":
                         npc.current_task = "socializing"
+                    elif npc.current_task == "visiting friend":
+                        npc.current_task = "socializing"
                     else:
                         npc.current_task = "idle"
-
-                # Safety break if path somehow doesn't lead to destination
-                if not npc.current_path and (npc.x, npc.y) != npc.current_destination_coords and npc.current_destination_coords is not None:
-                    # self.add_message_to_chat_log(f"Warning: {npc.name} path ended but not at destination {npc.current_destination_coords}. At {(npc.x, npc.y)}")
-                    npc.current_destination_coords = None # Clear destination to avoid re-pathing to same failed spot immediately
-                    npc.current_task = "idle_confused" # Or some error state
+                elif not npc.current_path and npc.current_destination_coords and (npc.x, npc.y) != npc.current_destination_coords:
+                    # Path ended prematurely (e.g., was blocked)
+                    npc.current_destination_coords = None
+                    npc.current_task = "idle_confused"
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
         """Gets a building's global center coordinates using the buildings_by_id lookup."""
@@ -1488,85 +1449,136 @@ class World:
                     if path: npc.current_path = path
                     else: npc.current_task = "idle_confused"; npc.current_destination_coords = None
 
-            # --- Animal Behavior (Non-Hostile) ---
-            elif isinstance(npc, Animal) and not npc.is_hostile_to_player:
-                # --- Pregnancy and Birth ---
+            # --- Animal Behavior (Predator & Prey) ---
+            elif isinstance(npc, Animal):
+                # Universal updates
+                if npc.hunger < npc.max_hunger:
+                    npc.hunger += 1
+                animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
+
+                # 1. PREDATOR AI (Highest Priority)
+                is_predator = "prey" in animal_def
+                is_hungry_predator = is_predator and npc.hunger >= npc.max_hunger * 0.7
+                if is_hungry_predator or npc.current_task == "hunting":
+                    if npc.current_task != "hunting":
+                        # Find nearest prey
+                        nearest_prey = None
+                        min_dist_sq = float('inf')
+                        for other_npc in self.npcs:
+                            if other_npc.id != npc.id and isinstance(other_npc, Animal) and other_npc.animal_type in animal_def.get("prey", []):
+                                dist_sq = (npc.x - other_npc.x)**2 + (npc.y - other_npc.y)**2
+                                if dist_sq < min_dist_sq and dist_sq < 20**2:
+                                    min_dist_sq = dist_sq
+                                    nearest_prey = other_npc
+                        if nearest_prey:
+                            npc.current_task = "hunting"
+                            npc.task_target_entity_id = nearest_prey.id
+                            self.add_message_to_chat_log(f"The {npc.name} has caught the scent of a {nearest_prey.name} and begins to hunt.")
+
+                    if npc.current_task == "hunting":
+                        prey = next((n for n in self.npcs if n.id == npc.task_target_entity_id), None)
+                        if prey and not prey.is_dead:
+                            distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
+                            if distance_to_prey <= npc.attack_range:
+                                # If in range, attack immediately and clear pathing. This is the action for the turn.
+                                self.npc_attempt_attack_npc(npc, prey)
+                                npc.current_path = []
+                                npc.current_destination_coords = None
+                                if prey.is_dead:
+                                    npc.hunger = 0
+                                    npc.current_task = "idle"
+                                    npc.task_target_entity_id = None
+                            else:
+                                # If not in range, update path to chase.
+                                target_x, target_y = self._find_best_adjacent_tile(prey.x, prey.y, npc)
+                                if target_x is not None and (not npc.current_path or npc.current_destination_coords != (target_x, target_y)):
+                                    path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                                    if path:
+                                        npc.current_path = path
+                                        npc.current_destination_coords = (target_x, target_y)
+                        else:
+                            npc.current_task = "idle" # Prey is gone
+                            npc.task_target_entity_id = None
+                    continue # Predator logic is exclusive for this tick
+
+                # 2. PREY/FLEEING AI (Second Priority)
+                flee_radius = 15
+                should_flee = False
+                threat = None
+                distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                if distance_to_player < flee_radius:
+                    should_flee = True
+                    threat = self.player
+
+                if not should_flee:
+                    for other_npc in self.npcs:
+                        if other_npc.id != npc.id and other_npc.animal_type in animal_def.get("predators", []):
+                            distance_to_predator = math.sqrt((npc.x - other_npc.x)**2 + (npc.y - other_npc.y)**2)
+                            if distance_to_predator < flee_radius:
+                                should_flee = True
+                                threat = other_npc
+                                break
+
+                if should_flee and threat:
+                    if npc.current_task != "fleeing":
+                        self.add_message_to_chat_log(f"The {npc.name} spots the {threat.name if hasattr(threat, 'name') else 'player'} and bolts!")
+                        npc.current_task = "fleeing"
+
+                    dx = npc.x - threat.x
+                    dy = npc.y - threat.y
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist > 0:
+                        flee_x = npc.x + int(dx/dist * flee_radius)
+                        flee_y = npc.y + int(dy/dist * flee_radius)
+                        flee_x = max(0, min(WORLD_WIDTH - 1, flee_x))
+                        flee_y = max(0, min(WORLD_HEIGHT - 1, flee_y))
+                        path = self.calculate_path(npc.x, npc.y, flee_x, flee_y)
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = (flee_x, flee_y)
+                    continue
+
+                if npc.current_task == "fleeing" and not should_flee:
+                    npc.current_task = "idle"
+
+                # 3. OTHER BEHAVIORS (Lower Priority)
                 if npc.is_pregnant:
                     npc.pregnancy_timer -= 1
                     if npc.pregnancy_timer <= 0:
                         npc.is_pregnant = False
-                        # Find a spot for the baby
                         spawn_x, spawn_y = self._find_best_adjacent_tile(npc.x, npc.y, npc)
                         if spawn_x is not None:
-                            animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
                             new_animal = Animal(spawn_x, spawn_y, name=f"Baby {npc.animal_type}", animal_type=npc.animal_type)
                             new_animal.char = ord(animal_def.get("char", 'a').lower())
-                            new_animal.color = animal_def.get("color") # Same color for now
-                            new_animal.max_hp = animal_def.get("max_hp", 10) // 2 # Baby has half HP
+                            new_animal.color = animal_def.get("color")
+                            new_animal.max_hp = animal_def.get("max_hp", 10) // 2
                             new_animal.hp = new_animal.max_hp
-                            new_animal.behavior = "Wander-Flee" # Babies are timid
+                            new_animal.behavior = "Wander-Flee"
                             new_animal.gender = random.choice(["male", "female"])
-
                             self.npcs.append(new_animal)
                             self.add_message_to_chat_log(f"A baby {npc.animal_type} has been born!")
                         else:
-                            # Could not find a place for the baby, maybe try again next tick
-                            npc.pregnancy_timer = 1 # Try again very soon
-
+                            npc.pregnancy_timer = 1
 
                 if npc.behavior == "Follow-Owner" and npc.owner == self.player:
                     distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
-                    follow_distance = 3 # Start following if further than this
-
-                    if distance_to_player > follow_distance and not npc.current_path:
-                        # Find a tile adjacent to the player to path to.
+                    if distance_to_player > 3 and not npc.current_path:
                         target_x, target_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
-
                         if target_x is not None:
                             path = self.calculate_path(npc.x, npc.y, target_x, target_y)
                             if path:
                                 npc.current_path = path
                                 npc.current_destination_coords = (target_x, target_y)
                                 npc.current_task = "following"
-                else:
-                    # Handle non-hostile animal behaviors like wandering and fleeing
-                    distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
-                    flee_radius = 10 # Example radius to start fleeing
 
-                    if npc.behavior == "Wander-Flee" and distance_to_player < flee_radius:
-                        # Player is too close, initiate fleeing
-                        if npc.current_task != "combat_action_flee_from_player":
-                            npc.current_task = "combat_action_flee_from_player"
-                            npc.current_path = [] # Force path recalculation in _update_npc_movement
-                    elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
-                        # Wander randomly if player is not close or if behavior is just wander
-                        if random.random() < 0.2: # 20% chance to wander each update
-                            dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
-                            potential_x, potential_y = npc.x + dx, npc.y + dy
-                            target_tile = self.get_tile_at(potential_x, potential_y)
-                            if target_tile and target_tile.passable:
-                                npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
-                                npc.current_destination_coords = (potential_x, potential_y)
-                                npc.current_task = "wandering"
-                    elif npc.current_task == "combat_action_flee_from_player" and distance_to_player >= flee_radius * 1.5:
-                        # If the animal has fled far enough, it can go back to wandering
-                        npc.current_task = "idle"
-                        npc.current_path = []
-                        npc.current_destination_coords = None
-                # --- Mating Behavior ---
-                animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
-                current_season = self.seasons[self.current_season_index]
-
-                if animal_def.get("can_mate") and animal_def.get("mating_season") == current_season and not npc.is_pregnant:
+                elif animal_def.get("can_mate") and animal_def.get("mating_season") == self.seasons[self.current_season_index] and not npc.is_pregnant:
                     if npc.current_task not in ["seeking_mate", "mating"]:
-                        # Find a mate
                         for other_npc in self.npcs:
                             if isinstance(other_npc, Animal) and other_npc.id != npc.id and \
                                other_npc.animal_type == npc.animal_type and other_npc.gender != npc.gender and \
                                not other_npc.is_pregnant:
-
                                 distance_to_mate = math.sqrt((npc.x - other_npc.x)**2 + (npc.y - other_npc.y)**2)
-                                if distance_to_mate < 20: # Search radius for a mate
+                                if distance_to_mate < 20:
                                     npc.current_task = "seeking_mate"
                                     npc.task_target_entity_id = other_npc.id
                                     break
@@ -1576,20 +1588,28 @@ class World:
                         if mate:
                             distance_to_mate = math.sqrt((npc.x - mate.x)**2 + (npc.y - mate.y)**2)
                             if distance_to_mate <= 1:
-                                # Mate found, initiate mating
                                 if npc.gender == "female":
                                     npc.is_pregnant = True
                                     npc.pregnancy_timer = animal_def.get("gestation_period_days", 7) * DAY_LENGTH_TICKS
                                     self.add_message_to_chat_log(f"A wild {npc.animal_type} has become pregnant.")
-                                npc.current_task = "idle" # Or some post-mating behavior
+                                npc.current_task = "idle"
                             else:
-                                # Path towards mate
                                 target_x, target_y = self._find_best_adjacent_tile(mate.x, mate.y, npc)
                                 if target_x is not None:
                                     path = self.calculate_path(npc.x, npc.y, target_x, target_y)
                                     if path:
                                         npc.current_path = path
                                         npc.current_destination_coords = (target_x, target_y)
+
+                elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
+                    if random.random() < 0.2:
+                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
+                        potential_x, potential_y = npc.x + dx, npc.y + dy
+                        target_tile = self.get_tile_at(potential_x, potential_y)
+                        if target_tile and target_tile.passable:
+                            npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
+                            npc.current_destination_coords = (potential_x, potential_y)
+                            npc.current_task = "wandering"
 
             # Standard scheduling logic ONLY if NOT hostile by default (e.g. not a Creature) AND not investigating a sound
             elif npc.profession != "Creature" and not npc.is_hostile_to_player and \
@@ -2848,6 +2868,27 @@ class World:
         except ValueError: # For int(damage_dealt)
              self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
+
+    def npc_attempt_attack_npc(self, attacker: NPC, target: NPC):
+        """Handles an NPC's attempt to attack another NPC."""
+        if attacker.is_dead or target.is_dead:
+            return
+
+        # Simple damage calculation for now, bypassing LLM for NPC vs NPC
+        damage = random.randint(1, 4) # Example: 1d4 damage
+
+        # Check if player can see the attack to log it
+        can_player_see = self.player_fov_map[attacker.x, attacker.y] or self.player_fov_map[target.x, target.y]
+
+        if can_player_see:
+            self.add_message_to_chat_log(f"The {attacker.name} attacks the {target.name} for {damage} damage!")
+
+        target.take_damage(damage, self)
+
+        if target.is_dead:
+            if can_player_see:
+                self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
+            self.handle_npc_death(target)
 
     def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
         """Finds the nearest building that sells food (e.g., general store, bakery)."""

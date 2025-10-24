@@ -560,12 +560,18 @@ Based on the witness's personality, profession, and attitudes, decide their most
 4.  "admonish": Verbally confront the criminal without becoming hostile. (For NPCs who disapprove but won't risk a fight).
 5.  "ignore": Do nothing. (For indifferent, greedy, or criminal-minded NPCs, or if they dislike the victim more than the criminal).
 
+**Situational Context:**
+- Distance to Crime: {distance} tiles
+- Light Level: {light_level} (e.g., DAY, DUSK, NIGHT, PITCH_BLACK)
+- Witness Facing: Is the witness facing the crime? {is_facing_crime} (boolean)
+
 **Decision Factors:**
 - **Profession:** A Sheriff or Guard should almost always react with "become_hostile" or "report_crime".
 - **Personality:** A 'lawful' NPC will likely "report_crime". A 'cowardly' one will "flee". A 'greedy' one might "ignore" it unless they see personal gain. A 'loyal' NPC will defend friends ("become_hostile").
 - **Attitude to Criminal:** A 'friendly' or 'admiring' attitude makes "ignore" or "admonish" more likely. A 'hostile' attitude makes "become_hostile" or "report_crime" more likely.
 - **Attitude to Victim:** If the witness is 'friendly' towards the victim, they are more likely to intervene ("become_hostile" or "report_crime"). If they are 'hostile' towards the victim, they are more likely to "ignore" the crime.
 - **Crime Type:** Murder is more likely to provoke a strong reaction ("flee", "report_crime") than petty theft.
+- **Context:** A crime committed far away, in the dark, or behind the witness's back might be ignored or result in a less severe reaction (e.g., "admonish" instead of "report_crime"), even for a lawful NPC. A crime committed up close in broad daylight should provoke a stronger reaction.
 
 **Output Format (JSON):**
 Return a JSON object with the chosen reaction and a short, in-character dialogue line expressing their reaction.

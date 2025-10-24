@@ -94,6 +94,7 @@ class NPC:
         self.base_temperature_resistance: float = 2.0 # NPCs are a bit hardier
         self.clothing_insulation: float = 0.0
         self.status_effects: list[str] = []
+        self.just_ate = False
 
     def get_dialogue(self):
         return self.dialogue

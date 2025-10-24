@@ -141,6 +141,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     elif game_state == "BUILD_MODE":
         draw_build_mode_ui(console, world, camera_x, camera_y)
 
+    # --- Draw other UI elements that are always on top ---
     draw_chat_log(console, world)
     draw_interaction_menu(console, world, camera_x, camera_y)
     draw_chat_ui(console, world)

@@ -1281,27 +1281,31 @@ class World:
 
                     if npc.current_task == "hunting":
                         prey = self._get_predator_target(npc)
-                        if prey and not prey.is_dead:
-                            distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
-                            attack_range = getattr(npc, 'attack_range', 1)
-                            if distance_to_prey <= attack_range:
-                                print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
-                                self.npc_attempt_attack_npc(npc, prey)
-                                npc.current_path = []
-                                npc.current_destination_coords = None
-                                print(f"DEBUG: After attack, prey.is_dead = {prey.is_dead}")
-                                if prey.is_dead:
-                                    print(f"DEBUG: Prey is dead. Resetting {npc.name}'s hunger.")
-                                    npc.hunger = 0
-                                    npc.current_task = "idle"
-                                    npc.task_target_entity_id = None
-                            else:
-                                if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
-                                    path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
-                                    if path:
-                                        npc.current_path = path
-                                        npc.current_destination_coords = (prey.x, prey.y)
+                        if prey:
+                            # If prey is not dead, continue hunting/attacking
+                            if not prey.is_dead:
+                                distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
+                                attack_range = getattr(npc, 'attack_range', 1)
+
+                                if distance_to_prey <= attack_range:
+                                    self.npc_attempt_attack_npc(npc, prey)
+                                    npc.current_path = []
+                                    npc.current_destination_coords = None
+                                else:
+                                    # Path to prey if not in range or path is lost
+                                    if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
+                                        path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
+                                        if path:
+                                            npc.current_path = path
+                                            npc.current_destination_coords = (prey.x, prey.y)
+
+                            # After any hunting action, check if the prey is now dead
+                            if prey.is_dead:
+                                npc.hunger = 0
+                                npc.current_task = "idle"
+                                npc.task_target_entity_id = None
                         else:
+                            # Prey not found (e.g., despawned, or already dead and removed)
                             npc.current_task = "idle"
                             npc.task_target_entity_id = None
                         continue
@@ -3544,12 +3548,27 @@ class World:
             if len(self.chat_ui_history) > self.chat_ui_max_history:
                 self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
             self.chat_ui_scroll_offset = 0
-
-
         except json.JSONDecodeError:
             error_msg = f"{npc_target.name} gives a non-committal grunt. (LLM response format error)"
             self.chat_ui_history.append(("System", error_msg))
             # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
+
+    def update(self):
+        """Advances the game state by one tick."""
+        self.game_time += 1
+        self._update_player_hunger_thirst()
+        self._update_season()
+        self._update_player_temperature()
+        self._apply_temperature_effects(self.player)
+        self._update_light_level_and_fov()
+        self._update_world_environment()
+        self._update_weather()
+        self.update_fov()
+        self._update_npc_schedules()
+        self._update_npc_movement()
+        self._handle_npc_speech()
+        if self.game_time % 100 == 0:
+            self._update_economy()
 
     def player_attempt_attack(self, target_npc: NPC):
         if not target_npc:
@@ -5723,6 +5742,47 @@ class World:
             return False
 
         return True
+
+    def player_examine_entity(self, entity_dict: dict):
+        """Generates and displays a detailed description of an entity."""
+        entity_type = entity_dict.get("type")
+        entity_data = entity_dict.get("data")
+
+        if not entity_type or not entity_data:
+            self.add_message_to_chat_log("You see nothing special.")
+            return
+
+        details = ""
+        if entity_type == "npc":
+            details = f"Type: Person\nName: {entity_data.name}\nProfession: {entity_data.profession}\nPersonality: {entity_data.personality}\nCurrent Task: {entity_data.current_task}"
+        elif entity_type == "tile":
+            details = f"Type: Scenery\nName: {entity_data.name}\nProperties: {entity_data.properties}"
+            if isinstance(entity_data, Tree):
+                 details += f"\nState: {'Ready to chop' if entity_data.is_choppable else 'Already chopped'}"
+        elif entity_type == "item":
+            item_def = ITEM_DEFINITIONS.get(entity_data['item_key'], {})
+            details = f"Type: Item on Ground\nName: {item_def.get('name', 'Unknown Item')}\nDescription: {item_def.get('description', 'An ordinary object.')}\nQuantity: {entity_data.get('quantity', 1)}"
+        elif entity_type == "building":
+            details = f"Type: Structure\nBuilding Type: {entity_data.building_type}\nCategory: {entity_data.category}"
+            if entity_data.player_owned:
+                details += "\nOwnership: This is your property."
+            elif entity_data.residents:
+                resident_names = ", ".join([npc.name for npc in entity_data.residents])
+                details += f"\nResidents: {resident_names}"
+            else:
+                details += "\nOwnership: Unoccupied"
+        else:
+            self.add_message_to_chat_log(f"You see a {entity_dict.get('name', 'thing')}.")
+            return
+
+        prompt = LLM_PROMPTS["entity_examination"].format(details=details)
+        description = self._call_ollama(prompt)
+
+        if not description:
+            # Fallback if LLM fails
+            self.add_message_to_chat_log(f"You look closely at the {entity_dict.get('name', 'thing')}, but can't make out any further details.")
+        else:
+            self.add_message_to_chat_log(description.strip())
 
     def drop_item_on_map(self, item_key: str, quantity: int, x: int, y: int):
         """Drops an item or stack of items onto the map at specified coordinates."""

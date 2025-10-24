@@ -94,8 +94,7 @@ def execute_interaction(world: World, context_handler):
         else:
             world.add_message_to_chat_log("You cannot claim this structure.")
     elif selected_action == "Examine":
-        # Basic examine for now
-        world.add_message_to_chat_log(f"You see a {selected_entity_dict['name']}.")
+        world.player_examine_entity(selected_entity_dict)
 
     # Close the menu after action, unless it opened another UI like chat
     if not world.chat_ui_active and not world.trade_ui_active:
@@ -137,35 +136,8 @@ def main():
     ) as context:
         while True:
             # --- Game Logic Updates ---
-            # Player actions are handled in event loop below
-            # NPC Updates
-            world.game_time += 1 # Increment game time
-
-            # --- Jail Time Update ---
-            if world.player.is_jailed and world.player.jail_time_remaining > 0:
-                world.player.jail_time_remaining -= 1
-                if world.player.jail_time_remaining == 0:
-                    world.add_message_to_chat_log("Your sentence is over. The guard unlocks the door.")
-                    world.player.is_jailed = False
-                    door_x, door_y = world.player.jail_cell_coords
-                    open_door_def = world.DECORATION_ITEM_DEFINITIONS["iron_door_open"]
-                    world._change_map_tile((door_x, door_y), open_door_def)
-                    world.player.jail_cell_coords = None
-
-
-            world._update_player_hunger_thirst() # Update hunger/thirst and apply effects
-            world._update_season()
-            world._update_player_temperature()
-            world._apply_temperature_effects()
-            world._update_light_level_and_fov() # Update light level and FOV radius
-            world._update_world_environment()
-            world._update_weather()
-            world.update_fov() # Update FOV maps for player and NPCs
-            world._update_npc_schedules() # New: Update NPC schedules (includes combat AI decisions)
-            world._update_npc_movement() # Update NPC movement (includes combat movement/action execution)
-            world._handle_npc_speech()   # Existing: Handle NPC speech (might need timing adjustments)
-            if world.game_time % 100 == 0: # Update economy every 100 ticks
-                world._update_economy()
+            # All per-tick updates are now handled in the world.update() method
+            world.update()
 
             # --- Drawing ---
             if world.game_state == "PLAYER_DEAD":
@@ -352,7 +324,7 @@ def main():
                     # --- UI Mode: Info Menu Active (or toggling it) ---
                     elif event.sym == tcod.event.KeySym.I:
                         # This check ensures info menu doesn't open if other modal UIs are active
-                        if not world.chat_ui_active and not world.trade_ui_active and not world.interaction_menu_active: # Added trade_ui_active check
+                        if not world.chat_ui_active and not world.trade_ui_active and not world.interaction_context["active"]:
                              world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
 
                     # --- Game State: Crafting Menu ---
@@ -389,14 +361,6 @@ def main():
                             world.crafting_menu_context["all_recipes"].sort(
                                 key=lambda k: ITEM_DEFINITIONS[k].get("name", k)
                             )
-                        elif event.sym == tcod.event.KeySym.S: # Craft crude spear
-                            world.craft_item("crude_spear")
-                        elif event.sym == tcod.event.KeySym.X: # Craft wooden shield
-                            world.craft_item("wooden_shield")
-                        # M for Meat (Cooked) - conceptual, might require fire nearby later
-                        # For now, let's assume 'M' crafts it if ingredients are present.
-                        elif event.sym == tcod.event.KeySym.M:
-                            world.craft_item("cooked_meat_scrap")
                         elif event.sym == tcod.event.KeySym.H: # Use healing salve (example)
                             world.use_item("healing_salve")
                         # Keybind for using cooked meat scrap - let's use 'U' for "Use food"

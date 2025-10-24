@@ -140,6 +140,8 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
         draw_info_menu(console, world, camera_x, camera_y)
     elif game_state == "BUILD_MODE":
         draw_build_mode_ui(console, world, camera_x, camera_y)
+    elif game_state == "PLAYING": # Only draw status panel when in normal play
+        draw_status_panel(console, world)
 
     # --- Draw other UI elements that are always on top ---
     draw_chat_log(console, world)
@@ -148,7 +150,6 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     draw_trade_ui(console, world)
     draw_crafting_menu(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
-    draw_status_panel(console, world)
 
 
 def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:

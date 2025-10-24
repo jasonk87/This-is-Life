@@ -1258,6 +1258,10 @@ class World:
 
             # --- Animal Behavior (Predator & Prey) ---
             elif isinstance(npc, Animal):
+                if hasattr(npc, 'just_ate') and npc.just_ate:
+                    npc.just_ate = False
+                    continue
+
                 animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
 
                 # 1. PREDATOR AI (Highest Priority)
@@ -1285,14 +1289,14 @@ class World:
                             distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
-                                killed_prey = self.npc_attempt_attack_npc(npc, prey)
+                                prey_was_killed = self.npc_attempt_attack_npc(npc, prey)
                                 npc.current_path = []
                                 npc.current_destination_coords = None
-                                if killed_prey:
+                                if prey_was_killed:
                                     npc.hunger = 0
+                                    npc.just_ate = True # Set flag to prevent hunger increase this tick
                                     npc.current_task = "idle"
                                     npc.task_target_entity_id = None
-                                    npc.just_ate = True
                             else:
                                 if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
                                     path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
@@ -1405,12 +1409,9 @@ class World:
                                         npc.current_destination_coords = (target_x, target_y)
 
                 elif npc.current_task in ["idle", "wandering"] and not npc.current_path:
-                    if hasattr(npc, 'just_ate') and npc.just_ate:
-                        npc.just_ate = False
-                    else:
-                        # Hunger increases when idle
-                        if npc.hunger < npc.max_hunger:
-                            npc.hunger += 1
+                    # Hunger increases when idle
+                    if npc.hunger < npc.max_hunger:
+                        npc.hunger += 1
 
                     if random.random() < 0.2:
                         dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
@@ -2680,12 +2681,9 @@ class World:
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
     def npc_attempt_attack_npc(self, attacker: NPC, target: NPC) -> bool:
-        """
-        Handles an NPC's attempt to attack another NPC.
-        Returns True if the target was killed, False otherwise.
-        """
+        """Handles an NPC's attempt to attack another NPC. Returns True if target was killed."""
         if attacker.is_dead or target.is_dead:
-            return False
+            return True if target and target.is_dead else False
 
         # Simple damage calculation for now, bypassing LLM for NPC vs NPC
         damage = random.randint(1, 4) # Example: 1d4 damage

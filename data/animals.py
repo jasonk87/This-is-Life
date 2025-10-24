@@ -28,7 +28,8 @@ ANIMAL_DEFINITIONS = {
         "can_mate": True,
         "mating_season": "Autumn",
         "gestation_period_days": 7,
-        "predators": ["wolf", "dire_wolf"]
+        "predators": ["wolf", "dire_wolf"],
+        "hunger_increase_interval": 250
     },
     "wolf": {
         "name": "Wolf",
@@ -51,7 +52,8 @@ ANIMAL_DEFINITIONS = {
                 "quantity": [1, 2]
             }
         },
-        "prey": ["deer", "sheep"]
+        "prey": ["deer", "sheep"],
+        "hunger_increase_interval": 250
     },
     "dire_wolf": {
         "name": "Dire Wolf",
@@ -75,7 +77,8 @@ ANIMAL_DEFINITIONS = {
                 "quantity": [2, 4]
             }
         },
-        "prey": ["deer", "sheep", "wolf"]
+        "prey": ["deer", "sheep", "wolf"],
+        "hunger_increase_interval": 250
     },
     "sheep": {
         "name": "Sheep",
@@ -106,6 +109,7 @@ ANIMAL_DEFINITIONS = {
             "item_yield": "raw_wool",
             "quantity": [1, 3],
             "regrowth_days": 7
-        }
+        },
+        "hunger_increase_interval": 250
     }
 }

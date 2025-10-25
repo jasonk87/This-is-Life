@@ -382,6 +382,7 @@ class Player:
 class World:
     """World class now uses a generator for a more complex map."""
     def __init__(self, seed=None):
+        self.pack_id_counter = 0
         self.chat_log = [] # Stores chat messages
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
@@ -1007,6 +1008,7 @@ class World:
                     # If the NPC was pathing for a specific reason, update its state now that it has arrived
                     if npc.current_task == "going to work": npc.current_task = "at work"
                     elif npc.current_task in ["going home", "going home to sleep", "going to bed"]: npc.current_task = "at home"
+                    elif npc.current_task == "going_home_with_furniture": npc.current_task = "placing_furniture"
                     else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
@@ -1625,6 +1627,60 @@ class World:
                             # No food to buy or can't afford it
                             # self.add_message_to_chat_log(f"{npc.name} went to the {food_vendor_building.building_type} but couldn't buy food.")
                             npc.current_task = "wandering_hungry"
+                    needs_based_action_taken = True
+
+                # --- Furniture Acquisition ---
+                if not needs_based_action_taken:
+                    npc.desire_for_furniture += 1
+                    if npc.desire_for_furniture > 500:
+                        carpenter_shop = self._find_nearest_carpenter(npc)
+                        if carpenter_shop:
+                            npc.current_task = "going_to_buy_furniture"
+                            npc.previous_task = "idle"
+                            path = self.calculate_path(npc.x, npc.y, carpenter_shop.global_center_x, carpenter_shop.global_center_y)
+                            if path:
+                                npc.current_path = path
+                                npc.current_destination_coords = (carpenter_shop.global_center_x, carpenter_shop.global_center_y)
+                                needs_based_action_taken = True
+
+                if npc.current_task == "going_to_buy_furniture":
+                    carpenter_shop = self._find_nearest_carpenter(npc)
+                    if carpenter_shop and (npc.x, npc.y) == (carpenter_shop.global_center_x, carpenter_shop.global_center_y):
+                        village = self._get_village_for_npc(npc)
+                        chair_price = self.get_dynamic_price("wooden_chair", village)
+                        if npc.money >= chair_price and carpenter_shop.building_inventory.get("wooden_chair", 0) > 0:
+                            carpenter_shop.building_inventory["wooden_chair"] -= 1
+                            npc.money -= chair_price
+                            npc.add_item("wooden_chair", 1)
+                            npc.desire_for_furniture = 0
+                            npc.current_task = "going_home_with_furniture"
+                        else:
+                            npc.current_task = "idle"
+                    needs_based_action_taken = True
+
+                if npc.current_task == "going_home_with_furniture":
+                    home_building = self.buildings_by_id.get(npc.home_building_id)
+                    if home_building:
+                        path = self.calculate_path(npc.x, npc.y, home_building.global_center_x, home_building.global_center_y)
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = (home_building.global_center_x, home_building.global_center_y)
+                    needs_based_action_taken = True
+
+                if npc.current_task == "placing_furniture":
+                    home_building = self.buildings_by_id.get(npc.home_building_id)
+                    if home_building and (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y):
+                        for y_offset in range(1, home_building.height - 1):
+                            for x_offset in range(1, home_building.width - 1):
+                                tile_x = home_building.global_origin_x + x_offset
+                                tile_y = home_building.global_origin_y + y_offset
+                                if self.get_tile_at(tile_x, tile_y).name == "wood_floor":
+                                    self._change_map_tile((tile_x, tile_y), DECORATION_ITEM_DEFINITIONS["wooden_chair"])
+                                    npc.remove_item("wooden_chair", 1)
+                                    npc.current_task = "idle"
+                                    break
+                            if npc.current_task == "idle":
+                                break
                     needs_based_action_taken = True
 
 
@@ -2545,10 +2601,18 @@ class World:
 
         has_healing_item = npc.npc_inventory.get("healing_salve", 0) > 0
 
+        pack_members_nearby = 0
+        if isinstance(npc, Animal) and npc.pack_id:
+            for other_npc in self.npcs:
+                if isinstance(other_npc, Animal) and other_npc.pack_id == npc.pack_id and other_npc.id != npc.id:
+                    if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10:
+                        pack_members_nearby += 1
+
         prompt = LLM_PROMPTS["npc_combat_decision"].format(
             npc_name=npc.name,
             npc_personality=npc.personality,
             can_see_player=can_see_player,
+            pack_members_nearby=pack_members_nearby,
             npc_combat_behavior=npc.combat_behavior,
             npc_hp=npc.hp,
             npc_max_hp=npc.max_hp,
@@ -2765,7 +2829,8 @@ class World:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
             self.handle_npc_death(target)
-            attacker.hunger = 0
+            if self._is_predator(attacker):
+                attacker.hunger = 0
             return True # Kill was made
 
         return False
@@ -2914,6 +2979,10 @@ class World:
     def _find_nearest_tavern(self, npc: NPC) -> Building | None:
         """Finds the nearest building with a 'tavern' type in the NPC's village."""
         return self._find_nearest_building_of_type(npc, "tavern")
+
+    def _find_nearest_carpenter(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'carpenter_shop' type in the NPC's village."""
+        return self._find_nearest_building_of_type(npc, "carpenter_shop")
 
     def _find_nearest_fishing_hut(self, npc: NPC) -> Building | None:
         """Finds the nearest building with a 'fishing_hut' type in the NPC's village."""
@@ -4891,6 +4960,10 @@ class World:
                                     animal_y_world = chunk_coord_y * CHUNK_SIZE + y_local
                                     if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
                                         new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
+                                        if animal_def.get("pack_animal"):
+                                            if random.random() < 0.5:
+                                                self.pack_id_counter += 1
+                                            new_animal.pack_id = f"pack_{self.pack_id_counter}"
                                         new_animal.char = ord(animal_def["char"])
                                         new_animal.color = animal_def["color"]
                                         new_animal.max_hp = animal_def["max_hp"]

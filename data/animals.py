@@ -94,7 +94,8 @@ ANIMAL_DEFINITIONS = {
                 "quantity": [1, 2]
             }
         },
-        "prey": ["deer", "sheep"]
+        "prey": ["deer", "sheep"],
+        "pack_animal": True
     },
     "dire_wolf": {
         "name": "Dire Wolf",
@@ -224,6 +225,72 @@ ANIMAL_DEFINITIONS = {
         "loot_drops": {
             "raw_fish": {
                 "chance": 1.0,
+                "quantity": 1
+            }
+        }
+    },
+    "rabbit": {
+        "name": "Rabbit",
+        "char": "r",
+        "color": (139, 119, 101),
+        "max_hp": 4,
+        "behavior": "Wander-Flee",
+        "hostile": False,
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.02,
+        "base_attack_name": "bite",
+        "base_attack_damage_dice": "1d1",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_meat_scrap": {
+                "chance": 1.0,
+                "quantity": 1
+            }
+        },
+        "predators": ["fox", "wolf", "dire_wolf"]
+    },
+    "bison": {
+        "name": "Bison",
+        "char": "B",
+        "color": (160, 82, 45),
+        "max_hp": 40,
+        "behavior": "Wander-Neutral",
+        "hostile": False,
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.003,
+        "base_attack_name": "gore",
+        "base_attack_damage_dice": "2d6",
+        "combat_behavior": "herd_defensive",
+        "loot_drops": {
+            "raw_meat_scrap": {
+                "chance": 1.0,
+                "quantity": [5, 10]
+            },
+            "animal_pelt": {
+                "chance": 1.0,
+                "quantity": [2, 3]
+            }
+        }
+    },
+    "badger": {
+        "name": "Badger",
+        "char": "b",
+        "color": (54, 54, 54),
+        "max_hp": 15,
+        "behavior": "Territorial",
+        "hostile": False,
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.005,
+        "base_attack_name": "claws",
+        "base_attack_damage_dice": "1d6",
+        "combat_behavior": "aggressive",
+        "loot_drops": {
+            "raw_meat_scrap": {
+                "chance": 1.0,
+                "quantity": [1, 2]
+            },
+            "animal_pelt": {
+                "chance": 0.8,
                 "quantity": 1
             }
         }

@@ -95,6 +95,9 @@ class NPC:
         self.clothing_insulation: float = 0.0
         self.status_effects: list[str] = []
 
+        self.den_location: tuple[int, int] | None = None
+        self.desire_for_furniture: int = 0
+
     def get_dialogue(self):
         return self.dialogue
 

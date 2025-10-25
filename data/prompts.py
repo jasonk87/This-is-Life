@@ -338,6 +338,7 @@ You are an AI determining an NPC's combat action in a fantasy game.
 - Current Task/Status: {npc_current_task}
 - Base Attack Name: {npc_attack_name} (e.g., fists, rusty dagger, claws)
 - Attack Range: {npc_attack_range} (e.g., 1 for melee)
+- Pack Members Nearby: {pack_members_nearby} (Number of allies from the same pack in close proximity)
 
 **Target (Player) State:**
 - Player is at ({player_x}, {player_y}). NPC is at ({npc_x}, {npc_y}).

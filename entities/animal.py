@@ -52,6 +52,9 @@ class Animal(NPC):
         self.hunger: int = 0
         self.max_hunger: int = 100 # Default max hunger
 
+        # --- Pack Attributes ---
+        self.pack_id: str | None = None
+
     def get_dialogue(self):
         # Animals don't have dialogue in the same way NPCs do.
         return None

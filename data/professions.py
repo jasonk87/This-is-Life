@@ -245,6 +245,40 @@ PROFESSIONS = {
         "sub_tasks": [],
         "default_sub_task_sequence": []
     },
+    "Cook": {
+        "display_name": "Cook",
+        "wage": 22,
+        "description": "Prepares meals for the village.",
+        "work_building_categories": ["Tavern"],
+        "sub_tasks": [
+            {
+                "id": "fetch_fish",
+                "display_name": "Fetching Fish",
+                "action_verb": "fetching fish from",
+                "duration_ticks": 100,
+                "target_zone_tag": "fishing_hut"
+            },
+            {
+                "id": "store_raw_ingredients",
+                "display_name": "Storing Ingredients",
+                "action_verb": "storing ingredients in",
+                "duration_ticks": 20,
+                "target_zone_tag": "kitchen_storage",
+                "consumes_item_from_npc_inventory": {"raw_fish": 1},
+                "deposits_item_to_workplace": {"raw_fish": 1}
+            },
+            {
+                "id": "cook_fish_meal",
+                "display_name": "Cooking Fish",
+                "action_verb": "cooking at",
+                "duration_ticks": 120,
+                "target_zone_tag": "cooking_station",
+                "consumes_item_from_workplace": {"raw_fish": 1},
+                "produces_item_at_workplace": {"cooked_fish": 1}
+            }
+        ],
+        "default_sub_task_sequence": ["fetch_fish", "store_raw_ingredients", "cook_fish_meal"]
+    },
     "Fisherman": {
         "display_name": "Fisherman",
         "wage": 18,

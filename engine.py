@@ -1294,11 +1294,10 @@ class World:
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
-                                kill_made = self.npc_attempt_attack_npc(npc, prey)
-                                if kill_made:
-                                    npc.hunger = 0
-                                    npc.current_task = "idle"
-                                    npc.task_target_entity_id = None
+                                self.npc_attempt_attack_npc(npc, prey)
+                                # The hunger reset and task update are now handled within npc_attempt_attack_npc
+                                # if the prey is killed, so we don't need to check the return value here.
+                                # The predator will continue the 'hunting' task if the prey is not dead.
                                 npc.current_path = []
                                 npc.current_destination_coords = None
                             else:
@@ -1307,14 +1306,14 @@ class World:
                                     if path:
                                         npc.current_path = path
                                         npc.current_destination_coords = (prey.x, prey.y)
-                        else:
-                            # Prey is dead or gone, so reset state
+                        elif prey and prey.is_dead:
+                            # Prey is dead, so reset state
                             npc.current_task = "idle"
                             npc.task_target_entity_id = None
-                            # It's possible the predator killed the prey in the previous tick,
-                            # but the hunger reset didn't happen due to the bug.
-                            # We can't be sure if the last action was a kill, so we don't reset hunger here.
-                            # The fix is to ensure it's reset immediately after the kill.
+                        elif not prey:
+                            # Prey has disappeared (e.g., despawned), so reset state
+                            npc.current_task = "idle"
+                            npc.task_target_entity_id = None
                         continue
 
                 # 2. PREY/FLEEING AI (Second Priority)
@@ -1617,12 +1616,17 @@ class World:
                         if food_to_buy and npc.money >= food_price:
                             food_vendor_building.building_inventory[food_to_buy] -= 1
                             npc.money -= food_price
-                            npc.npc_inventory[food_to_buy] = npc.npc_inventory.get(food_to_buy, 0) + 1
-                            # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
-                            # Now that food is in inventory, the main hunger logic will handle eating it next tick
-                            npc.current_task = "seeking_food"
+
+                            # Instead of putting it in inventory, just "eat" it directly
+                            item_def = ITEM_DEFINITIONS[food_to_buy]
+                            on_use = item_def["on_use"]
+                            npc.hunger = max(0, npc.hunger - on_use["reduces_hunger"])
+                            # self.add_message_to_chat_log(f"{npc.name} bought and ate a {item_def.get('name', food_to_buy)} at the {food_vendor_building.building_type}.")
+                            npc.current_task = npc.previous_task or "idle" # Resume previous task
+                            npc.previous_task = None
                         else:
                             # No food to buy or can't afford it
+                            # self.add_message_to_chat_log(f"{npc.name} went to the {food_vendor_building.building_type} but couldn't buy food.")
                             npc.current_task = "wandering_hungry"
                     needs_based_action_taken = True
 
@@ -2064,6 +2068,11 @@ class World:
             if farm:
                 return (farm.global_center_x, farm.global_center_y)
             return None
+        elif target_zone_tag == "fishing_hut":
+            fishing_hut = self._find_nearest_fishing_hut(npc)
+            if fishing_hut:
+                return (fishing_hut.global_center_x, fishing_hut.global_center_y)
+            return None
         elif target_zone_tag == "mill":
             # For fetching flour, find the nearest mill
             mill = self._find_nearest_mill(npc)
@@ -2324,6 +2333,16 @@ class World:
                                 npc.money -= wheat_price * wheat_to_buy
                                 work_building.building_inventory["wheat"] = work_building.building_inventory.get("wheat", 0) + wheat_to_buy
                                 # self.add_message_to_chat_log(f"{npc.name} bought {wheat_to_buy} wheat.")
+
+                    elif completed_sub_task_id == "fetch_fish":
+                        # Cook is at the fishing hut, try to take fish
+                        fishing_hut = self._find_nearest_fishing_hut(npc)
+                        if fishing_hut:
+                            fish_to_take = 5 # Try to take 5 fish
+                            if fishing_hut.building_inventory.get("raw_fish", 0) >= fish_to_take:
+                                fishing_hut.building_inventory["raw_fish"] -= fish_to_take
+                                npc.add_item("raw_fish", fish_to_take)
+                                # self.add_message_to_chat_log(f"{npc.name} took {fish_to_take} raw fish.")
 
                     elif completed_sub_task_id == "fetch_flour":
                         # Baker is at the mill, try to buy flour
@@ -2749,6 +2768,7 @@ class World:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
             self.handle_npc_death(target)
+            attacker.hunger = 0
             return True # Kill was made
 
         return False
@@ -2759,7 +2779,7 @@ class World:
         if not npc_village:
             return None
 
-        food_vendors = [b for b in npc_village.buildings if b.building_type in ["general_store", "bakery"]]
+        food_vendors = [b for b in npc_village.buildings if b.building_type in ["general_store", "bakery", "tavern"]]
         if not food_vendors:
             return None
 
@@ -2897,6 +2917,10 @@ class World:
     def _find_nearest_tavern(self, npc: NPC) -> Building | None:
         """Finds the nearest building with a 'tavern' type in the NPC's village."""
         return self._find_nearest_building_of_type(npc, "tavern")
+
+    def _find_nearest_fishing_hut(self, npc: NPC) -> Building | None:
+        """Finds the nearest building with a 'fishing_hut' type in the NPC's village."""
+        return self._find_nearest_building_of_type(npc, "fishing_hut")
 
     def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
         """
@@ -4474,7 +4498,14 @@ class World:
                          "market" in work_building.building_type:
                         npc.profession = "Merchant"
                     elif work_building.building_type == "tavern":
-                        npc.profession = "Tavern Keeper"
+                        is_cook_assigned = any(
+                            other_npc.profession == "Cook" and other_npc.work_building_id == work_building.id
+                            for other_npc in self.village_npcs
+                        )
+                        if not is_cook_assigned and random.random() < 0.5:
+                            npc.profession = "Cook"
+                        else:
+                            npc.profession = "Tavern Keeper"
                     elif work_building.building_type == "lumber_mill":
                         # Could have multiple roles at a lumber mill, e.g. Foreman and Woodcutter
                         # For now, let's make the first NPC assigned to a lumber_mill the "Foreman" (quest giver)
@@ -4999,6 +5030,25 @@ class World:
             chunk.village.add_building(tavern)
             self.buildings_by_id[tavern.id] = tavern
             self._draw_building(tiles, tavern, "wood_wall")
+
+            # Define work zones for the new Cook profession
+            kitchen_storage_coords = []
+            if tavern.width > 3 and tavern.height > 3:
+                # Place in a corner, e.g., top-left interior
+                for i in range(2):
+                    for j in range(2):
+                        gx = tavern.global_origin_x + 1 + j
+                        gy = tavern.global_origin_y + 1 + i
+                        kitchen_storage_coords.append((gx, gy))
+            tavern.work_zone_tiles["kitchen_storage"] = kitchen_storage_coords
+
+            cooking_station_coords = []
+            if tavern.width > 4 and tavern.height > 3:
+                 # Place next to the storage area
+                gx = tavern.global_origin_x + 3
+                gy = tavern.global_origin_y + 1
+                cooking_station_coords.append((gx, gy))
+            tavern.work_zone_tiles["cooking_station"] = cooking_station_coords
 
         # Generate Lumber Mill (example producer workplace)
         lumber_mill_w, lumber_mill_h = 7, 7

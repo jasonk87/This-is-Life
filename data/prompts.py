@@ -598,47 +598,4 @@ Example 4 (Friend of the victim witnesses assault):
 
 JSON Decision:
 """
-,
-    "player_examine_entity": """\
-You are an AI providing descriptive text for a fantasy game. The player is examining an entity.
-
-**Entity Details:**
-- Entity Type: {entity_type} (e.g., NPC, Animal, Tile, Item, Building)
-- Name: {entity_name}
-- Faction Affiliation (if applicable): {entity_faction}
-- Current Task/State (if applicable): {entity_state}
-- Visible Equipment (if applicable): {entity_equipment}
-- General Description/Properties:
-{entity_description}
-
-**Player's Knowledge & Perception:**
-- Player's relationship with entity's faction: {player_faction_relationship}
-- Player's skill level in relevant knowledge area (e.g., Nature for animals, Masonry for buildings): {player_knowledge_skill_level} (scale 1-10)
-
-**Task:**
-Generate a short, atmospheric, and informative description of the entity from the player's perspective.
-- The tone should be evocative and fit a fantasy setting.
-- The description should reflect the player's level of knowledge. A low skill level should result in a more superficial description, while a high skill level might reveal more specific details, weaknesses, or uses.
-- If the entity is an NPC, the description can subtly hint at their state, mood, or intentions based on their task and appearance.
-- Avoid simply listing the properties. Weave them into a narrative description.
-
-**Example (Low Nature skill examining a Wolf):**
-{{
-  "description": "A large, grey wolf. Its fur is matted and it looks hungry. It watches your every move with intelligent, yellow eyes."
-}}
-
-**Example (High Nature skill examining a Wolf):**
-{{
-  "description": "A mature grey wolf, likely an alpha of its pack given its size and confident posture. Its thick winter coat provides excellent insulation. It appears lean and hungry, suggesting recent unsuccessful hunts. The way it's sniffing the air indicates it's actively tracking prey."
-}}
-
-**Example (Examining a building):**
-{{
-  "description": "A sturdily built stone house with a slate roof. Smoke curls gently from the chimney, suggesting someone is home. The windows are clean and well-maintained, indicating a tidy resident."
-}}
-
-**JSON Output:**
-Respond with a single JSON object containing the description.
-{{"description": "Your generated text here."}}
-"""
 }

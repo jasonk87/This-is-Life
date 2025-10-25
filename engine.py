@@ -274,7 +274,7 @@ class Player:
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None):
         item_def = ITEM_DEFINITIONS.get(item_key_to_add)
         if not item_def:
-            self.add_message_to_chat_log(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
+            print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
             return
 
         is_stackable = item_def.get("stackable", False)
@@ -946,7 +946,7 @@ class World:
 
                 if needs_new_path:
                     # Find a new spot to path to, adjacent to the player
-                    attack_pos_x, attack_pos_y = self._find_best_adjacent_tile(player.x, player.y, npc)
+                    attack_pos_x, attack_pos_y = self._find_best_adjacent_tile_for_attack(player.x, player.y, npc)
                     if attack_pos_x is not None:
                         path = self.calculate_path(npc.x, npc.y, attack_pos_x, attack_pos_y)
                         if path:
@@ -1012,6 +1012,40 @@ class World:
         """Converts a game tick to a descriptive time of day string."""
         time_ratio = (game_time_tick % day_length) / day_length
 
+    def _find_best_adjacent_tile(self, target_x: int, target_y: int, entity) -> tuple[int | None, int | None]:
+        """
+        Finds a passable, unoccupied, adjacent tile to the target for the entity to move to.
+        Prefers tiles closer to the entity if multiple are valid.
+        """
+        potential_spots = []
+        # Check cardinal directions first
+        for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+            adj_x, adj_y = target_x + dx, target_y + dy
+
+            # Basic validation
+            if not (0 <= adj_x < WORLD_WIDTH and 0 <= adj_y < WORLD_HEIGHT):
+                continue
+            tile = self.get_tile_at(adj_x, adj_y)
+            if not (tile and tile.passable):
+                continue
+
+            # Check for occupancy
+            occupied = False
+            for npc in self.village_npcs + self.npcs:
+                if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.is_dead:
+                    occupied = True
+                    break
+            if occupied:
+                continue
+
+            dist_sq = (entity.x - adj_x)**2 + (entity.y - adj_y)**2
+            potential_spots.append({'x': adj_x, 'y': adj_y, 'dist_sq': dist_sq})
+
+        if not potential_spots:
+            return None, None
+
+        potential_spots.sort(key=lambda s: s['dist_sq'])
+        return potential_spots[0]['x'], potential_spots[0]['y']
         if 0 <= time_ratio < 0.1: return "Dead of Night"
         if 0.1 <= time_ratio < 0.25: return "Early Morning"
         if 0.25 <= time_ratio < 0.45: return "Morning"
@@ -1020,10 +1054,10 @@ class World:
         if 0.75 <= time_ratio < 0.90: return "Evening"
         return "Night"
 
-    def _find_best_adjacent_tile(self, target_x: int, target_y: int, entity: NPC) -> tuple[int | None, int | None]:
+    def _find_best_adjacent_tile_for_attack(self, target_x: int, target_y: int, attacker_npc: NPC) -> tuple[int | None, int | None]:
         """
-        Finds a passable, unoccupied, adjacent tile to the target for the entity to move to.
-        Prefers tiles closer to the entity if multiple are valid.
+        Finds a passable, unoccupied, adjacent tile to the target for the attacker to move to.
+        Prefers tiles closer to the attacker if multiple are valid.
         Returns (x, y) or (None, None) if no suitable tile is found.
         """
         potential_spots = []
@@ -1040,12 +1074,12 @@ class World:
             if not (tile and tile.passable):
                 continue # Not passable
 
-            # Check if occupied by another NPC (excluding the entity itself)
+            # Check if occupied by another NPC (excluding the attacker itself)
             occupied_by_other_npc = False
             # Iterate over all relevant NPC lists
             for npc_list_to_check in [self.village_npcs, self.npcs]:
                 for other_npc in npc_list_to_check:
-                    if other_npc.id != entity.id and other_npc.x == adj_x and other_npc.y == adj_y and not other_npc.is_dead:
+                    if other_npc.id != attacker_npc.id and other_npc.x == adj_x and other_npc.y == adj_y and not other_npc.is_dead:
                         occupied_by_other_npc = True
                         break
                 if occupied_by_other_npc:
@@ -1053,12 +1087,12 @@ class World:
             if occupied_by_other_npc:
                 continue
 
-            # Ensure the spot is not the entity's current location if they are already next to target
+            # Ensure the spot is not the attacker's current location if they are already next to target
             # This prevents pathing to their own spot if they are already adjacent.
-            if adj_x == entity.x and adj_y == entity.y:
+            if adj_x == attacker_npc.x and adj_y == attacker_npc.y:
                 continue
 
-            dist_sq = (entity.x - adj_x)**2 + (entity.y - adj_y)**2
+            dist_sq = (attacker_npc.x - adj_x)**2 + (attacker_npc.y - adj_y)**2
             potential_spots.append({'x': adj_x, 'y': adj_y, 'dist_sq': dist_sq})
 
         if not potential_spots:
@@ -1168,7 +1202,9 @@ class World:
             # --- NPC NEEDS AND STATUS UPDATE ---
             self._update_npc_temperature(npc)
             self._apply_temperature_effects(npc)
-            if npc.profession != "Creature":
+
+            # Generic hunger/thirst for humanoid NPCs
+            if not isinstance(npc, Animal):
                 npc.hunger = min(npc.max_hunger, npc.hunger + 2)
                 npc.thirst = min(npc.max_thirst, npc.thirst + 3)
 
@@ -1224,10 +1260,6 @@ class World:
 
             # --- Animal Behavior (Predator & Prey) ---
             elif isinstance(npc, Animal):
-                if hasattr(npc, 'just_ate') and npc.just_ate:
-                    npc.just_ate = False
-                    continue
-
                 animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
 
                 # 1. PREDATOR AI (Highest Priority)
@@ -1255,12 +1287,11 @@ class World:
                             distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
-                                prey_was_killed = self.npc_attempt_attack_npc(npc, prey)
+                                target_was_killed = self.npc_attempt_attack_npc(npc, prey)
                                 npc.current_path = []
                                 npc.current_destination_coords = None
-                                if prey_was_killed:
+                                if target_was_killed:
                                     npc.hunger = 0
-                                    npc.just_ate = True # Set flag to prevent hunger increase this tick
                                     npc.current_task = "idle"
                                     npc.task_target_entity_id = None
                             else:
@@ -2647,14 +2678,14 @@ class World:
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
     def npc_attempt_attack_npc(self, attacker: NPC, target: NPC) -> bool:
-        """Handles an NPC's attempt to attack another NPC. Returns True if target was killed."""
+        """
+        Handles an NPC's attempt to attack another NPC.
+        Returns True if the target was killed, False otherwise.
+        """
         if attacker.is_dead or target.is_dead:
-            return True if target and target.is_dead else False
+            return False
 
-        # Simple damage calculation for now, bypassing LLM for NPC vs NPC
-        damage = random.randint(1, 4) # Example: 1d4 damage
-
-        # Check if player can see the attack to log it
+        damage = random.randint(1, 4)
         can_player_see = self.player_fov_map[attacker.x, attacker.y] or self.player_fov_map[target.x, target.y]
 
         if can_player_see:
@@ -2882,127 +2913,6 @@ class World:
                 if len(self.chat_ui_history) > self.chat_ui_max_history:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
-
-    def update(self):
-        """Advances the game state by one tick."""
-        self.game_time += 1
-
-        # --- Jail Time Update ---
-        if self.player.is_jailed and self.player.jail_time_remaining > 0:
-            self.player.jail_time_remaining -= 1
-            if self.player.jail_time_remaining == 0:
-                self.add_message_to_chat_log("Your sentence is over. The guard unlocks the door.")
-                self.player.is_jailed = False
-                door_x, door_y = self.player.jail_cell_coords
-                open_door_def = DECORATION_ITEM_DEFINITIONS["iron_door_open"]
-                self._change_map_tile((door_x, door_y), open_door_def)
-                self.player.jail_cell_coords = None
-
-        # --- Core World Updates ---
-        self._update_player_hunger_thirst()
-        self._update_season()
-        self._update_player_temperature()
-        self._apply_temperature_effects(self.player)
-        self._update_light_level_and_fov()
-        self._update_world_environment()
-        self._update_weather()
-        self.update_fov()
-
-        # --- AI and Movement ---
-        self._update_npc_schedules()
-        self._update_npc_movement()
-        self._handle_npc_speech()
-
-        # --- Economy (less frequent) ---
-        if self.game_time % 100 == 0:
-            self._update_economy()
-
-    def open_interaction_menu(self, x: int, y: int):
-        """Opens the interaction menu for a specific tile."""
-        entities = self._get_interactables_at(x, y)
-        if not entities:
-            self.add_message_to_chat_log("There is nothing to interact with here.")
-            return
-
-        self.interaction_context["active"] = True
-        self.interaction_context["x"] = x
-        self.interaction_context["y"] = y
-        self.interaction_context["target_entities"] = entities
-        self.interaction_context["selected_entity_index"] = 0
-
-        # Get actions for the first entity
-        first_entity = entities[0]
-        self.interaction_context["available_actions"] = self._get_actions_for_entity(first_entity)
-        self.interaction_context["selected_action_index"] = 0
-
-    def execute_interaction(self, context_handler):
-        """Executes the selected action from the interaction context."""
-        ctx = self.interaction_context
-        if not ctx["active"]:
-            return
-
-        selected_entity_dict = ctx["target_entities"][ctx["selected_entity_index"]]
-        selected_action = ctx["available_actions"][ctx["selected_action_index"]]
-        target_x = ctx["x"]
-        target_y = ctx["y"]
-        entity_data = selected_entity_dict["data"]
-
-        # Map actions to functions
-        if selected_action == "Chop":
-            self.player_attempt_chop_tree(target_x, target_y)
-        elif selected_action == "Butcher":
-            self.player_attempt_butcher(target_x, target_y)
-        elif selected_action == "Toggle Door":
-            self.player_attempt_toggle_door(target_x, target_y)
-        elif selected_action == "Talk":
-            if selected_entity_dict["type"] == "npc":
-                self.chat_ui_target_npc = entity_data
-                self.chat_ui_mode = "talk"
-                self.start_npc_dialogue(entity_data)
-                self.chat_ui_active = True
-                context_handler.start_text_input()
-        elif selected_action == "Attack":
-            if selected_entity_dict["type"] == "npc":
-                self.player_attempt_attack(entity_data)
-        elif selected_action == "Feed":
-            if selected_entity_dict["type"] == "npc":
-                self.player_attempt_feed_animal(entity_data)
-        elif selected_action == "Ride":
-            if selected_entity_dict["type"] == "npc":
-                self.player_attempt_ride_animal(entity_data)
-        elif selected_action == "Dismount":
-            if selected_entity_dict["type"] == "npc":
-                self.player_attempt_dismount(entity_data)
-        elif selected_action == "Shear":
-            if selected_entity_dict["type"] == "npc":
-                self.player_attempt_shear(entity_data)
-        elif selected_action == "Trade":
-            if selected_entity_dict["type"] == "npc" and entity_data.profession == "Merchant":
-                self.trade_ui_npc_target = entity_data
-                self.initialize_trade_session()
-                self.trade_ui_active = True
-            else:
-                self.add_message_to_chat_log("This person has nothing to trade.")
-        elif selected_action == "Pick up":
-            if selected_entity_dict["type"] == "item":
-                item_key = entity_data["item_key"]
-                quantity = entity_data["quantity"]
-                if self.remove_item_from_map(item_key, quantity, target_x, target_y):
-                    self.player.add_item(item_key, quantity)
-                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                    self.add_message_to_chat_log(f"You pick up {quantity}x {item_name}.")
-        elif selected_action == "Claim House":
-            if selected_entity_dict["type"] == "building" and entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
-                entity_data.player_owned = True
-                self.add_message_to_chat_log(f"You have claimed this {entity_data.building_type} as your own!")
-            else:
-                self.add_message_to_chat_log("You cannot claim this structure.")
-        elif selected_action == "Examine":
-            self.player_examine_entity(selected_entity_dict)
-
-        # Close the menu after action, unless it opened another UI like chat
-        if not self.chat_ui_active and not self.trade_ui_active:
-            ctx["active"] = False
 
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
@@ -3395,14 +3305,6 @@ class World:
 
         self.add_message_to_chat_log(f"You dismount the {animal_npc.name}.")
 
-    def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
-        """Handles the player's attempt to chop a tree at the given world coordinates."""
-        axe_item_key = "axe_stone"
-        if not self.player.has_item(axe_item_key):
-            self.add_message_to_chat_log("You need an axe to chop trees.")
-            return
-
-        target_tile = self.get_tile_at(tree_x, tree_y)
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
             original_tree_type = target_tile.tree_type
             yielded_resources = target_tile.chop()
@@ -4175,26 +4077,19 @@ class World:
                 if json_end != -1:
                     json_str = full_response[json_start + len("```json"):json_end].strip()
                     try:
-                        # Validate that the extracted string is valid JSON
-                        json.loads(json_str)
+                        json.loads(json_str) # Validate JSON
                         return json_str
                     except json.JSONDecodeError:
-                        # If JSON in markdown is malformed, fall through to returning the full response
-                        # self.add_message_to_chat_log("Debug: Malformed JSON in markdown block.")
-                        pass
+                        pass # Fall through to try parsing full response
 
-            # If no markdown block, or if JSON in markdown was bad, return the full response.
-            # The calling function's try-except block will handle if it's not valid JSON.
-            return full_response
-
-        except requests.exceptions.Timeout:
-            self.add_message_to_chat_log("The world's consciousness seems slow to respond. (Ollama timeout)")
-            return ""
-        except requests.exceptions.ConnectionError:
-            self.add_message_to_chat_log("A connection to the world's consciousness was lost. (Ollama connection error)")
-            return ""
+            # If no markdown block or invalid JSON in block, try parsing full response
+            try:
+                json.loads(full_response) # Validate JSON
+                return full_response
+            except json.JSONDecodeError:
+                return "" # Return empty string if not valid JSON
         except requests.exceptions.RequestException as e:
-            self.add_message_to_chat_log(f"An unknown disturbance ripples through the world's consciousness. ({e})")
+            print(f"Error communicating with Ollama: {e}")
             return ""
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
@@ -4717,14 +4612,14 @@ class World:
                                         # self.add_message_to_chat_log(f"Bed ('sleep_spot') recorded for building {building.id[:6]} at G({global_x},{global_y})")
                                 # Add other interaction points like "cook_spot", "craft_spot" here later
                             else:
-                                self.add_message_to_chat_log(f"Debug: Calculated tile coords ({tile_in_chunk_x},{tile_in_chunk_y}) for item '{item_type}' are out of chunk bounds.")
+                                print(f"Error: Calculated tile coords ({tile_in_chunk_x},{tile_in_chunk_y}) for item '{item_type}' are out of chunk bounds.")
                         else:
-                            self.add_message_to_chat_log(f"Debug: Unknown decoration item type: {item_type}")
+                            print(f"Unknown decoration item type: {item_type}")
                     else:
-                        self.add_message_to_chat_log(f"Debug: Decoration item {item_type} out of bounds for building at ({building.x}, {building.y})")
+                        print(f"Decoration item {item_type} out of bounds for building at ({building.x}, {building.y})")
         except json.JSONDecodeError as e:
-            self.add_message_to_chat_log(f"Debug: Error parsing LLM response for interior decoration: {e}")
-            self.add_message_to_chat_log(f"Debug: LLM Response: {llm_response}")
+            print(f"Error parsing LLM response for interior decoration: {e}")
+            print(f"LLM Response: {llm_response}")
 
         building.interior_decorated = True
 
@@ -4750,72 +4645,12 @@ class World:
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
             )
             llm_dialogue = self._call_ollama(prompt)
-            self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue.strip()}")
-            self.last_talked_to_npc = closest_npc
+            # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
+            print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
+            self.last_talked_to_npc = closest_npc # Store for potential follow-up actions like persuasion
         else:
-            self.add_message_to_chat_log("No one to talk to nearby.")
+            print("No one to talk to nearby.")
             self.last_talked_to_npc = None
-
-    def player_examine_entity(self, entity_dict: dict):
-        """Generates and displays a descriptive text for a given entity."""
-        entity_type = entity_dict.get("type", "Unknown")
-        entity_data = entity_dict.get("data")
-        entity_name = entity_dict.get("name", "Unnamed")
-
-        if not entity_data:
-            self.add_message_to_chat_log("You see nothing special.")
-            return
-
-        # --- Gather Context for LLM ---
-        entity_faction = "None"
-        entity_state = "Idle"
-        entity_equipment = "None"
-        entity_description = f"A standard {entity_name}."
-        player_faction_relationship = "Neutral"
-        player_knowledge_skill_level = 3 # Placeholder skill
-
-        if entity_type == "npc":
-            if isinstance(entity_data, NPC):
-                entity_faction = getattr(entity_data, 'faction', "None")
-                entity_state = entity_data.current_task
-                weapon = getattr(entity_data, 'equipped_weapon', None)
-                armor = getattr(entity_data, 'equipped_armor_body', None)
-                if weapon and armor:
-                    entity_equipment = f"Armed with {weapon}, wearing {armor}."
-                elif weapon:
-                    entity_equipment = f"Armed with {weapon}."
-                elif armor:
-                    entity_equipment = f"Wearing {armor}."
-                entity_description = f"A person named {entity_name}, who is a {entity_data.profession}. Personality: {entity_data.personality}."
-
-        elif entity_type == "tile":
-            if hasattr(entity_data, 'properties'):
-                entity_description = f"A patch of {entity_name}. Properties: {entity_data.properties}"
-
-        # More context gathering for other types can be added here...
-
-        prompt = LLM_PROMPTS["player_examine_entity"].format(
-            entity_type=entity_type,
-            entity_name=entity_name,
-            entity_faction=entity_faction,
-            entity_state=entity_state,
-            entity_equipment=entity_equipment,
-            entity_description=entity_description,
-            player_faction_relationship=player_faction_relationship,
-            player_knowledge_skill_level=player_knowledge_skill_level
-        )
-
-        response_str = self._call_ollama(prompt)
-        if response_str:
-            try:
-                response_json = json.loads(response_str)
-                description = response_json.get("description", "You see nothing out of the ordinary.")
-                self.add_message_to_chat_log(description)
-            except json.JSONDecodeError:
-                self.add_message_to_chat_log("You ponder what you are seeing, but no special insight comes to you. (LLM Format Error)")
-        else:
-            self.add_message_to_chat_log(f"You look at the {entity_name}, but it's hard to make out any details. (LLM Error)")
-
 
     def _initialize_chunks(self):
         """Initializes chunk data based on the world generator's macro map."""
@@ -4876,7 +4711,7 @@ class World:
                     if tile and tile.passable:
                         self.player.x, self.player.y = tx, ty
                         return
-        self.add_message_to_chat_log("Warning: No passable starting tile found. Player may be stuck.")
+        print("Warning: No passable starting tile found. Player may be stuck.")
 
     def _generate_chunk_detail(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the detailed tiles for a chunk based on its biome and POI."""

@@ -810,6 +810,23 @@ ITEM_DEFINITIONS = {
         "on_use": {
             "reduces_hunger": 15
         }
+    },
+    "cooked_fish": {
+        "name": "Cooked Fish",
+        "description": "A fish, cooked over a fire. A satisfying meal.",
+        "char": "f",
+        "color": COLORS["dark_orange"],
+        "value": 8,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "crafting_recipe": {
+            "raw_fish": 1
+        },
+        "required_workstation": "fire",
+        "on_use": {
+            "reduces_hunger": 40
+        }
     }
 }
 

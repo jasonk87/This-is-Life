@@ -169,7 +169,8 @@ DECORATION_ITEM_DEFINITIONS = {
             "light_radius": 5,
             "extinguishes_to": "fire_pit_simple",
             "heat_source_radius": 4,
-            "heat_intensity": 25.0
+            "heat_intensity": 25.0,
+            "workstation_type": "fire"
         }
     },
     "corpse_humanoid": {

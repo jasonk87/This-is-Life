@@ -1294,7 +1294,11 @@ class World:
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
-                                self.npc_attempt_attack_npc(npc, prey)
+                                kill_made = self.npc_attempt_attack_npc(npc, prey)
+                                if kill_made:
+                                    npc.hunger = 0
+                                    npc.current_task = "idle"
+                                    npc.task_target_entity_id = None
                                 npc.current_path = []
                                 npc.current_destination_coords = None
                             else:
@@ -1304,8 +1308,13 @@ class World:
                                         npc.current_path = path
                                         npc.current_destination_coords = (prey.x, prey.y)
                         else:
+                            # Prey is dead or gone, so reset state
                             npc.current_task = "idle"
                             npc.task_target_entity_id = None
+                            # It's possible the predator killed the prey in the previous tick,
+                            # but the hunger reset didn't happen due to the bug.
+                            # We can't be sure if the last action was a kill, so we don't reset hunger here.
+                            # The fix is to ensure it's reset immediately after the kill.
                         continue
 
                 # 2. PREY/FLEEING AI (Second Priority)
@@ -2681,9 +2690,12 @@ class World:
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
     def npc_attempt_attack_npc(self, attacker: NPC, target: NPC):
-        """Handles an NPC's attempt to attack another NPC."""
+        """
+        Handles an NPC's attempt to attack another NPC.
+        Returns True if the target was killed, False otherwise.
+        """
         if attacker.is_dead or target.is_dead:
-            return
+            return False
 
         # Simple damage calculation for now, bypassing LLM for NPC vs NPC
         damage = random.randint(1, 4) # Example: 1d4 damage
@@ -2700,12 +2712,9 @@ class World:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
             self.handle_npc_death(target)
+            return True # Kill was made
 
-            # If the attacker is a predator and was hunting, reset its hunger and task
-            if isinstance(attacker, Animal) and attacker.current_task == "hunting":
-                attacker.hunger = 0
-                attacker.current_task = "idle"
-                attacker.task_target_entity_id = None
+        return False
 
     def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
         """Finds the nearest building that sells food (e.g., general store, bakery)."""

@@ -28,7 +28,50 @@ ANIMAL_DEFINITIONS = {
         "can_mate": True,
         "mating_season": "Autumn",
         "gestation_period_days": 7,
-        "predators": ["wolf", "dire_wolf"]
+        "predators": ["wolf", "dire_wolf", "bear"]
+    },
+    "bear": {
+        "name": "Bear",
+        "char": "B",
+        "color": (139, 69, 19),
+        "max_hp": 30,
+        "behavior": "Wander-Aggressive",
+        "hostile": True,
+        "spawn_biomes": ["plains", "mountain"],
+        "spawn_chance": 0.004,
+        "base_attack_name": "maul",
+        "base_attack_damage_dice": "2d6",
+        "combat_behavior": "aggressive",
+        "loot_drops": {
+            "raw_meat_scrap": {
+                "chance": 1.0,
+                "quantity": [3, 6]
+            },
+            "animal_pelt": {
+                "chance": 1.0,
+                "quantity": [1, 2]
+            }
+        },
+        "prey": ["deer", "sheep", "wolf"]
+    },
+    "fish": {
+        "name": "Fish",
+        "char": "f",
+        "color": (0, 191, 255),
+        "max_hp": 3,
+        "behavior": "Wander-Water",
+        "hostile": False,
+        "spawn_biomes": ["water", "deep_water"],
+        "spawn_chance": 0.02,
+        "base_attack_name": "flop",
+        "base_attack_damage_dice": "1d1",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_fish": {
+                "chance": 1.0,
+                "quantity": 1
+            }
+        }
     },
     "wolf": {
         "name": "Wolf",
@@ -106,6 +149,83 @@ ANIMAL_DEFINITIONS = {
             "item_yield": "raw_wool",
             "quantity": [1, 3],
             "regrowth_days": 7
+        }
+    },
+    "fox": {
+        "name": "Fox",
+        "char": "x",
+        "color": (210, 105, 30),
+        "max_hp": 8,
+        "hostile": False,
+        "behavior": "Wander-Flee",
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.008,
+        "base_attack_name": "bite",
+        "base_attack_damage_dice": "1d4",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "animal_pelt": {
+                "chance": 0.7,
+                "quantity": 1
+            }
+        },
+        "prey": ["sheep"]
+    },
+    "boar": {
+        "name": "Boar",
+        "char": "b",
+        "color": (118, 85, 43),
+        "max_hp": 12,
+        "hostile": True,
+        "behavior": "Wander-Aggressive",
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.006,
+        "base_attack_name": "tusk slash",
+        "base_attack_damage_dice": "1d6",
+        "combat_behavior": "aggressive",
+        "loot_drops": {
+            "raw_meat_scrap": {
+                "chance": 1.0,
+                "quantity": [2, 4]
+            }
+        }
+    },
+    "salmon": {
+        "name": "Salmon",
+        "char": "S",
+        "color": (250, 128, 114),
+        "max_hp": 4,
+        "behavior": "Wander-Water",
+        "hostile": False,
+        "spawn_biomes": ["water", "deep_water"],
+        "spawn_chance": 0.015,
+        "base_attack_name": "flop",
+        "base_attack_damage_dice": "1d1",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_fish": {
+                "chance": 1.0,
+                "quantity": [1, 2]
+            }
+        }
+    },
+    "trout": {
+        "name": "Trout",
+        "char": "t",
+        "color": (135, 206, 250),
+        "max_hp": 3,
+        "behavior": "Wander-Water",
+        "hostile": False,
+        "spawn_biomes": ["water"],
+        "spawn_chance": 0.018,
+        "base_attack_name": "flop",
+        "base_attack_damage_dice": "1d1",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_fish": {
+                "chance": 1.0,
+                "quantity": 1
+            }
         }
     }
 }

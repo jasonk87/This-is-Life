@@ -975,6 +975,14 @@ class World:
                         npc.current_destination_coords = None
                         break
 
+                    # Aquatic animal check
+                    if isinstance(npc, Animal) and npc.behavior == "Wander-Water":
+                        is_next_tile_water = next_tile.name in ["water", "deep_water"]
+                        if not is_next_tile_water:
+                            npc.current_path = []
+                            npc.current_destination_coords = None
+                            break
+
                     is_occupied = False
                     is_hunting_prey = self._is_predator(npc) and npc.current_task == "hunting"
                     for other_npc in self.village_npcs + self.npcs:
@@ -1202,9 +1210,7 @@ class World:
             # --- NPC NEEDS AND STATUS UPDATE ---
             self._update_npc_temperature(npc)
             self._apply_temperature_effects(npc)
-
-            # Generic hunger/thirst for humanoid NPCs
-            if not isinstance(npc, Animal):
+            if npc.profession != "Creature":
                 npc.hunger = min(npc.max_hunger, npc.hunger + 2)
                 npc.thirst = min(npc.max_thirst, npc.thirst + 3)
 
@@ -1287,13 +1293,10 @@ class World:
                             distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
-                                target_was_killed = self.npc_attempt_attack_npc(npc, prey)
+                                print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
+                                self.npc_attempt_attack_npc(npc, prey)
                                 npc.current_path = []
                                 npc.current_destination_coords = None
-                                if target_was_killed:
-                                    npc.hunger = 0
-                                    npc.current_task = "idle"
-                                    npc.task_target_entity_id = None
                             else:
                                 if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
                                     path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
@@ -2677,15 +2680,15 @@ class World:
              self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
-    def npc_attempt_attack_npc(self, attacker: NPC, target: NPC) -> bool:
-        """
-        Handles an NPC's attempt to attack another NPC.
-        Returns True if the target was killed, False otherwise.
-        """
+    def npc_attempt_attack_npc(self, attacker: NPC, target: NPC):
+        """Handles an NPC's attempt to attack another NPC."""
         if attacker.is_dead or target.is_dead:
-            return False
+            return
 
-        damage = random.randint(1, 4)
+        # Simple damage calculation for now, bypassing LLM for NPC vs NPC
+        damage = random.randint(1, 4) # Example: 1d4 damage
+
+        # Check if player can see the attack to log it
         can_player_see = self.player_fov_map[attacker.x, attacker.y] or self.player_fov_map[target.x, target.y]
 
         if can_player_see:
@@ -2697,8 +2700,12 @@ class World:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
             self.handle_npc_death(target)
-            return True
-        return False
+
+            # If the attacker is a predator and was hunting, reset its hunger and task
+            if isinstance(attacker, Animal) and attacker.current_task == "hunting":
+                attacker.hunger = 0
+                attacker.current_task = "idle"
+                attacker.task_target_entity_id = None
 
     def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
         """Finds the nearest building that sells food (e.g., general store, bakery)."""
@@ -4772,6 +4779,14 @@ class World:
                             # Animal Spawning
                             for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
                                 if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
+                                    current_tile = tiles[y_local][x_local]
+                                    is_water_animal = animal_def.get("behavior") == "Wander-Water"
+                                    is_water_tile = current_tile.name == "water" or current_tile.name == "deep_water"
+
+                                    # Spawn water animals only on water, and land animals only on land
+                                    if is_water_animal != is_water_tile:
+                                        continue
+
                                     animal_x_world = chunk_coord_x * CHUNK_SIZE + x_local
                                     animal_y_world = chunk_coord_y * CHUNK_SIZE + y_local
                                     if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):

@@ -3,7 +3,6 @@ import tcod
 import tcod.console
 import tcod.event
 import tcod.tileset
-import os
 from engine import World
 from config import (
     SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT,
@@ -187,7 +186,7 @@ def main():
                         camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
                         mouse_world_x = camera_x + world.mouse_x
                         mouse_world_y = camera_y + world.mouse_y
-                        open_interaction_menu(world, mouse_world_x, mouse_world_y)
+                        world.open_interaction_menu(mouse_world_x, mouse_world_y)
 
                 if isinstance(event, tcod.event.TextInput):
                     if world.chat_ui_active: # Only process text input if chat UI is active
@@ -317,7 +316,7 @@ def main():
                             ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
                             ctx["selected_action_index"] = 0
                         elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            execute_interaction(world, context)
+                            world.execute_interaction(context)
                         elif event.sym == tcod.event.KeySym.ESCAPE:
                             ctx["active"] = False
 
@@ -361,11 +360,6 @@ def main():
                             world.crafting_menu_context["all_recipes"].sort(
                                 key=lambda k: ITEM_DEFINITIONS[k].get("name", k)
                             )
-                        elif event.sym == tcod.event.KeySym.H: # Use healing salve (example)
-                            world.use_item("healing_salve")
-                        # Keybind for using cooked meat scrap - let's use 'U' for "Use food"
-                        elif event.sym == tcod.event.KeySym.U:
-                            world.use_item("cooked_meat_scrap")
                         elif event.sym == tcod.event.KeySym.D: # Debug damage
                             world.player.take_damage(5)
                             world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}")

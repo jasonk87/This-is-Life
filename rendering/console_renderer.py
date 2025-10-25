@@ -211,7 +211,6 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
         main_console.print(x=menu_x + 4, y=ui_y, string="(Empty)", fg=(128, 128, 128))
         ui_y += 1
     else:
-        # This needs to be updated to handle the new list-of-dicts inventory
         inventory_summary = {}
         for item in world.player.inventory:
             key = item["key"]

@@ -2917,6 +2917,93 @@ class World:
         if self.game_time % 100 == 0:
             self._update_economy()
 
+    def open_interaction_menu(self, x: int, y: int):
+        """Opens the interaction menu for a specific tile."""
+        entities = self._get_interactables_at(x, y)
+        if not entities:
+            self.add_message_to_chat_log("There is nothing to interact with here.")
+            return
+
+        self.interaction_context["active"] = True
+        self.interaction_context["x"] = x
+        self.interaction_context["y"] = y
+        self.interaction_context["target_entities"] = entities
+        self.interaction_context["selected_entity_index"] = 0
+
+        # Get actions for the first entity
+        first_entity = entities[0]
+        self.interaction_context["available_actions"] = self._get_actions_for_entity(first_entity)
+        self.interaction_context["selected_action_index"] = 0
+
+    def execute_interaction(self, context_handler):
+        """Executes the selected action from the interaction context."""
+        ctx = self.interaction_context
+        if not ctx["active"]:
+            return
+
+        selected_entity_dict = ctx["target_entities"][ctx["selected_entity_index"]]
+        selected_action = ctx["available_actions"][ctx["selected_action_index"]]
+        target_x = ctx["x"]
+        target_y = ctx["y"]
+        entity_data = selected_entity_dict["data"]
+
+        # Map actions to functions
+        if selected_action == "Chop":
+            self.player_attempt_chop_tree(target_x, target_y)
+        elif selected_action == "Butcher":
+            self.player_attempt_butcher(target_x, target_y)
+        elif selected_action == "Toggle Door":
+            self.player_attempt_toggle_door(target_x, target_y)
+        elif selected_action == "Talk":
+            if selected_entity_dict["type"] == "npc":
+                self.chat_ui_target_npc = entity_data
+                self.chat_ui_mode = "talk"
+                self.start_npc_dialogue(entity_data)
+                self.chat_ui_active = True
+                context_handler.start_text_input()
+        elif selected_action == "Attack":
+            if selected_entity_dict["type"] == "npc":
+                self.player_attempt_attack(entity_data)
+        elif selected_action == "Feed":
+            if selected_entity_dict["type"] == "npc":
+                self.player_attempt_feed_animal(entity_data)
+        elif selected_action == "Ride":
+            if selected_entity_dict["type"] == "npc":
+                self.player_attempt_ride_animal(entity_data)
+        elif selected_action == "Dismount":
+            if selected_entity_dict["type"] == "npc":
+                self.player_attempt_dismount(entity_data)
+        elif selected_action == "Shear":
+            if selected_entity_dict["type"] == "npc":
+                self.player_attempt_shear(entity_data)
+        elif selected_action == "Trade":
+            if selected_entity_dict["type"] == "npc" and entity_data.profession == "Merchant":
+                self.trade_ui_npc_target = entity_data
+                self.initialize_trade_session()
+                self.trade_ui_active = True
+            else:
+                self.add_message_to_chat_log("This person has nothing to trade.")
+        elif selected_action == "Pick up":
+            if selected_entity_dict["type"] == "item":
+                item_key = entity_data["item_key"]
+                quantity = entity_data["quantity"]
+                if self.remove_item_from_map(item_key, quantity, target_x, target_y):
+                    self.player.add_item(item_key, quantity)
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    self.add_message_to_chat_log(f"You pick up {quantity}x {item_name}.")
+        elif selected_action == "Claim House":
+            if selected_entity_dict["type"] == "building" and entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
+                entity_data.player_owned = True
+                self.add_message_to_chat_log(f"You have claimed this {entity_data.building_type} as your own!")
+            else:
+                self.add_message_to_chat_log("You cannot claim this structure.")
+        elif selected_action == "Examine":
+            self.player_examine_entity(selected_entity_dict)
+
+        # Close the menu after action, unless it opened another UI like chat
+        if not self.chat_ui_active and not self.trade_ui_active:
+            ctx["active"] = False
+
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
         entities = []
@@ -4088,17 +4175,18 @@ class World:
                 if json_end != -1:
                     json_str = full_response[json_start + len("```json"):json_end].strip()
                     try:
-                        json.loads(json_str) # Validate JSON
+                        # Validate that the extracted string is valid JSON
+                        json.loads(json_str)
                         return json_str
                     except json.JSONDecodeError:
-                        pass # Fall through to try parsing full response
+                        # If JSON in markdown is malformed, fall through to returning the full response
+                        # self.add_message_to_chat_log("Debug: Malformed JSON in markdown block.")
+                        pass
 
-            # If no markdown block or invalid JSON in block, try parsing full response
-            try:
-                json.loads(full_response) # Validate JSON
-                return full_response
-            except json.JSONDecodeError:
-                return "" # Return empty string if not valid JSON
+            # If no markdown block, or if JSON in markdown was bad, return the full response.
+            # The calling function's try-except block will handle if it's not valid JSON.
+            return full_response
+
         except requests.exceptions.Timeout:
             self.add_message_to_chat_log("The world's consciousness seems slow to respond. (Ollama timeout)")
             return ""

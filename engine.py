@@ -2981,6 +2981,8 @@ class World:
                 actions.append("Toggle Door")
             elif entity_data.name == "Animal Corpse":
                 actions.append("Butcher")
+            elif entity_data.name in ["water", "deep_water"]:
+                actions.append("Fish")
         elif entity_type == "building":
             if entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
                 actions.append("Claim House")
@@ -3285,6 +3287,30 @@ class World:
             animal_npc.last_shorn_time = self.game_time
         else:
             self.add_message_to_chat_log(f"You attempt to shear the {animal_npc.name}, but get no wool.")
+
+    def player_attempt_fish(self, water_x: int, water_y: int):
+        """Handles the player's attempt to fish in a water tile."""
+        # 1. Check for fishing rod
+        if not self.player.has_item("fishing_rod"):
+            self.add_message_to_chat_log("You need a fishing rod to fish.")
+            return
+
+        # 2. Check if player is adjacent to the water tile
+        is_adjacent = abs(self.player.x - water_x) <= 1 and abs(self.player.y - water_y) <= 1
+        if not is_adjacent:
+            self.add_message_to_chat_log("You need to be closer to the water to fish.")
+            return
+
+        # 3. Attempt to catch a fish
+        self.add_message_to_chat_log("You cast your line into the water...")
+
+        # Simple chance-based system for now
+        if random.random() < 0.3: # 30% chance to catch a fish
+            self.player.add_item("raw_fish", 1)
+            fish_name = ITEM_DEFINITIONS.get("raw_fish", {}).get("name", "a fish")
+            self.add_message_to_chat_log(f"You caught {fish_name}!")
+        else:
+            self.add_message_to_chat_log("Nothing seems to be biting.")
 
     def player_attempt_dismount(self, animal_npc: Animal):
         """Handles the player's attempt to dismount an animal."""

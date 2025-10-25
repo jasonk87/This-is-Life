@@ -779,6 +779,37 @@ ITEM_DEFINITIONS = {
             "cloth": 4
         },
         "required_workstation": "loom"
+    },
+    "fishing_rod": {
+        "name": "Fishing Rod",
+        "description": "A simple fishing rod for catching fish.",
+        "char": "/",
+        "color": COLORS["dark_sepia"],
+        "value": 20,
+        "weight": 3,
+        "stackable": False,
+        "item_type_tags": ["tool"],
+        "properties": {
+            "tool_type": "fishing_rod",
+            "max_durability": 25
+        },
+        "crafting_recipe": {
+            "raw_log": 3,
+            "cloth": 1
+        }
+    },
+    "raw_fish": {
+        "name": "Raw Fish",
+        "description": "A raw fish, freshly caught. Should be cooked.",
+        "char": "f",
+        "color": COLORS["silver"],
+        "value": 4,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["resource", "food_ingredient_raw"],
+        "on_use": {
+            "reduces_hunger": 15
+        }
     }
 }
 

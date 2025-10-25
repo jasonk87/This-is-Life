@@ -256,8 +256,7 @@ PROFESSIONS = {
                 "display_name": "Fishing",
                 "action_verb": "fishing at",
                 "duration_ticks": 150,
-                "target_zone_tag": "fishing_spot",
-                "produces_item_at_workplace": {"fish": 1}
+                "target_zone_tag": "fishing_spot"
             },
             {
                 "id": "store_fish",
@@ -265,8 +264,8 @@ PROFESSIONS = {
                 "action_verb": "storing fish in",
                 "duration_ticks": 20,
                 "target_zone_tag": "storage_area",
-                "consumes_item_from_npc_inventory": {"fish": 1},
-                "deposits_item_to_workplace": {"fish": 1}
+                "consumes_item_from_npc_inventory": {"raw_fish": 1},
+                "deposits_item_to_workplace": {"raw_fish": 1}
             }
         ],
         "default_sub_task_sequence": ["fish_at_spot", "store_fish"]

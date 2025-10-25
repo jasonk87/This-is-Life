@@ -1797,7 +1797,30 @@ class World:
 
                     # Priority: Go to work during work hours
                     if work_start_tick <= current_time_in_day < work_end_tick:
-                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work":
+                        # --- Fisherman AI ---
+                        if npc.profession == "Fisherman" and npc.current_task not in ["fishing", "going_to_fish"]:
+                            npc_village = self._get_village_for_npc(npc)
+                            if npc_village and "fishing_spot" in npc_village.interaction_points and npc_village.interaction_points["fishing_spot"]:
+                                # Find closest fishing spot
+                                fishing_spots = npc_village.interaction_points["fishing_spot"]
+                                closest_spot = None
+                                min_dist_sq = float('inf')
+                                for spot in fishing_spots:
+                                    dist_sq = (npc.x - spot[0])**2 + (npc.y - spot[1])**2
+                                    if dist_sq < min_dist_sq:
+                                        min_dist_sq = dist_sq
+                                        closest_spot = spot
+
+                                if closest_spot:
+                                    # Check if already at a fishing spot
+                                    if (npc.x, npc.y) in fishing_spots:
+                                        npc.current_task = "fishing"
+                                        npc.current_path = []
+                                        npc.current_destination_coords = None
+                                    else:
+                                        new_task_label = "going_to_fish"
+                                        destination_coords = closest_spot
+                        elif npc.work_building_id and not is_at_work and npc.current_task != "going to work":
                             work_building_obj = self.buildings_by_id.get(npc.work_building_id)
                             # Future: Check for specific workstation in work_building_obj.interaction_points
                             # For now, path to building center for work.
@@ -2321,6 +2344,20 @@ class World:
                             work_building.building_inventory["wheat"] -= wheat_needed
                             work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} milled some flour.")
+                    elif completed_sub_task_id == "fish_at_spot":
+                        # Fisherman is at a fishing spot, 50% chance to catch a fish
+                        if random.random() < 0.5:
+                            npc.add_item("raw_fish", 1)
+                    elif completed_sub_task_id == "store_fish":
+                        # Fisherman is at their work building, deposit fish
+                        fish_in_inventory = 0
+                        for item in npc.inventory:
+                            if item["key"] == "raw_fish":
+                                fish_in_inventory = item["quantity"]
+                                break
+                        if fish_in_inventory > 0:
+                            work_building.building_inventory["raw_fish"] = work_building.building_inventory.get("raw_fish", 0) + fish_in_inventory
+                            npc.remove_item("raw_fish", fish_in_inventory)
 
                     elif npc.profession == "Farmer":
                         target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
@@ -5195,7 +5232,27 @@ class World:
 
 
         # Generate Fishing Hut
+        # Generate Fishing Hut and Fishing Spots
         if any(tiles[y][x].name == "water" for x in range(CHUNK_SIZE) for y in range(CHUNK_SIZE)):
+            # Designate fishing spots
+            for y in range(CHUNK_SIZE):
+                for x in range(CHUNK_SIZE):
+                    if tiles[y][x].name != "water":
+                        # Check adjacent tiles for water
+                        for dx in range(-1, 2):
+                            for dy in range(-1, 2):
+                                if dx == 0 and dy == 0:
+                                    continue
+                                check_x, check_y = x + dx, y + dy
+                                if 0 <= check_x < CHUNK_SIZE and 0 <= check_y < CHUNK_SIZE:
+                                    if tiles[check_y][check_x].name == "water":
+                                        if "fishing_spot" not in chunk.village.interaction_points:
+                                            chunk.village.interaction_points["fishing_spot"] = []
+                                        chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + x, chunk_global_start_y + y))
+                                        break
+                            if (chunk_global_start_x + x, chunk_global_start_y + y) in chunk.village.interaction_points.get("fishing_spot", []):
+                                break
+
             hut_w, hut_h = 5, 5
             for _ in range(100): # Attempts to place hut
                 hut_x = random.randint(1, CHUNK_SIZE - hut_w - 1)
@@ -5219,18 +5276,16 @@ class World:
                     self.buildings_by_id[fishing_hut.id] = fishing_hut
                     self._draw_building(tiles, fishing_hut, "wood_wall")
 
-                    # Designate a fishing spot
-                    for i in range(-2, hut_h + 2):
-                        for j in range(-2, hut_w + 2):
-                            spot_x, spot_y = hut_x + j, hut_y + i
-                            if 0 <= spot_x < CHUNK_SIZE and 0 <= spot_y < CHUNK_SIZE:
-                                if tiles[spot_y][spot_x].name == "water":
-                                    if "fishing_spot" not in chunk.village.interaction_points:
-                                        chunk.village.interaction_points["fishing_spot"] = []
-                                    chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + spot_x, chunk_global_start_y + spot_y))
-                                    break
-                        if "fishing_spot" in chunk.village.interaction_points:
-                            break
+                    storage_area_coords_global = []
+                    if fishing_hut.width > 2 and fishing_hut.height > 2:
+                        local_storage_x = 1
+                        local_storage_y = 1
+                        for i in range(2):
+                            for j in range(2):
+                                gx = fishing_hut.global_origin_x + local_storage_x + j
+                                gy = fishing_hut.global_origin_y + local_storage_y + i
+                                storage_area_coords_global.append((gx, gy))
+                    fishing_hut.work_zone_tiles["storage_area"] = storage_area_coords_global
                     break
 
         # Generate a few regular houses

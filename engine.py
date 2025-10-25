@@ -1294,10 +1294,11 @@ class World:
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
-                                self.npc_attempt_attack_npc(npc, prey)
-                                # The hunger reset and task update are now handled within npc_attempt_attack_npc
-                                # if the prey is killed, so we don't need to check the return value here.
-                                # The predator will continue the 'hunting' task if the prey is not dead.
+                                prey_was_killed = self.npc_attempt_attack_npc(npc, prey)
+                                if prey_was_killed:
+                                    # Prey is dead, so reset state immediately
+                                    npc.current_task = "idle"
+                                    npc.task_target_entity_id = None
                                 npc.current_path = []
                                 npc.current_destination_coords = None
                             else:
@@ -1306,12 +1307,8 @@ class World:
                                     if path:
                                         npc.current_path = path
                                         npc.current_destination_coords = (prey.x, prey.y)
-                        elif prey and prey.is_dead:
-                            # Prey is dead, so reset state
-                            npc.current_task = "idle"
-                            npc.task_target_entity_id = None
-                        elif not prey:
-                            # Prey has disappeared (e.g., despawned), so reset state
+                        else: # Catches both 'prey is dead' and 'no prey'
+                            # Prey is dead or gone, so reset state
                             npc.current_task = "idle"
                             npc.task_target_entity_id = None
                         continue

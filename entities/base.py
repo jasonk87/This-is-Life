@@ -122,6 +122,15 @@ class NPC:
         """Checks if the NPC has a sufficient quantity of an item."""
         return self.npc_inventory.get(item_key, 0) >= quantity
 
+    def remove_item(self, item_key_to_remove: str, quantity: int = 1) -> bool:
+        """Removes an item from the NPC's inventory. Returns True if successful."""
+        if self.npc_inventory.get(item_key_to_remove, 0) >= quantity:
+            self.npc_inventory[item_key_to_remove] -= quantity
+            if self.npc_inventory[item_key_to_remove] <= 0:
+                del self.npc_inventory[item_key_to_remove]
+            return True
+        return False
+
     def take_damage(self, amount: int, world):
         if self.is_dead:
             return

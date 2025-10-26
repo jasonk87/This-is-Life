@@ -1009,7 +1009,21 @@ class World:
                             # Increase relationship score
                             npc.relationships[chat_partner.id] = npc.relationships.get(chat_partner.id, 0) + 1
                             chat_partner.relationships[npc.id] = chat_partner.relationships.get(npc.id, 0) + 1
-                            self.add_message_to_chat_log(f"{npc.name} and {chat_partner.name} chat for a bit.")
+                            self.add_message_to_chat_log(f"{npc.name} and {chat_partner.name} share some news.")
+
+                            # Knowledge Exchange
+                            if npc.knowledge:
+                                knowledge_to_share = random.choice(npc.knowledge)
+                                if knowledge_to_share not in chat_partner.knowledge:
+                                    chat_partner.knowledge.append(knowledge_to_share)
+                                    # self.add_message_to_chat_log(f"{npc.name} tells {chat_partner.name} something.")
+
+                            if chat_partner.knowledge:
+                                knowledge_to_share = random.choice(chat_partner.knowledge)
+                                if knowledge_to_share not in npc.knowledge:
+                                    npc.knowledge.append(knowledge_to_share)
+                                    # self.add_message_to_chat_log(f"{chat_partner.name} tells {npc.name} something.")
+
                         npc.current_task = "idle"
                     else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
@@ -1973,17 +1987,36 @@ class World:
                     # Only if not night time and not during work hours
                     is_day_leisure_time = not is_night_time and not (work_start_tick <= current_time_in_day < work_end_tick)
                     if not new_task_label and is_day_leisure_time and random.random() < 0.02:  # 2% chance to socialize
-                        # Find a nearby NPC to chat with
-                        potential_chat_partners = [
-                            other_npc for other_npc in self.village_npcs
-                            if other_npc.id != npc.id and not other_npc.is_dead and
-                            abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10 # Within 10 tiles
-                        ]
-                        if potential_chat_partners:
-                            chat_partner = random.choice(potential_chat_partners)
-                            new_task_label = "socializing"
-                            destination_coords = (chat_partner.x, chat_partner.y)
-                            npc.task_target_entity_id = chat_partner.id
+                        chat_partner = None
+                        # Try to find best friend first
+                        if npc.relationships:
+                            best_friend_id = max(npc.relationships, key=npc.relationships.get)
+                            # Check if the score is meaningfully high, e.g., > 5, to be considered a "best friend"
+                            if npc.relationships[best_friend_id] > 5:
+                                best_friend_npc = next((p for p in self.village_npcs if p.id == best_friend_id), None)
+                                if best_friend_npc and not best_friend_npc.is_dead:
+                                    # Check if best friend is in a wider radius
+                                    if abs(npc.x - best_friend_npc.x) + abs(npc.y - best_friend_npc.y) < 20:
+                                        chat_partner = best_friend_npc
+
+                        # Fallback to random nearby partner if no best friend found or they are too far
+                        if not chat_partner:
+                            potential_chat_partners = [
+                                other_npc for other_npc in self.village_npcs
+                                if other_npc.id != npc.id and not other_npc.is_dead and
+                                abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10 # Tighter radius for random chats
+                            ]
+                            if potential_chat_partners:
+                                chat_partner = random.choice(potential_chat_partners)
+
+                        # If a partner was found (either best friend or random), set up the task
+                        if chat_partner:
+                            # Path to a tile adjacent to the chat partner, not on top of them
+                            adj_x, adj_y = self._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
+                            if adj_x is not None:
+                                new_task_label = "socializing"
+                                destination_coords = (adj_x, adj_y)
+                                npc.task_target_entity_id = chat_partner.id
 
                     elif not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
                         # Find the NPC's village to get well location
@@ -4578,6 +4611,21 @@ class World:
                 if home_building:
                     npc.home_building_id = home_building.id
                     home_building.residents.append(npc)
+                    npc.knowledge.append({
+                        "type": "location",
+                        "subject": "home",
+                        "coords": (home_building.global_center_x, home_building.global_center_y)
+                    })
+
+                # Assign profession based on work building
+                if work_building:
+                    npc.work_building_id = work_building.id
+                    work_building.occupants.append(npc) # Store NPC object for now
+                    npc.knowledge.append({
+                        "type": "location",
+                        "subject": "work",
+                        "coords": (work_building.global_center_x, work_building.global_center_y)
+                    })
 
                 # Chance to give NPC a healing salve
                 if random.random() < 0.33: # 33% chance

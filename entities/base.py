@@ -17,6 +17,7 @@ class NPC:
         self.attitude_to_player = attitude_to_player
         self.last_speech_time = 0
         self.relationships = {}  # {npc_id: score}
+        self.knowledge = [] # List of known information
 
         # Scheduling attributes from Phase 1
         self.home_building_id = None

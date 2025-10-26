@@ -11,10 +11,10 @@ class Animal(NPC):
         self.behavior = "wanders" # Default behavior
 
         # --- Remove or simplify NPC-specific attributes ---
+        # Animals do not use these social attributes. Attitude is handled by the base class.
         self.dialogue = None
         self.personality = None
         self.family_ties = None
-        self.attitude_to_player = None
         self.home_building_id = None
         self.work_building_id = None
         self.profession = "Creature" # Use "Creature" to bypass human-like scheduling

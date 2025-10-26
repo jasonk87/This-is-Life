@@ -52,14 +52,15 @@ import uuid
 
 class Event:
     """A class to represent a significant event that occurs in the world."""
-    def __init__(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None):
+    def __init__(self, event_type: str, description: str, subject_id: int, game_time: int, target_id: int | None = None, location: tuple[int, int] | None = None):
         self.id = str(uuid.uuid4())
         self.type = event_type  # e.g., "combat_attack", "npc_death", "item_craft"
         self.description = description
         self.subject_id = subject_id  # The ID of the entity performing the action
         self.target_id = target_id    # The ID of the entity being acted upon (optional)
         self.location = location      # Where the event happened (optional)
-        self.timestamp = time.time()  # For potential aging of information
+        self.timestamp = game_time  # Use game ticks for consistency
+
 
 class WorldGenerator:
     """Handles the procedural generation of the world's macro-structure."""
@@ -228,10 +229,6 @@ class Player:
         # Riding state
         self.is_riding: bool = False
         self.riding_animal_id: int | None = None
-
-        # Quests
-        self.active_quests: dict = {}
-        self.completed_quests: list[str] = []
 
         # Quests
         self.active_quests: dict = {}
@@ -407,7 +404,6 @@ class World:
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
         self.player.world_ref = self
-        self.pending_quest_offer: dict | None = None # For quests offered by NPCs before player accepts
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height, seed=seed)
         self.chunks = self._initialize_chunks()
         self.npcs = []
@@ -1079,10 +1075,21 @@ class World:
                                     # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about event {event_id_to_share_back[:8]}.")
 
                             # Increase relationship
-                            npc.relationships[chat_partner.id] = npc.relationships.get(chat_partner.id, 50) + 2
-                            chat_partner.relationships[npc.id] = chat_partner.relationships.get(npc.id, 50) + 2
+                            npc.relationships[chat_partner.id] = min(100, npc.relationships.get(chat_partner.id, 50) + 5)
+                            chat_partner.relationships[npc.id] = min(100, chat_partner.relationships.get(npc.id, 50) + 5)
+
 
                         npc.current_task = "idle" # Done socializing for now
+                    elif npc.current_task == "visiting friend" and npc.task_target_entity_id:
+                        friend = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
+                        if friend and friend.home_building_id:
+                            friend_home = self.buildings_by_id.get(friend.home_building_id)
+                            if friend_home and (npc.x, npc.y) == (friend_home.global_center_x, friend_home.global_center_y):
+                                # Successfully arrived at friend's house
+                                npc.relationships[friend.id] = min(100, npc.relationships.get(friend.id, 50) + 10)
+                                friend.relationships[npc.id] = min(100, friend.relationships.get(npc.id, 50) + 10)
+                                # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
+                        npc.current_task = "idle" # Done visiting
                     elif npc.current_task == "going to work":
                         npc.current_task = "at work"
                     elif npc.current_task in ["going home", "going home to sleep", "going to bed"]:
@@ -1997,7 +2004,10 @@ class World:
                                 if p.id != npc.id and not p.is_dead and abs(npc.x - p.x) + abs(npc.y - p.y) < 20
                             ]
                             if potential_partners:
-                                chat_partner = random.choice(potential_partners)
+                                # Weight choice by relationship score
+                                weights = [max(1, npc.relationships.get(p.id, 50)) for p in potential_partners]
+                                chat_partner = random.choices(potential_partners, weights=weights, k=1)[0]
+
                                 new_task_label = "socializing"
                                 # Path to a tile adjacent to the partner
                                 dest_x, dest_y = self._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
@@ -2006,14 +2016,17 @@ class World:
                                     npc.task_target_entity_id = chat_partner.id
                                     npc.leisure_timer = random.randint(50, 150) # Chat for a bit
                         elif random.random() < 0.05: # 5% chance to visit a friend
-                            friend = random.choice([n for n in self.village_npcs if n.id != npc.id])
-                            if friend and friend.home_building_id:
-                                friend_home = self.buildings_by_id.get(friend.home_building_id)
-                                if friend_home:
-                                    new_task_label = "visiting friend"
-                                    destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
-                                    npc.task_target_entity_id = friend.id
-                                    npc.leisure_timer = random.randint(100, 300) # Stay for a while
+                            # Filter for NPCs with a positive relationship
+                            friends = [n for n in self.village_npcs if n.id != npc.id and npc.relationships.get(n.id, 50) > 60]
+                            if friends:
+                                friend_to_visit = random.choice(friends)
+                                if friend_to_visit.home_building_id:
+                                    friend_home = self.buildings_by_id.get(friend_to_visit.home_building_id)
+                                    if friend_home:
+                                        new_task_label = "visiting friend"
+                                        destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
+                                        npc.task_target_entity_id = friend_to_visit.id
+                                        npc.leisure_timer = random.randint(100, 300) # Stay for a while
                         elif random.random() < 0.05 or npc.profession == "Fisherman": # Fishermen will also use this logic
                             npc_village = self._get_village_for_npc(npc)
                             if npc_village and "fishing_spot" in npc_village.interaction_points:
@@ -2782,6 +2795,7 @@ class World:
                     # self.add_message_to_chat_log(f"({npc.name} decides to attack immediately as player is in range.)")
             elif chosen_action == "flee_from_player":
                 npc.current_task = "combat_action_flee_from_player"
+                npc.add_grudge(player.id, "Forced me to flee for my life.")
             elif chosen_action == "move_to_cover":
                 cover_spot_x, cover_spot_y = self._find_best_cover_spot(npc, player.x, player.y)
                 if cover_spot_x is not None:
@@ -4366,14 +4380,13 @@ class World:
         # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
         # This is a simplified trigger; more robust would be keyword matching or LLM intent.
         if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
-           "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
+           "kill_wolves_01" not in self.player.completed_quests:
 
             quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
             if quest_def:
                 offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
                 self.chat_ui_history.append((npc_target.name, offer_dialogue))
-                self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
-                self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
+                self.add_message_to_chat_log(f"Quest Offered: {quest_def['title']}")
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
@@ -4422,7 +4435,8 @@ class World:
             description=description,
             subject_id=subject_id,
             target_id=target_id,
-            location=location
+            location=location,
+            game_time=self.game_time
         )
         self.global_events.append(new_event)
         # Keep the event log from growing indefinitely
@@ -4607,7 +4621,8 @@ class World:
                     dialogue=npc_data.get("dialogue", ["Hello!"]),
                     personality=npc_data.get("personality", "normal"),
                     family_ties=npc_data.get("family_ties", "none"),
-                    attitude_to_player=npc_data.get("attitude_to_player", "indifferent")
+                    attitude_to_player=npc_data.get("attitude_to_player", "indifferent"),
+                    player_id=self.player.id
                 ))
                 self.add_message_to_chat_log(f"Generated NPC: {npc_data.get("name", "NPC")}")
             except json.JSONDecodeError as e:
@@ -4699,7 +4714,8 @@ class World:
                     dialogue=npc_data.get("dialogue", ["Greetings."]),
                     personality=npc_data.get("personality", "commoner"),
                     family_ties=npc_data.get("family_ties", "none"),
-                    attitude_to_player=npc_data.get("attitude_to_player", "neutral")
+                    attitude_to_player=npc_data.get("attitude_to_player", "neutral"),
+                    player_id=self.player.id
                 )
 
                 # Assign wealth (randomly for now) - This is now part of LLM prompt for personality
@@ -5016,7 +5032,8 @@ class World:
                     dialogue=npc_data.get("dialogue", ["Looking for a deal?"]),
                     personality=npc_data.get("personality", "merchant"),
                     family_ties=npc_data.get("family_ties", "none"),
-                    attitude_to_player=npc_data.get("attitude_to_player", "neutral")
+                    attitude_to_player=npc_data.get("attitude_to_player", "neutral"),
+                    player_id=self.player.id
                 )
                 merchant.profession = "Traveling Merchant"
                 merchant.money = random.randint(200, 500)
@@ -5817,6 +5834,7 @@ class World:
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
+        self._handle_npc_speech()
 
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""
@@ -5957,7 +5975,10 @@ class World:
                     npc.relationships[target_entity.id] = npc.relationships.get(target_entity.id, 50) + relationship_change_target
                     # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {target_name} changed by {relationship_change_target}.")
 
-                if action == "mourn_death" and subject_entity:
+                if action == "form_grudge" and subject_entity:
+                    npc.add_grudge(subject_entity.id, f"Heard they were involved in: {event_summary}")
+                    self.add_message_to_chat_log(f"Debug: {npc.name} now holds a grudge against {subject_name}.")
+                elif action == "mourn_death" and subject_entity:
                     # Find the home of the deceased
                     if subject_entity.home_building_id:
                         home_building = self.buildings_by_id.get(subject_entity.home_building_id)
@@ -6046,8 +6067,9 @@ class World:
 
             if reaction == "become_hostile":
                 witness.is_hostile_to_player = True
-                # Combat AI will take over.
+                witness.add_grudge(criminal.id, f"Was hostile towards me after witnessing a crime.")
             elif reaction == "report_crime":
+                witness.add_grudge(criminal.id, f"Reported me for {crime_type}.")
                 sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
                 if sheriff_office:
                     witness.current_task = "going_to_report_crime"
@@ -6056,10 +6078,11 @@ class World:
                 else:
                     self.add_message_to_chat_log(f"{witness.name} wants to report the crime but doesn't know where the sheriff is.")
             elif reaction == "flee":
+                witness.add_grudge(criminal.id, f"Saw me commit a crime and fled.")
                 witness.current_task = "combat_action_flee_from_player"
                 witness.current_path = [] # Force path recalculation
             elif reaction == "admonish":
-                # For now, admonishing is just the dialogue. Could lower reputation slightly.
+                witness.relationships[criminal.id] = witness.relationships.get(criminal.id, 50) - 10
                 pass
             elif reaction == "ignore":
                 # Do nothing.

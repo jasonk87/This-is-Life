@@ -4,7 +4,7 @@ from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
 from data.items import ITEM_DEFINITIONS # For accessing armor properties
 
 class NPC:
-    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent"):
+    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent", player_id=None):
         self.x = x
         self.y = y
         self.name = name
@@ -14,10 +14,17 @@ class NPC:
         self.dialogue = dialogue if dialogue is not None else ["Hello!"] # List of dialogue options
         self.personality = personality
         self.family_ties = family_ties
-        self.attitude_to_player = attitude_to_player
+        self.player_id = player_id
         self.last_speech_time = 0
         self.age = random.randint(18, 65)
-        self.relationships = {}  # {npc_id: score}
+        self.relationships = {}  # {entity_id: score}
+        self.grudges: dict[int, list[str]] = {} # {target_id: [list of reasons]}
+        if self.player_id:
+            initial_score = 50
+            if attitude_to_player == "friendly": initial_score = 75
+            elif attitude_to_player == "hostile": initial_score = 25
+            self.relationships[self.player_id] = initial_score
+
         self.knowledge = [] # List of known information
         self.known_events: dict[str, 'Event'] = {}
         self.reacted_to_event_ids: set[str] = set()
@@ -109,6 +116,26 @@ class NPC:
         self.desire_for_furniture: int = 0
         self.is_frightened: bool = False
         self.threat_source_ids: list[int] = []
+
+    @property
+    def attitude_to_player(self) -> str:
+        if not self.player_id:
+            return "neutral"
+        score = self.relationships.get(self.player_id, 50)
+        if score < 30: return "hostile"
+        if score < 45: return "unfriendly"
+        if score < 55: return "neutral"
+        if score < 75: return "friendly"
+        return "warm"
+
+    def add_grudge(self, target_id: int, reason: str):
+        if target_id not in self.grudges:
+            self.grudges[target_id] = []
+        self.grudges[target_id].append(reason)
+        # Having a grudge significantly damages the relationship
+        self.relationships[target_id] = self.relationships.get(target_id, 50) - 40
+        # Clamp the relationship score so it doesn't go too low from one event
+        self.relationships[target_id] = max(0, self.relationships[target_id])
 
     def get_dialogue(self):
         return self.dialogue

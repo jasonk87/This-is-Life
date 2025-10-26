@@ -1613,9 +1613,20 @@ class World:
                         npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                         npc.current_task = "seeking_water"
 
-                    npc_village = self._get_village_for_npc(npc)
-                    if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
-                        well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
+                    well_coords = None
+                    # 1. Check knowledge first
+                    known_wells = [k for k in npc.knowledge if k.get("type") == "location" and k.get("subject") == "well"]
+                    if known_wells:
+                        well_coords = random.choice(known_wells)["coords"]
+                        self.add_message_to_chat_log(f"{npc.name} is thirsty and knows where to find a well.")
+
+                    # 2. If no knowledge, fall back to finding the well in the village
+                    if not well_coords:
+                        npc_village = self._get_village_for_npc(npc)
+                        if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
+                            well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
+
+                    if well_coords:
                         if (npc.x, npc.y) == well_coords:
                             npc.thirst = 0
                             # self.add_message_to_chat_log(f"{npc.name} drinks from the well and is no longer thirsty.")
@@ -1633,8 +1644,8 @@ class World:
                     needs_based_action_taken = True
 
                 # --- Hunger Fulfillment ---
-                elif npc.hunger >= 70 or npc.current_task == "seeking_food":
-                    if not needs_based_action_taken and npc.current_task != "seeking_food":
+                elif npc.hunger >= 70 or npc.current_task in ["seeking_food", "going_to_buy_food"]:
+                    if not needs_based_action_taken and npc.current_task not in ["seeking_food", "going_to_buy_food"]:
                         npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                         npc.current_task = "seeking_food"
 
@@ -1644,83 +1655,61 @@ class World:
                         npc.current_task = npc.previous_task or "idle"
                         npc.previous_task = None
                     else:
-                        # 2. If no food in pack, try to go home to eat
-                        home_building = self.buildings_by_id.get(npc.home_building_id)
-                        if home_building:
-                            is_at_home = (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y) # Simplified check
-                            if is_at_home:
-                                found_home, consumed_home = self._npc_eat_from_inventory(npc, home_building.building_inventory, is_building_inventory=True)
-                                if consumed_home:
-                                    npc.current_task = npc.previous_task or "idle"
-                                    npc.previous_task = None
-                                else:
-                                    # At home, but no food. What to do now?
-                                    # self.add_message_to_chat_log(f"{npc.name} is hungry at home, but there is no food.")
-                                    npc.current_task = "wandering_hungry" # A new state
-                                    npc.previous_task = None
-                            else:
-                                # Not at home, check if there's food there before pathing
-                                has_food_at_home = any(ITEM_DEFINITIONS.get(k,{}).get("on_use",{}).get("reduces_hunger",0) > 0 for k,v in home_building.building_inventory.items() if v > 0)
-                                if has_food_at_home:
+                        # 2. No food in pack. Find a place to buy food.
+                        food_vendor_building = None
+                        known_food_sources = [k for k in npc.knowledge if k.get("type") == "location" and k.get("subject") in ["tavern", "bakery", "general_store"]]
+
+                        if known_food_sources:
+                            # self.add_message_to_chat_log(f"{npc.name} is hungry and knows where to find food.")
+                            known_source = random.choice(known_food_sources)
+                            food_vendor_building = self.get_building_at(known_source["coords"][0], known_source["coords"][1])
+
+                        # Fallback to searching if no knowledge or known building doesn't exist anymore
+                        if not food_vendor_building:
+                             food_vendor_building = self._find_nearest_food_vendor(npc)
+
+                        if food_vendor_building and npc.money > 10: # Has a place to go and can afford it
+                            is_at_vendor = (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
+                            if is_at_vendor:
+                                # At the vendor, attempt to buy food
+                                food_to_buy, food_price = None, 0
+                                village = self._get_village_for_npc(npc)
+                                for item_key, quantity in food_vendor_building.building_inventory.items():
+                                    if quantity > 0 and ITEM_DEFINITIONS.get(item_key, {}).get("on_use", {}).get("reduces_hunger", 0) > 0:
+                                        food_to_buy = item_key
+                                        food_price = self.get_dynamic_price(item_key, village)
+                                        break
+
+                                if food_to_buy and npc.money >= food_price:
+                                    food_vendor_building.building_inventory[food_to_buy] -= 1
+                                    npc.money -= food_price
+                                    npc.add_item(food_to_buy, 1)
+                                    npc.current_task = "seeking_food" # Re-trigger to eat from inventory next tick
+                                else: # No food to buy or can't afford it
+                                    npc.current_task = "wandering_hungry"
+                            else: # Not at the vendor, path to it
+                                npc.current_task = "going_to_buy_food"
+                                vendor_coords = (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
+                                if not npc.current_path or npc.current_destination_coords != vendor_coords:
+                                    path = self.calculate_path(npc.x, npc.y, vendor_coords[0], vendor_coords[1])
+                                    if path: npc.current_path, npc.current_destination_coords = path, vendor_coords
+                                    else: npc.current_task = "idle_confused"
+                        else:
+                            # 3. No vendor found or can't afford food. Try going home to eat as a last resort.
+                            home_building = self.buildings_by_id.get(npc.home_building_id)
+                            if home_building:
+                                is_at_home = (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y)
+                                if is_at_home:
+                                    found_home, consumed_home = self._npc_eat_from_inventory(npc, home_building.building_inventory, is_building_inventory=True)
+                                    npc.current_task = npc.previous_task or "idle" if consumed_home else "wandering_hungry"
+                                else: # Not at home, path there
                                     home_coords = (home_building.global_center_x, home_building.global_center_y)
                                     if not npc.current_path or npc.current_destination_coords != home_coords:
                                         path = self.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
-                                        if path:
-                                            npc.current_path = path
-                                            npc.current_destination_coords = home_coords
-                                        else:
-                                            npc.current_task = "idle_confused" # Can't path home
-                                else:
-                                    # No food at home, try to buy food if they have money
-                                    if npc.money > 10: # Arbitrary threshold to decide to buy food
-                                        food_vendor_building = self._find_nearest_food_vendor(npc)
-                                        if food_vendor_building:
-                                            npc.current_task = "going_to_buy_food"
-                                            vendor_coords = (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
-                                            if not npc.current_path or npc.current_destination_coords != vendor_coords:
-                                                path = self.calculate_path(npc.x, npc.y, vendor_coords[0], vendor_coords[1])
-                                                if path:
-                                                    npc.current_path = path
-                                                    npc.current_destination_coords = vendor_coords
-                                                else:
-                                                    npc.current_task = "idle_confused" # Can't path to vendor
-                                        else:
-                                            # No vendor, wander hungry
-                                            npc.current_task = "wandering_hungry"
-                                    else:
-                                        # No food at home and not enough money
-                                        npc.current_task = "wandering_hungry"
-                                    npc.previous_task = None
-                        else:
-                            # Homeless and hungry.
-                            npc.current_task = "wandering_hungry_homeless"
-
-                    needs_based_action_taken = True
-                elif npc.current_task == "going_to_buy_food":
-                    food_vendor_building = self._find_nearest_food_vendor(npc)
-                    if food_vendor_building and (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y):
-                        # At the vendor, attempt to buy food
-                        food_to_buy = None
-                        food_price = 0
-                        village = self._get_village_for_npc(npc)
-                        for item_key, quantity in food_vendor_building.building_inventory.items():
-                            if quantity > 0:
-                                item_def = ITEM_DEFINITIONS.get(item_key, {})
-                                if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
-                                    food_to_buy = item_key
-                                    food_price = self.get_dynamic_price(item_key, village)
-                                    break
-
-                        if food_to_buy and npc.money >= food_price:
-                            food_vendor_building.building_inventory[food_to_buy] -= 1
-                            npc.money -= food_price
-                            npc.npc_inventory[food_to_buy] = npc.npc_inventory.get(food_to_buy, 0) + 1
-                            # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
-                            # Now that food is in inventory, the main hunger logic will handle eating it next tick
-                            npc.current_task = "seeking_food"
-                        else:
-                            # No food to buy or can't afford it
-                            npc.current_task = "wandering_hungry"
+                                        if path: npc.current_path, npc.current_destination_coords = path, home_coords
+                                        else: npc.current_task = "idle_confused"
+                            else: # No vendor, no home, wander hungry
+                                npc.current_task = "wandering_hungry_homeless"
                     needs_based_action_taken = True
 
 
@@ -4727,6 +4716,18 @@ class World:
                     }
                     if store_knowledge not in random_villager.knowledge:
                         random_villager.knowledge.append(store_knowledge)
+
+            # Bakery Knowledge
+            bakery_building = next((b for b in village.buildings if b.building_type == "bakery"), None)
+            if bakery_building:
+                for _ in range(random.randint(1, 2)):
+                    random_villager = random.choice(newly_created_npcs)
+                    bakery_knowledge = {
+                        "type": "location", "subject": "bakery",
+                        "coords": (bakery_building.global_center_x, bakery_building.global_center_y)
+                    }
+                    if bakery_knowledge not in random_villager.knowledge:
+                        random_villager.knowledge.append(bakery_knowledge)
 
 
     def _handle_npc_speech(self):

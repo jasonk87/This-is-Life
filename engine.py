@@ -176,7 +176,7 @@ class Player:
         self.active_contracts = {}
         self.pending_contract_offer = None
         self.lockpicking_skill = 3 # Conceptual skill, scale 1-10, default slightly below average
-        self.id = id(self) # Simple unique ID for player
+        self.id = "player" # Simple unique ID for player
         self.bounty = 0
 
         # Light Source State
@@ -219,6 +219,9 @@ class Player:
         # Quests
         self.active_quests: dict = {}
         self.completed_quests: list[str] = []
+
+        # Knowledge
+        self.knowledge: list[dict] = []
 
 
     def take_damage(self, amount: int, world=None) -> int:
@@ -4147,86 +4150,84 @@ class World:
         if not npc_target:
             return
 
-        # Format conversation history for the prompt
-        formatted_history = []
-        # Take last N messages for context window (e.g., last 10 lines, 5 exchanges)
-        history_context_limit = 10
-        recent_history = self.chat_ui_history[-(history_context_limit-1):] if len(self.chat_ui_history) > 1 else self.chat_ui_history
+        if self.chat_ui_mode == "talk":
+            # Format conversation history for the prompt
+            formatted_history = []
+            history_context_limit = 10
+            recent_history = self.chat_ui_history[-(history_context_limit-1):] if len(self.chat_ui_history) > 1 else self.chat_ui_history
 
-        for speaker, text in recent_history:
-            if speaker == "Player": # Assuming "Player" is the key for player lines
-                formatted_history.append(f"Player: {text}")
-            else: # NPC lines
-                formatted_history.append(f"{speaker}: {text}")
-        history_str = "\n".join(formatted_history)
+            for speaker, text in recent_history:
+                if speaker == "Player":
+                    formatted_history.append(f"Player: {text}")
+                else:
+                    formatted_history.append(f"{speaker}: {text}")
+            history_str = "\n".join(formatted_history)
 
-        player_rep = self.player.reputation
-        prompt = LLM_PROMPTS["npc_conversation_continue"].format(
-            npc_name=npc_target.name,
-            npc_personality=npc_target.personality,
-            npc_attitude=npc_target.attitude_to_player,
-            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0),
-            conversation_history=history_str,
-            player_input=player_input_text
-        )
-
-        npc_response = self._call_ollama(prompt)
-        if not npc_response:
-            npc_response = "... (LLM failed to respond)"
-
-        self.chat_ui_history.append((npc_target.name, npc_response.strip()))
-
-        # After NPC response, check if this NPC should offer a job
-        if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.active_contracts:
-            # Check if player's response was affirmative to a previous implicit offer or just general talk
-            # This is tricky without more state. For now, let's assume if they talk to Foreman, job is offered.
-            # A better way: Foreman's initial greeting (start_npc_dialogue) could offer.
-            # Or, if player says "work" or "job".
-            # For simplicity now: if player just said something, and no active contract, Foreman offers.
-
-            # Define contract details
-            contract_id = f"lumber_delivery_{npc_target.id}"
-            item_needed = "log"
-            quantity_needed = 10
-            reward_amount = 50 # Example reward
-            item_name_plural = "logs" # For the prompt
-
-            offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
+            player_rep = self.player.reputation
+            prompt = LLM_PROMPTS["npc_conversation_continue"].format(
                 npc_name=npc_target.name,
-                npc_profession=npc_target.profession,
                 npc_personality=npc_target.personality,
                 npc_attitude=npc_target.attitude_to_player,
-                player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
-                player_hero_points=self.player.reputation.get(REP_HERO,0),
-                quantity_needed=quantity_needed,
-                item_name_plural=item_name_plural,
-                reward_amount=reward_amount
+                player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+                player_hero_points=player_rep.get(REP_HERO, 0),
+                conversation_history=history_str,
+                player_input=player_input_text
             )
-            job_offer_dialogue = self._call_ollama(offer_prompt)
-            if not job_offer_dialogue:
-                job_offer_dialogue = f"I might have some work for you... if you're interested. Need {quantity_needed} {item_name_plural} for {reward_amount} coins."
 
-            self.chat_ui_history.append((npc_target.name, job_offer_dialogue.strip()))
-            # Store pending offer to be accepted on player's next input if affirmative
-            self.player.pending_contract_offer = {
-                "contract_id": contract_id, "npc_id": npc_target.id,
-                "item_key": item_needed, "quantity_needed": quantity_needed,
-            "reward": reward_amount, "npc_offerer_id": npc_target.id
-            }
-            self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
+            npc_response = self._call_ollama(prompt)
+            if not npc_response:
+                npc_response = "... (LLM failed to respond)"
 
-        # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
-        # This is a simplified trigger; more robust would be keyword matching or LLM intent.
-        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
-           "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
+            if player_input_text.lower() in ["share", "tell", "share information"]:
+                self.chat_ui_mode = "share_knowledge"
+                self.chat_ui_history.append(("System", "What knowledge do you want to share? (Enter the number)"))
+            else:
+                self.chat_ui_history.append((npc_target.name, npc_response.strip()))
 
-            quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
-            if quest_def:
-                offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
-                self.chat_ui_history.append((npc_target.name, offer_dialogue))
-                self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
-                self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
+                # After NPC response, check if this NPC should offer a job or quest
+                if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.active_contracts:
+                    contract_id = f"lumber_delivery_{npc_target.id}"
+                    item_needed, quantity_needed, reward_amount = "log", 10, 50
+                    offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
+                        npc_name=npc_target.name, npc_profession=npc_target.profession, npc_personality=npc_target.personality,
+                        npc_attitude=npc_target.attitude_to_player, player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
+                        player_hero_points=self.player.reputation.get(REP_HERO,0), quantity_needed=quantity_needed,
+                        item_name_plural="logs", reward_amount=reward_amount
+                    )
+                    job_offer_dialogue = self._call_ollama(offer_prompt) or f"I might have some work for you... if you're interested. Need {quantity_needed} logs for {reward_amount} coins."
+                    self.chat_ui_history.append((npc_target.name, job_offer_dialogue.strip()))
+                    self.player.pending_contract_offer = {
+                        "contract_id": contract_id, "npc_id": npc_target.id, "item_key": item_needed,
+                        "quantity_needed": quantity_needed, "reward": reward_amount, "npc_offerer_id": npc_target.id
+                    }
+                    self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
+
+                if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
+                   "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
+                    quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
+                    if quest_def:
+                        offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
+                        self.chat_ui_history.append((npc_target.name, offer_dialogue))
+                        self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
+                        self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
+
+        elif self.chat_ui_mode == "share_knowledge":
+            try:
+                choice_index = int(player_input_text) - 1
+                if 0 <= choice_index < len(self.player.knowledge):
+                    knowledge_to_share = self.player.knowledge[choice_index]
+                    if knowledge_to_share not in npc_target.knowledge:
+                        npc_target.knowledge.append(knowledge_to_share)
+                        subject = knowledge_to_share.get('subject', 'something').replace('_', ' ')
+                        self.chat_ui_history.append((npc_target.name, f"Oh, I didn't know that about the {subject}. Thank you!"))
+                        npc_target.relationships[self.player.id] = npc_target.relationships.get(self.player.id, 0) + 2
+                    else:
+                        self.chat_ui_history.append((npc_target.name, "I appreciate the thought, but I already knew that."))
+                else:
+                    self.chat_ui_history.append(("System", "Invalid choice."))
+            except ValueError:
+                self.chat_ui_history.append(("System", "Invalid input. Please enter a number."))
+            self.chat_ui_mode = "talk"
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
@@ -5592,18 +5593,29 @@ class World:
 
             movement_cost = int(destination_tile.properties.get("movement_cost", 1))
 
-            # Check if player entered a building
+            # Check if player entered a building and handle knowledge acquisition
             building = self.get_building_at(new_x, new_y)
-            if building and not building.interior_decorated:
-                # Get the chunk the building is in to pass to decoration method
-                current_chunk_x = new_x // CHUNK_SIZE
-                current_chunk_y = new_y // CHUNK_SIZE
-                if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
-                    chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
-                    self.decorate_building_interior(building, chunk_of_building)
-                else:
-                    # This should ideally not happen if get_building_at found a building
-                    self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
+            if building:
+                new_knowledge = {
+                    "type": "location",
+                    "subject": building.building_type,
+                    "coords": (building.global_center_x, building.global_center_y)
+                }
+                if new_knowledge not in self.player.knowledge:
+                    self.player.knowledge.append(new_knowledge)
+                    building_name = building.building_type.replace("_", " ").title()
+                    self.add_message_to_chat_log(f"You have discovered the {building_name}.")
+
+                if not building.interior_decorated:
+                    # Get the chunk the building is in to pass to decoration method
+                    current_chunk_x = new_x // CHUNK_SIZE
+                    current_chunk_y = new_y // CHUNK_SIZE
+                    if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
+                        chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
+                        self.decorate_building_interior(building, chunk_of_building)
+                    else:
+                        # This should ideally not happen if get_building_at found a building
+                        self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
 
             self.update_fov() # Player moved, so update FOV
 

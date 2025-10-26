@@ -137,43 +137,32 @@ class NPC:
             return True
         return False
 
-    def take_damage(self, amount: int, world):
+    def take_damage(self, amount: int, world) -> bool:
         if self.is_dead:
-            return
+            return False
 
         total_defense_bonus = 0
-        # Check body armor
         if self.equipped_armor_body and self.equipped_armor_body in ITEM_DEFINITIONS:
             armor_def = ITEM_DEFINITIONS[self.equipped_armor_body]
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
 
-        # Check head armor
         if self.equipped_armor_head and self.equipped_armor_head in ITEM_DEFINITIONS:
             armor_def = ITEM_DEFINITIONS[self.equipped_armor_head]
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
 
-        effective_damage = max(0, amount - total_defense_bonus) # Ensure damage doesn't go below 0
-
-        # world.add_message_to_chat_log(f"Debug: {self.name} incoming damage {amount}, defense {total_defense_bonus}, effective {effective_damage}")
-
+        effective_damage = max(0, amount - total_defense_bonus)
         self.hp -= effective_damage
 
         if self.hp <= 0:
             self.hp = 0
             self.is_dead = True
-            # The world.handle_npc_death(self) call will be made from where take_damage is called,
-            # typically after the LLM has provided its narrative.
-            # This keeps the NPC class from needing a direct 'world' reference for this specific action,
-            # though for other interactions it might be useful.
-            # For now, the death processing is handled by the World class after this method.
-            # world.add_message_to_chat_log(f"{self.name} has died!") # This will also be part of LLM narrative or game logic
+            return True
         else:
-            # Non-fatal hit, NPC becomes hostile if not already
-            if not self.is_hostile_to_player: # Only make non-hostiles hostile. Creatures might already be.
+            if not self.is_hostile_to_player:
                 self.is_hostile_to_player = True
-                # Avoid "becomes hostile" message for creatures that are always hostile
-                if self.profession != "Creature": # Assuming Creature profession for always-hostile
+                if self.profession != "Creature":
                     world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+            return False
 
 class DireWolf(NPC):
     def __init__(self, x, y, name="Dire Wolf"):

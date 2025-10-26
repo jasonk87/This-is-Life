@@ -108,6 +108,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_name": "savage bite",
         "base_attack_damage_dice": "1d8",
         "combat_behavior": "aggressive",
+        "prey": ["deer", "sheep", "wolf"],
         "fearless": True, # Will not flee from the player
         "loot_drops": {
             "animal_pelt": {
@@ -251,7 +252,7 @@ ANIMAL_DEFINITIONS = {
     },
     "bison": {
         "name": "Bison",
-        "char": "B",
+        "char": "O",
         "color": (160, 82, 45),
         "max_hp": 40,
         "behavior": "Wander-Neutral",
@@ -274,7 +275,7 @@ ANIMAL_DEFINITIONS = {
     },
     "badger": {
         "name": "Badger",
-        "char": "b",
+        "char": "a",
         "color": (54, 54, 54),
         "max_hp": 15,
         "behavior": "Territorial",

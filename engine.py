@@ -43,6 +43,7 @@ from data.professions import PROFESSIONS, get_profession_data, get_sub_task_data
 from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
+from data.environment import WEATHER_DEFINITIONS
 
 import json
 import uuid
@@ -382,6 +383,8 @@ class Player:
 class World:
     """World class now uses a generator for a more complex map."""
     def __init__(self, seed=None):
+        if seed is not None:
+            random.seed(seed)
         self.chat_log = [] # Stores chat messages
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
@@ -405,6 +408,7 @@ class World:
         self.current_day: int = 0
         self.ambient_temperature: float = 20.0 # Default starting temp
         self.weather = "clear"
+        self.weather_change_timer: int = 0
 
         # New Interaction Context
         self.interaction_context = {
@@ -1242,7 +1246,11 @@ class World:
                 if npc.id in self.npc_fov_maps:
                     fov_map = self.npc_fov_maps[npc.id]
                     for threat_id in npc.threat_source_ids:
+                        # Check both lists for the threat
                         threat = next((n for n in self.npcs if n.id == threat_id), None)
+                        if not threat:
+                            threat = next((n for n in self.village_npcs if n.id == threat_id), None)
+
                         if threat and not threat.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.x, threat.y]:
                             threats_still_visible = True
                             break
@@ -1355,11 +1363,6 @@ class World:
                                 self.npc_attempt_attack_npc(npc, prey)
                                 npc.current_path = []
                                 npc.current_destination_coords = None
-                                print(f"DEBUG: After attack, prey.is_dead = {prey.is_dead}")
-                                if prey.is_dead:
-                                    npc.hunger = 0
-                                    npc.current_task = "idle"
-                                    npc.task_target_entity_id = None
                             else:
                                 if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
                                     path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
@@ -1411,7 +1414,23 @@ class World:
                 if npc.current_task == "fleeing" and not should_flee:
                     npc.current_task = "idle"
 
-                # 3. OTHER BEHAVIORS (Lower Priority)
+                # 3. TERRITORIAL and NEUTRAL BEHAVIORS
+                if npc.behavior == "Territorial":
+                    if not npc.den_location:
+                        npc.den_location = (npc.x, npc.y)
+
+                    dist_to_den = math.sqrt((self.player.x - npc.den_location[0])**2 + (self.player.y - npc.den_location[1])**2)
+                    if dist_to_den < 10 and not npc.is_hostile_to_player:
+                        self.add_message_to_chat_log(f"The {npc.name} becomes aggressive as you approach its den!")
+                        npc.is_hostile_to_player = True
+
+                elif npc.behavior == "Wander-Neutral":
+                    dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                    if dist_to_player < 3 and not npc.is_hostile_to_player:
+                        self.add_message_to_chat_log(f"The {npc.name} feels threatened and becomes hostile!")
+                        npc.is_hostile_to_player = True
+
+                # 4. OTHER BEHAVIORS (Lower Priority)
                 if npc.is_pregnant:
                     npc.pregnancy_timer -= 1
                     if npc.pregnancy_timer <= 0:
@@ -1481,6 +1500,8 @@ class World:
                         potential_x, potential_y = npc.x + dx, npc.y + dy
                         target_tile = self.get_tile_at(potential_x, potential_y)
                         if target_tile and target_tile.passable:
+                            if npc.behavior == "Wander-Water" and target_tile.name not in ["Water", "Deep Water"]:
+                                continue
                             npc.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
                             npc.current_destination_coords = (potential_x, potential_y)
                             npc.current_task = "wandering"
@@ -1882,13 +1903,19 @@ class World:
                                     destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
                                     npc.task_target_entity_id = friend.id
                                     npc.leisure_timer = random.randint(100, 300) # Stay for a while
-                        elif random.random() < 0.05: # 5% chance to go fishing
+                        elif random.random() < 0.05 or npc.profession == "Fisherman": # Fishermen will also use this logic
                             npc_village = self._get_village_for_npc(npc)
                             if npc_village and "fishing_spot" in npc_village.interaction_points:
                                 fishing_spot = random.choice(npc_village.interaction_points["fishing_spot"])
-                                new_task_label = "fishing"
+                                if npc.profession == "Fisherman":
+                                    new_task_label = "working_fishing"
+                                else:
+                                    new_task_label = "leisure_fishing"
                                 destination_coords = fishing_spot
                                 npc.leisure_timer = random.randint(100, 300)
+
+                    if npc.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
+                        self.npc_attempt_fish(npc, npc.x, npc.y)
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.home_building_id and npc.current_task not in ["sleeping", "going home to sleep"]:
@@ -2766,12 +2793,16 @@ class World:
         if can_player_see:
             self.add_message_to_chat_log(f"The {attacker.name} attacks the {target.name} for {damage} damage!")
 
-        target.take_damage(damage, self)
+        was_killed = target.take_damage(damage, self)
 
-        if target.is_dead:
+        if was_killed:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
             self.handle_npc_death(target)
+            if self._is_predator(attacker):
+                attacker.hunger = 0
+                attacker.current_task = "idle"
+                attacker.task_target_entity_id = None
 
     def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
         """Finds the nearest building that sells food (e.g., general store, bakery)."""
@@ -4222,7 +4253,21 @@ class World:
                             tile.properties["growth_progress"] += 5 # Example growth increment
 
     def _update_weather(self):
-        """Handles weather effects, like rain extinguishing fires."""
+        """Dynamically updates weather and handles its effects."""
+        self.weather_change_timer -= 1
+        if self.weather_change_timer <= 0:
+            current_season = self.seasons[self.current_season_index]
+            possible_weathers = []
+            for weather, data in WEATHER_DEFINITIONS.items():
+                if current_season in data["seasons"]:
+                    possible_weathers.append(weather)
+
+            if possible_weathers:
+                self.weather = random.choice(possible_weathers)
+                self.add_message_to_chat_log(f"The weather has changed to {self.weather}.")
+
+            self.weather_change_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS * 2)
+
         if self.weather == "rain":
             self._water_crops()
             for y_chunk in range(self.chunk_height):
@@ -4235,7 +4280,6 @@ class World:
                         for x_local in range(CHUNK_SIZE):
                             tile = chunk.tiles[y_local][x_local]
                             if tile and hasattr(tile, 'properties') and "extinguishes_to" in tile.properties:
-                                # Check if the fire is outdoors (not sheltered)
                                 world_x = x_chunk * CHUNK_SIZE + x_local
                                 world_y = y_chunk * CHUNK_SIZE + y_local
                                 if not self._check_for_shelter(world_x, world_y):
@@ -5812,6 +5856,40 @@ class World:
 
         active_quest_data = self.player.active_quests[quest_id]
         quest_def = QUEST_DEFINITIONS.get(quest_id)
+    def player_attempt_fish(self, water_x: int, water_y: int):
+        """Handles the player's attempt to fish."""
+        if not self.player.has_item("fishing_rod"):
+            self.add_message_to_chat_log("You need a fishing rod to fish.")
+            return
+
+        target_tile = self.get_tile_at(water_x, water_y)
+        if not (target_tile and target_tile.name in ["Water", "Deep Water"]):
+            self.add_message_to_chat_log("You can't fish there.")
+            return
+
+        self.add_message_to_chat_log("You cast your line into the water...")
+
+        if random.random() < 0.3: # 30% chance to catch a fish
+            fish_types = ["fish", "salmon", "trout"]
+            fish_caught = random.choice(fish_types)
+            self.player.add_item(f"raw_{fish_caught}")
+            self.add_message_to_chat_log(f"You caught a {fish_caught}!")
+        else:
+            self.add_message_to_chat_log("You didn't catch anything.")
+
+    def npc_attempt_fish(self, npc, water_x, water_y):
+        """Handles an NPC's attempt to fish."""
+        target_tile = self.get_tile_at(water_x, water_y)
+        if not (target_tile and target_tile.name in ["Water", "Deep Water"]):
+            return
+
+        if random.random() < 0.2: # 20% chance for NPC to catch a fish
+            fish_types = ["fish", "salmon", "trout"]
+            fish_caught = random.choice(fish_types)
+            work_building = self.buildings_by_id.get(npc.work_building_id)
+            if work_building:
+                work_building.building_inventory[f"raw_{fish_caught}"] = work_building.building_inventory.get(f"raw_{fish_caught}", 0) + 1
+                self.add_message_to_chat_log(f"{npc.name} caught a {fish_caught}!")
 
         if not quest_def:
             self.add_message_to_chat_log(f"Error: Quest definition for '{quest_id}' not found.")

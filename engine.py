@@ -404,6 +404,7 @@ class World:
         self.game_state = "PLAYING"
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
+        self.needs_text_input = False
 
         # Season and Temperature
         self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
@@ -1033,6 +1034,25 @@ class World:
                                     # self.add_message_to_chat_log(f"{chat_partner.name} tells {npc.name} something.")
 
                         npc.current_task = "idle"
+                    elif npc.current_task == "approaching_player_for_help":
+                        self.chat_ui_active = True
+                        self.chat_ui_target_npc = npc
+                        self.needs_text_input = True
+
+                        # Use the new LLM prompt to ask for help
+                        prompt = LLM_PROMPTS["npc_ask_for_help"].format(
+                            npc_name=npc.name,
+                            npc_personality=npc.personality,
+                            npc_need=npc.help_needed
+                        )
+                        help_question = self._call_ollama(prompt)
+                        if not help_question:
+                            help_question = f"Hello. Can you help me find some {npc.help_needed}?"
+
+                        self.chat_ui_history.clear()
+                        self.chat_ui_history.append((npc.name, help_question.strip()))
+                        npc.current_task = "awaiting_help_response"
+                        npc.help_needed = None
                     else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
@@ -1251,6 +1271,51 @@ class World:
                     continue # Skip non-hostile NPC if not their update interval
 
             npc.game_time_last_updated = self.game_time
+
+            if npc.current_task == "approaching_player_for_help":
+                dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+
+                # Check if still needs help (e.g., learned from another NPC while walking)
+                if hasattr(npc, 'help_needed'):
+                    if npc.help_needed == "water" and any(k.get("subject") == "well" for k in npc.knowledge):
+                        npc.current_task = "idle"
+                        npc.help_needed = None
+                        npc.current_path = []
+                        self.add_message_to_chat_log(f"{npc.name} figured out where to find water on their own.")
+                        continue
+
+                    if npc.help_needed == "food" and any(k.get("subject") in ["tavern", "bakery", "general_store"] for k in npc.knowledge):
+                        npc.current_task = "idle"
+                        npc.help_needed = None
+                        npc.current_path = []
+                        self.add_message_to_chat_log(f"{npc.name} figured out where to find food on their own.")
+                        continue
+
+                # If player is too far, give up
+                if dist_to_player > 20: # Give up if player gets too far
+                    npc.current_task = "idle"
+                    if hasattr(npc, 'help_needed'): npc.help_needed = None
+                    npc.current_path = []
+                    self.add_message_to_chat_log(f"{npc.name} gives up trying to reach you for help.")
+                    continue
+
+                # If path destination is no longer adjacent to player, recalculate path
+                needs_new_path = False
+                if not npc.current_path or not npc.current_destination_coords:
+                    needs_new_path = True
+                # Use manhattan distance for adjacency check, it's cheaper and what's used for attacks
+                elif abs(npc.current_destination_coords[0] - self.player.x) + abs(npc.current_destination_coords[1] - self.player.y) > 1:
+                    needs_new_path = True
+
+                if needs_new_path:
+                    dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
+                    if dest_x is not None:
+                        path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                        if path:
+                            npc.current_path = path
+                            npc.current_destination_coords = (dest_x, dest_y)
+
+                continue
 
             # --- FEAR SYSTEM (High Priority) ---
             can_be_frightened = (npc.profession != "Creature" and
@@ -1628,11 +1693,27 @@ class World:
                         well_coords = random.choice(known_wells)["coords"]
                         self.add_message_to_chat_log(f"{npc.name} is thirsty and knows where to find a well.")
 
-                    # 2. If no knowledge, fall back to finding the well in the village
+                    # 2. If no knowledge, check if player is nearby to ask for help
                     if not well_coords:
-                        npc_village = self._get_village_for_npc(npc)
-                        if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
-                            well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
+                        # Check distance to player
+                        dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                        if dist_to_player < 15: # If player is within 15 tiles
+                            self.add_message_to_chat_log(f"{npc.name} is thirsty and doesn't know where to find water. They decide to ask you for help.")
+                            npc.current_task = "approaching_player_for_help"
+                            npc.help_needed = "water"
+                            # Path to player
+                            dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
+                            if dest_x is not None:
+                                path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                                if path:
+                                    npc.current_path = path
+                                    npc.current_destination_coords = (dest_x, dest_y)
+                            needs_based_action_taken = True
+                        else:
+                            # Fallback to original behavior if player is not nearby
+                            npc_village = self._get_village_for_npc(npc)
+                            if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
+                                well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
 
                     if well_coords:
                         if (npc.x, npc.y) == well_coords:
@@ -1674,7 +1755,21 @@ class World:
 
                         # Fallback to searching if no knowledge or known building doesn't exist anymore
                         if not food_vendor_building:
-                             food_vendor_building = self._find_nearest_food_vendor(npc)
+                            dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
+                            if dist_to_player < 15:
+                                self.add_message_to_chat_log(f"{npc.name} is hungry and doesn't know where to find food. They decide to ask you for help.")
+                                npc.current_task = "approaching_player_for_help"
+                                npc.help_needed = "food"
+                                dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
+                                if dest_x is not None:
+                                    path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                                    if path:
+                                        npc.current_path = path
+                                        npc.current_destination_coords = (dest_x, dest_y)
+                                needs_based_action_taken = True
+                                return # End processing for this NPC this tick
+                            else:
+                                food_vendor_building = self._find_nearest_food_vendor(npc)
 
                         if food_vendor_building and npc.money > 10: # Has a place to go and can afford it
                             is_at_vendor = (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
@@ -4232,11 +4327,38 @@ class World:
                     self.chat_ui_history.append(("System", "Invalid choice."))
             except ValueError:
                 self.chat_ui_history.append(("System", "Invalid input. Please enter a number."))
+
+            # Check if the shared knowledge helped
+            if npc_target.current_task == "awaiting_help_response":
+                shared_subject = knowledge_to_share.get("subject")
+                need = npc_target.help_needed
+
+                knowledge_matches_need = False
+                if need == "water" and shared_subject == "well":
+                    knowledge_matches_need = True
+                elif need == "food" and shared_subject in ["tavern", "bakery", "general_store"]:
+                    knowledge_matches_need = True
+
+                if knowledge_matches_need:
+                    npc_target.current_task = "idle" # Will re-evaluate schedule next tick
+                    self.chat_ui_history.append((npc_target.name, "Oh, thank you so much! I'll head there right away."))
+                    # Close chat after a brief moment (or let player close it)
+                else:
+                    self.chat_ui_history.append((npc_target.name, "I appreciate the thought, but that's not what I was looking for right now."))
+
             self.chat_ui_mode = "talk"
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
 
+    def handle_unfulfilled_help_request(self, npc: NPC):
+        """Handles the NPC's reaction when the player doesn't provide needed help."""
+        if npc and npc.current_task == "awaiting_help_response":
+            self.add_message_to_chat_log(f"{npc.name} seems disappointed you couldn't help.")
+            npc.current_task = "idle" # Revert to idle, will try to find food/water again next cycle
+            npc.help_needed = None
+            # Decrease relationship with player
+            npc.relationships[self.player.id] = npc.relationships.get(self.player.id, 0) - 1
 
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""

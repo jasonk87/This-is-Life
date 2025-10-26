@@ -18,6 +18,7 @@ class NPC:
         self.last_speech_time = 0
         self.relationships = {}  # {npc_id: score}
         self.knowledge = [] # List of known information
+        self.help_needed = None # For tracking what the NPC is asking for
 
         # Scheduling attributes from Phase 1
         self.home_building_id = None
@@ -90,6 +91,7 @@ class NPC:
 
         # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
         self.task_target_entity_id: int | None = None
+        self.task_context: str | None = None # For storing the reason for a task, e.g., 'hunger'
         self.leisure_timer = 0
 
         # Temperature and Weather

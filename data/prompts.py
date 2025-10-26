@@ -599,4 +599,21 @@ Example 4 (Friend of the victim witnesses assault):
 
 JSON Decision:
 """
+,
+    "npc_ask_for_help": """\
+You are {npc_name}, an NPC in a fantasy village who desperately needs help.
+Your personality is: {npc_personality}.
+Your specific need is: {npc_need}. (e.g., "food", "water", "directions to the blacksmith")
+
+The player is nearby, and you have approached them to ask for help.
+Generate a short, in-character dialogue line where you ask the player for assistance with your specific need.
+
+Example for need="food", personality="timid":
+"Excuse me, I'm terribly sorry to bother you, but I'm new here and frightfully hungry. Do you know where I might find a tavern or a bakery?"
+
+Example for need="water", personality="gruff":
+"You. I need water. Where's the well in this town?"
+
+Dialogue:
+"""
 }

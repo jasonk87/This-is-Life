@@ -303,8 +303,31 @@ PROFESSIONS = {
             }
         ],
         "default_sub_task_sequence": ["fish_at_spot", "store_fish"]
+    },
+    "Town Official": {
+        "display_name": "Town Official",
+        "wage": 40,
+        "description": "Manages the civic duties of a settlement.",
+        "work_building_categories": ["Town Hall", "Capital Hall"],
+        "sub_tasks": [],
+        "default_sub_task_sequence": []
+    },
+    "Traveling Merchant": {
+        "display_name": "Traveling Merchant",
+        "wage": 0, # They earn money by trading
+        "description": "Travels between towns to buy and sell goods.",
+        "work_building_categories": [], # No fixed workplace
+        "sub_tasks": [],
+        "default_sub_task_sequence": []
+    },
+    "Unemployed": {
+        "display_name": "Unemployed",
+        "wage": 0,
+        "description": "Currently without a formal job.",
+        "work_building_categories": [],
+        "sub_tasks": [],
+        "default_sub_task_sequence": []
     }
-    # More professions can be added here
 }
 
 # Helper function to get profession details

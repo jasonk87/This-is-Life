@@ -104,3 +104,6 @@ LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
 DEFAULT_HEARING_RADIUS = 12 # How far the player can hear standard volume speech.
 DEFAULT_SPEECH_VOLUME = 10  # How far standard NPC speech travels.
 # Speech is heard if distance <= player.hearing_radius AND distance <= npc.speech_volume.
+
+# --- Abstract Simulation Configs ---
+ABSTRACT_SIMULATION_DISTANCE_CHUNKS = 3 # villages further than this may be abstractly simulated

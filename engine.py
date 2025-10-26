@@ -26,6 +26,8 @@ from config import (
     FOV_RADIUS_DAY, FOV_RADIUS_DUSK_DAWN, FOV_RADIUS_NIGHT, FOV_RADIUS_PITCH_BLACK,
     # Auditory Perception Configs
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME,
+    # Abstract Simulation Configs
+    ABSTRACT_SIMULATION_DISTANCE_CHUNKS,
     # Season and Temperature Configs
     DAYS_PER_SEASON,
     SEASON_TEMPERATURE_MODIFIERS,
@@ -494,6 +496,7 @@ class World:
             for x in range(self.chunk_width):
                 self._generate_chunk_detail(self.chunks[y][x], x, y)
 
+        self._spawn_traveling_merchants()
         self._find_starting_position()
 
         # Build transparency map - this is expensive on init as it forces all chunks to generate.
@@ -1019,7 +1022,41 @@ class World:
                 if not npc.current_path or len(npc.current_path) <= 1:
                     npc.current_path = []
                     # Destination reached, process arrival based on task
-                    if npc.current_task == "socializing" and npc.task_target_entity_id:
+                    if npc.profession == "Traveling Merchant" and npc.current_task == "traveling_to_village":
+                        self.add_message_to_chat_log(f"{npc.name} has arrived at a village.")
+                        npc.current_task = "lingering_in_village"
+                        npc.leisure_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS)
+
+                        arrival_village = self._get_village_for_npc(npc, by_coords=True)
+                        if arrival_village:
+                            key_npcs = [
+                                other_npc for other_npc in self.village_npcs
+                                if self._get_village_for_npc(other_npc) == arrival_village and
+                                other_npc.profession in ["Tavern Keeper", "Town Official", "Sheriff"]
+                            ]
+                            if key_npcs:
+                                gossip_recipient = random.choice(key_npcs)
+                                events_shared = 0
+                                for event_id, event_obj in npc.known_events.items():
+                                    if event_id not in gossip_recipient.known_events:
+                                        gossip_recipient.known_events[event_id] = event_obj
+                                        events_shared += 1
+                                if events_shared > 0:
+                                    self.add_message_to_chat_log(f"Debug: {npc.name} shared {events_shared} rumors with {gossip_recipient.name}.")
+
+                        npc.known_events.clear()
+                        village_center_x = (npc.x // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
+                        village_center_y = (npc.y // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
+                        for event in self.global_events:
+                            if event.location:
+                                dist_sq = (event.location[0] - village_center_x)**2 + (event.location[1] - village_center_y)**2
+                                if dist_sq < (CHUNK_SIZE * 1.5)**2:
+                                    if event.id not in npc.known_events:
+                                        npc.known_events[event.id] = event
+                        if npc.known_events:
+                            self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.known_events)} events in the new village.")
+
+                    elif npc.current_task == "socializing" and npc.task_target_entity_id:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
                             # Successfully met up, now exchange gossip
@@ -1431,7 +1468,7 @@ class World:
 
                 if not should_flee:
                     for other_npc in self.npcs:
-                        if other_npc.id != npc.id and other_npc.animal_type in animal_def.get("predators", []):
+                        if other_npc.id != npc.id and isinstance(other_npc, Animal) and other_npc.animal_type in animal_def.get("predators", []):
                             distance_to_predator = math.sqrt((npc.x - other_npc.x)**2 + (npc.y - other_npc.y)**2)
                             if distance_to_predator < flee_radius:
                                 should_flee = True
@@ -2097,6 +2134,35 @@ class World:
             if npc.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'):
                 if hasattr(npc, 'original_char_before_sleep'): # Ensure it exists before trying to access
                     npc.char = npc.original_char_before_sleep
+
+            # --- Traveling Merchant AI ---
+            if npc.profession == "Traveling Merchant":
+                if npc.current_task == "traveling_to_village" and not npc.current_path:
+                    # Find a new village to travel to
+                    all_villages = []
+                    for y_chunk in range(self.chunk_height):
+                        for x_chunk in range(self.chunk_width):
+                            chunk = self.chunks[y_chunk][x_chunk]
+                            if chunk.village:
+                                all_villages.append(chunk.village)
+
+                    if len(all_villages) > 1:
+                        current_village = self._get_village_for_npc(npc)
+                        target_village = random.choice([v for v in all_villages if v != current_village])
+
+                        if target_village and target_village.buildings:
+                            target_building = random.choice(target_village.buildings)
+                            dest_x = target_building.global_center_x
+                            dest_y = target_building.global_center_y
+
+                            path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                            if path:
+                                npc.current_path = path
+                                npc.current_destination_coords = (dest_x, dest_y)
+                                self.add_message_to_chat_log(f"{npc.name} is traveling to a new village.")
+                elif npc.current_task == "idle" and random.random() < 0.1:
+                     npc.current_task = "traveling_to_village"
+
 
             npc.game_time_last_updated = self.game_time
 
@@ -2992,18 +3058,26 @@ class World:
 
         return closest_mill
 
-    def _get_village_for_npc(self, npc: NPC) -> Village | None:
-        """Finds the village object that an NPC belongs to, typically via their home."""
-        if not npc.home_building_id:
-            return None
-        # This is inefficient and relies on iterating all chunks.
-        # A future optimization would be to cache npc -> village mapping.
-        for y_idx, row in enumerate(self.chunks):
-            for x_idx, chk in enumerate(row):
-                if chk.village:
-                    # Check if the building object is in this village's list of buildings
-                    if self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
-                        return chk.village
+    def _get_village_for_npc(self, npc: NPC, by_coords: bool = False) -> Village | None:
+        """
+        Finds the village object an NPC is associated with.
+        Can find by home building ID or by current coordinates.
+        """
+        if not by_coords and npc.home_building_id:
+            # Find village by home building (for residents)
+            for y_idx, row in enumerate(self.chunks):
+                for x_idx, chk in enumerate(row):
+                    if chk.village:
+                        if self.buildings_by_id.get(npc.home_building_id) in chk.village.buildings:
+                            return chk.village
+        else:
+            # Find village by current NPC coordinates (for travelers)
+            chunk_x = npc.x // CHUNK_SIZE
+            chunk_y = npc.y // CHUNK_SIZE
+            if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+                chunk = self.chunks[chunk_y][chunk_x]
+                if chunk.village:
+                    return chunk.village
         return None
 
     def _find_nearest_building_of_type(self, npc: NPC, building_type: str) -> Building | None:
@@ -4886,6 +4960,67 @@ class World:
 
         building.interior_decorated = True
 
+    def _spawn_traveling_merchants(self):
+        """Spawns a few traveling merchants in random villages."""
+        all_villages = []
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if chunk.village:
+                    all_villages.append(chunk.village)
+
+        if not all_villages:
+            return
+
+        num_merchants = 2 # Let's spawn 2 for now
+        for i in range(num_merchants):
+            start_village = random.choice(all_villages)
+
+            # Find a building in the village to place the merchant
+            if not start_village.buildings:
+                continue
+
+            start_building = random.choice(start_village.buildings)
+            start_x = start_building.global_center_x
+            start_y = start_building.global_center_y
+
+            prompt = LLM_PROMPTS["npc_personality"].format(
+                player_criminal_points=self.player.reputation.get(REP_CRIMINAL, 0),
+                player_hero_points=self.player.reputation.get(REP_HERO, 0),
+                name_hint="a traveling merchant",
+                personality_hint="worldly, business-savvy, friendly",
+                family_ties_hint="none",
+                attitude_to_player_hint="neutral"
+            )
+            llm_response = self._call_ollama(prompt)
+            try:
+                npc_data = json.loads(llm_response)
+
+                merchant = NPC(
+                    x=start_x,
+                    y=start_y,
+                    name=npc_data.get("name", f"Traveling Merchant {i+1}"),
+                    dialogue=npc_data.get("dialogue", ["Looking for a deal?"]),
+                    personality=npc_data.get("personality", "merchant"),
+                    family_ties=npc_data.get("family_ties", "none"),
+                    attitude_to_player=npc_data.get("attitude_to_player", "neutral")
+                )
+                merchant.profession = "Traveling Merchant"
+                merchant.money = random.randint(200, 500)
+                # Give them some goods to sell
+                merchant.npc_inventory["healing_salve"] = random.randint(5, 15)
+                merchant.npc_inventory["iron_ingot"] = random.randint(3, 10)
+                # merchant.npc_inventory["cloth"] = random.randint(10, 20)
+
+                # Set their initial AI state
+                merchant.current_task = "traveling_to_village"
+
+                self.npcs.append(merchant) # Add them to the general NPC list, not a specific village
+                self.add_message_to_chat_log(f"A traveling merchant, {merchant.name}, has begun their journey.")
+
+            except json.JSONDecodeError as e:
+                self.add_message_to_chat_log(f"Error parsing LLM response for Traveling Merchant: {e}")
+
     def talk_to_npc(self):
         # Find the closest NPC and interact with them
         closest_npc = None
@@ -5665,8 +5800,67 @@ class World:
         self._update_npc_movement()
         self._update_world_environment()
         self._update_economy()
+        self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
+
+    def _update_abstract_simulation(self):
+        """
+        Runs a lightweight simulation for off-screen villages to simulate high-level events
+        like births, deaths, etc., creating a living history.
+        """
+        # This should not run on every single tick. Let's run it once per day.
+        if self.game_time % DAY_LENGTH_TICKS != 0:
+            return
+
+        player_chunk_x = self.player.x // CHUNK_SIZE
+        player_chunk_y = self.player.y // CHUNK_SIZE
+
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if not chunk.village:
+                    continue
+
+                # Calculate distance to player
+                dist = max(abs(x_chunk - player_chunk_x), abs(y_chunk - player_chunk_y))
+
+                if dist > ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
+                    village_npcs = [npc for npc in self.village_npcs if self._get_village_for_npc(npc) == chunk.village]
+                    if not village_npcs:
+                        continue
+
+                    # --- Birth Simulation ---
+                    # Find potential couples (for simplicity, any two adults living together)
+                    potential_parents = [npc for npc in village_npcs if 18 < npc.age < 50]
+                    if len(potential_parents) >= 2 and random.random() < 0.05: # 5% chance of a birth event per day
+                        parent1 = random.choice(potential_parents)
+                        parent2 = random.choice(potential_parents)
+                        if parent1.id != parent2.id:
+                            # For now, we don't create a new NPC object as it would be complex to place and manage.
+                            # We just log the historical event.
+                            self.log_event(
+                                event_type="npc_birth",
+                                description=f"A child was born to {parent1.name} and {parent2.name}.",
+                                subject_id=parent1.id,
+                                target_id=parent2.id,
+                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE)
+                            )
+
+                    # --- Death Simulation (Old Age) ---
+                    elderly_npcs = [npc for npc in village_npcs if npc.age > 70]
+                    for elder in elderly_npcs:
+                        # Chance of dying increases with age
+                        if random.random() < (elder.age - 70) / 100.0:
+                            self.log_event(
+                                event_type="entity_death",
+                                description=f"{elder.name} died of old age.",
+                                subject_id=elder.id,
+                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE)
+                            )
+                            # In a full abstract sim, we would remove the NPC from the world here.
+                            # For now, we just log it. A more complex system would be needed to truly remove them.
+                            # self.handle_npc_death(elder) # This could be problematic if the NPC is referenced elsewhere.
 
     def _process_npc_gossip_reaction(self):
         """

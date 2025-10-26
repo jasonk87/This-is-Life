@@ -96,19 +96,12 @@ def execute_interaction(world: World, context_handler):
             world.add_message_to_chat_log(f"You have claimed this {entity_data.building_type} as your own!")
         else:
             world.add_message_to_chat_log("You cannot claim this structure.")
-    elif selected_action == "Read":
-        if selected_entity_dict["type"] == "item" and entity_data["item_key"].startswith("book_"):
-            book_id = entity_data["item_key"].split("_")[1]
-            world.game_state = "BOOK_READING"
-            world.book_reading_context["book_id"] = book_id
-            world.book_reading_context["scroll_offset"] = 0
-            world.player.known_books.add(book_id)
     elif selected_action == "Examine":
         # Basic examine for now
         world.add_message_to_chat_log(f"You see a {selected_entity_dict['name']}.")
 
     # Close the menu after action, unless it opened another UI like chat
-    if not world.chat_ui_active and not world.trade_ui_active and world.game_state != "BOOK_READING":
+    if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
 
 import argparse
@@ -131,7 +124,20 @@ def main():
     if args.headless:
         print("Running in headless mode. The game will run for a fixed number of ticks.")
         for _ in range(1000): # Run for 1000 ticks in headless mode
-            world.update()
+            world.game_time += 1
+            world._update_player_hunger_thirst()
+            world._update_season()
+            world._update_player_temperature()
+            world._apply_temperature_effects(world.player)
+            world._update_light_level_and_fov()
+            world._update_world_environment()
+            world._update_weather()
+            world.update_fov()
+            world._update_npc_schedules()
+            world._update_npc_movement()
+            world._handle_npc_speech()
+            if world.game_time % 100 == 0:
+                world._update_economy()
         print("Headless mode run complete.")
         return
 
@@ -156,7 +162,7 @@ def main():
     ) as context:
         while True:
             # Game Logic Updates
-            world.update()
+            world.game_time += 1
             # ... (rest of the game logic updates) ...
             if world.player.is_jailed and world.player.jail_time_remaining > 0:
                 world.player.jail_time_remaining -= 1
@@ -167,6 +173,20 @@ def main():
                     open_door_def = world.DECORATION_ITEM_DEFINITIONS["iron_door_open"]
                     world._change_map_tile((door_x, door_y), open_door_def)
                     world.player.jail_cell_coords = None
+
+            world._update_player_hunger_thirst()
+            world._update_season()
+            world._update_player_temperature()
+            world._apply_temperature_effects(world.player)
+            world._update_light_level_and_fov()
+            world._update_world_environment()
+            world._update_weather()
+            world.update_fov()
+            world._update_npc_schedules()
+            world._update_npc_movement()
+            world._handle_npc_speech()
+            if world.game_time % 100 == 0:
+                world._update_economy()
 
             # Drawing
             if world.game_state == "PLAYER_DEAD":
@@ -336,25 +356,6 @@ def main():
                                 selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
                                 world.craft_item(selected_key)
 
-                    elif world.game_state == "KNOWLEDGE_MENU":
-                        ctx = world.knowledge_menu_context
-                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.K:
-                            world.game_state = "PLAYING"
-                        elif event.sym == tcod.event.KeySym.UP:
-                            ctx["scroll_offset"] = max(0, ctx["scroll_offset"] - 1)
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            ctx["scroll_offset"] += 1
-
-                    elif world.game_state == "BOOK_READING":
-                        ctx = world.book_reading_context
-                        if event.sym == tcod.event.KeySym.ESCAPE:
-                            world.game_state = "PLAYING"
-                            ctx["book_id"] = None
-                        elif event.sym == tcod.event.KeySym.UP:
-                            ctx["scroll_offset"] = max(0, ctx["scroll_offset"] - 1)
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            ctx["scroll_offset"] += 1
-
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
                             dx, dy = move_keys[event.sym]
@@ -381,7 +382,8 @@ def main():
                             world.player.take_damage(5)
                             world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}")
                         elif event.sym == tcod.event.KeySym.K:
-                            world.game_state = "KNOWLEDGE_MENU"
+                            world.player.adjust_reputation(REP_CRIMINAL, 10)
+                            world.add_message_to_chat_log(f"Criminal points +10. Total: {world.player.reputation[REP_CRIMINAL]}")
                         elif event.sym == tcod.event.KeySym.J:
                             world.player.adjust_reputation(REP_HERO, 10)
                             world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")

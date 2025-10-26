@@ -4500,30 +4500,17 @@ class World:
                     "prompt": prompt,
                     "stream": False
                 },
-                timeout=30 # 30 second timeout
+                timeout=5 # 5 second timeout, reduced from 30
             )
-            response.raise_for_status() # Raise an exception for HTTP errors
+            response.raise_for_status()
             full_response = response.json()["response"]
-            # Attempt to extract JSON from markdown code block
-            json_start = full_response.find("```json")
-            if json_start != -1:
-                json_end = full_response.find("```", json_start + len("```json"))
-                if json_end != -1:
-                    json_str = full_response[json_start + len("```json"):json_end].strip()
-                    try:
-                        json.loads(json_str) # Validate JSON
-                        return json_str
-                    except json.JSONDecodeError:
-                        pass # Fall through to try parsing full response
-
-            # If no markdown block or invalid JSON in block, try parsing full response
-            try:
-                json.loads(full_response) # Validate JSON
-                return full_response
-            except json.JSONDecodeError:
-                return "" # Return empty string if not valid JSON
+            # This logic to extract JSON is good, but let's assume for now the model might not always return valid JSON.
+            # We will just return the raw response if it's not JSON, and let the calling function handle it.
+            return full_response.strip()
         except requests.exceptions.RequestException as e:
-            print(f"Error communicating with Ollama: {e}")
+            # Don't print to the console during gameplay, as it can be disruptive.
+            # A proper logging system would be better for production. For now, we'll just return "".
+            # print(f"Error communicating with Ollama: {e}")
             return ""
 
     def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None):

@@ -2,15 +2,15 @@ import tcod
 import random
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
-from data.environment import WEATHER_TYPES
+from data.environment import WEATHER_DEFINITIONS
 
 def draw_weather_overlay(console: tcod.console.Console, world) -> None:
     """Draws a visual effect for the current weather, like rain."""
-    current_weather_name = getattr(world, 'current_weather', 'clear')
+    current_weather_name = world.weather
     if current_weather_name != 'clear':
-        weather_def = WEATHER_TYPES.get(current_weather_name)
+        weather_def = WEATHER_DEFINITIONS.get(current_weather_name)
         if weather_def:
-            weather_char = weather_def.get("char", ord(' '))
+            weather_char = weather_def.get("char", " ")
             weather_color = weather_def.get("color", (200, 200, 255))
             weather_chance = weather_def.get("chance", 0.1)
 

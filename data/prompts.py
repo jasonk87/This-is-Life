@@ -736,4 +736,19 @@ Example 2 (A cynical scribe writing a philosophical text):
 
 JSON Output:
 """
+,
+    "town_official_compile_census": """
+You are a Town Official named {official_name} with a {official_personality} personality in a medieval fantasy world.
+You are compiling a census for the village for the year {year}.
+Based on the following list of births and deaths, write a short census document.
+The document should have a formal tone, but may include a brief, personality-driven introductory or concluding remark.
+
+Births:
+{birth_events_summary}
+
+Deaths:
+{death_events_summary}
+
+Respond with a JSON object containing the census document's "title" and "content". The title should be something like "Village Census - Year {year}".
+""",
 }

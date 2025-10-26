@@ -309,8 +309,23 @@ PROFESSIONS = {
         "wage": 40,
         "description": "Manages the civic duties of a settlement.",
         "work_building_categories": ["Town Hall", "Capital Hall"],
-        "sub_tasks": [],
-        "default_sub_task_sequence": []
+        "sub_tasks": [
+            {
+                "id": "idle_at_desk",
+                "display_name": "Reviewing Documents",
+                "action_verb": "reviewing",
+                "duration_ticks": 150,
+                "target_zone_tag": "desk_area"
+            },
+            {
+                "id": "compile_census",
+                "display_name": "Compiling Census",
+                "action_verb": "compiling",
+                "duration_ticks": 6000,
+                "target_zone_tag": "desk_area"
+            }
+        ],
+        "default_sub_task_sequence": ["idle_at_desk", "compile_census"]
     },
     "Traveling Merchant": {
         "display_name": "Traveling Merchant",

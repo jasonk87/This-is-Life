@@ -52,13 +52,14 @@ import uuid
 
 class Book:
     """A class to represent a book written by a Scribe."""
-    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str):
+    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle"):
         self.id = str(uuid.uuid4())
         self.title = title
         self.author_id = author_id
         self.author_name = author_name
         self.year_written = year_written
         self.content = content
+        self.book_type = book_type # e.g., "chronicle", "census"
 
 class Event:
     """A class to represent a significant event that occurs in the world."""
@@ -2582,13 +2583,44 @@ class World:
                                 author_id=npc.id,
                                 author_name=npc.name,
                                 year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-                                content=book_data.get("content", "...")
+                                content=book_data.get("content", "..."),
+                                book_type="chronicle"
                             )
                             self.books.append(new_book)
                             work_building.building_inventory[f"book_{new_book.id}"] = 1
                             self.add_message_to_chat_log(f"{npc.name} has written a new book titled '{new_book.title}'.")
                         except json.JSONDecodeError as e:
                             self.add_message_to_chat_log(f"Error parsing LLM response for book writing: {e}")
+                    elif completed_sub_task_id == "compile_census":
+                        birth_events = [e for e in self.global_events if e.type == 'npc_birth']
+                        death_events = [e for e in self.global_events if e.type == 'entity_death']
+
+                        birth_events_summary = "\n".join([e.description for e in birth_events]) or "None recorded."
+                        death_events_summary = "\n".join([e.description for e in death_events]) or "None recorded."
+
+                        prompt = LLM_PROMPTS["town_official_compile_census"].format(
+                            official_name=npc.name,
+                            official_personality=npc.personality,
+                            year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                            birth_events_summary=birth_events_summary,
+                            death_events_summary=death_events_summary
+                        )
+                        llm_response = self._call_ollama(prompt)
+                        try:
+                            book_data = json.loads(llm_response)
+                            new_book = Book(
+                                title=book_data.get("title", f"Census - Year {self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)}"),
+                                author_id=npc.id,
+                                author_name=npc.name,
+                                year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                                content=book_data.get("content", "..."),
+                                book_type="census"
+                            )
+                            self.books.append(new_book)
+                            work_building.building_inventory[f"book_{new_book.id}"] = 1
+                            self.add_message_to_chat_log(f"{npc.name} has compiled the village census.")
+                        except json.JSONDecodeError as e:
+                            self.add_message_to_chat_log(f"Error parsing LLM response for census compilation: {e}")
 
                     elif completed_sub_task_id == "mill_flour":
                         # Miller is at their grinding stone, try to mill flour
@@ -3256,7 +3288,7 @@ class World:
         # 2. Add items on the ground
         if (x, y) in self.items_on_map:
             for item_info in self.items_on_map[(x, y)]:
-                item_def = ITEM_DEFINITIONS.get(item_info["item_key"], {})
+                item_def = self.get_item_definition(item_info["item_key"])
                 entities.append({
                     "type": "item",
                     "data": item_info,
@@ -3274,6 +3306,28 @@ class World:
             entities.append({"type": "building", "data": building, "name": building.building_type})
 
         return entities
+
+    def get_item_definition(self, item_key: str) -> dict | None:
+        """
+        Gets the definition for an item. Handles dynamic book keys.
+        Returns a copy of the definition to prevent modification of the original.
+        """
+        if item_key.startswith("book_"):
+            book_id = item_key.split("_", 1)[1]
+            book = next((b for b in self.books if b.id == book_id), None)
+            if book:
+                base_def_key = f"book_{book.book_type}"
+                base_def = ITEM_DEFINITIONS.get(base_def_key)
+                if base_def:
+                    # Create a copy and override dynamic properties
+                    dynamic_def = base_def.copy()
+                    dynamic_def["name"] = book.title
+                    dynamic_def["description"] = f"A book titled '{book.title}' by {book.author_name}."
+                    return dynamic_def
+            # Fallback if book not found, return the base chronicle definition
+            return ITEM_DEFINITIONS.get("book_chronicle", {}).copy()
+
+        return ITEM_DEFINITIONS.get(item_key, {}).copy()
 
     def _get_actions_for_entity(self, entity: dict) -> list[str]:
         """Returns a list of available actions for a given entity dictionary."""
@@ -6090,13 +6144,19 @@ class World:
         witness_attitude_to_victim = "N/A"
         if victim:
             victim_name = victim.name
-            # A more complex social model would have NPC->NPC attitudes. For now, use a placeholder.
-            # We can infer it slightly based on professions (e.g., two guards are likely allies).
             if witness.profession == victim.profession and witness.profession not in ["Unemployed", "Farmer"]:
                  witness_attitude_to_victim = "friendly"
             else:
                  witness_attitude_to_victim = "neutral"
 
+        # Log the crime event itself
+        self.log_event(
+            event_type="crime_witnessed",
+            description=f"{{subject}} was witnessed by {witness.name} committing the crime of {crime_type}.",
+            subject_id=criminal.id,
+            target_id=victim.id if victim else None,
+            location=(witness.x, witness.y) # Location is where the witness was
+        )
 
         prompt = LLM_PROMPTS["npc_witness_reaction"].format(
             witness_name=witness.name,
@@ -6491,6 +6551,14 @@ class World:
 
 
         if is_complete:
+            # Log the event before giving rewards
+            self.log_event(
+                event_type="quest_complete",
+                description=f"{{subject}} completed the quest '{active_quest_data['title']}'.",
+                subject_id=self.player.id,
+                location=(self.player.x, self.player.y)
+            )
+
             if active_quest_data["type"] == "fetch": # Consume items for fetch quests
                 self.player.remove_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"])
 

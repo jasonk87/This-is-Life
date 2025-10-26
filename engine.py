@@ -50,6 +50,16 @@ from data.environment import WEATHER_DEFINITIONS
 import json
 import uuid
 
+class Book:
+    """A class to represent a book written by a Scribe."""
+    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str):
+        self.id = str(uuid.uuid4())
+        self.title = title
+        self.author_id = author_id
+        self.author_name = author_name
+        self.year_written = year_written
+        self.content = content
+
 class Event:
     """A class to represent a significant event that occurs in the world."""
     def __init__(self, event_type: str, description: str, subject_id: int, game_time: int, target_id: int | None = None, location: tuple[int, int] | None = None):
@@ -233,6 +243,7 @@ class Player:
         # Quests
         self.active_quests: dict = {}
         self.completed_quests: list[str] = []
+        self.known_books: set[str] = set()
 
 
     def take_damage(self, amount: int, world=None) -> int:
@@ -472,6 +483,12 @@ class World:
             "scroll_offset": 0
         }
 
+        # Book Reading UI State
+        self.book_reading_context = {
+            "book_id": None,
+            "scroll_offset": 0
+        }
+
         # Items on the ground
         self.items_on_map: dict[tuple[int, int], list[dict]] = {} # Key: (x,y), Value: list of {"item_key": str, "quantity": int}
 
@@ -490,6 +507,7 @@ class World:
 
         # Gossip and Event System
         self.global_events: list[Event] = []
+        self.books: list[Book] = []
 
         # Pre-generate all chunks to avoid lazy-loading issues in tests
         for y in range(self.chunk_height):
@@ -2547,6 +2565,30 @@ class World:
                                 mill.building_inventory["flour"] -= flour_to_buy
                                 npc.money -= flour_price * flour_to_buy
                                 work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + flour_to_buy
+                    elif completed_sub_task_id == "write_book":
+                        # Scribe is at their desk, generate a book
+                        known_events_summary = " ".join([event.description for event in npc.known_events.values()])
+                        prompt = LLM_PROMPTS["scribe_write_book"].format(
+                            scribe_name=npc.name,
+                            scribe_personality=npc.personality,
+                            known_events_summary=known_events_summary,
+                            year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+                        )
+                        llm_response = self._call_ollama(prompt)
+                        try:
+                            book_data = json.loads(llm_response)
+                            new_book = Book(
+                                title=book_data.get("title", "Untitled"),
+                                author_id=npc.id,
+                                author_name=npc.name,
+                                year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                                content=book_data.get("content", "...")
+                            )
+                            self.books.append(new_book)
+                            work_building.building_inventory[f"book_{new_book.id}"] = 1
+                            self.add_message_to_chat_log(f"{npc.name} has written a new book titled '{new_book.title}'.")
+                        except json.JSONDecodeError as e:
+                            self.add_message_to_chat_log(f"Error parsing LLM response for book writing: {e}")
 
                     elif completed_sub_task_id == "mill_flour":
                         # Miller is at their grinding stone, try to mill flour
@@ -3255,6 +3297,8 @@ class World:
                     actions.append("Trade")
         elif entity_type == "item":
             actions.append("Pick up")
+            if entity_data["item_key"].startswith("book_"):
+                actions.append("Read")
         elif entity_type == "tile":
             if isinstance(entity_data, Tree) and entity_data.is_choppable:
                 actions.append("Chop")
@@ -4763,20 +4807,17 @@ class World:
                     elif work_building.building_type == "tavern":
                         npc.profession = "Tavern Keeper"
                     elif work_building.building_type == "lumber_mill":
-                        # Could have multiple roles at a lumber mill, e.g. Foreman and Woodcutter
-                        # For now, let's make the first NPC assigned to a lumber_mill the "Foreman" (quest giver)
-                        # and subsequent ones "Woodcutter" (producer). This is a simple heuristic.
                         is_foreman_assigned_to_mill = any(
                             other_npc.profession == "Lumber Mill Foreman" and other_npc.work_building_id == work_building.id
-                            for other_npc in self.village_npcs + self.npcs # Check all existing npcs
+                            for other_npc in self.village_npcs + self.npcs
                         )
                         if not is_foreman_assigned_to_mill:
                             npc.profession = "Lumber Mill Foreman"
                         else:
                             npc.profession = "Woodcutter"
-                    elif work_building.building_type == "farm": # Assuming farm type from production step
+                    elif work_building.building_type == "farm":
                          npc.profession = "Farmer"
-                    elif work_building.building_type == "mine": # Assuming mine type
+                    elif work_building.building_type == "mine":
                          npc.profession = "Miner"
                     elif work_building.building_type == "carpenter_shop":
                         npc.profession = "Carpenter"
@@ -4786,6 +4827,8 @@ class World:
                         npc.profession = "Baker"
                     elif work_building.building_type == "fishing_hut":
                         npc.profession = "Fisherman"
+                    elif work_building.building_type == "library":
+                        npc.profession = "Scribe"
                     else:
                         npc.profession = work_building.building_type.replace("_", " ").title()
                 else:
@@ -5638,6 +5681,19 @@ class World:
             chunk.village.add_building(house)
             self.buildings_by_id[house.id] = house
             self._draw_building(tiles, house, "wood_wall")
+
+        # Generate Library
+        library_w, library_h = 8, 6
+        library_x = road_x - library_w - 2
+        library_y = road_y + 2
+        library_x = max(1, min(library_x, CHUNK_SIZE - library_w - 1))
+        library_y = max(1, min(library_y, CHUNK_SIZE - library_h - 1))
+        library = Building(library_x, library_y, library_w, library_h,
+                                building_type="library", category="civic_workplace",
+                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        chunk.village.add_building(library)
+        self.buildings_by_id[library.id] = library
+        self._draw_building(tiles, library, "stone_wall")
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         self._initialize_economy(chunk.village)

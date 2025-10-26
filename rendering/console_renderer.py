@@ -146,9 +146,104 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     draw_chat_ui(console, world)
     draw_trade_ui(console, world)
     draw_crafting_menu(console, world)
+    draw_knowledge_menu(console, world)
+    draw_book_reading_ui(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
     draw_status_panel(console, world)
 
+def draw_book_reading_ui(console: tcod.console.Console, world) -> None:
+    """Draws the book reading UI."""
+    if world.game_state != "BOOK_READING":
+        return
+
+    menu_width = 60
+    menu_height = 40
+    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
+    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
+
+    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="Reading", clear=True)
+
+    ctx = world.book_reading_context
+    book_id = ctx.get("book_id")
+    scroll_offset = ctx.get("scroll_offset", 0)
+
+    if not book_id:
+        console.print(x=menu_x + 2, y=menu_y + 2, string="No book selected.", fg=(255, 0, 0))
+        return
+
+    book = next((b for b in world.books if b.id == book_id), None)
+
+    if not book:
+        console.print(x=menu_x + 2, y=menu_y + 2, string=f"Error: Book with ID {book_id} not found.", fg=(255, 0, 0))
+        return
+
+    # --- Render Book Content ---
+    y_offset = menu_y + 2
+
+    # Title
+    console.print_box(x=menu_x + 2, y=y_offset, width=menu_width - 4, height=2, string=book.title, fg=(255, 255, 0), alignment=tcod.CENTER)
+    y_offset += 2
+
+    # Author and Year
+    author_line = f"by {book.author_name}, Year {book.year_written}"
+    console.print_box(x=menu_x + 2, y=y_offset, width=menu_width - 4, height=1, string=author_line, fg=(200, 200, 200), alignment=tcod.CENTER)
+    y_offset += 2
+
+    # Separator
+    console.print(x=menu_x + 1, y=y_offset, string="-" * (menu_width - 2))
+    y_offset += 1
+
+    # Content
+    content_width = menu_width - 4
+    content_height = menu_height - (y_offset - menu_y) - 2
+
+    # Use tcod's text wrapping
+    wrapped_text = tcod.text.wrap(book.content, width=content_width, indent=0)
+
+    lines = wrapped_text.split('\n')
+
+    for i in range(content_height):
+        line_index = scroll_offset + i
+        if line_index < len(lines):
+            console.print(x=menu_x + 2, y=y_offset + i, string=lines[line_index], fg=(255, 255, 255))
+
+    # Scroll indicators
+    if scroll_offset > 0:
+        console.print(x=menu_x + menu_width - 2, y=menu_y + 1, string="^", fg=(255, 255, 0))
+    if scroll_offset + content_height < len(lines):
+        console.print(x=menu_x + menu_width - 2, y=menu_y + menu_height - 2, string="v", fg=(255, 255, 0))
+
+def draw_knowledge_menu(console: tcod.console.Console, world) -> None:
+    """Draws the knowledge menu UI."""
+    if world.game_state != "KNOWLEDGE_MENU":
+        return
+
+    menu_width = 50
+    menu_height = 30
+    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
+    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
+
+    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="Knowledge", clear=True)
+
+    ctx = world.knowledge_menu_context
+    scroll_offset = ctx.get("scroll_offset", 0)
+
+    y_offset = menu_y + 2
+
+    known_books = [b for b in world.books if b.id in world.player.known_books]
+
+    if not known_books:
+        console.print(x=menu_x + 2, y=y_offset, string="You haven't read any books yet.", fg=(128, 128, 128))
+        return
+
+    list_height = menu_height - 4
+    for i in range(list_height):
+        book_index = scroll_offset + i
+        if book_index >= len(known_books):
+            break
+
+        book = known_books[book_index]
+        console.print(x=menu_x + 2, y=y_offset + i, string=f"- {book.title} by {book.author_name}", fg=(255, 255, 255))
 
 def draw_cursor_info(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws information about the tile under the mouse cursor."""

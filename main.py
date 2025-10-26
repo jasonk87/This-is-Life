@@ -96,12 +96,19 @@ def execute_interaction(world: World, context_handler):
             world.add_message_to_chat_log(f"You have claimed this {entity_data.building_type} as your own!")
         else:
             world.add_message_to_chat_log("You cannot claim this structure.")
+    elif selected_action == "Read":
+        if selected_entity_dict["type"] == "item" and entity_data["item_key"].startswith("book_"):
+            book_id = entity_data["item_key"].split("_")[1]
+            world.game_state = "BOOK_READING"
+            world.book_reading_context["book_id"] = book_id
+            world.book_reading_context["scroll_offset"] = 0
+            world.player.known_books.add(book_id)
     elif selected_action == "Examine":
         # Basic examine for now
         world.add_message_to_chat_log(f"You see a {selected_entity_dict['name']}.")
 
     # Close the menu after action, unless it opened another UI like chat
-    if not world.chat_ui_active and not world.trade_ui_active:
+    if not world.chat_ui_active and not world.trade_ui_active and world.game_state != "BOOK_READING":
         ctx["active"] = False
 
 import argparse
@@ -329,6 +336,25 @@ def main():
                                 selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
                                 world.craft_item(selected_key)
 
+                    elif world.game_state == "KNOWLEDGE_MENU":
+                        ctx = world.knowledge_menu_context
+                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.K:
+                            world.game_state = "PLAYING"
+                        elif event.sym == tcod.event.KeySym.UP:
+                            ctx["scroll_offset"] = max(0, ctx["scroll_offset"] - 1)
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            ctx["scroll_offset"] += 1
+
+                    elif world.game_state == "BOOK_READING":
+                        ctx = world.book_reading_context
+                        if event.sym == tcod.event.KeySym.ESCAPE:
+                            world.game_state = "PLAYING"
+                            ctx["book_id"] = None
+                        elif event.sym == tcod.event.KeySym.UP:
+                            ctx["scroll_offset"] = max(0, ctx["scroll_offset"] - 1)
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            ctx["scroll_offset"] += 1
+
                     elif world.game_state == "PLAYING":
                         if event.sym in move_keys:
                             dx, dy = move_keys[event.sym]
@@ -355,8 +381,7 @@ def main():
                             world.player.take_damage(5)
                             world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}")
                         elif event.sym == tcod.event.KeySym.K:
-                            world.player.adjust_reputation(REP_CRIMINAL, 10)
-                            world.add_message_to_chat_log(f"Criminal points +10. Total: {world.player.reputation[REP_CRIMINAL]}")
+                            world.game_state = "KNOWLEDGE_MENU"
                         elif event.sym == tcod.event.KeySym.J:
                             world.player.adjust_reputation(REP_HERO, 10)
                             world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")

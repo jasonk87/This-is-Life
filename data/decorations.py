@@ -247,5 +247,17 @@ DECORATION_ITEM_DEFINITIONS = {
         "properties": {
             "decay_timer": 1000
         }
+    },
+    "bookshelf": {
+        "name": "Bookshelf",
+        "description": "A wooden bookshelf filled with various tomes.",
+        "char": "[",
+        "color": COLORS["saddlebrown"],
+        "passable": False,
+        "blocks_fov": True,
+        "item_type_tags": ["interactable", "furniture", "container"],
+        "properties": {
+            "interaction_hint": "read"
+        }
     }
 }

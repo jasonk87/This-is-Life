@@ -702,4 +702,38 @@ Example 3: Grumpy NPC hears two people they dislike fought each other.
 
 JSON Decision:
 """
+,
+    "scribe_write_book": """\
+You are an AI roleplaying as a Scribe in a fantasy world, writing a book.
+
+**Scribe's Profile:**
+- Name: {scribe_name}
+- Personality: {scribe_personality}
+
+**Context:**
+The current year is {year}. The scribe has knowledge of various local and historical events, summarized here:
+{known_events_summary}
+
+**Task:**
+Based on the scribe's personality and the events they know, write a short book. The book could be a historical account, a philosophical text, a collection of local tales, or a cautionary work, depending on the scribe's personality and the nature of the events.
+
+**Output Format (JSON):**
+Return a JSON object with the following fields:
+- "title": string (A fitting title for the book.)
+- "content": string (The content of the book. Should be a few paragraphs long.)
+
+Example 1 (A lawful scribe writing about a recent battle):
+{{
+  "title": "The Battle of Black Creek",
+  "content": "In the year {year}, a great battle was fought at Black Creek. The brave warriors of our village defended our homes from the savage goblins..."
+}}
+
+Example 2 (A cynical scribe writing a philosophical text):
+{{
+  "title": "On the Folly of Man",
+  "content": "Year after year, I record the same tales of greed and violence. Men fight over scraps of land and shiny baubles, never learning from the past..."
+}}
+
+JSON Output:
+"""
 }

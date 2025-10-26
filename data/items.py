@@ -827,6 +827,32 @@ ITEM_DEFINITIONS = {
         "on_use": {
             "reduces_hunger": 40
         }
+    },
+    "book_census": {
+        "name": "Census",
+        "description": "A record of births and deaths in the village.",
+        "char": "B",
+        "color": COLORS["dark_amber"],
+        "value": 100,
+        "weight": 2,
+        "stackable": False,
+        "item_type_tags": ["book", "readable"],
+        "properties": {
+            "interaction_hint": "read"
+        }
+    },
+    "book_chronicle": {
+        "name": "Chronicle",
+        "description": "A record of significant events in the village.",
+        "char": "B",
+        "color": COLORS["dark_amber"],
+        "value": 100,
+        "weight": 2,
+        "stackable": False,
+        "item_type_tags": ["book", "readable"],
+        "properties": {
+            "interaction_hint": "read"
+        }
     }
 }
 

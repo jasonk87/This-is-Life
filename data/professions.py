@@ -327,6 +327,22 @@ PROFESSIONS = {
         "work_building_categories": [],
         "sub_tasks": [],
         "default_sub_task_sequence": []
+    },
+    "Scribe": {
+        "display_name": "Scribe",
+        "wage": 28,
+        "description": "Records historical events, maintains the town census, and authors books.",
+        "work_building_categories": ["Library"],
+        "sub_tasks": [
+            {
+                "id": "write_book",
+                "display_name": "Writing a Book",
+                "action_verb": "writing at",
+                "duration_ticks": 5000,
+                "target_zone_tag": "writing_desk"
+            }
+        ],
+        "default_sub_task_sequence": ["write_book"]
     }
 }
 

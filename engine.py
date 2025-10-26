@@ -233,6 +233,10 @@ class Player:
         self.active_quests: dict = {}
         self.completed_quests: list[str] = []
 
+        # Quests
+        self.active_quests: dict = {}
+        self.completed_quests: list[str] = []
+
 
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
@@ -1304,6 +1308,15 @@ class World:
                     continue # Skip non-hostile NPC if not their update interval
 
             npc.game_time_last_updated = self.game_time
+
+            # --- Mourning and Investigating Tasks ---
+            if npc.current_task in ["mourning", "investigating"]:
+                if npc.task_timer > 0:
+                    npc.task_timer -= 1
+                else:
+                    npc.current_task = "idle"
+                    npc.task_target_coords = None
+                continue # Skip normal scheduling
 
             # --- FEAR SYSTEM (High Priority) ---
             can_be_frightened = (npc.profession != "Creature" and
@@ -5800,9 +5813,16 @@ class World:
         self._update_npc_movement()
         self._update_world_environment()
         self._update_economy()
+        self._update_npc_ages()
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
+
+    def _update_npc_ages(self):
+        """Increments the age of all NPCs once per game day."""
+        if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
+            for npc in self.village_npcs + self.npcs:
+                npc.age += 1
 
     def _update_abstract_simulation(self):
         """
@@ -5937,8 +5957,20 @@ class World:
                     npc.relationships[target_entity.id] = npc.relationships.get(target_entity.id, 50) + relationship_change_target
                     # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {target_name} changed by {relationship_change_target}.")
 
-                # TODO: Implement "action" handlers, e.g., if action is "investigate_crime_scene",
-                # generate a new task for the NPC. For now, we just process the social changes.
+                if action == "mourn_death" and subject_entity:
+                    # Find the home of the deceased
+                    if subject_entity.home_building_id:
+                        home_building = self.buildings_by_id.get(subject_entity.home_building_id)
+                        if home_building:
+                            npc.current_task = "mourning"
+                            npc.task_target_coords = (home_building.global_center_x, home_building.global_center_y)
+                            npc.current_path = []
+                            npc.task_timer = random.randint(100, 200) # Mourn for a while
+                elif action == "investigate_crime_scene" and event_to_process.location:
+                    npc.current_task = "investigating"
+                    npc.task_target_coords = event_to_process.location
+                    npc.current_path = []
+                    npc.task_timer = random.randint(50, 100) # Investigate for a bit
 
             except json.JSONDecodeError:
                 # self.add_message_to_chat_log(f"Debug: Failed to parse gossip reaction for {npc.name}: {response_str}")

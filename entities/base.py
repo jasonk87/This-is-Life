@@ -16,6 +16,7 @@ class NPC:
         self.family_ties = family_ties
         self.attitude_to_player = attitude_to_player
         self.last_speech_time = 0
+        self.age = random.randint(18, 65)
         self.relationships = {}  # {npc_id: score}
         self.knowledge = [] # List of known information
         self.known_events: dict[str, 'Event'] = {}
@@ -84,6 +85,7 @@ class NPC:
         self.current_sub_task: str | None = None # e.g., "chop_trees", "haul_logs"
         self.sub_task_target_coords: tuple[int, int] | None = None # Specific global coords for the sub-task action
         self.sub_task_timer: int = 0 # Ticks remaining for the current sub-task's action phase
+        self.task_timer: int = 0
         self.sub_task_zone_target: str | None = None # General zone tag for pathing, e.g., "log_pile_area"
         self.current_sub_task_sequence_index: int = 0 # Index for current profession's sub-task sequence
 

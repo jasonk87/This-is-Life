@@ -652,33 +652,47 @@ You are an AI determining an NPC's internal reaction to hearing a piece of gossi
 - Current Relationship with Gossip Target: {npc_attitude_to_target} (0-100, 50 is neutral)
 
 **Gossip Details:**
-- Event Type: {event_type} (e.g., "combat_attack", "npc_death", "theft")
+- Event Type: {event_type} (e.g., "combat_attack", "entity_death", "theft", "npc_birth")
 - Event Summary: {event_summary}
 
 **Task:**
-Based on the NPC's personality and existing relationships, determine their internal reaction. This will manifest as a change in their relationships towards the subject and/or target of the gossip.
-- A 'lawful' NPC might decrease their relationship with someone who committed a crime.
-- A 'greedy' NPC might not care unless it affects them financially.
-- A 'loyal' NPC will significantly decrease their relationship with anyone who harmed their friends.
-- If the NPC likes the subject and dislikes the target, they might approve of the subject's actions, increasing their relationship score.
-- If the NPC dislikes the subject, they might enjoy hearing about their failures, but it might not change their relationship much more.
+Based on the NPC's personality, relationships, and the nature of the event, determine their reaction. This can be a simple social adjustment or a concrete action.
+
+**Available Actions:**
+1.  "update_relationships": Only adjust relationship scores and have an internal thought. This is the most common reaction for minor events.
+2.  "mourn_death": If the NPC hears about the death (`entity_death`) of someone they have a high relationship with (e.g., > 70).
+3.  "investigate_crime_scene": If a 'lawful', 'curious', or 'Sheriff'/'Guard' NPC hears about a serious crime like 'entity_death' or 'theft' and they didn't cause it.
+4.  "celebrate_birth": If the NPC hears about a birth (`npc_birth`) and has a high relationship with one of the parents.
+
+**Decision Factors:**
+- **Event Type:** `entity_death` and `npc_birth` are major events that can trigger actions. `combat_attack` and `theft` might trigger actions for lawful NPCs or friends of the victim.
+- **Relationships:** A high relationship with the victim of a crime or the deceased is a strong motivator for "mourn_death" or "investigate_crime_scene". A low relationship might lead to indifference ("update_relationships" with 0 change).
+- **Personality/Profession:** A 'Sheriff' should "investigate_crime_scene". A 'loyal' NPC will "mourn_death" for a friend. A 'cowardly' NPC will likely just use "update_relationships" even for serious events they hear about.
 
 **Output Format (JSON):**
 Return a JSON object with the following fields:
-- "action": string (For now, this will always be "update_relationships". Future actions could be "investigate_crime_scene", "warn_friend", etc.)
-- "internal_thought_dialogue": string (A brief, in-character thought the NPC has upon hearing the news. This might be surfaced to the player if they are very close by.)
+- "action": string (must be one of the available actions listed above)
+- "internal_thought_dialogue": string (A brief, in-character thought the NPC has upon hearing the news.)
 - "relationship_change_subject": integer (The amount to change the relationship with the event's subject, e.g., -10, 5, 0).
 - "relationship_change_target": integer (The amount to change the relationship with the event's target, e.g., -5, 10, 0).
 
 Example 1: Lawful NPC hears their friend was attacked.
 {{
-  "action": "update_relationships",
-  "internal_thought_dialogue": "That brute! I hope someone teaches them a lesson.",
+  "action": "investigate_crime_scene",
+  "internal_thought_dialogue": "That brute! I'm going to see what happened.",
   "relationship_change_subject": -15,
   "relationship_change_target": 5
 }}
 
-Example 2: Grumpy NPC hears two people they dislike fought each other.
+Example 2: Loyal NPC hears their friend has died.
+{{
+  "action": "mourn_death",
+  "internal_thought_dialogue": "I can't believe they're gone... I must go pay my respects.",
+  "relationship_change_subject": -50,
+  "relationship_change_target": 0
+}}
+
+Example 3: Grumpy NPC hears two people they dislike fought each other.
 {{
   "action": "update_relationships",
   "internal_thought_dialogue": "A pox on both their houses. Good riddance.",

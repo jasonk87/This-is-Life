@@ -124,20 +124,7 @@ def main():
     if args.headless:
         print("Running in headless mode. The game will run for a fixed number of ticks.")
         for _ in range(1000): # Run for 1000 ticks in headless mode
-            world.game_time += 1
-            world._update_player_hunger_thirst()
-            world._update_season()
-            world._update_player_temperature()
-            world._apply_temperature_effects(world.player)
-            world._update_light_level_and_fov()
-            world._update_world_environment()
-            world._update_weather()
-            world.update_fov()
-            world._update_npc_schedules()
-            world._update_npc_movement()
-            world._handle_npc_speech()
-            if world.game_time % 100 == 0:
-                world._update_economy()
+            world.update()
         print("Headless mode run complete.")
         return
 
@@ -162,7 +149,7 @@ def main():
     ) as context:
         while True:
             # Game Logic Updates
-            world.game_time += 1
+            world.update()
             # ... (rest of the game logic updates) ...
             if world.player.is_jailed and world.player.jail_time_remaining > 0:
                 world.player.jail_time_remaining -= 1
@@ -173,20 +160,6 @@ def main():
                     open_door_def = world.DECORATION_ITEM_DEFINITIONS["iron_door_open"]
                     world._change_map_tile((door_x, door_y), open_door_def)
                     world.player.jail_cell_coords = None
-
-            world._update_player_hunger_thirst()
-            world._update_season()
-            world._update_player_temperature()
-            world._apply_temperature_effects(world.player)
-            world._update_light_level_and_fov()
-            world._update_world_environment()
-            world._update_weather()
-            world.update_fov()
-            world._update_npc_schedules()
-            world._update_npc_movement()
-            world._handle_npc_speech()
-            if world.game_time % 100 == 0:
-                world._update_economy()
 
             # Drawing
             if world.game_state == "PLAYER_DEAD":
@@ -406,20 +379,10 @@ def main():
                                     world.ghost_furniture_tile = None
                             else:
                                 world.add_message_to_chat_log("You can only build inside a house you own.")
-                        elif event.sym == tcod.event.KeySym.K:
-                            world.game_state = "KNOWLEDGE_MENU"
                         elif event.sym == tcod.event.KeySym.E:
                             target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
                             open_interaction_menu(world, target_x, target_y)
-
-                    elif world.game_state == "KNOWLEDGE_MENU":
-                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.K:
-                            world.game_state = "PLAYING"
-                        elif event.sym == tcod.event.KeySym.UP:
-                            world.knowledge_menu_context["scroll_offset"] = max(0, world.knowledge_menu_context["scroll_offset"] - 1)
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            world.knowledge_menu_context["scroll_offset"] += 1
 
                     elif world.game_state == "BUILD_MODE":
                         if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.B:

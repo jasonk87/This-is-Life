@@ -48,6 +48,17 @@ from data.environment import WEATHER_DEFINITIONS
 import json
 import uuid
 
+class Event:
+    """A class to represent a significant event that occurs in the world."""
+    def __init__(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None):
+        self.id = str(uuid.uuid4())
+        self.type = event_type  # e.g., "combat_attack", "npc_death", "item_craft"
+        self.description = description
+        self.subject_id = subject_id  # The ID of the entity performing the action
+        self.target_id = target_id    # The ID of the entity being acted upon (optional)
+        self.location = location      # Where the event happened (optional)
+        self.timestamp = time.time()  # For potential aging of information
+
 class WorldGenerator:
     """Handles the procedural generation of the world's macro-structure."""
     def __init__(self, width, height, seed=None):
@@ -176,7 +187,7 @@ class Player:
         self.active_contracts = {}
         self.pending_contract_offer = None
         self.lockpicking_skill = 3 # Conceptual skill, scale 1-10, default slightly below average
-        self.id = "player" # Simple unique ID for player
+        self.id = id(self) # Simple unique ID for player
         self.bounty = 0
 
         # Light Source State
@@ -219,9 +230,6 @@ class Player:
         # Quests
         self.active_quests: dict = {}
         self.completed_quests: list[str] = []
-
-        # Knowledge
-        self.knowledge: list[dict] = []
 
 
     def take_damage(self, amount: int, world=None) -> int:
@@ -404,7 +412,6 @@ class World:
         self.game_state = "PLAYING"
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
-        self.needs_text_input = False
 
         # Season and Temperature
         self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
@@ -478,6 +485,9 @@ class World:
 
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
+
+        # Gossip and Event System
+        self.global_events: list[Event] = []
 
         # Pre-generate all chunks to avoid lazy-loading issues in tests
         for y in range(self.chunk_height):
@@ -1008,52 +1018,38 @@ class World:
 
                 if not npc.current_path or len(npc.current_path) <= 1:
                     npc.current_path = []
+                    # Destination reached, process arrival based on task
+                    if npc.current_task == "socializing" and npc.task_target_entity_id:
+                        chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
+                        if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
+                            # Successfully met up, now exchange gossip
+                            # NPC shares one piece of news with partner
+                            if npc.known_events:
+                                event_id_to_share = random.choice(list(npc.known_events.keys()))
+                                if event_id_to_share not in chat_partner.known_events:
+                                    chat_partner.known_events[event_id_to_share] = npc.known_events[event_id_to_share]
+                                    # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about event {event_id_to_share[:8]}.")
+
+                            # Partner shares one piece of news back
+                            if chat_partner.known_events:
+                                event_id_to_share_back = random.choice(list(chat_partner.known_events.keys()))
+                                if event_id_to_share_back not in npc.known_events:
+                                    npc.known_events[event_id_to_share_back] = chat_partner.known_events[event_id_to_share_back]
+                                    # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about event {event_id_to_share_back[:8]}.")
+
+                            # Increase relationship
+                            npc.relationships[chat_partner.id] = npc.relationships.get(chat_partner.id, 50) + 2
+                            chat_partner.relationships[npc.id] = chat_partner.relationships.get(npc.id, 50) + 2
+
+                        npc.current_task = "idle" # Done socializing for now
+                    elif npc.current_task == "going to work":
+                        npc.current_task = "at work"
+                    elif npc.current_task in ["going home", "going home to sleep", "going to bed"]:
+                        npc.current_task = "at home"
+                    else:
+                        npc.current_task = "idle" # Default state post-movement
+
                     npc.current_destination_coords = None
-                    # If the NPC was pathing for a specific reason, update its state now that it has arrived
-                    if npc.current_task == "going to work": npc.current_task = "at work"
-                    elif npc.current_task in ["going home", "going home to sleep", "going to bed"]: npc.current_task = "at home"
-                    elif npc.current_task == "socializing":
-                        chat_partner = next((n for n in self.village_npcs if n.id == npc.task_target_entity_id), None)
-                        if chat_partner:
-                            # Increase relationship score
-                            npc.relationships[chat_partner.id] = npc.relationships.get(chat_partner.id, 0) + 1
-                            chat_partner.relationships[npc.id] = chat_partner.relationships.get(npc.id, 0) + 1
-                            self.add_message_to_chat_log(f"{npc.name} and {chat_partner.name} share some news.")
-
-                            # Knowledge Exchange
-                            if npc.knowledge:
-                                knowledge_to_share = random.choice(npc.knowledge)
-                                if knowledge_to_share not in chat_partner.knowledge:
-                                    chat_partner.knowledge.append(knowledge_to_share)
-                                    # self.add_message_to_chat_log(f"{npc.name} tells {chat_partner.name} something.")
-
-                            if chat_partner.knowledge:
-                                knowledge_to_share = random.choice(chat_partner.knowledge)
-                                if knowledge_to_share not in npc.knowledge:
-                                    npc.knowledge.append(knowledge_to_share)
-                                    # self.add_message_to_chat_log(f"{chat_partner.name} tells {npc.name} something.")
-
-                        npc.current_task = "idle"
-                    elif npc.current_task == "approaching_player_for_help":
-                        self.chat_ui_active = True
-                        self.chat_ui_target_npc = npc
-                        self.needs_text_input = True
-
-                        # Use the new LLM prompt to ask for help
-                        prompt = LLM_PROMPTS["npc_ask_for_help"].format(
-                            npc_name=npc.name,
-                            npc_personality=npc.personality,
-                            npc_need=npc.help_needed
-                        )
-                        help_question = self._call_ollama(prompt)
-                        if not help_question:
-                            help_question = f"Hello. Can you help me find some {npc.help_needed}?"
-
-                        self.chat_ui_history.clear()
-                        self.chat_ui_history.append((npc.name, help_question.strip()))
-                        npc.current_task = "awaiting_help_response"
-                        npc.help_needed = None
-                    else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
         """Gets a building's global center coordinates using the buildings_by_id lookup."""
@@ -1271,51 +1267,6 @@ class World:
                     continue # Skip non-hostile NPC if not their update interval
 
             npc.game_time_last_updated = self.game_time
-
-            if npc.current_task == "approaching_player_for_help":
-                dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
-
-                # Check if still needs help (e.g., learned from another NPC while walking)
-                if hasattr(npc, 'help_needed'):
-                    if npc.help_needed == "water" and any(k.get("subject") == "well" for k in npc.knowledge):
-                        npc.current_task = "idle"
-                        npc.help_needed = None
-                        npc.current_path = []
-                        self.add_message_to_chat_log(f"{npc.name} figured out where to find water on their own.")
-                        continue
-
-                    if npc.help_needed == "food" and any(k.get("subject") in ["tavern", "bakery", "general_store"] for k in npc.knowledge):
-                        npc.current_task = "idle"
-                        npc.help_needed = None
-                        npc.current_path = []
-                        self.add_message_to_chat_log(f"{npc.name} figured out where to find food on their own.")
-                        continue
-
-                # If player is too far, give up
-                if dist_to_player > 20: # Give up if player gets too far
-                    npc.current_task = "idle"
-                    if hasattr(npc, 'help_needed'): npc.help_needed = None
-                    npc.current_path = []
-                    self.add_message_to_chat_log(f"{npc.name} gives up trying to reach you for help.")
-                    continue
-
-                # If path destination is no longer adjacent to player, recalculate path
-                needs_new_path = False
-                if not npc.current_path or not npc.current_destination_coords:
-                    needs_new_path = True
-                # Use manhattan distance for adjacency check, it's cheaper and what's used for attacks
-                elif abs(npc.current_destination_coords[0] - self.player.x) + abs(npc.current_destination_coords[1] - self.player.y) > 1:
-                    needs_new_path = True
-
-                if needs_new_path:
-                    dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
-                    if dest_x is not None:
-                        path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
-                        if path:
-                            npc.current_path = path
-                            npc.current_destination_coords = (dest_x, dest_y)
-
-                continue
 
             # --- FEAR SYSTEM (High Priority) ---
             can_be_frightened = (npc.profession != "Creature" and
@@ -1686,36 +1637,9 @@ class World:
                         npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                         npc.current_task = "seeking_water"
 
-                    well_coords = None
-                    # 1. Check knowledge first
-                    known_wells = [k for k in npc.knowledge if k.get("type") == "location" and k.get("subject") == "well"]
-                    if known_wells:
-                        well_coords = random.choice(known_wells)["coords"]
-                        self.add_message_to_chat_log(f"{npc.name} is thirsty and knows where to find a well.")
-
-                    # 2. If no knowledge, check if player is nearby to ask for help
-                    if not well_coords:
-                        # Check distance to player
-                        dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
-                        if dist_to_player < 15: # If player is within 15 tiles
-                            self.add_message_to_chat_log(f"{npc.name} is thirsty and doesn't know where to find water. They decide to ask you for help.")
-                            npc.current_task = "approaching_player_for_help"
-                            npc.help_needed = "water"
-                            # Path to player
-                            dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
-                            if dest_x is not None:
-                                path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
-                                if path:
-                                    npc.current_path = path
-                                    npc.current_destination_coords = (dest_x, dest_y)
-                            needs_based_action_taken = True
-                        else:
-                            # Fallback to original behavior if player is not nearby
-                            npc_village = self._get_village_for_npc(npc)
-                            if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
-                                well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
-
-                    if well_coords:
+                    npc_village = self._get_village_for_npc(npc)
+                    if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
+                        well_coords = npc_village.interaction_points["well"][0] # Assume one well for now
                         if (npc.x, npc.y) == well_coords:
                             npc.thirst = 0
                             # self.add_message_to_chat_log(f"{npc.name} drinks from the well and is no longer thirsty.")
@@ -1733,8 +1657,8 @@ class World:
                     needs_based_action_taken = True
 
                 # --- Hunger Fulfillment ---
-                elif npc.hunger >= 70 or npc.current_task in ["seeking_food", "going_to_buy_food"]:
-                    if not needs_based_action_taken and npc.current_task not in ["seeking_food", "going_to_buy_food"]:
+                elif npc.hunger >= 70 or npc.current_task == "seeking_food":
+                    if not needs_based_action_taken and npc.current_task != "seeking_food":
                         npc.previous_task = npc.current_task if npc.current_task not in ["idle", "wandering"] else "idle"
                         npc.current_task = "seeking_food"
 
@@ -1744,75 +1668,83 @@ class World:
                         npc.current_task = npc.previous_task or "idle"
                         npc.previous_task = None
                     else:
-                        # 2. No food in pack. Find a place to buy food.
-                        food_vendor_building = None
-                        known_food_sources = [k for k in npc.knowledge if k.get("type") == "location" and k.get("subject") in ["tavern", "bakery", "general_store"]]
-
-                        if known_food_sources:
-                            # self.add_message_to_chat_log(f"{npc.name} is hungry and knows where to find food.")
-                            known_source = random.choice(known_food_sources)
-                            food_vendor_building = self.get_building_at(known_source["coords"][0], known_source["coords"][1])
-
-                        # Fallback to searching if no knowledge or known building doesn't exist anymore
-                        if not food_vendor_building:
-                            dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
-                            if dist_to_player < 15:
-                                self.add_message_to_chat_log(f"{npc.name} is hungry and doesn't know where to find food. They decide to ask you for help.")
-                                npc.current_task = "approaching_player_for_help"
-                                npc.help_needed = "food"
-                                dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
-                                if dest_x is not None:
-                                    path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
-                                    if path:
-                                        npc.current_path = path
-                                        npc.current_destination_coords = (dest_x, dest_y)
-                                needs_based_action_taken = True
-                                return # End processing for this NPC this tick
+                        # 2. If no food in pack, try to go home to eat
+                        home_building = self.buildings_by_id.get(npc.home_building_id)
+                        if home_building:
+                            is_at_home = (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y) # Simplified check
+                            if is_at_home:
+                                found_home, consumed_home = self._npc_eat_from_inventory(npc, home_building.building_inventory, is_building_inventory=True)
+                                if consumed_home:
+                                    npc.current_task = npc.previous_task or "idle"
+                                    npc.previous_task = None
+                                else:
+                                    # At home, but no food. What to do now?
+                                    # self.add_message_to_chat_log(f"{npc.name} is hungry at home, but there is no food.")
+                                    npc.current_task = "wandering_hungry" # A new state
+                                    npc.previous_task = None
                             else:
-                                food_vendor_building = self._find_nearest_food_vendor(npc)
-
-                        if food_vendor_building and npc.money > 10: # Has a place to go and can afford it
-                            is_at_vendor = (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
-                            if is_at_vendor:
-                                # At the vendor, attempt to buy food
-                                food_to_buy, food_price = None, 0
-                                village = self._get_village_for_npc(npc)
-                                for item_key, quantity in food_vendor_building.building_inventory.items():
-                                    if quantity > 0 and ITEM_DEFINITIONS.get(item_key, {}).get("on_use", {}).get("reduces_hunger", 0) > 0:
-                                        food_to_buy = item_key
-                                        food_price = self.get_dynamic_price(item_key, village)
-                                        break
-
-                                if food_to_buy and npc.money >= food_price:
-                                    food_vendor_building.building_inventory[food_to_buy] -= 1
-                                    npc.money -= food_price
-                                    npc.add_item(food_to_buy, 1)
-                                    npc.current_task = "seeking_food" # Re-trigger to eat from inventory next tick
-                                else: # No food to buy or can't afford it
-                                    npc.current_task = "wandering_hungry"
-                            else: # Not at the vendor, path to it
-                                npc.current_task = "going_to_buy_food"
-                                vendor_coords = (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
-                                if not npc.current_path or npc.current_destination_coords != vendor_coords:
-                                    path = self.calculate_path(npc.x, npc.y, vendor_coords[0], vendor_coords[1])
-                                    if path: npc.current_path, npc.current_destination_coords = path, vendor_coords
-                                    else: npc.current_task = "idle_confused"
-                        else:
-                            # 3. No vendor found or can't afford food. Try going home to eat as a last resort.
-                            home_building = self.buildings_by_id.get(npc.home_building_id)
-                            if home_building:
-                                is_at_home = (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y)
-                                if is_at_home:
-                                    found_home, consumed_home = self._npc_eat_from_inventory(npc, home_building.building_inventory, is_building_inventory=True)
-                                    npc.current_task = npc.previous_task or "idle" if consumed_home else "wandering_hungry"
-                                else: # Not at home, path there
+                                # Not at home, check if there's food there before pathing
+                                has_food_at_home = any(ITEM_DEFINITIONS.get(k,{}).get("on_use",{}).get("reduces_hunger",0) > 0 for k,v in home_building.building_inventory.items() if v > 0)
+                                if has_food_at_home:
                                     home_coords = (home_building.global_center_x, home_building.global_center_y)
                                     if not npc.current_path or npc.current_destination_coords != home_coords:
                                         path = self.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
-                                        if path: npc.current_path, npc.current_destination_coords = path, home_coords
-                                        else: npc.current_task = "idle_confused"
-                            else: # No vendor, no home, wander hungry
-                                npc.current_task = "wandering_hungry_homeless"
+                                        if path:
+                                            npc.current_path = path
+                                            npc.current_destination_coords = home_coords
+                                        else:
+                                            npc.current_task = "idle_confused" # Can't path home
+                                else:
+                                    # No food at home, try to buy food if they have money
+                                    if npc.money > 10: # Arbitrary threshold to decide to buy food
+                                        food_vendor_building = self._find_nearest_food_vendor(npc)
+                                        if food_vendor_building:
+                                            npc.current_task = "going_to_buy_food"
+                                            vendor_coords = (food_vendor_building.global_center_x, food_vendor_building.global_center_y)
+                                            if not npc.current_path or npc.current_destination_coords != vendor_coords:
+                                                path = self.calculate_path(npc.x, npc.y, vendor_coords[0], vendor_coords[1])
+                                                if path:
+                                                    npc.current_path = path
+                                                    npc.current_destination_coords = vendor_coords
+                                                else:
+                                                    npc.current_task = "idle_confused" # Can't path to vendor
+                                        else:
+                                            # No vendor, wander hungry
+                                            npc.current_task = "wandering_hungry"
+                                    else:
+                                        # No food at home and not enough money
+                                        npc.current_task = "wandering_hungry"
+                                    npc.previous_task = None
+                        else:
+                            # Homeless and hungry.
+                            npc.current_task = "wandering_hungry_homeless"
+
+                    needs_based_action_taken = True
+                elif npc.current_task == "going_to_buy_food":
+                    food_vendor_building = self._find_nearest_food_vendor(npc)
+                    if food_vendor_building and (npc.x, npc.y) == (food_vendor_building.global_center_x, food_vendor_building.global_center_y):
+                        # At the vendor, attempt to buy food
+                        food_to_buy = None
+                        food_price = 0
+                        village = self._get_village_for_npc(npc)
+                        for item_key, quantity in food_vendor_building.building_inventory.items():
+                            if quantity > 0:
+                                item_def = ITEM_DEFINITIONS.get(item_key, {})
+                                if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
+                                    food_to_buy = item_key
+                                    food_price = self.get_dynamic_price(item_key, village)
+                                    break
+
+                        if food_to_buy and npc.money >= food_price:
+                            food_vendor_building.building_inventory[food_to_buy] -= 1
+                            npc.money -= food_price
+                            npc.npc_inventory[food_to_buy] = npc.npc_inventory.get(food_to_buy, 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
+                            # Now that food is in inventory, the main hunger logic will handle eating it next tick
+                            npc.current_task = "seeking_food"
+                        else:
+                            # No food to buy or can't afford it
+                            npc.current_task = "wandering_hungry"
                     needs_based_action_taken = True
 
 
@@ -2000,17 +1932,29 @@ class World:
                              if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
 
                     # Leisure time logic
-                    elif is_leisure_time and npc.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend", "act_on_knowledge", "going to store"]:
+                    elif is_leisure_time and npc.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
                         if npc.leisure_timer > 0:
                             npc.leisure_timer -= 1
-                        elif random.random() < 0.1 and npc.knowledge: # 10% chance to act on knowledge
-                            # Decide to act on a piece of knowledge
-                            npc.current_task = "act_on_knowledge"
                         elif random.random() < 0.05: # 5% chance to go to the tavern
                             tavern = self._find_nearest_tavern(npc)
                             if tavern:
                                 new_task_label = "going to tavern"
                                 destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                        elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
+                            # Find a nearby NPC to chat with
+                            potential_partners = [
+                                p for p in self.village_npcs
+                                if p.id != npc.id and not p.is_dead and abs(npc.x - p.x) + abs(npc.y - p.y) < 20
+                            ]
+                            if potential_partners:
+                                chat_partner = random.choice(potential_partners)
+                                new_task_label = "socializing"
+                                # Path to a tile adjacent to the partner
+                                dest_x, dest_y = self._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
+                                if dest_x is not None:
+                                    destination_coords = (dest_x, dest_y)
+                                    npc.task_target_entity_id = chat_partner.id
+                                    npc.leisure_timer = random.randint(50, 150) # Chat for a bit
                         elif random.random() < 0.05: # 5% chance to visit a friend
                             friend = random.choice([n for n in self.village_npcs if n.id != npc.id])
                             if friend and friend.home_building_id:
@@ -2030,32 +1974,6 @@ class World:
                                     new_task_label = "leisure_fishing"
                                 destination_coords = fishing_spot
                                 npc.leisure_timer = random.randint(100, 300)
-                    elif npc.current_task == "act_on_knowledge":
-                        # This is a decision-making task. It will be replaced by a new task or 'idle'.
-                        actionable_knowledge = [
-                            k for k in npc.knowledge
-                            if k.get("type") == "location" and k.get("subject") in ["tavern", "fishing_spot", "general_store"]
-                        ]
-
-                        if actionable_knowledge:
-                            known_fact = random.choice(actionable_knowledge)
-                            subject = known_fact.get("subject")
-                            coords = known_fact.get("coords")
-
-                            if subject == "tavern" and coords:
-                                new_task_label = "going to tavern"
-                                destination_coords = coords
-                            elif subject == "fishing_spot" and coords:
-                                new_task_label = "leisure_fishing"
-                                destination_coords = coords
-                            elif subject == "general_store" and coords:
-                                new_task_label = "going to store"
-                                destination_coords = coords
-                                npc.leisure_timer = random.randint(50, 150) # Window shop for a bit
-
-                        # After attempting to act on knowledge, always reset the task.
-                        # If a new task was found, it will be assigned below. Otherwise, they become idle.
-                        npc.current_task = "idle"
 
                     if npc.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
                         self.npc_attempt_fish(npc, npc.x, npc.y)
@@ -2107,39 +2025,7 @@ class World:
                     # New Task: Fetching Water (example, low priority, during day, if not working/going to work)
                     # Only if not night time and not during work hours
                     is_day_leisure_time = not is_night_time and not (work_start_tick <= current_time_in_day < work_end_tick)
-                    if not new_task_label and is_day_leisure_time and random.random() < 0.02:  # 2% chance to socialize
-                        chat_partner = None
-                        # Try to find best friend first
-                        if npc.relationships:
-                            best_friend_id = max(npc.relationships, key=npc.relationships.get)
-                            # Check if the score is meaningfully high, e.g., > 5, to be considered a "best friend"
-                            if npc.relationships[best_friend_id] > 5:
-                                best_friend_npc = next((p for p in self.village_npcs if p.id == best_friend_id), None)
-                                if best_friend_npc and not best_friend_npc.is_dead:
-                                    # Check if best friend is in a wider radius
-                                    if abs(npc.x - best_friend_npc.x) + abs(npc.y - best_friend_npc.y) < 20:
-                                        chat_partner = best_friend_npc
-
-                        # Fallback to random nearby partner if no best friend found or they are too far
-                        if not chat_partner:
-                            potential_chat_partners = [
-                                other_npc for other_npc in self.village_npcs
-                                if other_npc.id != npc.id and not other_npc.is_dead and
-                                abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10 # Tighter radius for random chats
-                            ]
-                            if potential_chat_partners:
-                                chat_partner = random.choice(potential_chat_partners)
-
-                        # If a partner was found (either best friend or random), set up the task
-                        if chat_partner:
-                            # Path to a tile adjacent to the chat partner, not on top of them
-                            adj_x, adj_y = self._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
-                            if adj_x is not None:
-                                new_task_label = "socializing"
-                                destination_coords = (adj_x, adj_y)
-                                npc.task_target_entity_id = chat_partner.id
-
-                    elif not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
+                    if not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
                         # Find the NPC's village to get well location
                         npc_village = None
                         for y_idx, row in enumerate(self.chunks):
@@ -2935,7 +2821,14 @@ class World:
             self.emit_sound(npc.x, npc.y, "combat_attack", volume=10, source_entity_id=npc.id) # Emit attack sound
 
             if hit and damage_dealt > 0:
-                actual_damage = player.take_damage(damage_dealt)
+                self.log_event(
+                    event_type="combat_attack",
+                    description="{subject} attacked {target}.",
+                    subject_id=npc.id,
+                    target_id=player.id,
+                    location=(npc.x, npc.y)
+                )
+                actual_damage = player.take_damage(damage_dealt, world=self)
                 if actual_damage > 0:
                     self.add_message_to_chat_log(f"You take {actual_damage} damage! Your HP is now {player.hp}/{player.max_hp}.")
                 else:
@@ -2944,6 +2837,13 @@ class World:
                 if player.hp <= 0:
                     self.add_message_to_chat_log("You have been defeated!")
                     self.game_state = "PLAYER_DEAD"
+                    self.log_event(
+                        event_type="entity_death",
+                        description="{subject} was killed by {target}.",
+                        subject_id=player.id,
+                        target_id=npc.id,
+                        location=(player.x, player.y)
+                    )
             elif hit and damage_dealt <= 0:
                 self.add_message_to_chat_log(f"{npc.name}'s attack hits you but deals no damage.")
 
@@ -2968,12 +2868,20 @@ class World:
         if can_player_see:
             self.add_message_to_chat_log(f"The {attacker.name} attacks the {target.name} for {damage} damage!")
 
+        self.log_event(
+            event_type="combat_attack",
+            description="{subject} attacked {target}.",
+            subject_id=attacker.id,
+            target_id=target.id,
+            location=(attacker.x, attacker.y)
+        )
+
         was_killed = target.take_damage(damage, self)
 
         if was_killed:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
-            self.handle_npc_death(target)
+            self.handle_npc_death(target, killer_id=attacker.id)
             if self._is_predator(attacker):
                 attacker.hunger = 0
                 attacker.current_task = "idle"
@@ -3834,9 +3742,16 @@ class World:
             self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=10, source_entity_id=self.player.id) # Emit attack sound
 
             if hit and damage_dealt > 0:
+                self.log_event(
+                    event_type="combat_attack",
+                    description="{subject} attacked {target}.",
+                    subject_id=self.player.id,
+                    target_id=target_npc.id,
+                    location=(self.player.x, self.player.y)
+                )
                 target_npc.take_damage(damage_dealt, self)
                 if target_npc.is_dead:
-                    self.handle_npc_death(target_npc)
+                    self.handle_npc_death(target_npc, killer_id=self.player.id)
             elif hit and damage_dealt <= 0: # A hit that does no damage
                 self.add_message_to_chat_log(f"Your attack hits but glances off {target_npc.name} harmlessly!")
 
@@ -3865,8 +3780,16 @@ class World:
                 if witness.id != target_npc.id:
                     self._handle_witness_reaction(witness, "assault", self.player, victim=target_npc)
 
-    def handle_npc_death(self, dead_npc: NPC):
+    def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
+
+        self.log_event(
+            event_type="entity_death",
+            description="{subject} was killed by {target}.",
+            subject_id=dead_npc.id,
+            target_id=killer_id,
+            location=(dead_npc.x, dead_npc.y)
+        )
 
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
@@ -4250,115 +4173,124 @@ class World:
         if not npc_target:
             return
 
-        if self.chat_ui_mode == "talk":
-            # Format conversation history for the prompt
-            formatted_history = []
-            history_context_limit = 10
-            recent_history = self.chat_ui_history[-(history_context_limit-1):] if len(self.chat_ui_history) > 1 else self.chat_ui_history
+        # --- Handle special keywords before general conversation ---
+        gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
+        if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
+            if not npc_target.known_events:
+                self.chat_ui_history.append((npc_target.name, "I haven't heard anything interesting lately."))
+            else:
+                # Select a random event to gossip about
+                event_to_share = random.choice(list(npc_target.known_events.values()))
 
-            for speaker, text in recent_history:
-                if speaker == "Player":
-                    formatted_history.append(f"Player: {text}")
-                else:
-                    formatted_history.append(f"{speaker}: {text}")
-            history_str = "\n".join(formatted_history)
+                # Get names and relationships for the prompt
+                subject = next((n for n in self.village_npcs + self.npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
+                target = next((n for n in self.village_npcs + self.npcs if n.id == event_to_share.target_id), self.player if event_to_share.target_id == self.player.id else None) if event_to_share.target_id else None
 
-            player_rep = self.player.reputation
-            prompt = LLM_PROMPTS["npc_conversation_continue"].format(
+                subject_name = getattr(subject, 'name', 'Someone') if subject else 'Someone'
+                target_name = getattr(target, 'name', 'someone') if target else 'someone'
+
+                gossip_prompt = LLM_PROMPTS["npc_share_gossip"].format(
+                    npc_name=npc_target.name,
+                    npc_personality=npc_target.personality,
+                    npc_relationship_with_player=npc_target.relationships.get(self.player.id, 50),
+                    npc_relationship_with_subject=npc_target.relationships.get(event_to_share.subject_id, 50),
+                    npc_relationship_with_target=npc_target.relationships.get(event_to_share.target_id, 50) if event_to_share.target_id else 50,
+                    event_description=event_to_share.description,
+                    subject_name=subject_name,
+                    target_name=target_name
+                )
+                gossip_dialogue = self._call_ollama(gossip_prompt)
+                if not gossip_dialogue:
+                    gossip_dialogue = "I... uh... forget what I was going to say."
+
+                self.chat_ui_history.append((npc_target.name, gossip_dialogue.strip()))
+            # End the turn after sharing gossip
+            return
+
+        # Format conversation history for the prompt
+        formatted_history = []
+        # Take last N messages for context window (e.g., last 10 lines, 5 exchanges)
+        history_context_limit = 10
+        recent_history = self.chat_ui_history[-(history_context_limit-1):] if len(self.chat_ui_history) > 1 else self.chat_ui_history
+
+        for speaker, text in recent_history:
+            if speaker == "Player": # Assuming "Player" is the key for player lines
+                formatted_history.append(f"Player: {text}")
+            else: # NPC lines
+                formatted_history.append(f"{speaker}: {text}")
+        history_str = "\n".join(formatted_history)
+
+        player_rep = self.player.reputation
+        prompt = LLM_PROMPTS["npc_conversation_continue"].format(
+            npc_name=npc_target.name,
+            npc_personality=npc_target.personality,
+            npc_attitude=npc_target.attitude_to_player,
+            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
+            player_hero_points=player_rep.get(REP_HERO, 0),
+            conversation_history=history_str,
+            player_input=player_input_text
+        )
+
+        npc_response = self._call_ollama(prompt)
+        if not npc_response:
+            npc_response = "... (LLM failed to respond)"
+
+        self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+
+        # After NPC response, check if this NPC should offer a job
+        if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.active_contracts:
+            # Check if player's response was affirmative to a previous implicit offer or just general talk
+            # This is tricky without more state. For now, let's assume if they talk to Foreman, job is offered.
+            # A better way: Foreman's initial greeting (start_npc_dialogue) could offer.
+            # Or, if player says "work" or "job".
+            # For simplicity now: if player just said something, and no active contract, Foreman offers.
+
+            # Define contract details
+            contract_id = f"lumber_delivery_{npc_target.id}"
+            item_needed = "log"
+            quantity_needed = 10
+            reward_amount = 50 # Example reward
+            item_name_plural = "logs" # For the prompt
+
+            offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
                 npc_name=npc_target.name,
+                npc_profession=npc_target.profession,
                 npc_personality=npc_target.personality,
                 npc_attitude=npc_target.attitude_to_player,
-                player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-                player_hero_points=player_rep.get(REP_HERO, 0),
-                conversation_history=history_str,
-                player_input=player_input_text
+                player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
+                player_hero_points=self.player.reputation.get(REP_HERO,0),
+                quantity_needed=quantity_needed,
+                item_name_plural=item_name_plural,
+                reward_amount=reward_amount
             )
+            job_offer_dialogue = self._call_ollama(offer_prompt)
+            if not job_offer_dialogue:
+                job_offer_dialogue = f"I might have some work for you... if you're interested. Need {quantity_needed} {item_name_plural} for {reward_amount} coins."
 
-            npc_response = self._call_ollama(prompt)
-            if not npc_response:
-                npc_response = "... (LLM failed to respond)"
+            self.chat_ui_history.append((npc_target.name, job_offer_dialogue.strip()))
+            # Store pending offer to be accepted on player's next input if affirmative
+            self.player.pending_contract_offer = {
+                "contract_id": contract_id, "npc_id": npc_target.id,
+                "item_key": item_needed, "quantity_needed": quantity_needed,
+            "reward": reward_amount, "npc_offerer_id": npc_target.id
+            }
+            self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
 
-            if player_input_text.lower() in ["share", "tell", "share information"]:
-                self.chat_ui_mode = "share_knowledge"
-                self.chat_ui_history.append(("System", "What knowledge do you want to share? (Enter the number)"))
-            else:
-                self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+        # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
+        # This is a simplified trigger; more robust would be keyword matching or LLM intent.
+        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
+           "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
 
-                # After NPC response, check if this NPC should offer a job or quest
-                if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.active_contracts:
-                    contract_id = f"lumber_delivery_{npc_target.id}"
-                    item_needed, quantity_needed, reward_amount = "log", 10, 50
-                    offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
-                        npc_name=npc_target.name, npc_profession=npc_target.profession, npc_personality=npc_target.personality,
-                        npc_attitude=npc_target.attitude_to_player, player_criminal_points=self.player.reputation.get(REP_CRIMINAL,0),
-                        player_hero_points=self.player.reputation.get(REP_HERO,0), quantity_needed=quantity_needed,
-                        item_name_plural="logs", reward_amount=reward_amount
-                    )
-                    job_offer_dialogue = self._call_ollama(offer_prompt) or f"I might have some work for you... if you're interested. Need {quantity_needed} logs for {reward_amount} coins."
-                    self.chat_ui_history.append((npc_target.name, job_offer_dialogue.strip()))
-                    self.player.pending_contract_offer = {
-                        "contract_id": contract_id, "npc_id": npc_target.id, "item_key": item_needed,
-                        "quantity_needed": quantity_needed, "reward": reward_amount, "npc_offerer_id": npc_target.id
-                    }
-                    self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
-
-                if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.active_quests and \
-                   "kill_wolves_01" not in self.player.completed_quests and not self.pending_quest_offer:
-                    quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
-                    if quest_def:
-                        offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
-                        self.chat_ui_history.append((npc_target.name, offer_dialogue))
-                        self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
-                        self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
-
-        elif self.chat_ui_mode == "share_knowledge":
-            try:
-                choice_index = int(player_input_text) - 1
-                if 0 <= choice_index < len(self.player.knowledge):
-                    knowledge_to_share = self.player.knowledge[choice_index]
-                    if knowledge_to_share not in npc_target.knowledge:
-                        npc_target.knowledge.append(knowledge_to_share)
-                        subject = knowledge_to_share.get('subject', 'something').replace('_', ' ')
-                        self.chat_ui_history.append((npc_target.name, f"Oh, I didn't know that about the {subject}. Thank you!"))
-                        npc_target.relationships[self.player.id] = npc_target.relationships.get(self.player.id, 0) + 2
-                    else:
-                        self.chat_ui_history.append((npc_target.name, "I appreciate the thought, but I already knew that."))
-                else:
-                    self.chat_ui_history.append(("System", "Invalid choice."))
-            except ValueError:
-                self.chat_ui_history.append(("System", "Invalid input. Please enter a number."))
-
-            # Check if the shared knowledge helped
-            if npc_target.current_task == "awaiting_help_response":
-                shared_subject = knowledge_to_share.get("subject")
-                need = npc_target.help_needed
-
-                knowledge_matches_need = False
-                if need == "water" and shared_subject == "well":
-                    knowledge_matches_need = True
-                elif need == "food" and shared_subject in ["tavern", "bakery", "general_store"]:
-                    knowledge_matches_need = True
-
-                if knowledge_matches_need:
-                    npc_target.current_task = "idle" # Will re-evaluate schedule next tick
-                    self.chat_ui_history.append((npc_target.name, "Oh, thank you so much! I'll head there right away."))
-                    # Close chat after a brief moment (or let player close it)
-                else:
-                    self.chat_ui_history.append((npc_target.name, "I appreciate the thought, but that's not what I was looking for right now."))
-
-            self.chat_ui_mode = "talk"
+            quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
+            if quest_def:
+                offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
+                self.chat_ui_history.append((npc_target.name, offer_dialogue))
+                self.pending_quest_offer = {"quest_id": "kill_wolves_01", "npc_offerer_id": npc_target.id}
+                self.chat_ui_history.append(("System", f"{npc_target.name} has offered you a quest. Type 'yes' or 'accept' to take it."))
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
 
-    def handle_unfulfilled_help_request(self, npc: NPC):
-        """Handles the NPC's reaction when the player doesn't provide needed help."""
-        if npc and npc.current_task == "awaiting_help_response":
-            self.add_message_to_chat_log(f"{npc.name} seems disappointed you couldn't help.")
-            npc.current_task = "idle" # Revert to idle, will try to find food/water again next cycle
-            npc.help_needed = None
-            # Decrease relationship with player
-            npc.relationships[self.player.id] = npc.relationships.get(self.player.id, 0) - 1
 
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
@@ -4395,6 +4327,20 @@ class World:
         except requests.exceptions.RequestException as e:
             print(f"Error communicating with Ollama: {e}")
             return ""
+
+    def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None):
+        """Creates an Event object and adds it to the global event log."""
+        new_event = Event(
+            event_type=event_type,
+            description=description,
+            subject_id=subject_id,
+            target_id=target_id,
+            location=location
+        )
+        self.global_events.append(new_event)
+        # Keep the event log from growing indefinitely
+        if len(self.global_events) > 200: # Max 200 recent events
+            self.global_events.pop(0)
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
         """Finds the nearest lit heat source for an NPC."""
@@ -4616,7 +4562,6 @@ class World:
         if not village.buildings:
             num_npcs = 0
 
-        newly_created_npcs = [] # To hold NPCs created in this call for knowledge seeding
         residential_buildings = [b for b in village.buildings if b.category == "residential"]
         workplace_buildings = [b for b in village.buildings if "workplace" in b.category] # e.g., "civic_workplace", "commercial_workplace"
 
@@ -4758,21 +4703,6 @@ class World:
                 if home_building:
                     npc.home_building_id = home_building.id
                     home_building.residents.append(npc)
-                    npc.knowledge.append({
-                        "type": "location",
-                        "subject": "home",
-                        "coords": (home_building.global_center_x, home_building.global_center_y)
-                    })
-
-                # Assign profession based on work building
-                if work_building:
-                    npc.work_building_id = work_building.id
-                    work_building.occupants.append(npc) # Store NPC object for now
-                    npc.knowledge.append({
-                        "type": "location",
-                        "subject": "work",
-                        "coords": (work_building.global_center_x, work_building.global_center_y)
-                    })
 
                 # Chance to give NPC a healing salve
                 if random.random() < 0.33: # 33% chance
@@ -4796,7 +4726,6 @@ class World:
 
 
                 self.village_npcs.append(npc)
-                newly_created_npcs.append(npc)
                 self.add_message_to_chat_log(
                     f"Generated Villager: {npc.name} (Wealth: {npc.wealth_level}, Prof: {npc.profession}). "
                     f"Home: {home_building.building_type if home_building else 'N/A'}. "
@@ -4808,54 +4737,6 @@ class World:
                 self.add_message_to_chat_log(f"LLM Response: {llm_response}")
             except IndexError: # Ran out of homes or workplaces
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
-
-        # --- Seed Initial Knowledge ---
-        if newly_created_npcs:
-            # Tavern Knowledge
-            tavern_building = next((b for b in village.buildings if b.building_type == "tavern"), None)
-            if tavern_building:
-                for _ in range(random.randint(1, 2)):
-                    random_villager = random.choice(newly_created_npcs)
-                    tavern_knowledge = {
-                        "type": "location", "subject": "tavern",
-                        "coords": (tavern_building.global_center_x, tavern_building.global_center_y)
-                    }
-                    if tavern_knowledge not in random_villager.knowledge:
-                        random_villager.knowledge.append(tavern_knowledge)
-
-            # Fishing Spot Knowledge
-            fishing_spots = village.interaction_points.get("fishing_spot", [])
-            if fishing_spots:
-                for _ in range(random.randint(1, 2)):
-                    random_villager = random.choice(newly_created_npcs)
-                    random_spot = random.choice(fishing_spots)
-                    spot_knowledge = { "type": "location", "subject": "fishing_spot", "coords": random_spot }
-                    if spot_knowledge not in random_villager.knowledge:
-                        random_villager.knowledge.append(spot_knowledge)
-
-            # General Store Knowledge
-            store_building = next((b for b in village.buildings if b.building_type == "general_store"), None)
-            if store_building:
-                for _ in range(random.randint(1, 2)):
-                    random_villager = random.choice(newly_created_npcs)
-                    store_knowledge = {
-                        "type": "location", "subject": "general_store",
-                        "coords": (store_building.global_center_x, store_building.global_center_y)
-                    }
-                    if store_knowledge not in random_villager.knowledge:
-                        random_villager.knowledge.append(store_knowledge)
-
-            # Bakery Knowledge
-            bakery_building = next((b for b in village.buildings if b.building_type == "bakery"), None)
-            if bakery_building:
-                for _ in range(random.randint(1, 2)):
-                    random_villager = random.choice(newly_created_npcs)
-                    bakery_knowledge = {
-                        "type": "location", "subject": "bakery",
-                        "coords": (bakery_building.global_center_x, bakery_building.global_center_y)
-                    }
-                    if bakery_knowledge not in random_villager.knowledge:
-                        random_villager.knowledge.append(bakery_knowledge)
 
 
     def _handle_npc_speech(self):
@@ -5720,29 +5601,18 @@ class World:
 
             movement_cost = int(destination_tile.properties.get("movement_cost", 1))
 
-            # Check if player entered a building and handle knowledge acquisition
+            # Check if player entered a building
             building = self.get_building_at(new_x, new_y)
-            if building:
-                new_knowledge = {
-                    "type": "location",
-                    "subject": building.building_type,
-                    "coords": (building.global_center_x, building.global_center_y)
-                }
-                if new_knowledge not in self.player.knowledge:
-                    self.player.knowledge.append(new_knowledge)
-                    building_name = building.building_type.replace("_", " ").title()
-                    self.add_message_to_chat_log(f"You have discovered the {building_name}.")
-
-                if not building.interior_decorated:
-                    # Get the chunk the building is in to pass to decoration method
-                    current_chunk_x = new_x // CHUNK_SIZE
-                    current_chunk_y = new_y // CHUNK_SIZE
-                    if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
-                        chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
-                        self.decorate_building_interior(building, chunk_of_building)
-                    else:
-                        # This should ideally not happen if get_building_at found a building
-                        self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
+            if building and not building.interior_decorated:
+                # Get the chunk the building is in to pass to decoration method
+                current_chunk_x = new_x // CHUNK_SIZE
+                current_chunk_y = new_y // CHUNK_SIZE
+                if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
+                    chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
+                    self.decorate_building_interior(building, chunk_of_building)
+                else:
+                    # This should ideally not happen if get_building_at found a building
+                    self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
 
             self.update_fov() # Player moved, so update FOV
 
@@ -5779,6 +5649,106 @@ class World:
             "source_id": source_entity_id # Optional: ID of player/NPC that made the sound
         })
         # self.add_message_to_chat_log(f"Debug: Sound '{sound_type}' emitted at ({origin_x},{origin_y}) vol {volume}")
+
+    def update(self):
+        """Main update function for the world, called once per game tick."""
+        self.game_time += 1
+        self._update_season()
+        self._update_weather()
+        self._update_light_level_and_fov()
+        self.update_fov() # This will update FOV for player and all NPCs
+        self._update_player_temperature()
+        self._apply_temperature_effects(self.player)
+        self._update_player_wetness()
+        self._update_player_hunger_thirst()
+        self._update_npc_schedules()
+        self._update_npc_movement()
+        self._update_world_environment()
+        self._update_economy()
+        self._process_npc_witness_events()
+        self._process_npc_gossip_reaction()
+
+    def _process_npc_gossip_reaction(self):
+        """
+        Periodically processes an NPC's known events to see if they react.
+        """
+        for npc in self.village_npcs + self.npcs:
+            if npc.is_dead or not npc.known_events:
+                continue
+
+            # Limit reaction checks to prevent spam/performance issues
+            if random.random() > 0.01: # 1% chance per tick to process gossip
+                continue
+
+            # Select a random event from known events to react to
+            event_to_process = random.choice(list(npc.known_events.values()))
+
+            # Avoid reacting to very old news repeatedly
+            time_since_event = time.time() - event_to_process.timestamp
+            if time_since_event > (DAY_LENGTH_TICKS * 2): # Older than 2 days
+                if random.random() > 0.05: # Very small chance to react to old news
+                    continue
+
+            # Prevent reacting to one's own actions
+            if event_to_process.subject_id == npc.id:
+                continue
+
+            # Prevent reacting to the same event multiple times in a short period
+            if event_to_process.id in npc.reacted_to_event_ids:
+                continue
+
+            # Get names for the prompt
+            subject_entity = next((n for n in self.village_npcs + self.npcs if n.id == event_to_process.subject_id), self.player if event_to_process.subject_id == self.player.id else None)
+            target_entity = next((n for n in self.village_npcs + self.npcs if n.id == event_to_process.target_id), self.player if event_to_process.target_id == self.player.id else None) if event_to_process.target_id else None
+
+            subject_name = getattr(subject_entity, 'name', 'Someone') if subject_entity else 'Someone'
+            target_name = getattr(target_entity, 'name', 'someone') if target_entity else 'someone'
+
+            # Frame the event for the LLM
+            event_summary = event_to_process.description.format(subject=subject_name, target=target_name)
+
+            prompt = LLM_PROMPTS["npc_gossip_reaction"].format(
+                npc_name=npc.name,
+                npc_personality=npc.personality,
+                npc_attitude_to_subject=npc.relationships.get(event_to_process.subject_id, 50), # Use relationship score
+                npc_attitude_to_target=npc.relationships.get(event_to_process.target_id, 50) if event_to_process.target_id else 50,
+                event_summary=event_summary,
+                event_type=event_to_process.type
+            )
+
+            response_str = self._call_ollama(prompt)
+            if not response_str:
+                continue
+
+            try:
+                response_json = json.loads(response_str)
+                action = response_json.get("action")
+                dialogue = response_json.get("internal_thought_dialogue")
+                relationship_change_subject = response_json.get("relationship_change_subject", 0)
+                relationship_change_target = response_json.get("relationship_change_target", 0)
+
+                # Log the internal thought if player is very close
+                if dialogue and abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 2:
+                    self.add_message_to_chat_log(f"({npc.name} seems to be pondering something: '{dialogue}')")
+
+                # Mark as reacted
+                npc.reacted_to_event_ids.add(event_to_process.id)
+
+                # Apply relationship changes
+                if relationship_change_subject != 0 and subject_entity:
+                    npc.relationships[subject_entity.id] = npc.relationships.get(subject_entity.id, 50) + relationship_change_subject
+                    # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {subject_name} changed by {relationship_change_subject}.")
+
+                if relationship_change_target != 0 and target_entity:
+                    npc.relationships[target_entity.id] = npc.relationships.get(target_entity.id, 50) + relationship_change_target
+                    # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {target_name} changed by {relationship_change_target}.")
+
+                # TODO: Implement "action" handlers, e.g., if action is "investigate_crime_scene",
+                # generate a new task for the NPC. For now, we just process the social changes.
+
+            except json.JSONDecodeError:
+                # self.add_message_to_chat_log(f"Debug: Failed to parse gossip reaction for {npc.name}: {response_str}")
+                pass
 
     def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
         """

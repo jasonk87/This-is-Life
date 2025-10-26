@@ -140,6 +140,7 @@ class TestTemperatureSystem(unittest.TestCase):
 
         # 2. Set weather to rain
         self.world.weather = "rain"
+        self.world.weather_change_timer = 1000 # Prevent weather from changing during test
 
         # 3. Ensure the location is not sheltered (mock the shelter check to be certain)
         with patch('engine.World._check_for_shelter', return_value=False) as mock_shelter_check:
@@ -179,6 +180,7 @@ class TestAgriculturalSystem(unittest.TestCase):
 
         # 2. Make it rain for enough ticks to water the plant to maturity
         self.world.weather = "rain"
+        self.world.weather_change_timer = 1000 # Prevent weather from changing during test
         watering_increment = 5 # From _water_crops
         growth_needed = growing_def['properties']['growth_needed']
         updates_needed = (growth_needed // watering_increment) + 1

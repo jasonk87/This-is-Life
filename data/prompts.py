@@ -600,20 +600,92 @@ Example 4 (Friend of the victim witnesses assault):
 JSON Decision:
 """
 ,
-    "npc_ask_for_help": """\
-You are {npc_name}, an NPC in a fantasy village who desperately needs help.
+    "npc_share_gossip": """\
+You are {npc_name}, an NPC in a fantasy village, sharing a rumor with the player.
 Your personality is: {npc_personality}.
-Your specific need is: {npc_need}. (e.g., "food", "water", "directions to the blacksmith")
+Your relationship score with the player is: {npc_relationship_with_player} (0-100, higher is better).
+Your relationship score with the person the gossip is about (the subject) is: {npc_relationship_with_subject}.
+Your relationship score with the other person involved (the target) is: {npc_relationship_with_target}.
 
-The player is nearby, and you have approached them to ask for help.
-Generate a short, in-character dialogue line where you ask the player for assistance with your specific need.
+The event you are gossiping about is:
+"{event_description}"
+(This event involved {subject_name} as the subject and {target_name} as the target.)
 
-Example for need="food", personality="timid":
-"Excuse me, I'm terribly sorry to bother you, but I'm new here and frightfully hungry. Do you know where I might find a tavern or a bakery?"
+Task:
+Based on your personality and your relationships with the involved parties, turn this event into a piece of gossip or a rumor to share with the player.
+- If your relationship with the player is low, you might be reluctant, dismissive, or share a very short, unenthusiastic version.
+- If your relationship with the player is high, you might be more open, detailed, or share your personal opinion.
+- If you like the subject of the gossip, you might downplay their negative actions or frame them in a better light.
+- If you dislike the subject, you might exaggerate their negative actions or sound gleeful about their misfortune.
+- Your personality is key: a 'kind' NPC might sound concerned, a 'greedy' one might focus on financial aspects, a 'gossipy' one might be very dramatic and eager to share details.
 
-Example for need="water", personality="gruff":
-"You. I need water. Where's the well in this town?"
+Example Input:
+- npc_name: "Elara", personality: "wise and lawful", relationship_with_player: 75
+- event_description: "subject attacked target"
+- subject_name: "Borin", target_name: "a wolf"
+- npc_relationship_with_subject: 60 (neutral-positive)
+
+Example Output Dialogue:
+"I heard Borin had a run-in with a wolf near the woods. He's a sturdy fellow, so I'm sure he handled himself, but one must be cautious."
+
+Example Input 2:
+- npc_name: "Grizelda", personality: "grumpy and gossipy", relationship_with_player: 80
+- event_description: "subject was defeated by target"
+- subject_name: "Lord Valerius", target_name: "a common bandit"
+- npc_relationship_with_subject: 20 (dislikes)
+
+Example Output Dialogue:
+"Heh, did you hear? Pompous Lord Valerius got himself trounced by a common bandit out on the road! Serves him right, if you ask me."
+
+Generate a single line of dialogue for {npc_name} to say.
 
 Dialogue:
+"""
+,
+    "npc_gossip_reaction": """\
+You are an AI determining an NPC's internal reaction to hearing a piece of gossip.
+
+**NPC State:**
+- Name: {npc_name}
+- Personality: {npc_personality}
+- Current Relationship with Gossip Subject: {npc_attitude_to_subject} (0-100, 50 is neutral)
+- Current Relationship with Gossip Target: {npc_attitude_to_target} (0-100, 50 is neutral)
+
+**Gossip Details:**
+- Event Type: {event_type} (e.g., "combat_attack", "npc_death", "theft")
+- Event Summary: {event_summary}
+
+**Task:**
+Based on the NPC's personality and existing relationships, determine their internal reaction. This will manifest as a change in their relationships towards the subject and/or target of the gossip.
+- A 'lawful' NPC might decrease their relationship with someone who committed a crime.
+- A 'greedy' NPC might not care unless it affects them financially.
+- A 'loyal' NPC will significantly decrease their relationship with anyone who harmed their friends.
+- If the NPC likes the subject and dislikes the target, they might approve of the subject's actions, increasing their relationship score.
+- If the NPC dislikes the subject, they might enjoy hearing about their failures, but it might not change their relationship much more.
+
+**Output Format (JSON):**
+Return a JSON object with the following fields:
+- "action": string (For now, this will always be "update_relationships". Future actions could be "investigate_crime_scene", "warn_friend", etc.)
+- "internal_thought_dialogue": string (A brief, in-character thought the NPC has upon hearing the news. This might be surfaced to the player if they are very close by.)
+- "relationship_change_subject": integer (The amount to change the relationship with the event's subject, e.g., -10, 5, 0).
+- "relationship_change_target": integer (The amount to change the relationship with the event's target, e.g., -5, 10, 0).
+
+Example 1: Lawful NPC hears their friend was attacked.
+{{
+  "action": "update_relationships",
+  "internal_thought_dialogue": "That brute! I hope someone teaches them a lesson.",
+  "relationship_change_subject": -15,
+  "relationship_change_target": 5
+}}
+
+Example 2: Grumpy NPC hears two people they dislike fought each other.
+{{
+  "action": "update_relationships",
+  "internal_thought_dialogue": "A pox on both their houses. Good riddance.",
+  "relationship_change_subject": -1,
+  "relationship_change_target": -1
+}}
+
+JSON Decision:
 """
 }

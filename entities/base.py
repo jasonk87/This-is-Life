@@ -18,6 +18,9 @@ class NPC:
         self.last_speech_time = 0
         self.relationships = {}  # {npc_id: score}
         self.knowledge = [] # List of known information
+        self.known_events: dict[str, 'Event'] = {}
+        self.reacted_to_event_ids: set[str] = set()
+        self.last_global_event_index_checked: int = -1
         self.help_needed = None # For tracking what the NPC is asking for
 
         # Scheduling attributes from Phase 1

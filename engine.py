@@ -1003,6 +1003,14 @@ class World:
                     # If the NPC was pathing for a specific reason, update its state now that it has arrived
                     if npc.current_task == "going to work": npc.current_task = "at work"
                     elif npc.current_task in ["going home", "going home to sleep", "going to bed"]: npc.current_task = "at home"
+                    elif npc.current_task == "socializing":
+                        chat_partner = next((n for n in self.village_npcs if n.id == npc.task_target_entity_id), None)
+                        if chat_partner:
+                            # Increase relationship score
+                            npc.relationships[chat_partner.id] = npc.relationships.get(chat_partner.id, 0) + 1
+                            chat_partner.relationships[npc.id] = chat_partner.relationships.get(npc.id, 0) + 1
+                            self.add_message_to_chat_log(f"{npc.name} and {chat_partner.name} chat for a bit.")
+                        npc.current_task = "idle"
                     else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
@@ -1964,7 +1972,20 @@ class World:
                     # New Task: Fetching Water (example, low priority, during day, if not working/going to work)
                     # Only if not night time and not during work hours
                     is_day_leisure_time = not is_night_time and not (work_start_tick <= current_time_in_day < work_end_tick)
-                    if not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
+                    if not new_task_label and is_day_leisure_time and random.random() < 0.02:  # 2% chance to socialize
+                        # Find a nearby NPC to chat with
+                        potential_chat_partners = [
+                            other_npc for other_npc in self.village_npcs
+                            if other_npc.id != npc.id and not other_npc.is_dead and
+                            abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10 # Within 10 tiles
+                        ]
+                        if potential_chat_partners:
+                            chat_partner = random.choice(potential_chat_partners)
+                            new_task_label = "socializing"
+                            destination_coords = (chat_partner.x, chat_partner.y)
+                            npc.task_target_entity_id = chat_partner.id
+
+                    elif not new_task_label and is_day_leisure_time and random.random() < 0.01 : # Low chance to decide to fetch water
                         # Find the NPC's village to get well location
                         npc_village = None
                         for y_idx, row in enumerate(self.chunks):

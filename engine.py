@@ -6107,6 +6107,16 @@ class World:
                 # self.add_message_to_chat_log(f"Debug: Failed to parse gossip reaction for {npc.name}: {response_str}")
                 pass
 
+    def _get_village_at_coords(self, x: int, y: int) -> Village | None:
+        """Gets the village object at a given world coordinate, if one exists."""
+        chunk_x = x // CHUNK_SIZE
+        chunk_y = y // CHUNK_SIZE
+        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+            chunk = self.chunks[chunk_y][chunk_x]
+            if chunk and chunk.village:
+                return chunk.village
+        return None
+
     def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
         """
         Finds NPCs who witness a criminal act.

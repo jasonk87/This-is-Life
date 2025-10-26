@@ -1908,9 +1908,12 @@ class World:
                              if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
 
                     # Leisure time logic
-                    elif is_leisure_time and npc.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
+                    elif is_leisure_time and npc.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend", "act_on_knowledge", "going to store"]:
                         if npc.leisure_timer > 0:
                             npc.leisure_timer -= 1
+                        elif random.random() < 0.1 and npc.knowledge: # 10% chance to act on knowledge
+                            # Decide to act on a piece of knowledge
+                            npc.current_task = "act_on_knowledge"
                         elif random.random() < 0.05: # 5% chance to go to the tavern
                             tavern = self._find_nearest_tavern(npc)
                             if tavern:
@@ -1935,6 +1938,32 @@ class World:
                                     new_task_label = "leisure_fishing"
                                 destination_coords = fishing_spot
                                 npc.leisure_timer = random.randint(100, 300)
+                    elif npc.current_task == "act_on_knowledge":
+                        # This is a decision-making task. It will be replaced by a new task or 'idle'.
+                        actionable_knowledge = [
+                            k for k in npc.knowledge
+                            if k.get("type") == "location" and k.get("subject") in ["tavern", "fishing_spot", "general_store"]
+                        ]
+
+                        if actionable_knowledge:
+                            known_fact = random.choice(actionable_knowledge)
+                            subject = known_fact.get("subject")
+                            coords = known_fact.get("coords")
+
+                            if subject == "tavern" and coords:
+                                new_task_label = "going to tavern"
+                                destination_coords = coords
+                            elif subject == "fishing_spot" and coords:
+                                new_task_label = "leisure_fishing"
+                                destination_coords = coords
+                            elif subject == "general_store" and coords:
+                                new_task_label = "going to store"
+                                destination_coords = coords
+                                npc.leisure_timer = random.randint(50, 150) # Window shop for a bit
+
+                        # After attempting to act on knowledge, always reset the task.
+                        # If a new task was found, it will be assigned below. Otherwise, they become idle.
+                        npc.current_task = "idle"
 
                     if npc.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
                         self.npc_attempt_fish(npc, npc.x, npc.y)
@@ -4470,6 +4499,7 @@ class World:
         if not village.buildings:
             num_npcs = 0
 
+        newly_created_npcs = [] # To hold NPCs created in this call for knowledge seeding
         residential_buildings = [b for b in village.buildings if b.category == "residential"]
         workplace_buildings = [b for b in village.buildings if "workplace" in b.category] # e.g., "civic_workplace", "commercial_workplace"
 
@@ -4649,6 +4679,7 @@ class World:
 
 
                 self.village_npcs.append(npc)
+                newly_created_npcs.append(npc)
                 self.add_message_to_chat_log(
                     f"Generated Villager: {npc.name} (Wealth: {npc.wealth_level}, Prof: {npc.profession}). "
                     f"Home: {home_building.building_type if home_building else 'N/A'}. "
@@ -4660,6 +4691,42 @@ class World:
                 self.add_message_to_chat_log(f"LLM Response: {llm_response}")
             except IndexError: # Ran out of homes or workplaces
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
+
+        # --- Seed Initial Knowledge ---
+        if newly_created_npcs:
+            # Tavern Knowledge
+            tavern_building = next((b for b in village.buildings if b.building_type == "tavern"), None)
+            if tavern_building:
+                for _ in range(random.randint(1, 2)):
+                    random_villager = random.choice(newly_created_npcs)
+                    tavern_knowledge = {
+                        "type": "location", "subject": "tavern",
+                        "coords": (tavern_building.global_center_x, tavern_building.global_center_y)
+                    }
+                    if tavern_knowledge not in random_villager.knowledge:
+                        random_villager.knowledge.append(tavern_knowledge)
+
+            # Fishing Spot Knowledge
+            fishing_spots = village.interaction_points.get("fishing_spot", [])
+            if fishing_spots:
+                for _ in range(random.randint(1, 2)):
+                    random_villager = random.choice(newly_created_npcs)
+                    random_spot = random.choice(fishing_spots)
+                    spot_knowledge = { "type": "location", "subject": "fishing_spot", "coords": random_spot }
+                    if spot_knowledge not in random_villager.knowledge:
+                        random_villager.knowledge.append(spot_knowledge)
+
+            # General Store Knowledge
+            store_building = next((b for b in village.buildings if b.building_type == "general_store"), None)
+            if store_building:
+                for _ in range(random.randint(1, 2)):
+                    random_villager = random.choice(newly_created_npcs)
+                    store_knowledge = {
+                        "type": "location", "subject": "general_store",
+                        "coords": (store_building.global_center_x, store_building.global_center_y)
+                    }
+                    if store_knowledge not in random_villager.knowledge:
+                        random_villager.knowledge.append(store_knowledge)
 
 
     def _handle_npc_speech(self):

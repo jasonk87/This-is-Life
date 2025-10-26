@@ -406,10 +406,20 @@ def main():
                                     world.ghost_furniture_tile = None
                             else:
                                 world.add_message_to_chat_log("You can only build inside a house you own.")
+                        elif event.sym == tcod.event.KeySym.K:
+                            world.game_state = "KNOWLEDGE_MENU"
                         elif event.sym == tcod.event.KeySym.E:
                             target_x = world.player.x + world.player.last_dx
                             target_y = world.player.y + world.player.last_dy
                             open_interaction_menu(world, target_x, target_y)
+
+                    elif world.game_state == "KNOWLEDGE_MENU":
+                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.K:
+                            world.game_state = "PLAYING"
+                        elif event.sym == tcod.event.KeySym.UP:
+                            world.knowledge_menu_context["scroll_offset"] = max(0, world.knowledge_menu_context["scroll_offset"] - 1)
+                        elif event.sym == tcod.event.KeySym.DOWN:
+                            world.knowledge_menu_context["scroll_offset"] += 1
 
                     elif world.game_state == "BUILD_MODE":
                         if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.B:

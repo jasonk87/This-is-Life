@@ -146,6 +146,7 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
     draw_chat_ui(console, world)
     draw_trade_ui(console, world)
     draw_crafting_menu(console, world)
+    draw_knowledge_menu(console, world)
     draw_cursor_info(console, world, camera_x, camera_y)
     draw_status_panel(console, world)
 
@@ -293,6 +294,52 @@ def draw_chat_ui(console: tcod.console.Console, world) -> None:
 def draw_trade_ui(console: tcod.console.Console, world) -> None:
     if not world.trade_ui_active: return
     # ... (this function is full-screen overlay, no camera coords needed)
+
+def draw_knowledge_menu(console: tcod.console.Console, world) -> None:
+    """Draws the player's knowledge journal."""
+    if world.game_state != "KNOWLEDGE_MENU":
+        return
+
+    menu_width = 50
+    menu_height = 30
+    menu_x = (SCREEN_WIDTH_TILES - menu_width) // 2
+    menu_y = (SCREEN_HEIGHT_TILES - menu_height) // 2
+
+    console.draw_frame(x=menu_x, y=menu_y, width=menu_width, height=menu_height, title="Knowledge Journal", clear=True)
+
+    ctx = world.knowledge_menu_context
+    known_facts = world.player.knowledge
+
+    list_height = menu_height - 4
+
+    # Clamp scroll offset
+    if not known_facts:
+        ctx["scroll_offset"] = 0
+    else:
+        ctx["scroll_offset"] = max(0, min(ctx["scroll_offset"], len(known_facts) - list_height))
+
+    facts_to_display = known_facts[ctx["scroll_offset"]:ctx["scroll_offset"] + list_height]
+
+    if not facts_to_display:
+        console.print(x=menu_x + 2, y=menu_y + 2, string="You haven't discovered anything yet.", fg=(128,128,128))
+        return
+
+    for i, fact in enumerate(facts_to_display):
+        fact_type = fact.get("type", "Misc").title()
+        subject = fact.get("subject", "Unknown").replace("_", " ").title()
+        coords = fact.get("coords")
+
+        display_text = f"[{fact_type}] {subject}"
+        if coords:
+            display_text += f" at ({coords[0]}, {coords[1]})"
+
+        console.print(x=menu_x + 2, y=menu_y + 2 + i, string=display_text, fg=(255,255,255))
+
+    # Draw scroll indicators
+    if ctx["scroll_offset"] > 0:
+        console.print(x=menu_x + menu_width - 2, y=menu_y + 1, string="^", fg=(255,255,0))
+    if ctx["scroll_offset"] + list_height < len(known_facts):
+        console.print(x=menu_x + menu_width - 2, y=menu_y + menu_height - 2, string="v", fg=(255,255,0))
 
 def draw_crafting_menu(console: tcod.console.Console, world) -> None:
     """Draws the crafting menu UI."""

@@ -457,6 +457,11 @@ class World:
             "all_recipes": [] # This will be populated when the menu is opened
         }
 
+        # Knowledge Menu State
+        self.knowledge_menu_context = {
+            "scroll_offset": 0
+        }
+
         # Items on the ground
         self.items_on_map: dict[tuple[int, int], list[dict]] = {} # Key: (x,y), Value: list of {"item_key": str, "quantity": int}
 

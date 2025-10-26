@@ -382,7 +382,6 @@ class Player:
 class World:
     """World class now uses a generator for a more complex map."""
     def __init__(self, seed=None):
-        self.pack_id_counter = 0
         self.chat_log = [] # Stores chat messages
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
@@ -976,14 +975,6 @@ class World:
                         npc.current_destination_coords = None
                         break
 
-                    # Aquatic animal check
-                    if isinstance(npc, Animal) and npc.behavior == "Wander-Water":
-                        is_next_tile_water = next_tile.name in ["water", "deep_water"]
-                        if not is_next_tile_water:
-                            npc.current_path = []
-                            npc.current_destination_coords = None
-                            break
-
                     is_occupied = False
                     is_hunting_prey = self._is_predator(npc) and npc.current_task == "hunting"
                     for other_npc in self.village_npcs + self.npcs:
@@ -1008,7 +999,6 @@ class World:
                     # If the NPC was pathing for a specific reason, update its state now that it has arrived
                     if npc.current_task == "going to work": npc.current_task = "at work"
                     elif npc.current_task in ["going home", "going home to sleep", "going to bed"]: npc.current_task = "at home"
-                    elif npc.current_task == "going_home_with_furniture": npc.current_task = "placing_furniture"
                     else: npc.current_task = "idle" # Or whatever the default state should be post-movement
 
     def _get_building_global_center_coords(self, building_id: str) -> tuple[int, int] | None:
@@ -1228,8 +1218,74 @@ class World:
 
             npc.game_time_last_updated = self.game_time
 
-            if npc.is_hostile_to_player: # This includes creatures who are hostile by default
-                self._handle_npc_combat_turn(npc) # Combat AI runs
+            # --- FEAR SYSTEM (High Priority) ---
+            can_be_frightened = (npc.profession != "Creature" and
+                                 not npc.is_hostile_to_player and
+                                 npc.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player"])
+
+            if can_be_frightened and npc.id in self.npc_fov_maps:
+                fov_map = self.npc_fov_maps[npc.id]
+                visible_npcs = [
+                    other_npc for other_npc in self.npcs + self.village_npcs
+                    if other_npc.id != npc.id and not other_npc.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.x, other_npc.y]
+                ]
+                visible_wolves = [vn for vn in visible_npcs if isinstance(vn, Animal) and vn.animal_type == "wolf"]
+                if len(visible_wolves) >= 2:
+                    if not npc.is_frightened:
+                        npc.is_frightened = True
+                        npc.threat_source_ids = [wolf.id for wolf in visible_wolves]
+                        self.add_message_to_chat_log(f"{npc.name} sees a wolf pack and is terrified!")
+                        npc.current_path = []
+
+            if npc.is_frightened:
+                threats_still_visible = False
+                if npc.id in self.npc_fov_maps:
+                    fov_map = self.npc_fov_maps[npc.id]
+                    for threat_id in npc.threat_source_ids:
+                        threat = next((n for n in self.npcs if n.id == threat_id), None)
+                        if threat and not threat.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.x, threat.y]:
+                            threats_still_visible = True
+                            break
+                if threats_still_visible:
+                    if npc.profession in ["Guard", "Sheriff"]:
+                        if npc.current_task == "alerting_guards" and (not npc.current_path or len(npc.current_path) <= 1):
+                            self.add_message_to_chat_log(f"{npc.name} raises the alarm about the threat!")
+                            npc.is_hostile_to_player = True
+                            for other_npc in self.village_npcs:
+                                if other_npc.id != npc.id and other_npc.profession in ["Guard", "Sheriff"]:
+                                    if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) <= 15:
+                                        other_npc.is_hostile_to_player = True
+                                        self.add_message_to_chat_log(f"{other_npc.name} hears the alarm and prepares for battle!")
+                        elif npc.current_task != "alerting_guards":
+                            npc.current_task = "alerting_guards"
+                            npc_village = self._get_village_for_npc(npc)
+                            alarm_spot = npc_village.interaction_points.get("town_square_center") if npc_village else None
+                            if alarm_spot:
+                                dest_x, dest_y = self._find_best_adjacent_tile(alarm_spot[0], alarm_spot[1], npc)
+                                if dest_x is not None:
+                                    path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                                    if path:
+                                        npc.current_path = path
+                                        npc.current_destination_coords = (dest_x, dest_y)
+                    else:
+                        if npc.current_task != "fleeing_from_threat":
+                            npc.current_task = "fleeing_from_threat"
+                            safe_spot = self.buildings_by_id.get(npc.home_building_id) or self._find_nearest_tavern(npc)
+                            if safe_spot:
+                                path = self.calculate_path(npc.x, npc.y, safe_spot.global_center_x, safe_spot.global_center_y)
+                                if path:
+                                    npc.current_path = path
+                                    npc.current_destination_coords = (safe_spot.global_center_x, safe_spot.global_center_y)
+                else:
+                    npc.is_frightened = False
+                    npc.threat_source_ids = []
+                    npc.current_task = "idle"
+                    npc.current_path = []
+                    self.add_message_to_chat_log(f"{npc.name} calms down as the threat is gone.")
+                continue
+
+            if npc.is_hostile_to_player:
+                self._handle_npc_combat_turn(npc)
                 # If creature is not actively pathing from combat AI (e.g. holding, or just attacked)
                 # and not investigating a sound, they could wander a bit.
                 if not npc.current_path and npc.current_task not in ["investigating_sound", "combat_action_attack_player"]:
@@ -1296,21 +1352,21 @@ class World:
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
-                                prey_was_killed = self.npc_attempt_attack_npc(npc, prey)
-                                if prey_was_killed:
-                                    # Prey is dead, so reset state immediately
-                                    npc.current_task = "idle"
-                                    npc.task_target_entity_id = None
+                                self.npc_attempt_attack_npc(npc, prey)
                                 npc.current_path = []
                                 npc.current_destination_coords = None
+                                print(f"DEBUG: After attack, prey.is_dead = {prey.is_dead}")
+                                if prey.is_dead:
+                                    npc.hunger = 0
+                                    npc.current_task = "idle"
+                                    npc.task_target_entity_id = None
                             else:
                                 if not npc.current_path or npc.current_destination_coords != (prey.x, prey.y):
                                     path = self.calculate_path(npc.x, npc.y, prey.x, prey.y)
                                     if path:
                                         npc.current_path = path
                                         npc.current_destination_coords = (prey.x, prey.y)
-                        else: # Catches both 'prey is dead' and 'no prey'
-                            # Prey is dead or gone, so reset state
+                        else:
                             npc.current_task = "idle"
                             npc.task_target_entity_id = None
                         continue
@@ -1615,72 +1671,13 @@ class World:
                         if food_to_buy and npc.money >= food_price:
                             food_vendor_building.building_inventory[food_to_buy] -= 1
                             npc.money -= food_price
-
-                            # Instead of putting it in inventory, just "eat" it directly
-                            item_def = ITEM_DEFINITIONS[food_to_buy]
-                            on_use = item_def["on_use"]
-                            npc.hunger = max(0, npc.hunger - on_use["reduces_hunger"])
-                            # self.add_message_to_chat_log(f"{npc.name} bought and ate a {item_def.get('name', food_to_buy)} at the {food_vendor_building.building_type}.")
-                            npc.current_task = npc.previous_task or "idle" # Resume previous task
-                            npc.previous_task = None
+                            npc.npc_inventory[food_to_buy] = npc.npc_inventory.get(food_to_buy, 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
+                            # Now that food is in inventory, the main hunger logic will handle eating it next tick
+                            npc.current_task = "seeking_food"
                         else:
                             # No food to buy or can't afford it
-                            # self.add_message_to_chat_log(f"{npc.name} went to the {food_vendor_building.building_type} but couldn't buy food.")
                             npc.current_task = "wandering_hungry"
-                    needs_based_action_taken = True
-
-                # --- Furniture Acquisition ---
-                if not needs_based_action_taken:
-                    npc.desire_for_furniture += 1
-                    if npc.desire_for_furniture > 500:
-                        carpenter_shop = self._find_nearest_carpenter(npc)
-                        if carpenter_shop:
-                            npc.current_task = "going_to_buy_furniture"
-                            npc.previous_task = "idle"
-                            path = self.calculate_path(npc.x, npc.y, carpenter_shop.global_center_x, carpenter_shop.global_center_y)
-                            if path:
-                                npc.current_path = path
-                                npc.current_destination_coords = (carpenter_shop.global_center_x, carpenter_shop.global_center_y)
-                                needs_based_action_taken = True
-
-                if npc.current_task == "going_to_buy_furniture":
-                    carpenter_shop = self._find_nearest_carpenter(npc)
-                    if carpenter_shop and (npc.x, npc.y) == (carpenter_shop.global_center_x, carpenter_shop.global_center_y):
-                        village = self._get_village_for_npc(npc)
-                        chair_price = self.get_dynamic_price("wooden_chair", village)
-                        if npc.money >= chair_price and carpenter_shop.building_inventory.get("wooden_chair", 0) > 0:
-                            carpenter_shop.building_inventory["wooden_chair"] -= 1
-                            npc.money -= chair_price
-                            npc.add_item("wooden_chair", 1)
-                            npc.desire_for_furniture = 0
-                            npc.current_task = "going_home_with_furniture"
-                        else:
-                            npc.current_task = "idle"
-                    needs_based_action_taken = True
-
-                if npc.current_task == "going_home_with_furniture":
-                    home_building = self.buildings_by_id.get(npc.home_building_id)
-                    if home_building:
-                        path = self.calculate_path(npc.x, npc.y, home_building.global_center_x, home_building.global_center_y)
-                        if path:
-                            npc.current_path = path
-                            npc.current_destination_coords = (home_building.global_center_x, home_building.global_center_y)
-                    needs_based_action_taken = True
-
-                if npc.current_task == "placing_furniture":
-                    home_building = self.buildings_by_id.get(npc.home_building_id)
-                    if home_building and (npc.x, npc.y) == (home_building.global_center_x, home_building.global_center_y):
-                        for y_offset in range(1, home_building.height - 1):
-                            for x_offset in range(1, home_building.width - 1):
-                                tile_x = home_building.global_origin_x + x_offset
-                                tile_y = home_building.global_origin_y + y_offset
-                                if self.get_tile_at(tile_x, tile_y).name == "wood_floor":
-                                    self._change_map_tile((tile_x, tile_y), DECORATION_ITEM_DEFINITIONS["wooden_chair"])
-                                    npc.remove_item("wooden_chair", 1)
-                                    npc.current_task = "idle"
-                                    break
-                            if npc.current_task == "idle":
-                                break
                     needs_based_action_taken = True
 
 
@@ -1854,30 +1851,7 @@ class World:
 
                     # Priority: Go to work during work hours
                     if work_start_tick <= current_time_in_day < work_end_tick:
-                        # --- Fisherman AI ---
-                        if npc.profession == "Fisherman" and npc.current_task not in ["fishing", "going_to_fish"]:
-                            npc_village = self._get_village_for_npc(npc)
-                            if npc_village and "fishing_spot" in npc_village.interaction_points and npc_village.interaction_points["fishing_spot"]:
-                                # Find closest fishing spot
-                                fishing_spots = npc_village.interaction_points["fishing_spot"]
-                                closest_spot = None
-                                min_dist_sq = float('inf')
-                                for spot in fishing_spots:
-                                    dist_sq = (npc.x - spot[0])**2 + (npc.y - spot[1])**2
-                                    if dist_sq < min_dist_sq:
-                                        min_dist_sq = dist_sq
-                                        closest_spot = spot
-
-                                if closest_spot:
-                                    # Check if already at a fishing spot
-                                    if (npc.x, npc.y) in fishing_spots:
-                                        npc.current_task = "fishing"
-                                        npc.current_path = []
-                                        npc.current_destination_coords = None
-                                    else:
-                                        new_task_label = "going_to_fish"
-                                        destination_coords = closest_spot
-                        elif npc.work_building_id and not is_at_work and npc.current_task != "going to work":
+                        if npc.work_building_id and not is_at_work and npc.current_task != "going to work":
                             work_building_obj = self.buildings_by_id.get(npc.work_building_id)
                             # Future: Check for specific workstation in work_building_obj.interaction_points
                             # For now, path to building center for work.
@@ -2120,11 +2094,6 @@ class World:
             farm = self._find_nearest_farm(npc)
             if farm:
                 return (farm.global_center_x, farm.global_center_y)
-            return None
-        elif target_zone_tag == "fishing_hut":
-            fishing_hut = self._find_nearest_fishing_hut(npc)
-            if fishing_hut:
-                return (fishing_hut.global_center_x, fishing_hut.global_center_y)
             return None
         elif target_zone_tag == "mill":
             # For fetching flour, find the nearest mill
@@ -2387,16 +2356,6 @@ class World:
                                 work_building.building_inventory["wheat"] = work_building.building_inventory.get("wheat", 0) + wheat_to_buy
                                 # self.add_message_to_chat_log(f"{npc.name} bought {wheat_to_buy} wheat.")
 
-                    elif completed_sub_task_id == "fetch_fish":
-                        # Cook is at the fishing hut, try to take fish
-                        fishing_hut = self._find_nearest_fishing_hut(npc)
-                        if fishing_hut:
-                            fish_to_take = 5 # Try to take 5 fish
-                            if fishing_hut.building_inventory.get("raw_fish", 0) >= fish_to_take:
-                                fishing_hut.building_inventory["raw_fish"] -= fish_to_take
-                                npc.add_item("raw_fish", fish_to_take)
-                                # self.add_message_to_chat_log(f"{npc.name} took {fish_to_take} raw fish.")
-
                     elif completed_sub_task_id == "fetch_flour":
                         # Baker is at the mill, try to buy flour
                         mill = self._find_nearest_mill(npc)
@@ -2416,20 +2375,6 @@ class World:
                             work_building.building_inventory["wheat"] -= wheat_needed
                             work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} milled some flour.")
-                    elif completed_sub_task_id == "fish_at_spot":
-                        # Fisherman is at a fishing spot, 50% chance to catch a fish
-                        if random.random() < 0.5:
-                            npc.add_item("raw_fish", 1)
-                    elif completed_sub_task_id == "store_fish":
-                        # Fisherman is at their work building, deposit fish
-                        fish_in_inventory = 0
-                        for item in npc.inventory:
-                            if item["key"] == "raw_fish":
-                                fish_in_inventory = item["quantity"]
-                                break
-                        if fish_in_inventory > 0:
-                            work_building.building_inventory["raw_fish"] = work_building.building_inventory.get("raw_fish", 0) + fish_in_inventory
-                            npc.remove_item("raw_fish", fish_in_inventory)
 
                     elif npc.profession == "Farmer":
                         target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
@@ -2601,24 +2546,24 @@ class World:
 
         has_healing_item = npc.npc_inventory.get("healing_salve", 0) > 0
 
+        # Pack behavior logic
         pack_members_nearby = 0
         if isinstance(npc, Animal) and npc.pack_id:
-            for other_npc in self.npcs:
-                if isinstance(other_npc, Animal) and other_npc.pack_id == npc.pack_id and other_npc.id != npc.id:
-                    if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10:
+            for other_npc in self.npcs: # Check against all non-village NPCs
+                if isinstance(other_npc, Animal) and other_npc.id != npc.id and other_npc.pack_id == npc.pack_id:
+                    if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10: # Within 10 tiles
                         pack_members_nearby += 1
 
         prompt = LLM_PROMPTS["npc_combat_decision"].format(
             npc_name=npc.name,
             npc_personality=npc.personality,
             can_see_player=can_see_player,
-            pack_members_nearby=pack_members_nearby,
             npc_combat_behavior=npc.combat_behavior,
             npc_hp=npc.hp,
             npc_max_hp=npc.max_hp,
             npc_current_task=npc.current_task,
-            npc_attack_name=effective_attack_name, # Use effective name
-            npc_attack_range=effective_attack_range, # Use effective range
+            npc_attack_name=effective_attack_name,
+            npc_attack_range=effective_attack_range,
             has_healing_item=has_healing_item,
             player_x=player.x,
             player_y=player.y,
@@ -2627,6 +2572,7 @@ class World:
             distance_to_player=manhattan_distance,
             player_in_attack_range=player_in_attack_range,
             player_last_action_desc=player_last_action_desc,
+            pack_members_nearby=pack_members_nearby,
         )
 
         response_str = self._call_ollama(prompt)
@@ -2807,12 +2753,9 @@ class World:
              self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
 
     def npc_attempt_attack_npc(self, attacker: NPC, target: NPC):
-        """
-        Handles an NPC's attempt to attack another NPC.
-        Returns True if the target was killed, False otherwise.
-        """
+        """Handles an NPC's attempt to attack another NPC."""
         if attacker.is_dead or target.is_dead:
-            return False
+            return
 
         # Simple damage calculation for now, bypassing LLM for NPC vs NPC
         damage = random.randint(1, 4) # Example: 1d4 damage
@@ -2829,11 +2772,6 @@ class World:
             if can_player_see:
                 self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
             self.handle_npc_death(target)
-            if self._is_predator(attacker):
-                attacker.hunger = 0
-            return True # Kill was made
-
-        return False
 
     def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
         """Finds the nearest building that sells food (e.g., general store, bakery)."""
@@ -2841,7 +2779,7 @@ class World:
         if not npc_village:
             return None
 
-        food_vendors = [b for b in npc_village.buildings if b.building_type in ["general_store", "bakery", "tavern"]]
+        food_vendors = [b for b in npc_village.buildings if b.building_type in ["general_store", "bakery"]]
         if not food_vendors:
             return None
 
@@ -2980,14 +2918,6 @@ class World:
         """Finds the nearest building with a 'tavern' type in the NPC's village."""
         return self._find_nearest_building_of_type(npc, "tavern")
 
-    def _find_nearest_carpenter(self, npc: NPC) -> Building | None:
-        """Finds the nearest building with a 'carpenter_shop' type in the NPC's village."""
-        return self._find_nearest_building_of_type(npc, "carpenter_shop")
-
-    def _find_nearest_fishing_hut(self, npc: NPC) -> Building | None:
-        """Finds the nearest building with a 'fishing_hut' type in the NPC's village."""
-        return self._find_nearest_building_of_type(npc, "fishing_hut")
-
     def _npc_eat_from_inventory(self, npc: NPC, inventory: dict, is_building_inventory: bool = False) -> tuple[bool, bool]:
         """
         Searches an inventory for food and consumes one item if found.
@@ -3117,8 +3047,6 @@ class World:
                 actions.append("Toggle Door")
             elif entity_data.name == "Animal Corpse":
                 actions.append("Butcher")
-            elif entity_data.name in ["water", "deep_water"]:
-                actions.append("Fish")
         elif entity_type == "building":
             if entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
                 actions.append("Claim House")
@@ -3423,30 +3351,6 @@ class World:
             animal_npc.last_shorn_time = self.game_time
         else:
             self.add_message_to_chat_log(f"You attempt to shear the {animal_npc.name}, but get no wool.")
-
-    def player_attempt_fish(self, water_x: int, water_y: int):
-        """Handles the player's attempt to fish in a water tile."""
-        # 1. Check for fishing rod
-        if not self.player.has_item("fishing_rod"):
-            self.add_message_to_chat_log("You need a fishing rod to fish.")
-            return
-
-        # 2. Check if player is adjacent to the water tile
-        is_adjacent = abs(self.player.x - water_x) <= 1 and abs(self.player.y - water_y) <= 1
-        if not is_adjacent:
-            self.add_message_to_chat_log("You need to be closer to the water to fish.")
-            return
-
-        # 3. Attempt to catch a fish
-        self.add_message_to_chat_log("You cast your line into the water...")
-
-        # Simple chance-based system for now
-        if random.random() < 0.3: # 30% chance to catch a fish
-            self.player.add_item("raw_fish", 1)
-            fish_name = ITEM_DEFINITIONS.get("raw_fish", {}).get("name", "a fish")
-            self.add_message_to_chat_log(f"You caught {fish_name}!")
-        else:
-            self.add_message_to_chat_log("Nothing seems to be biting.")
 
     def player_attempt_dismount(self, animal_npc: Animal):
         """Handles the player's attempt to dismount an animal."""
@@ -4564,14 +4468,7 @@ class World:
                          "market" in work_building.building_type:
                         npc.profession = "Merchant"
                     elif work_building.building_type == "tavern":
-                        is_cook_assigned = any(
-                            other_npc.profession == "Cook" and other_npc.work_building_id == work_building.id
-                            for other_npc in self.village_npcs
-                        )
-                        if not is_cook_assigned and random.random() < 0.5:
-                            npc.profession = "Cook"
-                        else:
-                            npc.profession = "Tavern Keeper"
+                        npc.profession = "Tavern Keeper"
                     elif work_building.building_type == "lumber_mill":
                         # Could have multiple roles at a lumber mill, e.g. Foreman and Woodcutter
                         # For now, let's make the first NPC assigned to a lumber_mill the "Foreman" (quest giver)
@@ -4948,22 +4845,10 @@ class World:
                             # Animal Spawning
                             for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
                                 if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
-                                    current_tile = tiles[y_local][x_local]
-                                    is_water_animal = animal_def.get("behavior") == "Wander-Water"
-                                    is_water_tile = current_tile.name == "water" or current_tile.name == "deep_water"
-
-                                    # Spawn water animals only on water, and land animals only on land
-                                    if is_water_animal != is_water_tile:
-                                        continue
-
                                     animal_x_world = chunk_coord_x * CHUNK_SIZE + x_local
                                     animal_y_world = chunk_coord_y * CHUNK_SIZE + y_local
                                     if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
                                         new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
-                                        if animal_def.get("pack_animal"):
-                                            if random.random() < 0.5:
-                                                self.pack_id_counter += 1
-                                            new_animal.pack_id = f"pack_{self.pack_id_counter}"
                                         new_animal.char = ord(animal_def["char"])
                                         new_animal.color = animal_def["color"]
                                         new_animal.max_hp = animal_def["max_hp"]
@@ -5100,25 +4985,6 @@ class World:
             chunk.village.add_building(tavern)
             self.buildings_by_id[tavern.id] = tavern
             self._draw_building(tiles, tavern, "wood_wall")
-
-            # Define work zones for the new Cook profession
-            kitchen_storage_coords = []
-            if tavern.width > 3 and tavern.height > 3:
-                # Place in a corner, e.g., top-left interior
-                for i in range(2):
-                    for j in range(2):
-                        gx = tavern.global_origin_x + 1 + j
-                        gy = tavern.global_origin_y + 1 + i
-                        kitchen_storage_coords.append((gx, gy))
-            tavern.work_zone_tiles["kitchen_storage"] = kitchen_storage_coords
-
-            cooking_station_coords = []
-            if tavern.width > 4 and tavern.height > 3:
-                 # Place next to the storage area
-                gx = tavern.global_origin_x + 3
-                gy = tavern.global_origin_y + 1
-                cooking_station_coords.append((gx, gy))
-            tavern.work_zone_tiles["cooking_station"] = cooking_station_coords
 
         # Generate Lumber Mill (example producer workplace)
         lumber_mill_w, lumber_mill_h = 7, 7
@@ -5352,27 +5218,7 @@ class World:
 
 
         # Generate Fishing Hut
-        # Generate Fishing Hut and Fishing Spots
         if any(tiles[y][x].name == "water" for x in range(CHUNK_SIZE) for y in range(CHUNK_SIZE)):
-            # Designate fishing spots
-            for y in range(CHUNK_SIZE):
-                for x in range(CHUNK_SIZE):
-                    if tiles[y][x].name != "water":
-                        # Check adjacent tiles for water
-                        for dx in range(-1, 2):
-                            for dy in range(-1, 2):
-                                if dx == 0 and dy == 0:
-                                    continue
-                                check_x, check_y = x + dx, y + dy
-                                if 0 <= check_x < CHUNK_SIZE and 0 <= check_y < CHUNK_SIZE:
-                                    if tiles[check_y][check_x].name == "water":
-                                        if "fishing_spot" not in chunk.village.interaction_points:
-                                            chunk.village.interaction_points["fishing_spot"] = []
-                                        chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + x, chunk_global_start_y + y))
-                                        break
-                            if (chunk_global_start_x + x, chunk_global_start_y + y) in chunk.village.interaction_points.get("fishing_spot", []):
-                                break
-
             hut_w, hut_h = 5, 5
             for _ in range(100): # Attempts to place hut
                 hut_x = random.randint(1, CHUNK_SIZE - hut_w - 1)
@@ -5396,16 +5242,18 @@ class World:
                     self.buildings_by_id[fishing_hut.id] = fishing_hut
                     self._draw_building(tiles, fishing_hut, "wood_wall")
 
-                    storage_area_coords_global = []
-                    if fishing_hut.width > 2 and fishing_hut.height > 2:
-                        local_storage_x = 1
-                        local_storage_y = 1
-                        for i in range(2):
-                            for j in range(2):
-                                gx = fishing_hut.global_origin_x + local_storage_x + j
-                                gy = fishing_hut.global_origin_y + local_storage_y + i
-                                storage_area_coords_global.append((gx, gy))
-                    fishing_hut.work_zone_tiles["storage_area"] = storage_area_coords_global
+                    # Designate a fishing spot
+                    for i in range(-2, hut_h + 2):
+                        for j in range(-2, hut_w + 2):
+                            spot_x, spot_y = hut_x + j, hut_y + i
+                            if 0 <= spot_x < CHUNK_SIZE and 0 <= spot_y < CHUNK_SIZE:
+                                if tiles[spot_y][spot_x].name == "water":
+                                    if "fishing_spot" not in chunk.village.interaction_points:
+                                        chunk.village.interaction_points["fishing_spot"] = []
+                                    chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + spot_x, chunk_global_start_y + spot_y))
+                                    break
+                        if "fishing_spot" in chunk.village.interaction_points:
+                            break
                     break
 
         # Generate a few regular houses

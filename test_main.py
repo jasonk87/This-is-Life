@@ -435,14 +435,208 @@ class TestPredatorPreyAI(unittest.TestCase):
             if prey.is_dead:
                 break
 
-        # One final update to process the post-death state change (e.g., hunger reset)
-        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
-        self.world._update_npc_schedules()
+        # The hunger reset now happens inside npc_attempt_attack_npc, which is called
+        # during the _update_npc_schedules inside the loop. No extra update is needed.
+        # A final update would cause the predator's hunger to start increasing again.
 
         # 5. Assertion (Attack and outcome)
         self.assertLess(prey.hp, initial_prey_hp, "Prey should have taken damage")
         self.assertTrue(prey.is_dead, "Prey should be dead after the chase.")
         self.assertEqual(predator.hunger, 0, "Predator should not be hungry after a successful kill")
+
+
+class TestFearSystem(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+
+        mock_npc_data = {
+            "name": "Generic Villager", "personality": "neutral", "dialogue": ["..."],
+            "wealth_level": "average", "combat_behavior": "defensive", "base_attack_name": "fists"
+        }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+
+        # Use a fixed seed for any remaining randomness
+        self.world = World(seed=1337)
+        self.world.current_season_index = 1 # Summer, to ensure neutral temperature
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def _clear_area_and_place_tile(self, x, y, tile_def):
+        """Helper to ensure a chunk is generated, clear a tile, and place a new one."""
+        from tile_types import Tile
+        self.world.get_tile_at(x, y) # Ensure chunk generation
+        chunk_x, chunk_y = x // 20, y // 20
+        local_x, local_y = x % 20, y % 20
+        tile = Tile(char=tile_def['char'], color=tile_def['color'], passable=tile_def['passable'], name=tile_def['name'], properties=tile_def.get('properties', {}).copy())
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = tile
+        # Also update the transparency map for FOV calculations
+        self.world.transparency_map[x, y] = not tile.blocks_fov
+
+    def test_civilian_flees_from_wolf_pack(self):
+        from entities.base import NPC
+        from entities.animal import Animal
+        from engine import Village, Building
+        from data.tiles import TILE_DEFINITIONS
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 1. Manual Setup
+        center_x, center_y = 50, 50
+        village = Village()
+        chunk_x, chunk_y = center_x // 20, center_y // 20
+        self.world.chunks[chunk_y][chunk_x].village = village
+
+        home_building = Building(center_x - 10, center_y - 10, 5, 5, building_type="house", category="residential", global_chunk_x_start=chunk_x * 20, global_chunk_y_start=chunk_y * 20)
+        village.add_building(home_building)
+        self.world.buildings_by_id[home_building.id] = home_building
+
+        civilian = NPC(x=center_x, y=center_y, name="Civilian")
+        civilian.profession = "Farmer"
+        civilian.home_building_id = home_building.id
+        self.world.village_npcs.append(civilian)
+
+        wolf1 = Animal(x=civilian.x + 2, y=civilian.y + 2, name="Wolf", animal_type="wolf")
+        wolf2 = Animal(x=civilian.x + 3, y=civilian.y + 2, name="Wolf", animal_type="wolf")
+        self.world.npcs.extend([wolf1, wolf2])
+
+        plains_def = TILE_DEFINITIONS["plains"]
+        for y_offset in range(-15, 16):
+            for x_offset in range(-15, 16):
+                self._clear_area_and_place_tile(center_x + x_offset, center_y + y_offset, plains_def)
+
+        self.world.update_fov()
+        self.assertTrue(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y])
+
+        # 2. Execution
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+
+        # 3. Assertion
+        self.assertTrue(civilian.is_frightened)
+        self.assertEqual(civilian.current_task, "fleeing_from_threat")
+        self.assertIsNotNone(civilian.current_path)
+        self.assertEqual(civilian.current_destination_coords, (home_building.global_center_x, home_building.global_center_y))
+
+    def test_guard_alerts_other_guards(self):
+        from entities.base import NPC
+        from entities.animal import Animal
+        from engine import Village, Building
+        from data.tiles import TILE_DEFINITIONS
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 1. Manual Setup
+        center_x, center_y = 50, 50
+        alarm_spot = (center_x, center_y)
+
+        village = Village()
+        village.interaction_points["town_square_center"] = alarm_spot
+        chunk_x, chunk_y = center_x // 20, center_y // 20
+        self.world.chunks[chunk_y][chunk_x].village = village
+
+        home_building = Building(2, 2, 5, 5, building_type="house", category="residential", global_chunk_x_start=chunk_x * 20, global_chunk_y_start=chunk_y * 20)
+        village.add_building(home_building)
+        self.world.buildings_by_id[home_building.id] = home_building
+
+        guard1 = NPC(x=alarm_spot[0] - 5, y=alarm_spot[1], name="Guard")
+        guard1.profession = "Guard"
+        guard1.home_building_id = home_building.id
+
+        guard2 = NPC(x=alarm_spot[0] - 2, y=alarm_spot[1] - 2, name="Alerted Guard")
+        guard2.profession = "Guard"
+
+        wolf1 = Animal(x=guard1.x + 2, y=guard1.y, name="Wolf", animal_type="wolf")
+        wolf2 = Animal(x=guard1.x + 3, y=guard1.y, name="Wolf", animal_type="wolf")
+
+        self.world.village_npcs.extend([guard1, guard2])
+        self.world.npcs.extend([wolf1, wolf2])
+
+        plains_def = TILE_DEFINITIONS["plains"]
+        for y_offset in range(-15, 16):
+            for x_offset in range(-15, 16):
+                self._clear_area_and_place_tile(center_x + x_offset, center_y + y_offset, plains_def)
+
+        well_def = TILE_DEFINITIONS["well"]
+        self._clear_area_and_place_tile(alarm_spot[0], alarm_spot[1], well_def)
+        self.assertFalse(self.world.get_tile_at(alarm_spot[0], alarm_spot[1]).passable)
+
+        self.world.update_fov()
+        self.assertTrue(self.world.npc_fov_maps[guard1.id][wolf1.x, wolf1.y])
+
+        # 2. Execution
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+
+        # 3. Assertion (Guard 1 starts alerting)
+        self.assertTrue(guard1.is_frightened)
+        self.assertEqual(guard1.current_task, "alerting_guards")
+        self.assertIsNotNone(guard1.current_path, "Guard1 should have a path to the alarm spot")
+
+        destination = guard1.current_destination_coords
+        self.assertIsNotNone(destination)
+        distance_to_alarm = abs(destination[0] - alarm_spot[0]) + abs(destination[1] - alarm_spot[1])
+        self.assertEqual(distance_to_alarm, 1, "Guard should be pathing to a tile adjacent to the alarm spot.")
+
+        self.assertFalse(guard2.is_hostile_to_player, "Guard 2 should not be alerted yet.")
+
+        # 4. Manually move guard1 to their destination
+        guard1.x, guard1.y = destination
+        guard1.current_path = []
+
+        # 5. Execution (Second update)
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+
+        # 6. Assertion (Guards become hostile)
+        self.assertTrue(guard1.is_hostile_to_player, "Alerting guard should become hostile.")
+        self.assertTrue(guard2.is_hostile_to_player, "Nearby guard should become hostile after alarm.")
+
+    def test_npc_calms_down_when_threat_is_gone(self):
+        from entities.base import NPC
+        from entities.animal import Animal
+        from data.tiles import TILE_DEFINITIONS
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 1. Manual Setup
+        center_x, center_y = 50, 50
+        civilian = NPC(x=center_x, y=center_y, name="Civilian")
+        civilian.profession = "Farmer"
+        self.world.village_npcs.append(civilian)
+
+        wolf1 = Animal(x=center_x + 2, y=center_y, name="Wolf", animal_type="wolf")
+        wolf2 = Animal(x=center_x + 3, y=center_y, name="Wolf", animal_type="wolf")
+        self.world.npcs.extend([wolf1, wolf2])
+
+        plains_def = TILE_DEFINITIONS["plains"]
+        for y_offset in range(-5, 6):
+            for x_offset in range(-5, 6):
+                self._clear_area_and_place_tile(center_x + x_offset, center_y + y_offset, plains_def)
+
+        self.world.update_fov()
+        self.assertTrue(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y])
+
+
+        # 2. Execution (Initial fear)
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+        self.assertTrue(civilian.is_frightened)
+        self.assertNotEqual(civilian.current_task, "idle")
+
+        # 3. Remove the threat
+        self.world.npcs.remove(wolf1)
+        self.world.npcs.remove(wolf2)
+
+        # Update FOV so NPC no longer sees them
+        self.world.update_fov()
+        # self.assertFalse(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y]) # This assertion is incorrect
+
+        # 4. Execution (Calm down)
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        self.world._update_npc_schedules()
+
+        # 5. Assertion
+        self.assertFalse(civilian.is_frightened)
+        self.assertEqual(civilian.current_task, "idle")
 
 if __name__ == '__main__':
     unittest.main()

@@ -4729,7 +4729,7 @@ class World:
                     attitude_to_player=npc_data.get("attitude_to_player", "indifferent"),
                     player_id=self.player.id
                 ))
-                self.add_message_to_chat_log(f"Generated NPC: {npc_data.get("name", "NPC")}")
+                self.add_message_to_chat_log(f"Generated NPC: {npc_data.get('name', 'NPC')}")
             except json.JSONDecodeError as e:
                 self.add_message_to_chat_log(f"Error parsing LLM response for NPC: {e}")
                 self.add_message_to_chat_log(f"LLM Response: {llm_response}")

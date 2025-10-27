@@ -4383,8 +4383,8 @@ class World:
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
-            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0),
+            player_fame=self.player.fame,
+            player_infamy=self.player.infamy,
             player_title=self.player.title
         )
         greeting = self._call_ollama(prompt)
@@ -4458,8 +4458,8 @@ class World:
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
-            player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0),
+            player_fame=self.player.fame,
+            player_infamy=self.player.infamy,
             player_title=self.player.title,
             conversation_history=history_str,
             player_input=player_input_text
@@ -5969,6 +5969,26 @@ class World:
         self._handle_npc_speech()
         self._update_entity_titles()
         self._update_npc_reputations()
+        self._handle_reputation_based_reactions()
+
+    def _handle_reputation_based_reactions(self):
+        """Makes NPCs react to famous or infamous characters they see."""
+        if self.game_time % 10 != 0:  # Check every 10 ticks for performance
+            return
+
+        for npc in self.village_npcs + self.npcs:
+            if npc.is_dead or npc.current_task in ["fleeing", "greeting"]:
+                continue
+
+            if npc.id in self.npc_fov_maps:
+                fov_map = self.npc_fov_maps[npc.id]
+                if fov_map[self.player.x, self.player.y]:
+                    if self.player.infamy >= 50:
+                        npc.current_task = "fleeing"
+                        self.add_message_to_chat_log(f"{npc.name} sees {self.player.title or 'an infamous figure'} and flees!")
+                    elif self.player.fame >= 50:
+                        npc.current_task = "greeting"
+                        self.add_message_to_chat_log(f"{npc.name} approaches to greet {self.player.title or 'a famous figure'}.")
 
     def get_entity_by_id(self, entity_id: int):
         """Finds an entity (player or NPC) by its ID."""

@@ -246,6 +246,10 @@ class Player:
         self.completed_quests: list[str] = []
         self.known_books: set[str] = set()
 
+        # Fame and Infamy
+        self.fame: int = 0
+        self.infamy: int = 0
+
 
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
@@ -6169,6 +6173,10 @@ class World:
             else:
                  witness_attitude_to_victim = "neutral"
 
+        # Grant Infamy for witnessed crimes
+        self.player.infamy += 5
+        self.add_message_to_chat_log("Your infamy has increased by 5.")
+
         # Log the crime event itself
         self.log_event(
             event_type="crime_witnessed",
@@ -6586,6 +6594,10 @@ class World:
             if reward_money > 0:
                 self.player.money += reward_money
                 self.add_message_to_chat_log(f"You received {reward_money} money.")
+
+            # Grant Fame for completing a quest
+            self.player.fame += 10
+            self.add_message_to_chat_log("Your fame has increased by 10.")
 
             reward_items = quest_def.get("reward_items", {})
             for item_key, qty in reward_items.items():

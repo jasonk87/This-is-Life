@@ -1,5 +1,6 @@
 import tcod
 import random
+import numpy as np
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
 from data.environment import WEATHER_DEFINITIONS

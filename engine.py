@@ -16,7 +16,7 @@ from config import (
     NOISE_SCALE, NOISE_OCTAVES, NOISE_PERSISTENCE, NOISE_LACUNARITY,
     ELEVATION_DEEP_WATER, ELEVATION_WATER, ELEVATION_MOUNTAIN, ELEVATION_SNOW,
     # NPC Scheduling Configs
-    ENABLE_OLLAMA_CONNECTION, USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
+    USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
     WORK_START_TIME_RATIO, WORK_END_TIME_RATIO,
     # Reputation Configs
     INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
@@ -4515,8 +4515,6 @@ class World:
 
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
-        if not ENABLE_OLLAMA_CONNECTION:
-            return ""
         try:
             response = requests.post(
                 OLLAMA_ENDPOINT + "/api/generate",

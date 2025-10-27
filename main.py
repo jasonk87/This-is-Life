@@ -203,7 +203,7 @@ def main():
                     alignment=tcod.CENTER
                 )
                 context.present(console)
-                for event_deep_loop in tcod.event.wait():
+                for event_deep_loop in tcod.event.get():
                     context.convert_event(event_deep_loop)
                     if isinstance(event_deep_loop, tcod.event.Quit) or isinstance(event_deep_loop, tcod.event.KeyDown):
                         return
@@ -214,7 +214,7 @@ def main():
                 context.present(console)
 
             # Event Handling
-            for event in tcod.event.wait():
+            for event in tcod.event.get():
                 context.convert_event(event)
                 if isinstance(event, tcod.event.Quit):
                     return

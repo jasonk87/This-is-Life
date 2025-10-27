@@ -1,7 +1,7 @@
 # data/prompts.py
 
 # --- LLM Settings ---
-OLLAMA_ENDPOINT = "http://192.168.86.30:11434"
+OLLAMA_ENDPOINT = "http://192.168.86.250:11434"
 OLLAMA_MODEL = "llama3.2:latest"
 
 # --- LLM Prompts ---

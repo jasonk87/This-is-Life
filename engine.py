@@ -1281,7 +1281,10 @@ class World:
                         cover_obj_tile = self.get_tile_at(cover_obj_x, cover_obj_y)
                         if not cover_obj_tile: continue
 
-                        tile_cover_value = cover_obj_tile.provides_cover_value
+                        tile_cover_value = 0
+                        if hasattr(cover_obj_tile, 'provides_cover_value'):
+                            tile_cover_value = cover_obj_tile.provides_cover_value
+
                         if tile_cover_value > 0:
                             dist_sq_threat_to_spot = (spot_x - threat_x)**2 + (spot_y - threat_y)**2
                             dist_sq_threat_to_cover_obj = (cover_obj_x - threat_x)**2 + (cover_obj_y - threat_y)**2

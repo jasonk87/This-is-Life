@@ -19,7 +19,8 @@ def draw_weather_overlay(console: tcod.console.Console, world) -> None:
             for y in range(console.height):
                 for x in range(map_view_width):
                     if random.random() < weather_chance:
-                        if console.rgb[x, y]["bg"] != (0, 0, 0) and console.rgb[x, y]["char"] not in [ord('#'), ord('+'), 177, 178]:
+                        # Convert tuple to numpy array for comparison
+                        if not np.array_equal(console.rgb[x, y]["bg"], np.array([0, 0, 0])) and console.rgb[x, y]["char"] not in [ord('#'), ord('+'), 177, 178]:
                             existing_fg = console.rgb[x, y]["fg"]
                             mixed_color = (
                                 (weather_color[0] + existing_fg[0]) // 2,

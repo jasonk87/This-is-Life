@@ -249,6 +249,7 @@ class Player:
         # Fame and Infamy
         self.fame: int = 0
         self.infamy: int = 0
+        self.title: str = ""
 
 
     def take_damage(self, amount: int, world=None) -> int:
@@ -4383,7 +4384,8 @@ class World:
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
             player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
-            player_hero_points=player_rep.get(REP_HERO, 0)
+            player_hero_points=player_rep.get(REP_HERO, 0),
+            player_title=self.player.title
         )
         greeting = self._call_ollama(prompt)
         if not greeting:
@@ -4453,6 +4455,7 @@ class World:
             npc_attitude=npc_target.attitude_to_player,
             player_criminal_points=player_rep.get(REP_CRIMINAL, 0),
             player_hero_points=player_rep.get(REP_HERO, 0),
+            player_title=self.player.title,
             conversation_history=history_str,
             player_input=player_input_text
         )
@@ -5959,6 +5962,33 @@ class World:
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
         self._handle_npc_speech()
+        self._update_player_title()
+
+    def _update_player_title(self):
+        """Periodically checks and updates the player's title based on fame/infamy."""
+        if self.game_time % 100 != 0:  # Check every 100 ticks
+            return
+
+        player = self.player
+        if not player.title and (player.fame >= 50 or player.infamy >= 50):
+            recent_events = [e for e in self.global_events if e.subject_id == player.id and e.type in ["quest_complete", "crime_witnessed"]]
+            actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific deeds of note."
+
+            prompt = LLM_PROMPTS["player_title_generation"].format(
+                player_fame=player.fame,
+                player_infamy=player.infamy,
+                player_actions_summary=actions_summary
+            )
+            response_str = self._call_ollama(prompt)
+            if response_str:
+                try:
+                    response_json = json.loads(response_str)
+                    new_title = response_json.get("title")
+                    if new_title:
+                        player.title = new_title
+                        self.add_message_to_chat_log(f"You are now known as {new_title}.")
+                except json.JSONDecodeError:
+                    pass  # Ignore LLM format errors for now
 
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""

@@ -77,6 +77,11 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
     console.print(x=panel_x + 2, y=y_offset, string=f"Fame: {world.player.fame}")
     y_offset += 1
     console.print(x=panel_x + 2, y=y_offset, string=f"Infamy: {world.player.infamy}")
+    y_offset += 2
+
+    # Title
+    if world.player.title:
+        console.print(x=panel_x + 2, y=y_offset, string=f"Title: {world.player.title}")
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""

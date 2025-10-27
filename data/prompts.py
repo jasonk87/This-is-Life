@@ -196,8 +196,9 @@ You are {npc_name}, an NPC in a fantasy village.
 Your personality is: {npc_personality}.
 Your current attitude towards the player is: {npc_attitude}.
 Player Reputation: Criminal Points: {player_criminal_points}, Hero Points: {player_hero_points}.
+The player is known by the title: "{player_title}" (this may be empty).
 The player has just initiated conversation with you.
-Generate a short, in-character greeting or opening line.
+Generate a short, in-character greeting or opening line. If the player has a title, you might use it.
 
 Greeting:
 """,
@@ -206,6 +207,7 @@ You are {npc_name}, an NPC in a fantasy village.
 Your personality is: {npc_personality}.
 Your current attitude towards the player is: {npc_attitude}.
 Player Reputation: Criminal Points: {player_criminal_points}, Hero Points: {player_hero_points}.
+The player is known by the title: "{player_title}" (this may be empty).
 
 The conversation history so far is:
 {conversation_history}
@@ -750,5 +752,37 @@ Deaths:
 {death_events_summary}
 
 Respond with a JSON object containing the census document's "title" and "content". The title should be something like "Village Census - Year {year}".
+""",
+    "player_title_generation": """\
+You are an AI acting as a village chronicler, tasked with bestowing a title upon a player who has gained significant renown.
+
+**Player's Reputation:**
+- Fame Score: {player_fame}
+- Infamy Score: {player_infamy}
+
+**Recent Noteworthy Actions by the Player:**
+{player_actions_summary}
+
+**Task:**
+Based on the player's fame, infamy, and their recent actions, generate a fitting title or nickname for them. The title should be short, memorable, and reflect the nature of their deeds.
+- If Fame is high and Infamy is low, the title should be heroic (e.g., "The Just", "Shield of the Valley", "Dragonslayer").
+- If Infamy is high and Fame is low, the title should be villainous or fearsome (e.g., "The Black Hand", "The Butcher of Oakhaven", "The Shadow").
+- If both are high, the title could be complex or morally ambiguous (e.g., "The Reckoner", "The One Who Walks in Light and Shadow").
+- The title should be directly inspired by the `player_actions_summary`. For example, if they killed many wolves, "The Wolfsbane" is appropriate. If they completed a quest to find a lost artifact, "The Seeker" might fit.
+
+**Output Format (JSON):**
+Return a JSON object with a single key, "title".
+
+Example 1 (Heroic):
+{{
+  "title": "The Wolfsbane"
+}}
+
+Example 2 (Villainous):
+{{
+  "title": "The Red Hand"
+}}
+
+JSON Output:
 """,
 }

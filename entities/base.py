@@ -117,6 +117,11 @@ class NPC:
         self.is_frightened: bool = False
         self.threat_source_ids: list[int] = []
 
+        # Fame and Infamy
+        self.fame: int = 0
+        self.infamy: int = 0
+        self.title: str = ""
+
     @property
     def attitude_to_player(self) -> str:
         if not self.player_id:

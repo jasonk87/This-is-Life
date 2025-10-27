@@ -611,10 +611,10 @@ Your relationship score with the other person involved (the target) is: {npc_rel
 
 The event you are gossiping about is:
 "{event_description}"
-(This event involved {subject_name} as the subject and {target_name} as the target.)
+(This event involved {subject_name} (title: {subject_title}) as the subject and {target_name} (title: {target_title}) as the target.)
 
 Task:
-Based on your personality and your relationships with the involved parties, turn this event into a piece of gossip or a rumor to share with the player.
+Based on your personality and your relationships with the involved parties, turn this event into a piece of gossip or a rumor to share with the player. If the subject or target has a title, you might use it.
 - If your relationship with the player is low, you might be reluctant, dismissive, or share a very short, unenthusiastic version.
 - If your relationship with the player is high, you might be more open, detailed, or share your personal opinion.
 - If you like the subject of the gossip, you might downplay their negative actions or frame them in a better light.

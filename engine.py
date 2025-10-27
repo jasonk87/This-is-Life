@@ -4417,6 +4417,9 @@ class World:
                 subject_name = getattr(subject, 'name', 'Someone') if subject else 'Someone'
                 target_name = getattr(target, 'name', 'someone') if target else 'someone'
 
+                subject_title = getattr(subject, 'title', '') if subject else ''
+                target_title = getattr(target, 'title', '') if target else ''
+
                 gossip_prompt = LLM_PROMPTS["npc_share_gossip"].format(
                     npc_name=npc_target.name,
                     npc_personality=npc_target.personality,
@@ -4425,7 +4428,9 @@ class World:
                     npc_relationship_with_target=npc_target.relationships.get(event_to_share.target_id, 50) if event_to_share.target_id else 50,
                     event_description=event_to_share.description,
                     subject_name=subject_name,
-                    target_name=target_name
+                    target_name=target_name,
+                    subject_title=subject_title,
+                    target_title=target_title
                 )
                 gossip_dialogue = self._call_ollama(gossip_prompt)
                 if not gossip_dialogue:
@@ -5962,33 +5967,65 @@ class World:
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
         self._handle_npc_speech()
-        self._update_player_title()
+        self._update_entity_titles()
+        self._update_npc_reputations()
 
-    def _update_player_title(self):
-        """Periodically checks and updates the player's title based on fame/infamy."""
+    def get_entity_by_id(self, entity_id: int):
+        """Finds an entity (player or NPC) by its ID."""
+        if entity_id == self.player.id:
+            return self.player
+        for npc in self.village_npcs + self.npcs:
+            if npc.id == entity_id:
+                return npc
+        return None
+
+    def _update_npc_reputations(self):
+        """Periodically scans the event log for significant NPC actions and awards fame/infamy."""
         if self.game_time % 100 != 0:  # Check every 100 ticks
             return
 
-        player = self.player
-        if not player.title and (player.fame >= 50 or player.infamy >= 50):
-            recent_events = [e for e in self.global_events if e.subject_id == player.id and e.type in ["quest_complete", "crime_witnessed"]]
-            actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific deeds of note."
+        for npc in self.village_npcs + self.npcs:
+            # Check for heroic kills
+            heroic_kills = [e for e in self.global_events if e.subject_id == npc.id and e.type == "entity_death" and e.target_id and isinstance(self.get_entity_by_id(e.target_id), DireWolf)]
+            for kill in heroic_kills:
+                npc.fame += 20
+                self.add_message_to_chat_log(f"{npc.name} gains fame for killing a dire wolf!")
 
-            prompt = LLM_PROMPTS["player_title_generation"].format(
-                player_fame=player.fame,
-                player_infamy=player.infamy,
-                player_actions_summary=actions_summary
-            )
-            response_str = self._call_ollama(prompt)
-            if response_str:
-                try:
-                    response_json = json.loads(response_str)
-                    new_title = response_json.get("title")
-                    if new_title:
-                        player.title = new_title
-                        self.add_message_to_chat_log(f"You are now known as {new_title}.")
-                except json.JSONDecodeError:
-                    pass  # Ignore LLM format errors for now
+            # Check for murders
+            murders = [e for e in self.global_events if e.subject_id == npc.id and e.type == "entity_death" and e.target_id and isinstance(self.get_entity_by_id(e.target_id), NPC)]
+            for murder in murders:
+                npc.infamy += 20
+                self.add_message_to_chat_log(f"{npc.name} gains infamy for murder!")
+
+    def _update_entity_titles(self):
+        """Periodically checks and updates titles for all entities based on fame/infamy."""
+        if self.game_time % 100 != 0:  # Check every 100 ticks
+            return
+
+        entities_to_check = [self.player] + self.village_npcs + self.npcs
+        for entity in entities_to_check:
+            if not entity.title and (entity.fame >= 50 or entity.infamy >= 50):
+                recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"]]
+                actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific deeds of note."
+
+                prompt = LLM_PROMPTS["player_title_generation"].format(
+                    player_fame=entity.fame,
+                    player_infamy=entity.infamy,
+                    player_actions_summary=actions_summary
+                )
+                response_str = self._call_ollama(prompt)
+                if response_str:
+                    try:
+                        response_json = json.loads(response_str)
+                        new_title = response_json.get("title")
+                        if new_title:
+                            entity.title = new_title
+                            if isinstance(entity, Player):
+                                self.add_message_to_chat_log(f"You are now known as {new_title}.")
+                            else:
+                                self.add_message_to_chat_log(f"{entity.name} is now known as {new_title}.")
+                    except json.JSONDecodeError:
+                        pass
 
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""
@@ -6189,7 +6226,7 @@ class World:
 
         return witnesses
 
-    def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player, victim: NPC | None = None):
+    def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player or NPC, victim: NPC | None = None):
         """Determines how an NPC reacts to witnessing a crime using an LLM prompt."""
         if witness.is_hostile_to_player or witness.current_task in ["fleeing_from_player", "going_to_report_crime", "combat_action_flee_from_player"]:
             return
@@ -6204,8 +6241,11 @@ class World:
                  witness_attitude_to_victim = "neutral"
 
         # Grant Infamy for witnessed crimes
-        self.player.infamy += 5
-        self.add_message_to_chat_log("Your infamy has increased by 5.")
+        criminal.infamy += 5
+        if isinstance(criminal, Player):
+            self.add_message_to_chat_log("Your infamy has increased by 5.")
+        else:
+            self.add_message_to_chat_log(f"{criminal.name}'s infamy has increased by 5.")
 
         # Log the crime event itself
         self.log_event(

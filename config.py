@@ -23,6 +23,7 @@ ELEVATION_MOUNTAIN = 0.8
 ELEVATION_SNOW = 0.9
 
 # --- NPC Scheduling Settings ---
+ENABLE_OLLAMA_CONNECTION = True # Master switch for all OLLAMA calls. Set to False for testing without a connection.
 USE_LLM_FOR_SCHEDULES = True  # Set to False to use simple rule-based scheduler
 DAY_LENGTH_TICKS = 1500       # How many game ticks constitute a full day-night cycle
 NPC_SCHEDULE_UPDATE_INTERVAL = 50 # How often an NPC re-evaluates its schedule (in ticks)

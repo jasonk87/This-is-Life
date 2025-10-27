@@ -312,7 +312,7 @@ Example - Miss:
 {{
   "hit": false,
   "damage_dealt": 0,
-  "narrative_feedback": "{{npc_name}} nimbly dodges your wild swing with the {player_weapon_name}.",
+  "narrative_feedback": "{npc_name} nimbly dodges your wild swing with the {player_weapon_name}.",
   "target_status_change": "none"
 }}
 

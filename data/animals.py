@@ -1,3 +1,6 @@
+"""
+This file defines the properties of all animals in the game.
+"""
 ANIMAL_DEFINITIONS = {
     "deer": {
         "name": "Deer",
@@ -119,8 +122,7 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.7,
                 "quantity": [2, 4]
             }
-        },
-        "prey": ["deer", "sheep", "wolf"]
+        }
     },
     "sheep": {
         "name": "Sheep",

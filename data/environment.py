@@ -1,4 +1,6 @@
-# data/environment.py
+"""
+This file defines the properties of different weather types in the game.
+"""
 from data.tiles import COLORS
 
 WEATHER_DEFINITIONS = {

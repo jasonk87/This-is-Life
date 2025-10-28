@@ -1,4 +1,6 @@
-# data/decorations.py
+"""
+This file defines the properties of all decorations and interactable objects in the game.
+"""
 from data.tiles import COLORS
 
 DECORATION_ITEM_DEFINITIONS = {
@@ -53,7 +55,8 @@ DECORATION_ITEM_DEFINITIONS = {
         "description": "A simple bed with a straw mattress.",
         "char": "B",
         "color": COLORS["tan"],
-        "passable": True, # Can walk over it, maybe? Or treat as non-passable? Let's say passable for now.
+        # Can walk over it, maybe? Or treat as non-passable? Let's say passable for now.
+        "passable": True,
         "blocks_fov": False,
         "item_type_tags": ["interactable", "furniture"],
         "properties": {

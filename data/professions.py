@@ -1,3 +1,6 @@
+"""
+This file defines the properties of all NPC professions in the game.
+"""
 PROFESSIONS = {
     "Woodcutter": {
         "display_name": "Woodcutter",
@@ -8,28 +11,28 @@ PROFESSIONS = {
             {
                 "id": "chop_trees",
                 "display_name": "Chopping Trees",
-                "duration_ticks": 75, # Average ticks this sub-task takes when at the location
-                "target_zone_tag": "chopping_area", # NPC will look for actual tree tiles in this zone/nearby
-                "action_verb": "chopping", # For display "Woodcutter is chopping"
-                # Output is implicit: a felled tree / logs ready to be hauled
+                # Average ticks this sub-task takes when at the location
+                "duration_ticks": 75,
+                "target_zone_tag": "chopping_area",
+                "action_verb": "chopping",
             },
             {
                 "id": "haul_logs",
                 "display_name": "Hauling Logs",
-                "duration_ticks": 20, # Ticks for the action of dropping off logs at the pile
-                "target_zone_tag": "log_pile_area", # A designated spot at the lumber mill building
+                "duration_ticks": 20,
+                "target_zone_tag": "log_pile_area",
                 "action_verb": "depositing logs",
-                "consumes_item_from_npc_inventory": {"raw_log": 1}, # Assumes NPC carries 1 log's worth
+                "consumes_item_from_npc_inventory": {"raw_log": 1},
                 "deposits_item_to_workplace": {"raw_log": 1}
             },
             {
                 "id": "split_stack_wood",
                 "display_name": "Splitting & Stacking Wood",
                 "duration_ticks": 60,
-                "target_zone_tag": "splitting_area", # Another designated spot
+                "target_zone_tag": "splitting_area",
                 "action_verb": "splitting wood",
-                "consumes_item_from_workplace": {"raw_log": 1}, # Corrected to raw_log
-                "produces_item_at_workplace": {"wooden_plank": 1} # Adjusted output to 1 lumber per log
+                "consumes_item_from_workplace": {"raw_log": 1},
+                "produces_item_at_workplace": {"wooden_plank": 1}
             }
         ],
         "default_sub_task_sequence": ["chop_trees", "haul_logs", "split_stack_wood"]
@@ -38,40 +41,36 @@ PROFESSIONS = {
         "display_name": "Farmer",
         "wage": 15,
         "description": "Cultivates crops and tends to farmland.",
-        "work_building_categories": ["Farm"], # Ensure "Farm" is a defined building category/type
+        "work_building_categories": ["Farm"],
         "sub_tasks": [
             {
                 "id": "till_soil",
                 "display_name": "Tilling Soil",
                 "duration_ticks": 50,
-                "target_zone_tag": "field_patch", # Farmer will look for 'plains' tiles in this zone
+                "target_zone_tag": "field_patch",
                 "action_verb": "tilling soil",
-                "target_tile_type_key": "plains", # Tile to look for to perform action on
-                "becomes_tile_type_key": "tilled_soil" # Tile it becomes after action
+                "target_tile_type_key": "plains",
+                "becomes_tile_type_key": "tilled_soil"
             },
             {
                 "id": "plant_seeds",
                 "display_name": "Planting Seeds",
                 "duration_ticks": 40,
-                "target_zone_tag": "field_patch", # Farmer will look for 'tilled_soil' tiles
+                "target_zone_tag": "field_patch",
                 "action_verb": "planting seeds",
                 "target_tile_type_key": "tilled_soil",
-                "becomes_tile_type_key": "mature_wheat_crop", # Direct to mature for now
+                "becomes_tile_type_key": "mature_wheat_crop",
                 "consumes_item_from_workplace": {"wheat_seeds": 1}
             },
             {
                 "id": "harvest_crops",
                 "display_name": "Harvesting Crops",
                 "duration_ticks": 60,
-                "target_zone_tag": "field_patch", # Looks for 'mature_wheat_crop'
+                "target_zone_tag": "field_patch",
                 "action_verb": "harvesting crops",
                 "target_tile_type_key": "mature_wheat_crop",
-                # Tile properties will define what it becomes_on_harvest_key and yield
-                # This sub-task will trigger that logic in engine.py
-                # For simplicity, we can still define a default 'becomes_tile_type_key' if tile doesn't specify
                 "becomes_tile_type_key": "tilled_soil",
-                 # Actual item production will be based on tile's harvest_yield_item_key and quantity
-                "produces_item_at_workplace_from_tile_harvest": True # Special flag
+                "produces_item_at_workplace_from_tile_harvest": True
             }
         ],
         "default_sub_task_sequence": ["till_soil", "plant_seeds", "harvest_crops"]
@@ -140,7 +139,6 @@ PROFESSIONS = {
         "wage": 20,
         "description": "Buys and sells goods at a store or market.",
         "work_building_categories": ["General Store", "Market Stall"],
-        # Merchants might not have sub-tasks in the same way, their "work" is trading.
         "sub_tasks": [],
         "default_sub_task_sequence": []
     },
@@ -149,7 +147,6 @@ PROFESSIONS = {
         "wage": 25,
         "description": "Manages the operations at the lumber mill.",
         "work_building_categories": ["Lumber Mill"],
-        # May have supervisory tasks or also perform some woodcutter tasks. For now, none.
         "sub_tasks": [],
         "default_sub_task_sequence": []
     },
@@ -157,10 +154,12 @@ PROFESSIONS = {
         "display_name": "Guard",
         "wage": 20,
         "description": "Maintains peace and order, patrols designated areas.",
-        "work_building_categories": ["Guardhouse", "Barracks", "Town Hall"], # Can work out of various places
+        "work_building_categories": ["Guardhouse", "Barracks", "Town Hall"],
         "sub_tasks": [
-            {"id": "patrol_area", "display_name": "Patrolling", "duration_ticks": 200, "target_zone_tag": "patrol_route", "action_verb": "patrolling"},
-            {"id": "stand_guard", "display_name": "Standing Guard", "duration_ticks": 150, "target_zone_tag": "guard_post", "action_verb": "standing guard"}
+            {"id": "patrol_area", "display_name": "Patrolling", "duration_ticks": 200,
+             "target_zone_tag": "patrol_route", "action_verb": "patrolling"},
+            {"id": "stand_guard", "display_name": "Standing Guard", "duration_ticks": 150,
+             "target_zone_tag": "guard_post", "action_verb": "standing guard"}
         ],
         "default_sub_task_sequence": ["patrol_area", "stand_guard"]
     },
@@ -169,10 +168,13 @@ PROFESSIONS = {
         "wage": 35,
         "description": "Upholds the law and manages town security.",
         "work_building_categories": ["Sheriff's Office", "Town Hall"],
-        "sub_tasks": [ # Similar to guard but perhaps more investigative or office-based tasks later
-            {"id": "patrol_town", "display_name": "Patrolling Town", "duration_ticks": 250, "target_zone_tag": "town_patrol_route", "action_verb": "patrolling"},
-            {"id": "office_work", "display_name": "Office Work", "duration_ticks": 180, "target_zone_tag": "office_desk", "action_verb": "doing paperwork"},
-            {"id": "arrest_player", "display_name": "Arresting a Criminal", "duration_ticks": 100, "target_zone_tag": "jail_cell", "action_verb": "arresting"}
+        "sub_tasks": [
+            {"id": "patrol_town", "display_name": "Patrolling Town", "duration_ticks": 250,
+             "target_zone_tag": "town_patrol_route", "action_verb": "patrolling"},
+            {"id": "office_work", "display_name": "Office Work", "duration_ticks": 180,
+             "target_zone_tag": "office_desk", "action_verb": "doing paperwork"},
+            {"id": "arrest_player", "display_name": "Arresting a Criminal",
+             "duration_ticks": 100, "target_zone_tag": "jail_cell", "action_verb": "arresting"}
         ],
         "default_sub_task_sequence": ["patrol_town", "office_work"]
     },
@@ -182,8 +184,11 @@ PROFESSIONS = {
         "description": "Builds and repairs wooden structures and furniture.",
         "work_building_categories": ["Carpenter Shop"],
         "sub_tasks": [
-            {"id": "fetch_wood", "display_name": "Fetching Wood", "duration_ticks": 100, "target_zone_tag": "lumber_mill", "action_verb": "fetching wood"},
-            {"id": "craft_furniture", "display_name": "Crafting Furniture", "duration_ticks": 200, "target_zone_tag": "workbench", "action_verb": "crafting furniture"}
+            {"id": "fetch_wood", "display_name": "Fetching Wood", "duration_ticks": 100,
+             "target_zone_tag": "lumber_mill", "action_verb": "fetching wood"},
+            {"id": "craft_furniture", "display_name": "Crafting Furniture",
+             "duration_ticks": 200, "target_zone_tag": "workbench",
+             "action_verb": "crafting furniture"}
         ],
         "default_sub_task_sequence": ["fetch_wood", "craft_furniture"]
     },
@@ -361,28 +366,32 @@ PROFESSIONS = {
     }
 }
 
-# Helper function to get profession details
 def get_profession_data(profession_name: str) -> dict | None:
+    """
+    Retrieves the data for a given profession.
+
+    Args:
+        profession_name: The name of the profession.
+
+    Returns:
+        A dictionary containing the profession's data, or None if not found.
+    """
     return PROFESSIONS.get(profession_name)
 
 def get_sub_task_data(profession_name: str, sub_task_id: str) -> dict | None:
+    """
+    Retrieves the data for a specific sub-task of a profession.
+
+    Args:
+        profession_name: The name of the profession.
+        sub_task_id: The ID of the sub-task.
+
+    Returns:
+        A dictionary containing the sub-task's data, or None if not found.
+    """
     profession = get_profession_data(profession_name)
     if profession and "sub_tasks" in profession:
         for sub_task in profession["sub_tasks"]:
             if sub_task["id"] == sub_task_id:
                 return sub_task
     return None
-
-# Example of items that might be produced/consumed by sub-tasks
-# These would ideally be more centrally defined with other items
-# For now, just listing them as concepts for the sub-task definitions
-"""
-ITEM_DEFINITIONS_EXPANDED = {
-    "log_raw": {"display_name": "Raw Log", "value": 2, "type": "resource"},
-    "lumber_processed": {"display_name": "Processed Lumber", "value": 5, "type": "resource", "craftable_good": True},
-    "wheat_sheaf": {"display_name": "Sheaf of Wheat", "value": 1, "type": "resource"},
-    "flour_bag": {"display_name": "Bag of Flour", "value": 3, "type": "resource", "craftable_good": True},
-    "iron_ore_chunk": {"display_name": "Iron Ore Chunk", "value": 3, "type": "resource"},
-    "iron_ingot": {"display_name": "Iron Ingot", "value": 8, "type": "resource", "craftable_good": True},
-}
-"""

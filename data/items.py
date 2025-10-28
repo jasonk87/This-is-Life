@@ -1,4 +1,7 @@
-# data/items.py
+"""
+This file defines the properties of all items in the game that can be
+found in inventories, used, or crafted.
+"""
 from data.tiles import COLORS
 
 # --- Item Definitions ---
@@ -317,7 +320,7 @@ ITEM_DEFINITIONS = {
             "duration_ticks": 600,
             "on_extinguish_becomes": "unlit_torch",
             "on_burnout_becomes": "burnt_out_torch",
-            "max_durability": 600 # Duration can be its durability
+            "max_durability": 600
         },
         "on_use_effect": "extinguish_torch"
     },
@@ -357,9 +360,9 @@ ITEM_DEFINITIONS = {
         "stackable": False,
         "item_type_tags": ["consumable", "drink"],
         "properties": {
-             "max_durability": 3 # Represents 3 sips/uses
+             "max_durability": 3
         },
-        "on_use": { # Effect per sip
+        "on_use": {
             "reduces_thirst": 40
         }
     },
@@ -467,7 +470,7 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "fiber"],
     },
-     "raw_meat_scrap": { # Already defined, ensure it's here for completeness of food section
+     "raw_meat_scrap": {
         "name": "Raw Meat Scrap",
         "description": "A piece of raw meat. Needs cooking.",
         "char": "m",
@@ -477,9 +480,6 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"]
     },
-
-
-    # --- Weapons ---
     "rusty_sword": {
         "name": "Rusty Sword",
         "description": "A worn, but still somewhat sharp sword.",
@@ -546,8 +546,6 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["ammunition", "arrow"]
     },
-
-    # --- Armor ---
     "wooden_shield": {
         "name": "Wooden Shield",
         "description": "A simple shield made of wooden planks.",
@@ -855,88 +853,3 @@ ITEM_DEFINITIONS = {
         }
     }
 }
-
-# Standardize 'type' to 'item_type_tags' and ensure all items have item_type_tags
-for item_key, item_data in ITEM_DEFINITIONS.items():
-    if "type" in item_data and "item_type_tags" not in item_data:
-        if isinstance(item_data["type"], list):
-            item_data["item_type_tags"] = list(item_data["type"]) # Ensure it's a list copy
-        else:
-            item_data["item_type_tags"] = [str(item_data["type"])]
-        # del item_data["type"] # Optionally remove old 'type' key
-    elif "item_type_tags" not in item_data:
-        item_data["item_type_tags"] = []
-
-    # Ensure stackable is defined, default to False for non-consumables/resources if not set
-    if "stackable" not in item_data:
-        if any(tag in item_data.get("item_type_tags", []) for tag in ["resource", "consumable", "reagent", "ammunition", "food_ingredient", "seed", "trash"]):
-            item_data["stackable"] = True
-        else:
-            item_data["stackable"] = False
-
-    # For non-stackable items that should have durability, ensure properties and max_durability exist
-    if not item_data["stackable"] and any(tag in item_data.get("item_type_tags", []) for tag in ["tool", "weapon", "armor", "shield"]):
-        if "properties" not in item_data:
-            item_data["properties"] = {}
-        if "max_durability" not in item_data["properties"]:
-            # Add a default max_durability if missing for durable types
-            if "tool" in item_data["item_type_tags"]:
-                item_data["properties"]["max_durability"] = 20
-            elif "weapon" in item_data["item_type_tags"]:
-                item_data["properties"]["max_durability"] = 50
-            elif "armor" in item_data["item_type_tags"] or "shield" in item_data["item_type_tags"]:
-                item_data["properties"]["max_durability"] = 80
-            else:
-                item_data["properties"]["max_durability"] = 10 # Generic fallback for other non-stackable
-
-# Ensure axe_stone specific properties are correctly merged (already done by direct edit)
-axe_stone_def = ITEM_DEFINITIONS.get("axe_stone")
-if axe_stone_def:
-    axe_stone_def["stackable"] = False # Explicit
-    if "properties" not in axe_stone_def: axe_stone_def["properties"] = {}
-    axe_stone_def["properties"]["tool_type"] = "axe"
-    axe_stone_def["properties"]["chop_power"] = axe_stone_def["properties"].get("chop_power",1)
-    axe_stone_def["properties"]["max_durability"] = axe_stone_def["properties"].get("max_durability", 25)
-    axe_stone_def["properties"]["damage_dice"] = axe_stone_def["properties"].get("damage_dice", "1d4")
-    axe_stone_def["properties"]["damage_bonus"] = axe_stone_def["properties"].get("damage_bonus", 0)
-    axe_stone_def["properties"]["attack_range"] = axe_stone_def["properties"].get("attack_range", 1)
-    axe_stone_def["equip_slot"] = "main_hand"
-    # Remove old chance based key if it exists
-    if "durability_chance_to_degrade" in axe_stone_def["properties"]:
-        del axe_stone_def["properties"]["durability_chance_to_degrade"]
-
-lockpick_def = ITEM_DEFINITIONS.get("lockpick")
-if lockpick_def:
-    lockpick_def["stackable"] = False # Explicitly non-stackable
-    if "properties" not in lockpick_def: lockpick_def["properties"] = {}
-    lockpick_def["properties"]["tool_type"] = "lockpick"
-    lockpick_def["properties"]["max_durability"] = lockpick_def["properties"].get("max_durability", 5)
-    if "breaks_on_fail_chance" in lockpick_def["properties"]:
-        del lockpick_def["properties"]["breaks_on_fail_chance"]
-
-# Final check for item_type_tags for newly added items
-new_items_to_check_tags = ["crude_spear", "wooden_shield", "raw_meat_scrap", "cooked_meat_scrap", "water_flask", "apple", "pear", "acorn"]
-for key in new_items_to_check_tags:
-    if key in ITEM_DEFINITIONS and "item_type_tags" not in ITEM_DEFINITIONS[key]:
-        ITEM_DEFINITIONS[key]["item_type_tags"] = [] # Initialize if totally missing
-
-    # Ensure 'stackable' is present
-    if key in ITEM_DEFINITIONS and "stackable" not in ITEM_DEFINITIONS[key]:
-         ITEM_DEFINITIONS[key]["stackable"] = False # Default non-stackable and then check tags
-         if any(tag in ITEM_DEFINITIONS[key].get("item_type_tags", []) for tag in ["resource", "consumable", "reagent", "ammunition", "food_ingredient", "seed", "trash"]):
-            ITEM_DEFINITIONS[key]["stackable"] = True
-
-    # Ensure 'properties' and 'max_durability' for non-stackable tools/weapons/armor
-    if key in ITEM_DEFINITIONS and not ITEM_DEFINITIONS[key]["stackable"]:
-        if any(tag in ITEM_DEFINITIONS[key].get("item_type_tags", []) for tag in ["tool", "weapon", "armor", "shield"]):
-            if "properties" not in ITEM_DEFINITIONS[key]:
-                ITEM_DEFINITIONS[key]["properties"] = {}
-            if "max_durability" not in ITEM_DEFINITIONS[key]["properties"]:
-                 ITEM_DEFINITIONS[key]["properties"]["max_durability"] = 30 # A generic default
-                 if key == "water_flask": ITEM_DEFINITIONS[key]["properties"]["max_durability"] = 3 # sips
-
-
-# One final pass to remove the old "type" key if "item_type_tags" exists
-for item_key, item_data in ITEM_DEFINITIONS.items():
-    if "type" in item_data and "item_type_tags" in item_data:
-        del item_data["type"]

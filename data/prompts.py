@@ -1,3 +1,7 @@
+"""
+This file contains all the prompts used to interact with the Large Language Model (LLM).
+It also defines the endpoint and model to be used for the LLM connection.
+"""
 # data/prompts.py
 
 # --- LLM Settings ---
@@ -6,7 +10,11 @@ OLLAMA_MODEL = "llama3.2:latest"
 
 # --- LLM Prompts ---
 LLM_PROMPTS = {
-    "village_lore": "Generate a brief, atmospheric lore description for a fantasy village. Include its name, a unique characteristic, and a hint of its history or current struggles. Respond in a single paragraph.",
+    "village_lore": (
+        "Generate a brief, atmospheric lore description for a fantasy village. "
+        "Include its name, a unique characteristic, and a hint of its history "
+        "or current struggles. Respond in a single paragraph."
+    ),
     "building_interior": """\
 Generate a JSON object describing the interior decoration for a {building_type} of size {width}x{height} tiles.
 The building is located in a village with the following characteristics:

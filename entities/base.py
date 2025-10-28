@@ -1,37 +1,45 @@
+"""
+This module defines the base classes for all entities in the game world,
+including NPCs and specialized creature types.
+"""
 import random
-from dataclasses import field
 from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
-from data.items import ITEM_DEFINITIONS # For accessing armor properties
+from data.items import ITEM_DEFINITIONS
 
 class NPC:
-    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent", player_id=None):
+    """
+    The base class for all non-player characters in the game.
+    """
+    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal",
+                 family_ties="none", attitude_to_player="indifferent", player_id=None):
         self.x = x
         self.y = y
         self.name = name
-        self.char = ord('N') # Default character for NPC
-        self.color = (0, 255, 0) # Green color for NPC
+        self.char = ord('N')
+        self.color = (0, 255, 0)
         self.speed = 1
-        self.dialogue = dialogue if dialogue is not None else ["Hello!"] # List of dialogue options
+        self.dialogue = dialogue if dialogue is not None else ["Hello!"]
         self.personality = personality
         self.family_ties = family_ties
         self.player_id = player_id
         self.last_speech_time = 0
         self.age = random.randint(18, 65)
-        self.relationships = {}  # {entity_id: score}
-        self.grudges: dict[int, list[str]] = {} # {target_id: [list of reasons]}
+        self.relationships = {}
+        self.grudges: dict[int, list[str]] = {}
         if self.player_id:
             initial_score = 50
-            if attitude_to_player == "friendly": initial_score = 75
-            elif attitude_to_player == "hostile": initial_score = 25
+            if attitude_to_player == "friendly":
+                initial_score = 75
+            elif attitude_to_player == "hostile":
+                initial_score = 25
             self.relationships[self.player_id] = initial_score
 
-        self.knowledge = [] # List of known information
+        self.knowledge = []
         self.known_events: dict[str, 'Event'] = {}
         self.reacted_to_event_ids: set[str] = set()
         self.last_global_event_index_checked: int = -1
-        self.help_needed = None # For tracking what the NPC is asking for
+        self.help_needed = None
 
-        # Scheduling attributes from Phase 1
         self.home_building_id = None
         self.work_building_id = None
         self.current_destination_coords = None
@@ -41,7 +49,6 @@ class NPC:
         self.game_time_last_updated = 0
         self.last_paid_day = 0
 
-        # Contextual attributes for Phase 6
         self.wealth_level = "average"
         if self.wealth_level == "poor":
             self.money = random.randint(5, 20)
@@ -55,60 +62,50 @@ class NPC:
         self.original_char_before_sleep = self.char
         self.npc_inventory = {}
 
-        # Hunger and Thirst
         self.hunger: int = 0
         self.max_hunger: int = 100
         self.thirst: int = 0
         self.max_thirst: int = 100
 
-        # Combat Attributes (Phase 5.3)
-        self.max_hp = 20  # Default max HP
+        self.max_hp = 20
         self.hp = self.max_hp
-        self.toughness = "average"  # Descriptors: "frail", "average", "sturdy", "tough"
+        self.toughness = "average"
         self.is_hostile_to_player = False
         self.is_dead = False
-        self.id = id(self) # Simple unique ID for now, can be replaced by uuid later if needed
+        self.id = id(self)
 
-        # Combat AI Attributes (Extending from Phase 5.3)
-        self.combat_behavior = "defensive" # e.g., 'aggressive', 'defensive', 'cowardly', 'opportunist'
-        self.base_attack_name = "fists"    # e.g., "claws", "bite", "rusty dagger"
-        self.base_attack_damage_dice = "1d3" # e.g., "1d4", "1d6+1" (simple for now, can expand parsing later)
-        self.attack_range = 1              # Typically 1 for melee
-        self.target_entity_id = None       # ID of the entity this NPC is currently targeting (e.g., player's ID)
+        self.combat_behavior = "defensive"
+        self.base_attack_name = "fists"
+        self.base_attack_damage_dice = "1d3"
+        self.attack_range = 1
+        self.target_entity_id = None
 
-        # Auditory property
         self.speech_volume: int = DEFAULT_SPEECH_VOLUME
 
-        # Equipment Slots (Usually None for simple creatures)
         self.equipped_weapon: str | None = None
         self.equipped_armor_body: str | None = None
         self.equipped_armor_head: str | None = None
 
-        # Perception
-        self.perceived_item_tiles: list[tuple[int,int]] = [] # Coords of tiles with items seen this tick
-        self.task_target_item_details: dict | None = None # For tasks like picking up a specific item
+        self.perceived_item_tiles: list[tuple[int,int]] = []
+        self.task_target_item_details: dict | None = None
 
-        # Sub-Task State (for multi-step actions like professions)
-        self.current_sub_task: str | None = None # e.g., "chop_trees", "haul_logs"
-        self.sub_task_target_coords: tuple[int, int] | None = None # Specific global coords for the sub-task action
-        self.sub_task_timer: int = 0 # Ticks remaining for the current sub-task's action phase
+        self.current_sub_task: str | None = None
+        self.sub_task_target_coords: tuple[int, int] | None = None
+        self.sub_task_timer: int = 0
         self.task_timer: int = 0
-        self.sub_task_zone_target: str | None = None # General zone tag for pathing, e.g., "log_pile_area"
-        self.current_sub_task_sequence_index: int = 0 # Index for current profession's sub-task sequence
+        self.sub_task_zone_target: str | None = None
+        self.current_sub_task_sequence_index: int = 0
 
-        # Auditory Perception
-        self.hearing_radius: int = DEFAULT_HEARING_RADIUS # Standard hearing range for NPCs
+        self.hearing_radius: int = DEFAULT_HEARING_RADIUS
 
-        self.woodcutter_search_radius: int = 15 # Specific to woodcutter AI
+        self.woodcutter_search_radius: int = 15
 
-        # Note: self.current_task will be updated to include "attacking", "fleeing" as needed by the engine.
         self.task_target_entity_id: int | None = None
-        self.task_context: str | None = None # For storing the reason for a task, e.g., 'hunger'
+        self.task_context: str | None = None
         self.leisure_timer = 0
 
-        # Temperature and Weather
         self.temperature: float = 37.0
-        self.base_temperature_resistance: float = 2.0 # NPCs are a bit hardier
+        self.base_temperature_resistance: float = 2.0
         self.clothing_insulation: float = 0.0
         self.status_effects: list[str] = []
 
@@ -117,32 +114,40 @@ class NPC:
         self.is_frightened: bool = False
         self.threat_source_ids: list[int] = []
 
-        # Fame and Infamy
         self.fame: int = 0
         self.infamy: int = 0
         self.title: str = ""
 
     @property
     def attitude_to_player(self) -> str:
+        """
+        Dynamically determines the NPC's attitude towards the player based on relationship score.
+        """
         if not self.player_id:
             return "neutral"
         score = self.relationships.get(self.player_id, 50)
-        if score < 30: return "hostile"
-        if score < 45: return "unfriendly"
-        if score < 55: return "neutral"
-        if score < 75: return "friendly"
+        if score < 30:
+            return "hostile"
+        if score < 45:
+            return "unfriendly"
+        if score < 55:
+            return "neutral"
+        if score < 75:
+            return "friendly"
         return "warm"
 
     def add_grudge(self, target_id: int, reason: str):
+        """
+        Adds a grudge against a target entity, significantly lowering the relationship score.
+        """
         if target_id not in self.grudges:
             self.grudges[target_id] = []
         self.grudges[target_id].append(reason)
-        # Having a grudge significantly damages the relationship
         self.relationships[target_id] = self.relationships.get(target_id, 50) - 40
-        # Clamp the relationship score so it doesn't go too low from one event
         self.relationships[target_id] = max(0, self.relationships[target_id])
 
     def get_dialogue(self):
+        """Returns the NPC's dialogue options."""
         return self.dialogue
 
     def recalculate_stats(self):
@@ -179,6 +184,10 @@ class NPC:
         return False
 
     def take_damage(self, amount: int, world) -> bool:
+        """
+        Applies damage to the NPC, accounting for armor, and handles death.
+        Returns True if the NPC was killed, False otherwise.
+        """
         if self.is_dead:
             return False
 
@@ -198,27 +207,29 @@ class NPC:
             self.hp = 0
             self.is_dead = True
             return True
-        else:
-            if not self.is_hostile_to_player:
-                self.is_hostile_to_player = True
-                if self.profession != "Creature":
-                    world.add_message_to_chat_log(f"{self.name} becomes hostile!")
-            return False
+        if not self.is_hostile_to_player:
+            self.is_hostile_to_player = True
+            if self.profession != "Creature":
+                world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+        return False
 
 class DireWolf(NPC):
+    """
+    A specialized NPC subclass representing a Dire Wolf.
+    """
     def __init__(self, x, y, name="Dire Wolf"):
         super().__init__(x, y, name=name)
         self.char = ord('w')
-        self.color = (160, 160, 160) # Dark grey
+        self.color = (160, 160, 160)
         self.max_hp = 15
         self.hp = self.max_hp
         self.toughness = "average"
-        self.is_hostile_to_player = True # Hostile by default
+        self.is_hostile_to_player = True
         self.combat_behavior = "aggressive"
         self.base_attack_name = "bite"
         self.base_attack_damage_dice = "1d6"
         self.attack_range = 1
-        self.profession = "Creature" # To differentiate from villagers for AI/scheduling
-        self.dialogue = ["*Growl*", "*Snarl*"] # Simple "dialogue"
-        self.speech_volume = 5 # Quieter than human speech
-        self.hearing_radius = DEFAULT_HEARING_RADIUS + 2 # Slightly better hearing
+        self.profession = "Creature"
+        self.dialogue = ["*Growl*", "*Snarl*"]
+        self.speech_volume = 5
+        self.hearing_radius = DEFAULT_HEARING_RADIUS + 2

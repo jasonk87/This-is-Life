@@ -1,3 +1,9 @@
+"""
+Global configuration settings for the game.
+
+This file contains constants and settings that control various aspects of the game,
+including world generation, display, NPC behavior, and more.
+"""
 # game/config.py
 
 # --- World Settings ---
@@ -84,11 +90,13 @@ FOV_RADIUS_PITCH_BLACK = 4 # For very dark conditions, like unlit caves or deep 
 #   0.85 - 1.0 (1275-1499): NIGHT (uses FOV_RADIUS_NIGHT)
 
 LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
-    {"start_ratio": 0.0,  "name": "DEEP_NIGHT", "fov_config_key": "FOV_RADIUS_NIGHT"}, # Until dawn's first light
+    # Until dawn's first light
+    {"start_ratio": 0.0,  "name": "DEEP_NIGHT", "fov_config_key": "FOV_RADIUS_NIGHT"},
     {"start_ratio": 0.22, "name": "DAWN",       "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
     {"start_ratio": 0.28, "name": "DAY",        "fov_config_key": "FOV_RADIUS_DAY"},
     {"start_ratio": 0.72, "name": "DUSK",       "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
-    {"start_ratio": 0.78, "name": "NIGHT",      "fov_config_key": "FOV_RADIUS_NIGHT"} # Evening fading to night
+    # Evening fading to night
+    {"start_ratio": 0.78, "name": "NIGHT",      "fov_config_key": "FOV_RADIUS_NIGHT"}
     # The period from last entry (0.78) to 1.0 will use FOV_RADIUS_NIGHT
 ]
 

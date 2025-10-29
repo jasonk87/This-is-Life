@@ -233,12 +233,11 @@ def render_game_over(console, context):
 def handle_events(world, context):
     """Handles all player input and game events."""
     for event in tcod.event.get():
-        context.convert_event(event)
         if isinstance(event, tcod.event.Quit):
             raise SystemExit()
         if isinstance(event, tcod.event.MouseMotion):
-            world.mouse_x, world.mouse_y = int(event.tile.x), int(event.tile.y)
-        if isinstance(event, tcod.event.MouseButtonDown) and event.button == tcod.event.BUTTON_RIGHT:
+            world.mouse_x, world.mouse_y = event.tile
+        if isinstance(event, tcod.event.MouseButtonDown) and event.button == tcod.event.MouseButton.RIGHT:
             camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
             mouse_world_x, mouse_world_y = camera_x + world.mouse_x, camera_y + world.mouse_y
             open_interaction_menu(world, mouse_world_x, mouse_world_y)

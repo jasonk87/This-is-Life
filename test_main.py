@@ -5,8 +5,9 @@ from engine import World
 import json
 
 class TestGame(unittest.TestCase):
-    @patch('engine.World._call_ollama')
-    def test_world_initialization(self, mock_call_ollama):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
         # Canned response for NPC generation
         mock_npc_data = {
             "name": "Test NPC",
@@ -18,8 +19,12 @@ class TestGame(unittest.TestCase):
             "combat_behavior": "defensive",
             "base_attack_name": "fists"
         }
-        mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
 
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_world_initialization(self):
         try:
             world = World()
             self.assertIsNotNone(world)
@@ -28,11 +33,15 @@ class TestGame(unittest.TestCase):
             self.fail(f"World initialization failed with an exception: {e}")
 
 class TestTemperatureSystem(unittest.TestCase):
-    @patch('engine.World._call_ollama')
-    def setUp(self, mock_call_ollama):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
         self.world = World()
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
 
     def test_season_progression(self):
         from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
@@ -155,11 +164,15 @@ class TestTemperatureSystem(unittest.TestCase):
 
 
 class TestAgriculturalSystem(unittest.TestCase):
-    @patch('engine.World._call_ollama')
-    def setUp(self, mock_call_ollama):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
         self.world = World()
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
 
     def test_rain_waters_crops_and_they_grow(self):
         from data.tiles import TILE_DEFINITIONS

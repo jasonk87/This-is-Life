@@ -1,120 +1,145 @@
-"""
-Global configuration settings for the game.
+# config.py
 
-This file contains constants and settings that control various aspects of the game,
-including world generation, display, NPC behavior, and more.
-"""
-# game/config.py
+# Screen dimensions
+SCREEN_WIDTH = 160
+SCREEN_HEIGHT = 90
+MAP_WIDTH = 120
+MAP_HEIGHT = 80
+STATUS_PANEL_WIDTH = SCREEN_WIDTH - MAP_WIDTH
+MINIMAP_WIDTH = 40
+MINIMAP_HEIGHT = 20
+MINIMAP_X = SCREEN_WIDTH - MINIMAP_WIDTH - 1
+MINIMAP_Y = 1
+TILE_SIZE = 16
+SCREEN_WIDTH_TILES = SCREEN_WIDTH // TILE_SIZE
+SCREEN_HEIGHT_TILES = SCREEN_HEIGHT // TILE_SIZE
 
-# --- World Settings ---
-WORLD_WIDTH = 200  # in tiles
-WORLD_HEIGHT = 200 # in tiles
-CHUNK_SIZE = 20    # in tiles
+# World generation
+WORLD_WIDTH_CHUNKS = 10
+WORLD_HEIGHT_CHUNKS = 10
+CHUNK_WIDTH = 60
+CHUNK_HEIGHT = 40
+CHUNK_SIZE = 40
+WORLD_WIDTH = WORLD_WIDTH_CHUNKS * CHUNK_WIDTH
+WORLD_HEIGHT = WORLD_HEIGHT_CHUNKS * CHUNK_HEIGHT
+POI_DENSITY = 0.3
+# Noise settings for world generation
+NOISE_SCALE = 0.1
+NOISE_OCTAVES = 4
+NOISE_PERSISTENCE = 0.5
+NOISE_LACUNARITY = 2.0
+# Elevation constants
+ELEVATION_DEEP_WATER = -0.5
+ELEVATION_WATER = -0.2
+ELEVATION_MOUNTAIN = 0.6
+ELEVATION_SNOW = 0.8
 
-# --- POI Settings ---
-POI_DENSITY = 0.05 # Likelihood of a POI in a suitable chunk
 
-# --- Display Settings ---
-SCREEN_WIDTH_TILES = 80
-SCREEN_HEIGHT_TILES = 50
+# Simulation settings
+VILLAGE_SPAWN_ATTEMPTS = 50
+VILLAGE_MIN_DISTANCE_CHUNKS = 3
+MAX_VILLAGES = 5
+NPC_SPAWN_ATTEMPTS_PER_VILLAGE = 20
+MAX_NPCS_PER_VILLAGE = 15
+TRAVELING_MERCHANT_SPAWN_CHANCE = 0.1
+ABSTRACT_SIMULATION_DISTANCE_CHUNKS = 3
+NPC_SCHEDULE_UPDATE_INTERVAL = 10 # Number of game ticks between NPC schedule updates
+USE_LLM_FOR_SCHEDULES = False
+DAY_LENGTH_TICKS = 14400
+WORK_START_TIME_RATIO = 0.333 # 8 AM
+WORK_END_TIME_RATIO = 0.708 # 5 PM
 
-# --- World Generation Settings ---
-NOISE_SCALE = 0.05       # Smaller values -> larger features
-NOISE_OCTAVES = 4        # Adds more detail to the noise
-NOISE_PERSISTENCE = 0.5  # Controls how much detail is added each octave
-NOISE_LACUNARITY = 2.0   # Controls how much finer the detail is each octave
-ELEVATION_DEEP_WATER = 0.2
-ELEVATION_WATER = 0.35
-ELEVATION_MOUNTAIN = 0.8
-ELEVATION_SNOW = 0.9
+# Gameplay settings
+DEFAULT_SPEECH_VOLUME = 8
+DEFAULT_HEARING_RADIUS = 12
+FOV_RADIUS = 15
+PLAYER_BASE_SPEED = 1
+ANIMAL_BASE_SPEED = 1
+BASE_ATTACK_SPEED = 100 # in game ticks
+BASE_PICK_LOCK_SPEED = 300 # in game ticks
+BASE_BUTCHER_SPEED = 200 # in game ticks
+BASE_FISHING_SPEED = 400 # in game ticks
+BASE_TAMING_CHANCE = 0.2
+HOURS_PER_DAY = 24
+MINUTES_PER_HOUR = 60
+SECONDS_PER_MINUTE = 60
+GAME_TICKS_PER_SECOND = 10
+SECONDS_PER_GAME_TICK = 1 / GAME_TICKS_PER_SECOND
+TIME_PER_TICK = (HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE) / (GAME_TICKS_PER_SECOND * 60 * 24) # Placeholder for more complex time system
+INITIAL_TIME_OF_DAY = 8 * 60 # 8:00 AM
 
-# --- NPC Scheduling Settings ---
-USE_LLM_FOR_SCHEDULES = True  # Set to False to use simple rule-based scheduler
-DAY_LENGTH_TICKS = 1500       # How many game ticks constitute a full day-night cycle
-NPC_SCHEDULE_UPDATE_INTERVAL = 50 # How often an NPC re-evaluates its schedule (in ticks)
-# Example time definitions within a day (as fraction of DAY_LENGTH_TICKS)
-WORK_START_TIME_RATIO = 0.25 # e.g., 25% into the day
-WORK_END_TIME_RATIO = 0.70   # e.g., 70% into the day
-
-# --- Season & Temperature Settings ---
-DAYS_PER_SEASON = 10 # Game days per season
-SEASON_TEMPERATURE_MODIFIERS = {
-    "Spring": 20,
-    "Summer": 30,
-    "Autumn": 15,
-    "Winter": -5
-}
-BIOME_TEMPERATURE_MODIFIERS = {
-    "snow": -15,
-    "mountain": -8,
-    "water": -3,
-    "plains": 0,
-    "default": 0
-}
-TIME_OF_DAY_TEMPERATURE_MODIFIERS = {
-    "DEEP_NIGHT": -8,
-    "NIGHT": -5,
-    "DAWN": -2,
-    "DAY": 0,
-    "DUSK": -3
-}
-
-# --- Reputation Settings ---
-# Initial values for player reputation
-INITIAL_CRIMINAL_POINTS = 0
-INITIAL_HERO_POINTS = 0
-
-# Define keys for reputation types for consistency
-REP_CRIMINAL = "criminal_points"
-REP_HERO = "hero_points"
-
-# Optional: Define ranges or thresholds, though enforcement is in game logic
-# REP_MIN_VALUE = -100
-# REP_MAX_VALUE = 100
-
-# --- Field of View & Light Levels ---
-FOV_RADIUS_DAY = 20
+# FOV and Light Level
+FOV_RADIUS_DAY = 15
 FOV_RADIUS_DUSK_DAWN = 12
-FOV_RADIUS_NIGHT = 7
-FOV_RADIUS_PITCH_BLACK = 4 # For very dark conditions, like unlit caves or deep night
+FOV_RADIUS_NIGHT = 8
+FOV_RADIUS_PITCH_BLACK = 5
 
-# Define periods of the day based on DAY_LENGTH_TICKS ratio
-# These are start ratios for each period. Order matters for lookup.
-# The values are the FOV radius config key string to be used for this period.
-# A function in engine.py will determine current period based on these.
-# Example: DAY_LENGTH_TICKS = 1500
-#   0.0 - 0.20 (0-299): NIGHT (uses FOV_RADIUS_NIGHT)
-#   0.20 - 0.25 (300-374): DAWN (uses FOV_RADIUS_DUSK_DAWN)
-#   0.25 - 0.75 (375-1124): DAY (uses FOV_RADIUS_DAY)
-#   0.75 - 0.85 (1125-1274): DUSK (uses FOV_RADIUS_DUSK_DAWN)
-#   0.85 - 1.0 (1275-1499): NIGHT (uses FOV_RADIUS_NIGHT)
-
-LIGHT_LEVEL_PERIODS = [ # Must be sorted by start_ratio
-    # Until dawn's first light
-    {"start_ratio": 0.0,  "name": "DEEP_NIGHT", "fov_config_key": "FOV_RADIUS_NIGHT"},
-    {"start_ratio": 0.22, "name": "DAWN",       "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
-    {"start_ratio": 0.28, "name": "DAY",        "fov_config_key": "FOV_RADIUS_DAY"},
-    {"start_ratio": 0.72, "name": "DUSK",       "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
-    # Evening fading to night
-    {"start_ratio": 0.78, "name": "NIGHT",      "fov_config_key": "FOV_RADIUS_NIGHT"}
-    # The period from last entry (0.78) to 1.0 will use FOV_RADIUS_NIGHT
+LIGHT_LEVEL_PERIODS = [
+    {"name": "PITCH BLACK", "start_ratio": 0.0, "fov_config_key": "FOV_RADIUS_PITCH_BLACK"},
+    {"name": "DAWN", "start_ratio": 0.25, "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
+    {"name": "DAY", "start_ratio": 0.3, "fov_config_key": "FOV_RADIUS_DAY"},
+    {"name": "DUSK", "start_ratio": 0.7, "fov_config_key": "FOV_RADIUS_DUSK_DAWN"},
+    {"name": "NIGHT", "start_ratio": 0.8, "fov_config_key": "FOV_RADIUS_NIGHT"},
+    {"name": "PITCH BLACK", "start_ratio": 0.95, "fov_config_key": "FOV_RADIUS_PITCH_BLACK"}
 ]
 
-# Make sure DAY_LENGTH_TICKS is defined (it's in NPC Scheduling Settings, imported above)
-# For example, if DAY_LENGTH_TICKS = 1000:
-# DEEP_NIGHT: 0-219
-# DAWN: 220-279
-# DAY: 280-719
-# DUSK: 720-779
-# NIGHT: 780-999
+# Controls
+KEY_UP = 'w'
+KEY_DOWN = 's'
+KEY_LEFT = 'a'
+KEY_RIGHT = 'd'
+KEY_INTERACT = 'e'
+KEY_WAIT = 'space'
+KEY_INFO_MENU = 'i'
+KEY_KNOWLEDGE_MENU = 'k'
+KEY_CRAFTING_MENU = 'c'
+KEY_EXAMINE = 'x'
+KEY_ESCAPE = 'escape'
 
-# --- Auditory Perception Settings ---
-DEFAULT_HEARING_RADIUS = 12 # How far the player can hear standard volume speech.
-DEFAULT_SPEECH_VOLUME = 10  # How far standard NPC speech travels.
-# Speech is heard if distance <= player.hearing_radius AND distance <= npc.speech_volume.
+# Display
+TILESET_PATH = "assets/tileset.png"
+TILE_SIZE = 16
+DOUBLE_TILE_SIZE = TILE_SIZE * 2
 
-# --- Abstract Simulation Configs ---
-ABSTRACT_SIMULATION_DISTANCE_CHUNKS = 3 # villages further than this may be abstractly simulated
+# Colors
+COLOR_BLACK = (0, 0, 0)
+COLOR_WHITE = (255, 255, 255)
+COLOR_RED = (255, 0, 0)
+COLOR_GREEN = (0, 255, 0)
+COLOR_BLUE = (0, 0, 255)
+COLOR_YELLOW = (255, 255, 0)
+COLOR_ORANGE = (255, 165, 0)
+COLOR_PURPLE = (128, 0, 128)
+COLOR_CYAN = (0, 255, 255)
+COLOR_GREY = (128, 128, 128)
+COLOR_LIGHT_GREY = (192, 192, 192)
+COLOR_DARK_GREY = (64, 64, 64)
+COLOR_PLAYER_STATUS_WET = (0, 100, 255)
+COLOR_PLAYER_STATUS_FREEZING = (100, 100, 255)
+COLOR_CURSOR_INFO_TEXT = (200, 200, 200)
 
-# --- Debug and Feature Flags ---
-ENABLE_OLLAMA_CONNECTION = True # Set to False to disable all calls to Ollama for testing/offline mode
+# Factions
+FACTION_COMMON_FOLK = "common_folk"
+FACTION_MERCHANTS_GUILD = "merchants_guild"
+FACTION_LAW_AND_ORDER = "law_and_order"
+
+# Reputation
+INITIAL_CRIMINAL_POINTS = 0
+INITIAL_HERO_POINTS = 0
+REP_CRIMINAL = "criminal"
+REP_HERO = "hero"
+
+# Seasons and Temperature
+DAYS_PER_SEASON = 28
+SEASON_TEMPERATURE_MODIFIERS = {
+    "Spring": 15, "Summer": 25, "Autumn": 10, "Winter": -5
+}
+BIOME_TEMPERATURE_MODIFIERS = {
+    "plains": 0, "forest": -2, "mountain": -8, "snow": -15, "desert": 10
+}
+TIME_OF_DAY_TEMPERATURE_MODIFIERS = {
+    "PITCH BLACK": -10, "DAWN": -5, "DAY": 0, "DUSK": -5, "NIGHT": -8, "DEEP_NIGHT": -10
+}
+
+# Ollama settings
+ENABLE_OLLAMA_CONNECTION = True # Master switch to enable/disable Ollama connection

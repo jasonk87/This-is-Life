@@ -3425,8 +3425,8 @@ class World:
     def _get_witnesses_to_action(self, x: int, y: int, action_type: str) -> list['NPC']:
         """Finds NPCs who can see a location and would consider the action a crime."""
         witnesses = []
-        for npc in self.village_npcs:
-            if npc.is_dead:
+        for npc in self.village_npcs + self.npcs: # Check all NPCs
+            if npc.is_dead or isinstance(npc, Animal): # Animals can't be witnesses
                 continue
 
             # Check if the NPC can see the location of the crime
@@ -5585,7 +5585,7 @@ class World:
                 for y_sign in [-1, 1]:
                     tx, ty = center_x + x_offset, center_y + (r * y_sign)
                     tile = self.get_tile_at(tx, ty)
-                    if tile and tile.passable:
+                    if tile and tile.passable and "water" not in tile.name.lower():
                         self.player.x, self.player.y = tx, ty
                         return
             # Check left and right columns
@@ -5593,7 +5593,7 @@ class World:
                 for x_sign in [-1, 1]:
                     tx, ty = center_x + (r * x_sign), center_y + y_offset
                     tile = self.get_tile_at(tx, ty)
-                    if tile and tile.passable:
+                    if tile and tile.passable and "water" not in tile.name.lower():
                         self.player.x, self.player.y = tx, ty
                         return
         print("Warning: No passable starting tile found. Player may be stuck.")
@@ -6545,7 +6545,7 @@ class World:
             event_x, event_y = event.location
 
             for npc in potential_witnesses:
-                if npc.is_dead or (hasattr(event, 'subject_id') and event.subject_id == npc.id) or event.id in npc.known_events:
+                if npc.is_dead or isinstance(npc, Animal) or (hasattr(event, 'subject_id') and event.subject_id == npc.id) or event.id in npc.known_events:
                     continue
 
                 # Check if NPC can see the event's location

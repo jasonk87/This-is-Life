@@ -228,6 +228,7 @@ class PlayerKnowledge:
     completed_quests: list[str] = field(default_factory=list)
     known_books: set[str] = field(default_factory=set)
     lockpicking_skill: int = 3
+    known_locations: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 @dataclass
 class PlayerState:
@@ -2184,6 +2185,13 @@ class World:
                                         destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
                                         npc.task_target_entity_id = friend_to_visit.id
                                         npc.leisure_timer = random.randint(100, 300) # Stay for a while
+                        elif random.random() < 0.1: # 10% chance to act on knowledge
+                            if npc.knowledge.known_locations:
+                                location_name, location_coords = random.choice(list(npc.knowledge.known_locations.items()))
+                                if location_coords != (npc.x, npc.y):
+                                    new_task_label = f"acting on knowledge: visiting {location_name}"
+                                    destination_coords = location_coords
+                                    npc.leisure_timer = random.randint(100, 200)
                         elif random.random() < 0.05 or npc.economic.profession == "Fisherman": # Fishermen will also use this logic
                             npc_village = self._get_village_for_npc(npc)
                             if npc_village and "fishing_spot" in npc_village.interaction_points:
@@ -4587,10 +4595,12 @@ class World:
             long_term_memory_summary = "No specific memories of the player."
         # ---
 
+        relationship_score = npc_target.relationships.get(self.player.id, 50)
+
         prompt = LLM_PROMPTS["npc_conversation_greeting"].format(
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
-            npc_attitude=npc_target.attitude_to_player,
+            relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
             player_title=self.player.social.title,
@@ -4615,6 +4625,23 @@ class World:
             return
 
         # --- Handle special keywords before general conversation ---
+        share_keywords = ["i know where", "let me tell you about", "have you seen"]
+        if any(keyword in player_input_text.lower() for keyword in share_keywords):
+            shared = False
+            for loc_id, coords in self.player.knowledge.known_locations.items():
+                building = self.buildings_by_id.get(loc_id)
+                if building and building.building_type.replace('_', ' ') in player_input_text.lower():
+                    loc_name = building.building_type.replace('_', ' ')
+                    if loc_name not in npc_target.knowledge.known_locations:
+                        npc_target.knowledge.known_locations[loc_name] = coords
+                        npc_target.relationships[self.player.id] = npc_target.relationships.get(self.player.id, 50) + 10
+                        self.chat_ui_history.append((npc_target.name, f"Oh, the {loc_name}? I didn't know where that was. Thank you!"))
+                        shared = True
+                        break
+            if not shared:
+                self.chat_ui_history.append((npc_target.name, "I'm not sure what you mean."))
+            return
+
         gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
         if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
             if not npc_target.known_events:
@@ -4675,11 +4702,12 @@ class World:
             long_term_memory_summary = "No specific memories of the player."
         # ---
 
-        player_rep = self.player.social.reputation
+        relationship_score = npc_target.relationships.get(self.player.id, 50)
+
         prompt = LLM_PROMPTS["npc_conversation_continue"].format(
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
-            npc_attitude=npc_target.attitude_to_player,
+            relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
             player_title=self.player.social.title,
@@ -5217,6 +5245,24 @@ class World:
                 if home_building:
                     npc.home_building_id = home_building.id
                     home_building.residents.append(npc)
+                    # Seed initial knowledge of home and workplace
+                    npc.knowledge.known_locations[f"my home"] = (home_building.global_center_x, home_building.global_center_y)
+                if work_building:
+                    npc.knowledge.known_locations[f"my workplace"] = (work_building.global_center_x, work_building.global_center_y)
+
+                # A subset of villagers know about key public locations to bootstrap knowledge spread
+                if random.random() < 0.3: # 30% of villagers have this extra knowledge
+                    tavern = next((b for b in village.buildings if b.building_type == "tavern"), None)
+                    if tavern:
+                        npc.knowledge.known_locations["the tavern"] = (tavern.global_center_x, tavern.global_center_y)
+
+                    general_store = next((b for b in village.buildings if b.building_type == "general_store"), None)
+                    if general_store:
+                        npc.knowledge.known_locations["the general store"] = (general_store.global_center_x, general_store.global_center_y)
+
+                    if "well" in village.interaction_points and village.interaction_points["well"]:
+                        well_coords = village.interaction_points["well"][0]
+                        npc.knowledge.known_locations["the village well"] = well_coords
 
                 # Chance to give NPC a healing salve
                 if random.random() < 0.33: # 33% chance
@@ -6192,16 +6238,23 @@ class World:
 
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)
-            if building and not building.interior_decorated:
-                # Get the chunk the building is in to pass to decoration method
-                current_chunk_x = new_x // CHUNK_SIZE
-                current_chunk_y = new_y // CHUNK_SIZE
-                if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
-                    chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
-                    self.decorate_building_interior(building, chunk_of_building)
-                else:
-                    # This should ideally not happen if get_building_at found a building
-                    self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
+            if building:
+                # Player learns about the building upon entering
+                building_name = building.building_type.replace('_', ' ')
+                if building.id not in self.player.knowledge.known_locations:
+                    self.player.knowledge.known_locations[building.id] = (building.global_center_x, building.global_center_y)
+                    self.add_message_to_chat_log(f"You discover the {building_name}.")
+
+                if not building.interior_decorated:
+                    # Get the chunk the building is in to pass to decoration method
+                    current_chunk_x = new_x // CHUNK_SIZE
+                    current_chunk_y = new_y // CHUNK_SIZE
+                    if 0 <= current_chunk_x < self.chunk_width and 0 <= current_chunk_y < self.chunk_height:
+                        chunk_of_building = self.chunks[current_chunk_y][current_chunk_x]
+                        self.decorate_building_interior(building, chunk_of_building)
+                    else:
+                        # This should ideally not happen if get_building_at found a building
+                        self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
 
             self.update_fov() # Player moved, so update FOV
 
@@ -6258,11 +6311,60 @@ class World:
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
+        self._trigger_event_driven_conversation()
         self._handle_npc_speech()
         self._handle_npc_conversations()
         self._update_entity_titles()
         self._update_npc_reputations()
         self._handle_reputation_based_reactions()
+
+    def _trigger_event_driven_conversation(self):
+        """Checks if any NPC should start a conversation with the player about a witnessed event."""
+        if self.game_state != "PLAYING":
+            return
+
+        for npc in self.village_npcs + self.npcs:
+            if npc.is_dead or npc.combat.is_hostile_to_player or self.chat_ui_active:
+                continue
+
+            # Check if player is visible and close
+            if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
+                if abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 3:
+                    # Find an event the NPC knows about but hasn't discussed with the player yet
+                    undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
+                    if undiscussed_events:
+                        event_to_discuss = random.choice(undiscussed_events)
+
+                        # Gather context for the prompt
+                        subject = self.get_entity_by_id(event_to_discuss.subject_id)
+                        target = self.get_entity_by_id(event_to_discuss.target_id) if event_to_discuss.target_id else None
+
+                        subject_name = getattr(subject, 'name', 'Someone')
+                        target_name = getattr(target, 'name', 'someone')
+
+                        prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
+                            npc_name=npc.name,
+                            npc_personality=npc.social.personality,
+                            relationship_score=npc.relationships.get(self.player.id, 50),
+                            event_type=event_to_discuss.type,
+                            event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
+                            subject_name=subject_name,
+                            target_name=target_name,
+                            relationship_with_subject=npc.relationships.get(event_to_discuss.subject_id, 50),
+                            relationship_with_target=npc.relationships.get(event_to_discuss.target_id, 50)
+                        )
+
+                        starter_dialogue = self._call_ollama(prompt)
+                        if starter_dialogue:
+                            self.add_message_to_chat_log(f"{npc.name} approaches you.")
+                            self.start_npc_dialogue(npc) # This clears history and sets up the UI state
+                            self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
+                            self.game_state = "DIALOGUE"
+                            self.chat_ui_target_npc = npc
+                            self.chat_ui_active = True
+                            self.needs_text_input = True
+                            npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
+                            break # Only one NPC starts a conversation per tick
 
     def _handle_reputation_based_reactions(self):
         """Makes NPCs react to famous or infamous characters they see."""

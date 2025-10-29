@@ -76,9 +76,11 @@ class Knowledge:
     """Stores entity knowledge and questing state."""
     known_events: dict[str, 'Event'] = field(default_factory=dict)
     reacted_to_event_ids: set[str] = field(default_factory=set)
+    discussed_event_ids: set[str] = field(default_factory=set)
     last_global_event_index_checked: int = -1
     help_needed: str | None = None
     long_term_memory: list[str] = field(default_factory=list)
+    known_locations: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 class NPC:
     """

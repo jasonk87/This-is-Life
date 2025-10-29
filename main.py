@@ -1,17 +1,67 @@
-# main.py
+"""
+This module contains the main game loop and handles player input.
+"""
+import argparse
 import tcod
 import tcod.console
 import tcod.event
 import tcod.tileset
-import os
 from engine import World
-from config import (
-    SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT,
-    REP_CRIMINAL, REP_HERO # Import reputation keys
-)
+from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
 from data.items import ITEM_DEFINITIONS
 from rendering.console_renderer import draw
 
+def handle_playing_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the 'PLAYING' state."""
+    move_keys = {
+        tcod.event.KeySym.UP: (0, -1), tcod.event.KeySym.DOWN: (0, 1),
+        tcod.event.KeySym.LEFT: (-1, 0), tcod.event.KeySym.RIGHT: (1, 0),
+    }
+
+    if event.sym in move_keys:
+        dx, dy = move_keys[event.sym]
+        action_cost = world.handle_player_movement(dx, dy)
+        if action_cost > 0:
+            world.game_time += action_cost - 1
+    elif event.sym == tcod.event.KeySym.C:
+        world.game_state = "CRAFTING_MENU"
+        world.crafting_menu_context["all_recipes"] = [
+            key for key, definition in ITEM_DEFINITIONS.items() if "crafting_recipe" in definition
+        ]
+        world.crafting_menu_context["all_recipes"].sort(key=lambda k: ITEM_DEFINITIONS[k].get("name", k))
+    elif event.sym == tcod.event.KeySym.E:
+        target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
+        open_interaction_menu(world, target_x, target_y)
+
+def handle_crafting_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the 'CRAFTING_MENU' state."""
+    ctx = world.crafting_menu_context
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.C):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP and ctx["all_recipes"]:
+        ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] - 1) % len(ctx["all_recipes"])
+    elif event.sym == tcod.event.KeySym.DOWN and ctx["all_recipes"]:
+        ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] + 1) % len(ctx["all_recipes"])
+    elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx["selected_recipe_index"] < len(ctx["all_recipes"]):
+        selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
+        world.craft_item(selected_key)
+
+def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler):
+    """Handles input when the interaction menu is active."""
+    ctx = world.interaction_context
+    if event.sym == tcod.event.KeySym.UP:
+        ctx["selected_action_index"] = (ctx["selected_action_index"] - 1) % len(ctx["available_actions"])
+    elif event.sym == tcod.event.KeySym.DOWN:
+        ctx["selected_action_index"] = (ctx["selected_action_index"] + 1) % len(ctx["available_actions"])
+    elif event.sym in (tcod.event.KeySym.LCTRL, tcod.event.KeySym.RCTRL):
+        ctx["selected_entity_index"] = (ctx["selected_entity_index"] + 1) % len(ctx["target_entities"])
+        selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
+        ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
+        ctx["selected_action_index"] = 0
+    elif event.sym in (tcod.event.KeySym.RETURN, tcod.event.KeySym.E):
+        execute_interaction(world, context_handler)
+    elif event.sym == tcod.event.KeySym.ESCAPE:
+        ctx["active"] = False
 
 def open_interaction_menu(world: World, x: int, y: int):
     """Opens the interaction menu for a specific tile."""
@@ -21,14 +71,10 @@ def open_interaction_menu(world: World, x: int, y: int):
         return
 
     world.interaction_context["active"] = True
-    world.interaction_context["x"] = x
-    world.interaction_context["y"] = y
+    world.interaction_context["x"], world.interaction_context["y"] = x, y
     world.interaction_context["target_entities"] = entities
     world.interaction_context["selected_entity_index"] = 0
-
-    # Get actions for the first entity
-    first_entity = entities[0]
-    world.interaction_context["available_actions"] = world._get_actions_for_entity(first_entity)
+    world.interaction_context["available_actions"] = world._get_actions_for_entity(entities[0])
     world.interaction_context["selected_action_index"] = 0
 
 def execute_interaction(world: World, context_handler):
@@ -37,550 +83,136 @@ def execute_interaction(world: World, context_handler):
     if not ctx["active"]:
         return
 
-    selected_entity_dict = ctx["target_entities"][ctx["selected_entity_index"]]
+    selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
     selected_action = ctx["available_actions"][ctx["selected_action_index"]]
-    target_x = ctx["x"]
-    target_y = ctx["y"]
-    entity_data = selected_entity_dict["data"]
+    target_x, target_y = ctx["x"], ctx["y"]
+    entity_data = selected_entity["data"]
 
-    # Map actions to functions
-    if selected_action == "Chop":
-        world.player_attempt_chop_tree(target_x, target_y)
-    elif selected_action == "Butcher":
-        world.player_attempt_butcher(target_x, target_y)
-    elif selected_action == "Toggle Door":
-        world.player_attempt_toggle_door(target_x, target_y)
-    elif selected_action == "Talk":
-        if selected_entity_dict["type"] == "npc":
-            world.chat_ui_target_npc = entity_data
-            world.chat_ui_mode = "talk"
-            world.start_npc_dialogue(entity_data)
-            world.chat_ui_active = True
-            context_handler.start_text_input()
-    elif selected_action == "Attack":
-        if selected_entity_dict["type"] == "npc":
-            world.player_attempt_attack(entity_data)
-    elif selected_action == "Feed":
-        if selected_entity_dict["type"] == "npc":
-            world.player_attempt_feed_animal(entity_data)
-    elif selected_action == "Ride":
-        if selected_entity_dict["type"] == "npc":
-            world.player_attempt_ride_animal(entity_data)
-    elif selected_action == "Dismount":
-        if selected_entity_dict["type"] == "npc":
-            world.player_attempt_dismount(entity_data)
-    elif selected_action == "Shear":
-        if selected_entity_dict["type"] == "npc":
-            world.player_attempt_shear(entity_data)
-    elif selected_action == "Fish":
-        if selected_entity_dict["type"] == "tile":
-            world.player_attempt_fish(target_x, target_y)
-    elif selected_action == "Trade":
-        if selected_entity_dict["type"] == "npc" and entity_data.profession == "Merchant":
-            world.trade_ui_npc_target = entity_data
-            world.initialize_trade_session()
-            world.trade_ui_active = True
-        else:
-            world.add_message_to_chat_log("This person has nothing to trade.")
-    elif selected_action == "Pick up":
-        if selected_entity_dict["type"] == "item":
-            item_key = entity_data["item_key"]
-            quantity = entity_data["quantity"]
-            if world.remove_item_from_map(item_key, quantity, target_x, target_y):
-                world.player.add_item(item_key, quantity)
-                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                world.add_message_to_chat_log(f"You pick up {quantity}x {item_name}.")
-    elif selected_action == "Claim House":
-        if selected_entity_dict["type"] == "building" and entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
-            entity_data.player_owned = True
-            world.add_message_to_chat_log(f"You have claimed this {entity_data.building_type} as your own!")
-        else:
-            world.add_message_to_chat_log("You cannot claim this structure.")
-    elif selected_action == "Examine":
-        # Basic examine for now
-        world.add_message_to_chat_log(f"You see a {selected_entity_dict['name']}.")
+    action_map = {
+        "Chop": lambda: world.player_attempt_chop_tree(target_x, target_y),
+        "Butcher": lambda: world.player_attempt_butcher(target_x, target_y),
+        "Toggle Door": lambda: world.player_attempt_toggle_door(target_x, target_y),
+        "Talk": lambda: start_dialogue(world, entity_data, context_handler),
+        "Attack": lambda: world.player_attempt_attack(entity_data),
+        "Feed": lambda: world.player_attempt_feed_animal(entity_data),
+        "Ride": lambda: world.player_attempt_ride_animal(entity_data),
+        "Dismount": lambda: world.player_attempt_dismount(entity_data),
+        "Shear": lambda: world.player_attempt_shear(entity_data),
+        "Fish": lambda: world.player_attempt_fish(target_x, target_y),
+        "Trade": lambda: start_trade(world, entity_data),
+        "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
+        "Claim House": lambda: claim_house(world, entity_data),
+        "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}.")
+    }
 
-    # Close the menu after action, unless it opened another UI like chat
+    if selected_action in action_map:
+        action_map[selected_action]()
+
     if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
 
-import argparse
+def start_dialogue(world, npc, context_handler):
+    """Starts a dialogue with an NPC."""
+    world.chat_ui_target_npc = npc
+    world.chat_ui_mode = "talk"
+    world.start_npc_dialogue(npc)
+    world.chat_ui_active = True
+    context_handler.start_text_input()
+
+def start_trade(world, npc):
+    """Starts a trade session with an NPC."""
+    if npc.profession == "Merchant":
+        world.trade_ui_npc_target = npc
+        world.initialize_trade_session()
+        world.trade_ui_active = True
+    else:
+        world.add_message_to_chat_log("This person has nothing to trade.")
+
+def pick_up_item(world, item_data, x, y):
+    """Picks up an item from the map."""
+    item_key, quantity = item_data["item_key"], item_data["quantity"]
+    if world.remove_item_from_map(item_key, quantity, x, y):
+        world.player.add_item(item_key, quantity)
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+        world.add_message_to_chat_log(f"You pick up {quantity}x {item_name}.")
+
+def claim_house(world, building):
+    """Claims a house for the player."""
+    if building.building_type == "house" and not building.player_owned and not building.residents:
+        building.player_owned = True
+        world.add_message_to_chat_log(f"You have claimed this {building.building_type} as your own!")
+    else:
+        world.add_message_to_chat_log("You cannot claim this structure.")
 
 def main():
     """Sets up the game and runs the main loop."""
     parser = argparse.ArgumentParser(description="This is Life - A Roguelike Simulation")
-    parser.add_argument("--headless", action="store_true", help="Run the game in headless mode (no graphics).")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode.")
     args = parser.parse_args()
 
-    move_keys = {
-        tcod.event.KeySym.UP: (0, -1),
-        tcod.event.KeySym.DOWN: (0, 1),
-        tcod.event.KeySym.LEFT: (-1, 0),
-        tcod.event.KeySym.RIGHT: (1, 0),
-    }
-
     world = World()
-
     if args.headless:
-        print("Running in headless mode. The game will run for a fixed number of ticks.")
-        for _ in range(1000): # Run for 1000 ticks in headless mode
-            world.game_time += 1
-            world._update_player_hunger_thirst()
-            world._update_season()
-            world._update_player_temperature()
-            world._apply_temperature_effects(world.player)
-            world._update_light_level_and_fov()
-            world._update_world_environment()
-            world._update_weather()
-            world.update_fov()
-            world._update_npc_schedules()
-            world._update_npc_movement()
-            world._handle_npc_speech()
-            if world.game_time % 100 == 0:
-                world._update_economy()
-        print("Headless mode run complete.")
+        run_headless(world)
         return
 
-    # --- tcod Tileset Setup ---
     try:
-        tileset = tcod.tileset.load_tilesheet(
-            "dejavu10x10_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD
-        )
+        tileset = tcod.tileset.load_tilesheet("dejavu10x10_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
     except FileNotFoundError:
         print("Error: Font file not found: 'dejavu10x10_gs_tc.png'")
         return
 
     console = tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="F")
-
-    # --- Main Game Loop ---
-    with tcod.context.new(
-        columns=console.width,
-        rows=console.height,
-        tileset=tileset,
-        title="This is Life",
-        vsync=True,
-    ) as context:
+    with tcod.context.new(columns=console.width, rows=console.height, tileset=tileset,
+                          title="This is Life", vsync=True) as context:
         while True:
-            # Game Logic Updates
-            world.game_time += 1
-            # ... (rest of the game logic updates) ...
-            if world.player.is_jailed and world.player.jail_time_remaining > 0:
-                world.player.jail_time_remaining -= 1
-                if world.player.jail_time_remaining == 0:
-                    world.add_message_to_chat_log("Your sentence is over. The guard unlocks the door.")
-                    world.player.is_jailed = False
-                    door_x, door_y = world.player.jail_cell_coords
-                    open_door_def = world.DECORATION_ITEM_DEFINITIONS["iron_door_open"]
-                    world._change_map_tile((door_x, door_y), open_door_def)
-                    world.player.jail_cell_coords = None
-
-            world._update_player_hunger_thirst()
-            world._update_season()
-            world._update_player_temperature()
-            world._apply_temperature_effects(world.player)
-            world._update_light_level_and_fov()
-            world._update_world_environment()
-            world._update_weather()
-            world.update_fov()
-            world._update_npc_schedules()
-            world._update_npc_movement()
-            world._handle_npc_speech()
-            if world.game_time % 100 == 0:
-                world._update_economy()
-
-            # Drawing
+            world.update()
             if world.game_state == "PLAYER_DEAD":
-                console.clear()
-                tcod.console_print_box(
-                    console,
-                    x=console.width // 2 - 10,
-                    y=console.height // 2 - 2,
-                    width=20,
-                    height=4,
-                    string="GAME OVER",
-                    fg=tcod.white,
-                    bg=tcod.black,
-                    alignment=tcod.CENTER
-                )
-                context.present(console)
-                for event_deep_loop in tcod.event.wait():
-                    context.convert_event(event_deep_loop)
-                    if isinstance(event_deep_loop, tcod.event.Quit) or isinstance(event_deep_loop, tcod.event.KeyDown):
-                        return
-            else:
-                camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
-                camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
-                draw(console, world, camera_x, camera_y)
-                context.present(console)
+                render_game_over(console, context)
+                break
+            camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
+            draw(console, world, camera_x, camera_y)
+            context.present(console)
+            handle_events(world, context)
 
-            # Event Handling
-            for event in tcod.event.wait():
-                context.convert_event(event)
-                if isinstance(event, tcod.event.Quit):
-                    return
-                # ... (rest of the event handling logic) ...
-                if isinstance(event, tcod.event.MouseMotion):
-                    world.mouse_x = int(event.tile.x)
-                    world.mouse_y = int(event.tile.y)
+def run_headless(world):
+    """Runs the game for a fixed number of ticks in headless mode."""
+    print("Running in headless mode...")
+    for _ in range(1000):
+        world.update()
+    print("Headless mode run complete.")
 
-                if isinstance(event, tcod.event.MouseButtonDown):
-                    if event.button == tcod.event.BUTTON_RIGHT:
-                        camera_x = world.player.x - SCREEN_WIDTH_TILES // 2
-                        camera_y = world.player.y - SCREEN_HEIGHT_TILES // 2
-                        mouse_world_x = camera_x + world.mouse_x
-                        mouse_world_y = camera_y + world.mouse_y
-                        open_interaction_menu(world, mouse_world_x, mouse_world_y)
+def render_game_over(console, context):
+    """Renders the game over screen."""
+    console.clear()
+    console.print_box(x=console.width // 2 - 10, y=console.height // 2 - 2,
+                      width=20, height=4, string="GAME OVER", alignment=tcod.CENTER)
+    context.present(console)
+    for event in tcod.event.wait():
+        context.convert_event(event)
+        if isinstance(event, (tcod.event.Quit, tcod.event.KeyDown)):
+            return
 
-                if isinstance(event, tcod.event.TextInput):
-                    if world.chat_ui_active:
-                        world.chat_ui_input_line += event.text
-
-                elif isinstance(event, tcod.event.KeyDown):
-                    if world.trade_ui_active:
-                        if event.sym == tcod.event.KeySym.ESCAPE:
-                            world.trade_ui_active = False
-                            world.add_message_to_chat_log("Trade cancelled.")
-                            world.trade_ui_npc_target = None
-                        elif event.sym == tcod.event.KeySym.TAB:
-                            world.trade_ui_player_selling = not world.trade_ui_player_selling
-                            if world.trade_ui_player_selling: world.trade_ui_player_item_index = 0
-                            else: world.trade_ui_merchant_item_index = 0
-                        elif event.sym == tcod.event.KeySym.UP:
-                            if world.trade_ui_player_selling:
-                                if world.trade_ui_player_inventory_snapshot:
-                                    world.trade_ui_player_item_index = (world.trade_ui_player_item_index - 1) % len(world.trade_ui_player_inventory_snapshot)
-                            else:
-                                if world.trade_ui_merchant_inventory_snapshot:
-                                    world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index - 1) % len(world.trade_ui_merchant_inventory_snapshot)
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.trade_ui_player_selling:
-                                if world.trade_ui_player_inventory_snapshot:
-                                    world.trade_ui_player_item_index = (world.trade_ui_player_item_index + 1) % len(world.trade_ui_player_inventory_snapshot)
-                            else:
-                                if world.trade_ui_merchant_inventory_snapshot:
-                                    world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index + 1) % len(world.trade_ui_merchant_inventory_snapshot)
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            world.handle_trade_action()
-                            if world.trade_ui_active:
-                                world.initialize_trade_session()
-
-                    elif world.chat_ui_active:
-                        if event.sym == tcod.event.KeySym.ESCAPE:
-                            context.stop_text_input()
-                            world.chat_ui_active = False
-                            world.add_message_to_chat_log(f"Ended interaction with {world.chat_ui_target_npc.name if world.chat_ui_target_npc else 'someone'}.")
-                            world.chat_ui_target_npc = None
-                            world.chat_ui_input_line = ""
-                        elif event.sym == tcod.event.KeySym.BACKSPACE:
-                            if world.chat_ui_input_line:
-                                world.chat_ui_input_line = world.chat_ui_input_line[:-1]
-                        elif event.sym == tcod.event.KeySym.RETURN:
-                            if world.chat_ui_input_line:
-                                player_input = world.chat_ui_input_line
-                                world.chat_ui_history.append(("Player", player_input))
-                                world.chat_ui_input_line = ""
-                                if world.chat_ui_mode == "talk":
-                                    if world.player.pending_contract_offer and world.chat_ui_target_npc and world.player.pending_contract_offer["npc_offerer_id"] == world.chat_ui_target_npc.id and player_input.lower() in ["yes", "accept", "ok", "sure", "y"]:
-                                        contract = world.player.pending_contract_offer
-                                        world.player.active_contracts[contract["contract_id"]] = {
-                                            "npc_id": contract["npc_id"], "item_key": contract["item_key"],
-                                            "quantity_needed": contract["quantity_needed"], "reward": contract["reward"],
-                                            "progress_text": f"Deliver {contract['quantity_needed']} {contract['item_key']}(s) to {world.chat_ui_target_npc.name}.",
-                                            "turn_in_npc_id": contract["npc_id"]
-                                        }
-                                        world.chat_ui_history.append(("System", f"Job accepted: {contract['progress_text']}"))
-                                        world.player.pending_contract_offer = None
-                                    elif world.pending_quest_offer and world.chat_ui_target_npc and world.pending_quest_offer["npc_offerer_id"] == world.chat_ui_target_npc.id and player_input.lower() in world.QUEST_DEFINITIONS.get(world.pending_quest_offer["quest_id"], {}).get("dialogue_accept_player", ["yes", "accept", "ok", "sure", "y"]):
-                                        quest_id_to_accept = world.pending_quest_offer["quest_id"]
-                                        quest_def = world.QUEST_DEFINITIONS.get(quest_id_to_accept)
-                                        if quest_def:
-                                            world.player.active_quests[quest_id_to_accept] = {
-                                                "id": quest_id_to_accept, "title": quest_def["title"], "type": quest_def["type"],
-                                                "target_npc_name_prefix": quest_def.get("target_npc_name_prefix"), "target_count": quest_def.get("target_count", 0),
-                                                "item_to_fetch_key": quest_def.get("item_to_fetch_key"), "item_fetch_count": quest_def.get("item_fetch_count", 0),
-                                                "progress": 0, "quest_giver_id_or_role": quest_def["quest_giver_id_or_role"], "npc_offerer_id": world.chat_ui_target_npc.id
-                                            }
-                                            accept_response = quest_def.get("dialogue_accept_npc_response", "Good luck.")
-                                            world.chat_ui_history.append((world.chat_ui_target_npc.name, accept_response))
-                                            world.chat_ui_history.append(("System", f"Quest accepted: {quest_def['title']}"))
-                                            world.pending_quest_offer = None
-                                        else:
-                                            world.add_message_to_chat_log(f"Error: Tried to accept unknown quest '{quest_id_to_accept}'.")
-                                            world.pending_quest_offer = None
-                                    elif world.chat_ui_target_npc:
-                                        world.continue_npc_dialogue(world.chat_ui_target_npc, player_input)
-                                    else:
-                                        world.add_message_to_chat_log("Error: No target NPC for dialogue continuation.")
-                                elif world.chat_ui_mode == "persuade_goal_input":
-                                    world.attempt_persuasion(world.chat_ui_target_npc, player_input)
-                                    context.stop_text_input()
-                                    world.chat_ui_active = False
-                                    world.add_message_to_chat_log(f"Persuasion attempt made with {world.chat_ui_target_npc.name}.")
-                                    world.chat_ui_target_npc = None
-                                if len(world.chat_ui_history) > world.chat_ui_max_history:
-                                    world.chat_ui_history = world.chat_ui_history[-world.chat_ui_max_history:]
-                                world.chat_ui_scroll_offset = 0
-
-                    elif world.interaction_context["active"]:
-                        ctx = world.interaction_context
-                        if event.sym == tcod.event.KeySym.UP:
-                            ctx["selected_action_index"] = (ctx["selected_action_index"] - 1) % len(ctx["available_actions"])
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            ctx["selected_action_index"] = (ctx["selected_action_index"] + 1) % len(ctx["available_actions"])
-                        elif event.sym == tcod.event.KeySym.LCTRL or event.sym == tcod.event.KeySym.RCTRL:
-                            ctx["selected_entity_index"] = (ctx["selected_entity_index"] + 1) % len(ctx["target_entities"])
-                            selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
-                            ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
-                            ctx["selected_action_index"] = 0
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            execute_interaction(world, context)
-                        elif event.sym == tcod.event.KeySym.ESCAPE:
-                            ctx["active"] = False
-
-                    elif event.sym == tcod.event.KeySym.I:
-                        if not world.chat_ui_active and not world.trade_ui_active and not world.interaction_menu_active:
-                            world.game_state = "INFO_MENU" if world.game_state == "PLAYING" else "PLAYING"
-
-                    elif world.game_state == "CRAFTING_MENU":
-                        ctx = world.crafting_menu_context
-                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.C:
-                            world.game_state = "PLAYING"
-                        elif event.sym == tcod.event.KeySym.UP:
-                            if ctx["all_recipes"]:
-                                ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] - 1) % len(ctx["all_recipes"])
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            if ctx["all_recipes"]:
-                                ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] + 1) % len(ctx["all_recipes"])
-                        elif event.sym == tcod.event.KeySym.RETURN:
-                            if 0 <= ctx["selected_recipe_index"] < len(ctx["all_recipes"]):
-                                selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
-                                world.craft_item(selected_key)
-
-                    elif world.game_state == "PLAYING":
-                        if event.sym in move_keys:
-                            dx, dy = move_keys[event.sym]
-                            action_cost = world.handle_player_movement(dx, dy)
-                            if action_cost > 0:
-                                world.game_time += action_cost - 1
-                        elif event.sym == tcod.event.KeySym.C:
-                            world.game_state = "CRAFTING_MENU"
-                            world.crafting_menu_context["all_recipes"] = [
-                                key for key, definition in ITEM_DEFINITIONS.items() if "crafting_recipe" in definition
-                            ]
-                            world.crafting_menu_context["all_recipes"].sort(key=lambda k: ITEM_DEFINITIONS[k].get("name", k))
-                        elif event.sym == tcod.event.KeySym.S:
-                            world.craft_item("crude_spear")
-                        elif event.sym == tcod.event.KeySym.X:
-                            world.craft_item("wooden_shield")
-                        elif event.sym == tcod.event.KeySym.M:
-                            world.craft_item("cooked_meat_scrap")
-                        elif event.sym == tcod.event.KeySym.H:
-                            world.use_item("healing_salve")
-                        elif event.sym == tcod.event.KeySym.U:
-                            world.use_item("cooked_meat_scrap")
-                        elif event.sym == tcod.event.KeySym.D:
-                            world.player.take_damage(5)
-                            world.add_message_to_chat_log(f"You took 5 damage! Current HP: {world.player.hp}")
-                        elif event.sym == tcod.event.KeySym.K:
-                            world.player.adjust_reputation(REP_CRIMINAL, 10)
-                            world.add_message_to_chat_log(f"Criminal points +10. Total: {world.player.reputation[REP_CRIMINAL]}")
-                        elif event.sym == tcod.event.KeySym.J:
-                            world.player.adjust_reputation(REP_HERO, 10)
-                            world.add_message_to_chat_log(f"Hero points +10. Total: {world.player.reputation[REP_HERO]}")
-                        elif event.sym == tcod.event.KeySym.B:
-                            current_building_at_player = world.get_building_by_tile_coords(world.player.x, world.player.y)
-                            if current_building_at_player and current_building_at_player.player_owned:
-                                if world.game_state == "PLAYING":
-                                    world.game_state = "BUILD_MODE"
-                                    world.add_message_to_chat_log("Entered build mode. B/ESC to exit. UP/DOWN to select item. ENTER to place.")
-                                    if world.placeable_furniture_keys:
-                                        selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
-                                        item_def = ALL_DECORATION_DEFS.get(selected_item_key)
-                                        if item_def:
-                                            world.ghost_furniture_tile = BaseTileType(item_def["char"], item_def["color"], True, item_def["name"], item_def.get("properties", {}))
-                                    else:
-                                        world.ghost_furniture_tile = None
-                                elif world.game_state == "BUILD_MODE":
-                                    world.game_state = "PLAYING"
-                                    world.add_message_to_chat_log("Exited build mode.")
-                                    world.ghost_furniture_tile = None
-                            else:
-                                world.add_message_to_chat_log("You can only build inside a house you own.")
-                        elif event.sym == tcod.event.KeySym.E:
-                            target_x = world.player.x + world.player.last_dx
-                            target_y = world.player.y + world.player.last_dy
-                            open_interaction_menu(world, target_x, target_y)
-
-                    elif world.game_state == "BUILD_MODE":
-                        if event.sym == tcod.event.KeySym.ESCAPE or event.sym == tcod.event.KeySym.B:
-                            world.game_state = "PLAYING"
-                            world.add_message_to_chat_log("Exited build mode.")
-                            world.ghost_furniture_tile = None
-                        elif event.sym in move_keys:
-                            dx, dy = move_keys[event.sym]
-                            original_char = world.player.char
-                            world.handle_player_movement(dx, dy)
-                            world.player.char = original_char
-                            world.player.is_sitting = False
-                        elif event.sym == tcod.event.KeySym.UP:
-                            if world.placeable_furniture_keys:
-                                world.build_mode_selected_item_index = (world.build_mode_selected_item_index - 1) % len(world.placeable_furniture_keys)
-                                selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
-                                item_def = ALL_DECORATION_DEFS.get(selected_item_key)
-                                if item_def:
-                                    world.ghost_furniture_tile = BaseTileType(item_def["char"], item_def["color"], True, item_def["name"], item_def.get("properties", {}))
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.placeable_furniture_keys:
-                                world.build_mode_selected_item_index = (world.build_mode_selected_item_index + 1) % len(world.placeable_furniture_keys)
-                                selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
-                                item_def = ALL_DECORATION_DEFS.get(selected_item_key)
-                                if item_def:
-                                    world.ghost_furniture_tile = BaseTileType(item_def["char"], item_def["color"], True, item_def["name"], item_def.get("properties", {}))
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            if world.placeable_furniture_keys and world.ghost_furniture_tile:
-                                selected_item_key = world.placeable_furniture_keys[world.build_mode_selected_item_index]
-                                item_def_to_place = ALL_DECORATION_DEFS.get(selected_item_key)
-                                if item_def_to_place:
-                                    target_x = world.player.x + world.player.last_dx
-                                    target_y = world.player.y + world.player.last_dy
-                                    current_building = world.get_building_by_tile_coords(world.player.x, world.player.y)
-                                    target_tile_current_obj = world.get_tile_at(target_x, target_y)
-                                    can_place = True
-                                    if not (current_building and current_building.player_owned):
-                                        world.add_message_to_chat_log("You must be inside your own building to place furniture.")
-                                        can_place = False
-                                    elif not current_building.contains_global_coords(target_x, target_y):
-                                        world.add_message_to_chat_log("You can only place furniture inside this building.")
-                                        can_place = False
-                                    elif not (target_tile_current_obj and target_tile_current_obj.passable and "floor" in target_tile_current_obj.name.lower()):
-                                        world.add_message_to_chat_log(f"Cannot place furniture on '{target_tile_current_obj.name if target_tile_current_obj else 'solid ground'}'. Must be clear floor.")
-                                        can_place = False
-                                    cost = item_def_to_place.get("placement_cost", {})
-                                    if not cost:
-                                        pass
-                                    else:
-                                        for resource_key, required_qty in cost.items():
-                                            if world.player.inventory.get(resource_key, 0) < required_qty:
-                                                item_name_for_msg = ITEM_DEFINITIONS.get(resource_key, {}).get("name", resource_key)
-                                                world.add_message_to_chat_log(f"Not enough resources. Need {required_qty}x {item_name_for_msg}.")
-                                                can_place = False
-                                                break
-                                    if can_place:
-                                        for resource_key, required_qty in cost.items():
-                                            world.player.inventory[resource_key] -= required_qty
-                                            if world.player.inventory[resource_key] <= 0:
-                                                del world.player.inventory[resource_key]
-                                        new_furniture_tile = BaseTileType(
-                                            item_def_to_place["char"], item_def_to_place["color"], item_def_to_place["passable"],
-                                            item_def_to_place["name"], item_def_to_place.get("properties", {})
-                                        )
-                                        chunk_x, chunk_y = target_x // CHUNK_SIZE, target_y // CHUNK_SIZE
-                                        local_x, local_y = target_x % CHUNK_SIZE, target_y % CHUNK_SIZE
-                                        world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = new_furniture_tile
-                                        if new_furniture_tile.properties.get("blocks_fov", False):
-                                            world.transparency_map[target_x, target_y] = False
-                                        else:
-                                            world.transparency_map[target_x, target_y] = True
-                                        world.add_message_to_chat_log(f"Placed {item_def_to_place['name']}.")
-                                        world.update_fov()
-                    elif world.interaction_menu_active:
-                        if event.sym == tcod.event.KeySym.UP:
-                            if world.interaction_menu_options:
-                                world.interaction_menu_selected_index = (world.interaction_menu_selected_index - 1) % len(world.interaction_menu_options)
-                        elif event.sym == tcod.event.KeySym.DOWN:
-                            if world.interaction_menu_options:
-                                world.interaction_menu_selected_index = (world.interaction_menu_selected_index + 1) % len(world.interaction_menu_options)
-                        elif event.sym == tcod.event.KeySym.RETURN or event.sym == tcod.event.KeySym.E:
-                            if world.interaction_menu_options:
-                                selected_option_text = world.interaction_menu_options[world.interaction_menu_selected_index]
-                                target_npc = world.interaction_menu_target_npc
-                                target_building = world.interaction_menu_target_building
-                                world.interaction_menu_active = False
-                                if selected_option_text.startswith("Claim this"):
-                                    if target_building and target_building.building_type == "house" and not target_building.player_owned and not target_building.residents:
-                                        target_building.player_owned = True
-                                        world.add_message_to_chat_log(f"You have claimed this {target_building.building_type} as your own!")
-                                    else:
-                                        world.add_message_to_chat_log("You cannot claim this structure.")
-                                elif selected_option_text == "Open door" or selected_option_text == "Close door":
-                                    facing_x = world.player.x + world.player.last_dx
-                                    facing_y = world.player.y + world.player.last_dy
-                                    world.player_attempt_toggle_door(facing_x, facing_y)
-                                elif selected_option_text == "Talk":
-                                    if target_npc:
-                                        world.chat_ui_target_npc = target_npc
-                                        world.chat_ui_mode = "talk"
-                                        world.start_npc_dialogue(target_npc)
-                                        world.chat_ui_active = True
-                                        context.start_text_input()
-                                elif selected_option_text == "Persuade":
-                                    if target_npc:
-                                        world.chat_ui_target_npc = target_npc
-                                        world.chat_ui_mode = "persuade_goal_input"
-                                        world.chat_ui_history.clear()
-                                        world.chat_ui_scroll_offset = 0
-                                        world.chat_ui_input_line = ""
-                                        world.chat_ui_history.append(("System", f"Persuade {target_npc.name}: What is your goal?"))
-                                        world.chat_ui_active = True
-                                        context.start_text_input()
-                                elif selected_option_text == "Trade":
-                                    if target_npc and target_npc.profession == "Merchant":
-                                        world.trade_ui_npc_target = target_npc
-                                        world.initialize_trade_session()
-                                        world.trade_ui_active = True
-                                    else:
-                                        world.add_message_to_chat_log(f"{target_npc.name if target_npc else 'They'} are not a merchant.")
-                                elif selected_option_text == "Attack":
-                                    if target_npc and not target_npc.is_dead:
-                                        world.player_attempt_attack(target_npc)
-                                elif selected_option_text.startswith("Complete Contract:"):
-                                    if target_npc:
-                                        contract_id_to_complete = f"lumber_delivery_{target_npc.id}"
-                                        if contract_id_to_complete in world.player.active_contracts:
-                                            world.complete_contract_delivery(contract_id_to_complete, target_npc)
-                                            if not world.chat_ui_active:
-                                                world.chat_ui_target_npc = target_npc
-                                                world.chat_ui_mode = "talk"
-                                                world.chat_ui_active = True
-                                                context.start_text_input()
-                                        else:
-                                            world.add_message_to_chat_log("Could not find that specific contract to complete.")
-                                    else:
-                                        world.add_message_to_chat_log("Error: No target NPC for contract completion.")
-                                elif selected_option_text.startswith("Quest - "):
-                                    if target_npc:
-                                        try:
-                                            quest_title_in_menu = selected_option_text.split(" - ")[1].split(" (")[0]
-                                            found_quest_id = None
-                                            for q_id, q_data in world.player.active_quests.items():
-                                                if q_data["title"] == quest_title_in_menu:
-                                                    found_quest_id = q_id
-                                                    break
-                                            if found_quest_id:
-                                                world.complete_quest(found_quest_id, target_npc)
-                                                if not world.chat_ui_active:
-                                                    world.chat_ui_target_npc = target_npc
-                                                    world.chat_ui_mode = "talk"
-                                                    world.chat_ui_active = True
-                                                    context.start_text_input()
-                                            else:
-                                                world.add_message_to_chat_log(f"Could not find active quest: {quest_title_in_menu}")
-                                        except IndexError:
-                                            world.add_message_to_chat_log("Error parsing quest option.")
-                                    else:
-                                        world.add_message_to_chat_log("Error: No target NPC for quest interaction.")
-                                elif selected_option_text == "Cancel":
-                                    world.add_message_to_chat_log("Interaction cancelled.")
-                                world.interaction_menu_target_npc = None
-                                world.interaction_menu_target_building = None
-                        elif event.sym == tcod.event.KeySym.ESCAPE:
-                            world.interaction_menu_active = False
-                            world.interaction_menu_target_npc = None
-                            world.interaction_menu_target_building = None
-                            world.add_message_to_chat_log("Interaction cancelled.")
-
-                    if event.sym == tcod.event.KeySym.Q:
-                        return
+def handle_events(world, context):
+    """Handles all player input and game events."""
+    for event in tcod.event.get():
+        context.convert_event(event)
+        if isinstance(event, tcod.event.Quit):
+            raise SystemExit()
+        if isinstance(event, tcod.event.MouseMotion):
+            world.mouse_x, world.mouse_y = int(event.tile.x), int(event.tile.y)
+        if isinstance(event, tcod.event.MouseButtonDown) and event.button == tcod.event.BUTTON_RIGHT:
+            camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
+            mouse_world_x, mouse_world_y = camera_x + world.mouse_x, camera_y + world.mouse_y
+            open_interaction_menu(world, mouse_world_x, mouse_world_y)
+        if isinstance(event, tcod.event.TextInput) and world.chat_ui_active:
+            world.chat_ui_input_line += event.text
+        elif isinstance(event, tcod.event.KeyDown):
+            if world.interaction_context["active"]:
+                handle_interaction_input(event, world, context)
+            elif world.game_state == "CRAFTING_MENU":
+                handle_crafting_input(event, world)
+            elif world.game_state == "PLAYING":
+                handle_playing_input(event, world)
 
 if __name__ == "__main__":
     main()

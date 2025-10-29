@@ -3,120 +3,134 @@ This module defines the base classes for all entities in the game world,
 including NPCs and specialized creature types.
 """
 import random
+from dataclasses import dataclass, field
 from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
 from data.items import ITEM_DEFINITIONS
+
+@dataclass
+class CombatStats:
+    """Stores combat-related attributes for an entity."""
+    max_hp: int = 20
+    hp: int = 20
+    toughness: str = "average"
+    is_hostile_to_player: bool = False
+    combat_behavior: str = "defensive"
+    base_attack_name: str = "fists"
+    base_attack_damage_dice: str = "1d3"
+    attack_range: int = 1
+    target_entity_id: int | None = None
+
+@dataclass
+class PhysicalState:
+    """Stores physical attributes and states for an entity."""
+    hunger: int = 0
+    max_hunger: int = 100
+    thirst: int = 0
+    max_thirst: int = 100
+    temperature: float = 37.0
+    base_temperature_resistance: float = 2.0
+    clothing_insulation: float = 0.0
+    status_effects: list[str] = field(default_factory=list)
+    is_dead: bool = False
+
+@dataclass
+class SocialState:
+    """Stores social and reputational attributes for an entity."""
+    personality: str = "normal"
+    family_ties: str = "none"
+    relationships: dict = field(default_factory=dict)
+    grudges: dict[int, list[str]] = field(default_factory=dict)
+    fame: int = 0
+    infamy: int = 0
+    title: str = ""
+
+@dataclass
+class EconomicState:
+    """Stores economic attributes for an entity."""
+    wealth_level: str = "average"
+    money: int = 0
+    npc_inventory: dict = field(default_factory=dict)
+    profession: str = "unemployed"
+
+@dataclass
+class Schedule:
+    """Stores scheduling and task-related attributes for an entity."""
+    home_building_id: int | None = None
+    work_building_id: int | None = None
+    current_destination_coords: tuple[int, int] | None = None
+    current_path: list = field(default_factory=list)
+    current_task: str = "idle"
+    previous_task: str = "idle"
+    game_time_last_updated: int = 0
+    last_paid_day: int = 0
+
+@dataclass
+class Equipment:
+    """Stores entity equipment."""
+    weapon: str | None = None
+    body: str | None = None
+    head: str | None = None
+
+@dataclass
+class Knowledge:
+    """Stores entity knowledge and questing state."""
+    known_events: dict[str, 'Event'] = field(default_factory=dict)
+    reacted_to_event_ids: set[str] = field(default_factory=set)
+    last_global_event_index_checked: int = -1
+    help_needed: str | None = None
 
 class NPC:
     """
     The base class for all non-player characters in the game.
     """
-    def __init__(self, x, y, name="NPC", dialogue=None, personality="normal",
-                 family_ties="none", attitude_to_player="indifferent", player_id=None):
-        self.x = x
-        self.y = y
-        self.name = name
-        self.char = ord('N')
-        self.color = (0, 255, 0)
-        self.speed = 1
+    def __init__(self, x, y, name="NPC", dialogue=None,
+                 personality="normal", family_ties="none",
+                 attitude_to_player="indifferent", player_id=None,
+                 wealth_level="average"):
+        self.x, self.y, self.name = x, y, name
+        self.char, self.color, self.speed, self.id = ord('N'), (0, 255, 0), 1, id(self)
+
         self.dialogue = dialogue if dialogue is not None else ["Hello!"]
-        self.personality = personality
-        self.family_ties = family_ties
         self.player_id = player_id
         self.last_speech_time = 0
         self.age = random.randint(18, 65)
-        self.relationships = {}
-        self.grudges: dict[int, list[str]] = {}
-        if self.player_id:
-            initial_score = 50
-            if attitude_to_player == "friendly":
-                initial_score = 75
-            elif attitude_to_player == "hostile":
-                initial_score = 25
-            self.relationships[self.player_id] = initial_score
-
-        self.knowledge = []
-        self.known_events: dict[str, 'Event'] = {}
-        self.reacted_to_event_ids: set[str] = set()
-        self.last_global_event_index_checked: int = -1
-        self.help_needed = None
-
-        self.home_building_id = None
-        self.work_building_id = None
-        self.current_destination_coords = None
-        self.current_path = []
-        self.current_task = "idle"
-        self.previous_task = "idle"
-        self.game_time_last_updated = 0
-        self.last_paid_day = 0
-
-        self.wealth_level = "average"
-        if self.wealth_level == "poor":
-            self.money = random.randint(5, 20)
-        elif self.wealth_level == "average":
-            self.money = random.randint(20, 100)
-        elif self.wealth_level == "wealthy":
-            self.money = random.randint(100, 500)
-        else:
-            self.money = random.randint(10, 50)
-        self.profession = "unemployed"
         self.original_char_before_sleep = self.char
-        self.npc_inventory = {}
-
-        self.hunger: int = 0
-        self.max_hunger: int = 100
-        self.thirst: int = 0
-        self.max_thirst: int = 100
-
-        self.max_hp = 20
-        self.hp = self.max_hp
-        self.toughness = "average"
-        self.is_hostile_to_player = False
-        self.is_dead = False
-        self.id = id(self)
-
-        self.combat_behavior = "defensive"
-        self.base_attack_name = "fists"
-        self.base_attack_damage_dice = "1d3"
-        self.attack_range = 1
-        self.target_entity_id = None
-
         self.speech_volume: int = DEFAULT_SPEECH_VOLUME
+        self.hearing_radius: int = DEFAULT_HEARING_RADIUS
 
-        self.equipped_weapon: str | None = None
-        self.equipped_armor_body: str | None = None
-        self.equipped_armor_head: str | None = None
+        self.combat, self.physical, self.social = CombatStats(), PhysicalState(), SocialState()
+        self.economic, self.schedule = EconomicState(), Schedule()
+        self.equipment, self.knowledge = Equipment(), Knowledge()
+
+        self.social.personality = personality
+        self.social.family_ties = family_ties
+        self.economic.wealth_level = wealth_level
+
+        if self.player_id:
+            self._initialize_relationships(attitude_to_player, self.player_id)
 
         self.perceived_item_tiles: list[tuple[int,int]] = []
         self.task_target_item_details: dict | None = None
-
         self.current_sub_task: str | None = None
         self.sub_task_target_coords: tuple[int, int] | None = None
-        self.sub_task_timer: int = 0
-        self.task_timer: int = 0
+        self.sub_task_timer, self.task_timer, self.leisure_timer = 0, 0, 0
         self.sub_task_zone_target: str | None = None
         self.current_sub_task_sequence_index: int = 0
-
-        self.hearing_radius: int = DEFAULT_HEARING_RADIUS
-
         self.woodcutter_search_radius: int = 15
-
         self.task_target_entity_id: int | None = None
         self.task_context: str | None = None
-        self.leisure_timer = 0
-
-        self.temperature: float = 37.0
-        self.base_temperature_resistance: float = 2.0
-        self.clothing_insulation: float = 0.0
-        self.status_effects: list[str] = []
-
         self.den_location: tuple[int, int] | None = None
-        self.desire_for_furniture: int = 0
-        self.is_frightened: bool = False
-        self.threat_source_ids: list[int] = []
+        self.desire_for_furniture, self.is_frightened = 0, False
+        self.threat_source_ids: list[str] = []
+        self.defense_bonus = 0
 
-        self.fame: int = 0
-        self.infamy: int = 0
-        self.title: str = ""
+    def _initialize_relationships(self, attitude, player_id):
+        initial_score = 50
+        if attitude == "friendly":
+            initial_score = 75
+        elif attitude == "hostile":
+            initial_score = 25
+        self.social.relationships[player_id] = initial_score
 
     @property
     def attitude_to_player(self) -> str:
@@ -125,7 +139,7 @@ class NPC:
         """
         if not self.player_id:
             return "neutral"
-        score = self.relationships.get(self.player_id, 50)
+        score = self.social.relationships.get(self.player_id, 50)
         if score < 30:
             return "hostile"
         if score < 45:
@@ -140,11 +154,11 @@ class NPC:
         """
         Adds a grudge against a target entity, significantly lowering the relationship score.
         """
-        if target_id not in self.grudges:
-            self.grudges[target_id] = []
-        self.grudges[target_id].append(reason)
-        self.relationships[target_id] = self.relationships.get(target_id, 50) - 40
-        self.relationships[target_id] = max(0, self.relationships[target_id])
+        if target_id not in self.social.grudges:
+            self.social.grudges[target_id] = []
+        self.social.grudges[target_id].append(reason)
+        self.social.relationships[target_id] = self.social.relationships.get(target_id, 50) - 40
+        self.social.relationships[target_id] = max(0, self.social.relationships[target_id])
 
     def get_dialogue(self):
         """Returns the NPC's dialogue options."""
@@ -152,34 +166,34 @@ class NPC:
 
     def recalculate_stats(self):
         """Recalculates NPC stats based on equipped items."""
-        self.clothing_insulation = 0.0
+        self.physical.clothing_insulation = 0.0
         self.defense_bonus = 0
-        if self.equipped_armor_body:
-            item_def = ITEM_DEFINITIONS.get(self.equipped_armor_body)
+        if self.equipment.body:
+            item_def = ITEM_DEFINITIONS.get(self.equipment.body)
             if item_def and "properties" in item_def:
-                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+                self.physical.clothing_insulation += item_def["properties"].get("insulation", 0.0)
                 self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
-        if self.equipped_armor_head:
-            item_def = ITEM_DEFINITIONS.get(self.equipped_armor_head)
+        if self.equipment.head:
+            item_def = ITEM_DEFINITIONS.get(self.equipment.head)
             if item_def and "properties" in item_def:
-                self.clothing_insulation += item_def["properties"].get("insulation", 0.0)
+                self.physical.clothing_insulation += item_def["properties"].get("insulation", 0.0)
                 self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
-
 
     def add_item(self, item_key: str, quantity: int = 1):
         """Adds an item to the NPC's inventory."""
-        self.npc_inventory[item_key] = self.npc_inventory.get(item_key, 0) + quantity
+        current_quantity = self.economic.npc_inventory.get(item_key, 0)
+        self.economic.npc_inventory[item_key] = current_quantity + quantity
 
     def has_item(self, item_key: str, quantity: int = 1) -> bool:
         """Checks if the NPC has a sufficient quantity of an item."""
-        return self.npc_inventory.get(item_key, 0) >= quantity
+        return self.economic.npc_inventory.get(item_key, 0) >= quantity
 
     def remove_item(self, item_key_to_remove: str, quantity: int = 1) -> bool:
         """Removes an item from the NPC's inventory. Returns True if successful."""
-        if self.npc_inventory.get(item_key_to_remove, 0) >= quantity:
-            self.npc_inventory[item_key_to_remove] -= quantity
-            if self.npc_inventory[item_key_to_remove] <= 0:
-                del self.npc_inventory[item_key_to_remove]
+        if self.has_item(item_key_to_remove, quantity):
+            self.economic.npc_inventory[item_key_to_remove] -= quantity
+            if self.economic.npc_inventory[item_key_to_remove] <= 0:
+                del self.economic.npc_inventory[item_key_to_remove]
             return True
         return False
 
@@ -188,29 +202,27 @@ class NPC:
         Applies damage to the NPC, accounting for armor, and handles death.
         Returns True if the NPC was killed, False otherwise.
         """
-        if self.is_dead:
+        if self.physical.is_dead:
             return False
 
         total_defense_bonus = 0
-        if self.equipped_armor_body and self.equipped_armor_body in ITEM_DEFINITIONS:
-            armor_def = ITEM_DEFINITIONS[self.equipped_armor_body]
+        if self.equipment.body and self.equipment.body in ITEM_DEFINITIONS:
+            armor_def = ITEM_DEFINITIONS[self.equipment.body]
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
-
-        if self.equipped_armor_head and self.equipped_armor_head in ITEM_DEFINITIONS:
-            armor_def = ITEM_DEFINITIONS[self.equipped_armor_head]
+        if self.equipment.head and self.equipment.head in ITEM_DEFINITIONS:
+            armor_def = ITEM_DEFINITIONS[self.equipment.head]
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
 
         effective_damage = max(0, amount - total_defense_bonus)
-        self.hp -= effective_damage
+        self.combat.hp -= effective_damage
 
-        if self.hp <= 0:
-            self.hp = 0
-            self.is_dead = True
+        if self.combat.hp <= 0:
+            self.combat.hp = 0
+            self.physical.is_dead = True
             return True
-        if not self.is_hostile_to_player:
-            self.is_hostile_to_player = True
-            if self.profession != "Creature":
-                world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+        if not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
+            self.combat.is_hostile_to_player = True
+            world.add_message_to_chat_log(f"{self.name} becomes hostile!")
         return False
 
 class DireWolf(NPC):
@@ -219,17 +231,12 @@ class DireWolf(NPC):
     """
     def __init__(self, x, y, name="Dire Wolf"):
         super().__init__(x, y, name=name)
-        self.char = ord('w')
-        self.color = (160, 160, 160)
-        self.max_hp = 15
-        self.hp = self.max_hp
-        self.toughness = "average"
-        self.is_hostile_to_player = True
-        self.combat_behavior = "aggressive"
-        self.base_attack_name = "bite"
-        self.base_attack_damage_dice = "1d6"
-        self.attack_range = 1
-        self.profession = "Creature"
+        self.char, self.color = ord('w'), (160, 160, 160)
+        self.combat = CombatStats(max_hp=15, hp=15, toughness="average",
+                                  is_hostile_to_player=True, combat_behavior="aggressive",
+                                  base_attack_name="bite", base_attack_damage_dice="1d6",
+                                  attack_range=1)
+        self.economic.profession = "Creature"
         self.dialogue = ["*Growl*", "*Snarl*"]
         self.speech_volume = 5
         self.hearing_radius = DEFAULT_HEARING_RADIUS + 2

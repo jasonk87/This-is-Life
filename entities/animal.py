@@ -47,6 +47,23 @@ class Animal(NPC):
         self.max_hunger: int = 100
 
         self.pack_id: str | None = None
+        self.is_dead: bool = False
+
+        # Task-related attributes
+        self.current_task: str | None = "idle"
+        self.previous_task: str | None = None
+        self.task_target_entity_id: int | None = None
+        self.task_target_coords: tuple[int, int] | None = None
+        self.task_timer: int = 0
+        self.woodcutter_search_radius: int = 5
+
+        # Temperature-related attributes
+        self.temperature: float = 37.0
+        self.base_temperature_resistance: float = 0.0
+        self.clothing_insulation: float = 0.0
+        self.status_effects: list[str] = []
+        self.game_time_last_updated: int = 0
+
 
     def get_dialogue(self):
         """

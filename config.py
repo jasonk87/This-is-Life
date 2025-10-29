@@ -115,3 +115,6 @@ DEFAULT_SPEECH_VOLUME = 10  # How far standard NPC speech travels.
 
 # --- Abstract Simulation Configs ---
 ABSTRACT_SIMULATION_DISTANCE_CHUNKS = 3 # villages further than this may be abstractly simulated
+
+# --- Debug and Feature Flags ---
+ENABLE_OLLAMA_CONNECTION = True # Set to False to disable all calls to Ollama for testing/offline mode

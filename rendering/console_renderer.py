@@ -45,14 +45,14 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
 
     y_offset = 2
     console.print(x=panel_x + 2, y=y_offset,
-                  string=f"HP: {world.player.hp} / {world.player.max_hp}")
+                  string=f"HP: {world.player.combat.hp} / {world.player.combat.max_hp}")
     y_offset += 2
 
     console.print(x=panel_x + 2, y=y_offset,
-                  string=f"Hunger: {world.player.hunger_level_msg or 'Full'}")
+                  string=f"Hunger: {world.player.physical.hunger_level_msg or 'Full'}")
     y_offset += 1
     console.print(x=panel_x + 2, y=y_offset,
-                  string=f"Thirst: {world.player.thirst_level_msg or 'Quenched'}")
+                  string=f"Thirst: {world.player.physical.thirst_level_msg or 'Quenched'}")
     y_offset += 2
 
     console.print(x=panel_x + 2, y=y_offset, string=f"Time: {world.current_light_level_name}")
@@ -66,27 +66,27 @@ def draw_status_panel(console: tcod.console.Console, world) -> None:
     y_offset += 1
 
     body_temp_color = (255, 255, 255)
-    if "Freezing" in world.player.status_effects:
+    if "Freezing" in world.player.physical.status_effects:
         body_temp_color = (100, 100, 255)
-    elif "Overheating" in world.player.status_effects:
+    elif "Overheating" in world.player.physical.status_effects:
         body_temp_color = (255, 100, 100)
     console.print(x=panel_x + 2, y=y_offset,
-                  string=f"Body Temp: {world.player.temperature:.1f}C", fg=body_temp_color)
+                  string=f"Body Temp: {world.player.physical.temperature:.1f}C", fg=body_temp_color)
     y_offset += 1
 
-    if world.player.status_effects:
-        status_str = ", ".join(world.player.status_effects)
+    if world.player.physical.status_effects:
+        status_str = ", ".join(world.player.physical.status_effects)
         console.print(x=panel_x + 3, y=y_offset,
                       string=f"({status_str})", fg=(255, 100, 100))
     y_offset += 2
 
-    console.print(x=panel_x + 2, y=y_offset, string=f"Fame: {world.player.fame}")
+    console.print(x=panel_x + 2, y=y_offset, string=f"Fame: {world.player.social.fame}")
     y_offset += 1
-    console.print(x=panel_x + 2, y=y_offset, string=f"Infamy: {world.player.infamy}")
+    console.print(x=panel_x + 2, y=y_offset, string=f"Infamy: {world.player.social.infamy}")
     y_offset += 2
 
-    if world.player.title:
-        console.print(x=panel_x + 2, y=y_offset, string=f"Title: {world.player.title}")
+    if world.player.social.title:
+        console.print(x=panel_x + 2, y=y_offset, string=f"Title: {world.player.social.title}")
 
 def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> None:
     """Draws the world on the given console using the given camera coordinates."""
@@ -307,22 +307,22 @@ def draw_info_menu(main_console: tcod.console.Console, world, camera_x: int, cam
     main_console.print(x=menu_x + 2, y=ui_y, string="--- Player ---", fg=(170,170,220))
     ui_y += 1
     main_console.print(x=menu_x + 3, y=ui_y,
-                       string=f"HP: {world.player.hp} / {world.player.max_hp}")
+                       string=f"HP: {world.player.combat.hp} / {world.player.combat.max_hp}")
     ui_y +=1
     main_console.print(x=menu_x + 3, y=ui_y,
-                       string=f"Hunger: {world.player.hunger}/{world.player.max_hunger} {world.player.hunger_level_msg}")
+                       string=f"Hunger: {world.player.physical.hunger}/{world.player.physical.max_hunger} {world.player.physical.hunger_level_msg}")
     ui_y +=1
     main_console.print(x=menu_x + 3, y=ui_y,
-                       string=f"Thirst: {world.player.thirst}/{world.player.max_thirst} {world.player.thirst_level_msg}")
+                       string=f"Thirst: {world.player.physical.thirst}/{world.player.physical.max_thirst} {world.player.physical.thirst_level_msg}")
     ui_y += 2
     main_console.print(x=menu_x + 3, y=ui_y, string="Inventory:")
     ui_y += 1
-    if not world.player.inventory:
+    if not world.player.economic.inventory:
         main_console.print(x=menu_x + 4, y=ui_y, string="(Empty)", fg=(128, 128, 128))
         ui_y += 1
     else:
         inventory_summary = {}
-        for item in world.player.inventory:
+        for item in world.player.economic.inventory:
             key = item["key"]
             inventory_summary[key] = inventory_summary.get(key, 0) + item.get("quantity", 1)
 

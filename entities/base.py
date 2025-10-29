@@ -78,6 +78,7 @@ class Knowledge:
     reacted_to_event_ids: set[str] = field(default_factory=set)
     last_global_event_index_checked: int = -1
     help_needed: str | None = None
+    long_term_memory: list[str] = field(default_factory=list)
 
 class NPC:
     """

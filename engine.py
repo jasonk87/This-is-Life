@@ -1203,6 +1203,37 @@ class World:
         if 0.75 <= time_ratio < 0.90: return "Evening"
         return "Night"
 
+    def _get_location_description(self, x: int, y: int) -> str:
+        """Generates a brief description of a location based on its tile, building, or biome."""
+        # 1. Check for building
+        building = self.get_building_at(x, y)
+        if building:
+            building_name = building.building_type.replace('_', ' ')
+            if building.building_type in ["house", "home"]:
+                return f"in a {building_name}"
+            else:
+                return f"in the {building_name}"
+
+        # 2. Check for specific outdoor features
+        tile = self.get_tile_at(x, y)
+        if tile:
+            if tile.name == "Road":
+                return "on a road"
+            if tile.name == "Well":
+                return "by the village well"
+            if "water" in tile.name.lower():
+                return "near the water"
+
+        # 3. Fallback to biome
+        chunk_x = x // CHUNK_SIZE
+        chunk_y = y // CHUNK_SIZE
+        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+            chunk = self.chunks[chunk_y][chunk_x]
+            biome_name = chunk.biome.replace('_', ' ')
+            return f"in the {biome_name}"
+
+        return "in an unknown area"
+
     def _find_best_adjacent_tile(self, target_x: int, target_y: int, entity) -> tuple[int | None, int | None]:
         """
         Finds a passable, unoccupied, adjacent tile to the target for the entity to move to.
@@ -4511,13 +4542,27 @@ class World:
         self.chat_ui_input_line = ""
 
         player_rep = self.player.social.reputation
+
+        # --- Gather Environmental and Memory Context ---
+        time_of_day = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
+        current_weather = self.weather
+        location_description = self._get_location_description(npc_target.x, npc_target.y)
+        long_term_memory_summary = "\n- ".join(npc_target.knowledge.long_term_memory[-5:]) # Last 5 memories
+        if not long_term_memory_summary:
+            long_term_memory_summary = "No specific memories of the player."
+        # ---
+
         prompt = LLM_PROMPTS["npc_conversation_greeting"].format(
             npc_name=npc_target.name,
             npc_personality=npc_target.personality,
             npc_attitude=npc_target.attitude_to_player,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
-            player_title=self.player.social.title
+            player_title=self.player.social.title,
+            time_of_day=time_of_day,
+            current_weather=current_weather,
+            location_description=location_description,
+            long_term_memory=long_term_memory_summary
         )
         greeting = self._call_ollama(prompt)
         if not greeting:
@@ -4585,6 +4630,15 @@ class World:
                 formatted_history.append(f"{speaker}: {text}")
         history_str = "\n".join(formatted_history)
 
+        # --- Gather Environmental and Memory Context ---
+        time_of_day = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
+        current_weather = self.weather
+        location_description = self._get_location_description(npc_target.x, npc_target.y)
+        long_term_memory_summary = "\n- ".join(npc_target.knowledge.long_term_memory[-5:]) # Last 5 memories
+        if not long_term_memory_summary:
+            long_term_memory_summary = "No specific memories of the player."
+        # ---
+
         player_rep = self.player.social.reputation
         prompt = LLM_PROMPTS["npc_conversation_continue"].format(
             npc_name=npc_target.name,
@@ -4595,7 +4649,11 @@ class World:
             player_title=self.player.social.title,
             conversation_history=history_str,
             player_input=player_input_text,
-            npc_current_task=npc_target.schedule.current_task
+            npc_current_task=npc_target.schedule.current_task,
+            time_of_day=time_of_day,
+            current_weather=current_weather,
+            location_description=location_description,
+            long_term_memory=long_term_memory_summary
         )
 
         response_str = self._call_ollama(prompt)
@@ -4688,10 +4746,37 @@ class World:
             else:
                 self.add_message_to_chat_log(f"{npc.name} seems to want to trade, but isn't a merchant.")
         elif goal == "end_conversation":
+            self._summarize_and_store_conversation(npc, self.chat_ui_history)
             self.game_state = "PLAYING"
             self.chat_ui_active = False
             # The main loop needs to stop text input
             self.needs_text_input = False
+
+    def _summarize_and_store_conversation(self, npc: NPC, conversation_history: list):
+        """Summarizes a conversation and stores it in the NPC's long-term memory."""
+        if not conversation_history:
+            return
+
+        formatted_history = []
+        for speaker, text in conversation_history:
+            if speaker == "Player":
+                formatted_history.append(f"Player: {text}")
+            else:
+                formatted_history.append(f"{speaker}: {text}")
+        history_str = "\n".join(formatted_history)
+
+        prompt = LLM_PROMPTS["summarize_conversation_for_memory"].format(
+            npc_name=npc.name,
+            npc_personality=npc.personality,
+            conversation_history=history_str
+        )
+        summary = self._call_ollama(prompt)
+
+        if summary and len(summary) > 10: # Avoid storing short errors or empty strings
+            npc.knowledge.long_term_memory.append(summary)
+            # Keep memory from growing too large
+            if len(npc.knowledge.long_term_memory) > 20:
+                npc.knowledge.long_term_memory.pop(0)
 
 
     def _call_ollama(self, prompt: str) -> str:

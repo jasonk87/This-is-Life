@@ -11,7 +11,7 @@ from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
 from data.items import ITEM_DEFINITIONS
 from rendering.console_renderer import draw
 
-def handle_playing_input(event: tcod.event.KeyDown, world: World):
+def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler):
     """Handles input when the player is in the 'PLAYING' state."""
     move_keys = {
         tcod.event.KeySym.UP: (0, -1), tcod.event.KeySym.DOWN: (0, 1),
@@ -32,6 +32,22 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World):
     elif event.sym == tcod.event.KeySym.E:
         target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
         open_interaction_menu(world, target_x, target_y)
+    elif event.sym == tcod.event.KeySym.T:
+        # Find nearest NPC to talk to
+        import math
+        closest_npc = None
+        min_dist = float('inf')
+        for npc in world.village_npcs + world.npcs:
+            if not npc.is_dead:
+                dist = math.sqrt((world.player.x - npc.x)**2 + (world.player.y - npc.y)**2)
+                if dist < min_dist and dist <= 5: # Max talk distance
+                    min_dist = dist
+                    closest_npc = npc
+
+        if closest_npc:
+            start_dialogue(world, closest_npc, context_handler)
+        else:
+            world.add_message_to_chat_log("There's no one nearby to talk to.")
 
 def handle_crafting_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'CRAFTING_MENU' state."""
@@ -111,8 +127,25 @@ def execute_interaction(world: World, context_handler):
     if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
 
+def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handler):
+    """Handles input when the player is in the 'DIALOGUE' state."""
+    if event.sym == tcod.event.KeySym.ESCAPE:
+        world.game_state = "PLAYING"
+        world.chat_ui_active = False
+        context_handler.stop_text_input()
+    elif event.sym == tcod.event.KeySym.RETURN:
+        if world.chat_ui_input_line:
+            # Add player's line to history and process NPC response
+            world.chat_ui_history.append(("Player", world.chat_ui_input_line))
+            world.continue_npc_dialogue(world.chat_ui_target_npc, world.chat_ui_input_line)
+            world.chat_ui_input_line = "" # Clear input line
+    elif event.sym == tcod.event.KeySym.BACKSPACE:
+        if world.chat_ui_input_line:
+            world.chat_ui_input_line = world.chat_ui_input_line[:-1]
+
 def start_dialogue(world, npc, context_handler):
     """Starts a dialogue with an NPC."""
+    world.game_state = "DIALOGUE"
     world.chat_ui_target_npc = npc
     world.chat_ui_mode = "talk"
     world.start_npc_dialogue(npc)
@@ -211,8 +244,10 @@ def handle_events(world, context):
                 handle_interaction_input(event, world, context)
             elif world.game_state == "CRAFTING_MENU":
                 handle_crafting_input(event, world)
+            elif world.game_state == "DIALOGUE":
+                handle_dialogue_input(event, world, context)
             elif world.game_state == "PLAYING":
-                handle_playing_input(event, world)
+                handle_playing_input(event, world, context)
 
 if __name__ == "__main__":
     main()

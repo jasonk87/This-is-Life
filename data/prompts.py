@@ -218,8 +218,9 @@ The player has just initiated conversation with you. Generate a short, in-charac
 Greeting:
 """,
     "npc_conversation_continue": """\
-You are {npc_name}, an NPC in a fantasy village.
+You are {npc_name}, an NPC in a fantasy village, deciding on a response and a potential action.
 Your personality is: {npc_personality}.
+Your current task is: {npc_current_task}.
 Your current attitude towards the player is: {npc_attitude}.
 
 Player's Reputation:
@@ -232,10 +233,37 @@ The conversation history so far is:
 
 The player just said: "{player_input}"
 
-Generate a short, in-character response to the player. Keep it concise and relevant to the conversation.
-If the conversation seems to be ending or the player says goodbye, you can also say goodbye or make a concluding remark.
+Available Goals for you to take after responding:
+- "follow_player": If the player asks you to follow them.
+- "go_to_location": If the player tells you about a specific place to check out.
+- "start_trade": If the player wants to trade and you are a merchant.
+- "end_conversation": If the conversation is over.
+- "continue_conversation": If you should just continue talking without taking a new action.
 
-Response:
+Task:
+Based on the conversation, generate a JSON object with two fields:
+1. "response": A short, in-character dialogue response to the player.
+2. "goal": The most appropriate goal from the "Available Goals" list. If the player suggests an action, your goal should reflect that.
+
+Example 1: Player says "Follow me, I'll show you the wolf den."
+{{
+  "response": "A wolf den? Lead the way! I'll follow you.",
+  "goal": "follow_player"
+}}
+
+Example 2: Player says "I have some things to sell." and you are a merchant.
+{{
+  "response": "Excellent! Let's see what you've got.",
+  "goal": "start_trade"
+}}
+
+Example 3: Player says "Thanks for the chat. Goodbye!"
+{{
+  "response": "Farewell, traveler.",
+  "goal": "end_conversation"
+}}
+
+JSON Output:
 """,
     "npc_job_offer_lumber": """\
 You are {npc_name}, the {npc_profession} of this village. Your personality is {npc_personality}.
@@ -802,5 +830,36 @@ Example 2 (Villainous):
 }}
 
 JSON Output:
+""",
+    "npc_npc_conversation": """\
+You are an AI generating a single line of dialogue for an NPC in a conversation.
+
+**NPCs Involved:**
+- **Speaker:** {speaker_name} (Personality: {speaker_personality}, Attitude towards listener: {speaker_attitude_to_listener})
+- **Listener:** {listener_name} (Personality: {listener_personality})
+
+**Conversation Context:**
+- **Topic:** A brief summary of a recent event they both know about: "{event_summary}"
+- **Previous Dialogue (if any):**
+{conversation_history}
+
+**Task:**
+Generate a single, short, in-character line of dialogue for the **Speaker**.
+- The dialogue should be a natural continuation of the conversation if there is a history.
+- It should reflect the Speaker's personality and their attitude towards the Listener.
+- It should be related to the event they are discussing.
+- Do not wrap the output in quotes.
+
+**Example 1:**
+- Speaker: Borin (gruff), Listener: Elara (wise)
+- Topic: "Borin fought a wolf."
+- Borin's line could be: "It was a tough fight, but I managed. The forests are getting dangerous."
+
+**Example 2:**
+- Speaker: Elara (wise), Listener: Borin (gruff)
+- Topic: "Borin fought a wolf."
+- Elara's line could be: "You were fortunate, Borin. Your strength is a blessing to this village."
+
+Dialogue Line:
 """,
 }

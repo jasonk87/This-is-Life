@@ -148,11 +148,12 @@ def draw(console: tcod.console.Console, world, camera_x: int, camera_y: int) -> 
         draw_info_menu(console, world, camera_x, camera_y)
     elif game_state == "BUILD_MODE":
         draw_build_mode_ui(console, world)
+    elif game_state == "DIALOGUE":
+        draw_dialogue_ui(console, world)
 
     draw_chat_log(console, world)
     draw_interaction_menu(console, world)
-    draw_chat_ui(console)
-    draw_trade_ui(console)
+    draw_trade_ui(console, world)
     draw_crafting_menu(console, world)
     draw_knowledge_menu(console, world)
     draw_book_reading_ui(console, world)
@@ -390,10 +391,49 @@ def draw_interaction_menu(console: tcod.console.Console, world) -> None:
         console.print(x=menu_x + 1, y=y_offset, string=f"{prefix}{action}", fg=fg)
         y_offset += 1
 
-def draw_chat_ui(console: tcod.console.Console) -> None:
-    """Draws the chat UI."""
+def draw_dialogue_ui(console: tcod.console.Console, world) -> None:
+    """Draws the player-NPC dialogue UI."""
+    if not world.chat_ui_active:
+        return
 
-def draw_trade_ui(console: tcod.console.Console) -> None:
+    width = 60
+    height = 20
+    x = (SCREEN_WIDTH_TILES - width) // 2
+    y = (SCREEN_HEIGHT_TILES - height) // 2
+
+    title = f"Talking to {world.chat_ui_target_npc.name}" if world.chat_ui_target_npc else "Dialogue"
+    console.draw_frame(x=x, y=y, width=width, height=height, title=title, clear=True)
+
+    history_height = height - 4
+    y_offset = y + 1
+
+    # Display history from the bottom up
+    for i in range(history_height):
+        history_index = len(world.chat_ui_history) - 1 - i
+        if history_index < 0:
+            break
+
+        speaker, text = world.chat_ui_history[history_index]
+        line_y = y + height - 3 - i
+
+        # Word wrap the text
+        wrapped_lines = tcod.text.wrap(text, width=width - 4)
+
+        # Display the wrapped lines, also from the bottom up
+        for line in reversed(wrapped_lines.split('\n')):
+            if line_y < y + 1:
+                break
+
+            fg_color = (255, 255, 0) if speaker == "Player" else (255, 255, 255)
+            console.print(x=x + 2, y=line_y, string=f"{speaker}: {line}", fg=fg_color)
+            line_y -= 1
+            if line_y < y + 1:
+                break
+
+    # Draw the input line
+    console.print(x=x + 1, y=y + height - 2, string="> " + world.chat_ui_input_line + "_", fg=(255, 255, 255))
+
+def draw_trade_ui(console: tcod.console.Console, world) -> None:
     """Draws the trade UI."""
 
 def draw_crafting_menu(console: tcod.console.Console, world) -> None:

@@ -98,6 +98,12 @@ class NPC:
         self.speech_volume: int = DEFAULT_SPEECH_VOLUME
         self.hearing_radius: int = DEFAULT_HEARING_RADIUS
 
+        # Conversation state
+        self.conversation_partner_id: int | None = None
+        self.current_conversation: list[str] = []
+        self.conversation_cooldown: int = 0
+        self.last_conversation_time: int = 0
+
         self.combat, self.physical, self.social = CombatStats(), PhysicalState(), SocialState()
         self.economic, self.schedule = EconomicState(), Schedule()
         self.equipment, self.knowledge = Equipment(), Knowledge()

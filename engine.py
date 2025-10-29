@@ -956,7 +956,17 @@ class World:
             # If hostile and needs to decide on a combat action that involves movement
             # This section ensures that an NPC's path is up-to-date with its target's position
             # right before it attempts to move.
-            if npc.schedule.current_task == "combat_action_attack_player":
+            if npc.schedule.current_task == "following_player":
+                if npc.task_target_entity_id == self.player.id:
+                    # Recalculate path to player if not close enough
+                    if abs(npc.x - self.player.x) > 2 or abs(npc.y - self.player.y) > 2:
+                        dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
+                        if dest_x is not None and (npc.schedule.current_destination_coords != (dest_x, dest_y)):
+                            path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                            if path:
+                                npc.schedule.current_path = path
+                                npc.schedule.current_destination_coords = (dest_x, dest_y)
+            elif npc.schedule.current_task == "combat_action_attack_player":
                 # If in range, just attack, don't move. The attack itself is in this task block.
                 # If not in range, switch to move_to_attack.
                 player = self.player
@@ -1185,6 +1195,13 @@ class World:
     def _get_time_of_day_str(self, game_time_tick: int, day_length: int) -> str:
         """Converts a game tick to a descriptive time of day string."""
         time_ratio = (game_time_tick % day_length) / day_length
+        if 0 <= time_ratio < 0.1: return "Dead of Night"
+        if 0.1 <= time_ratio < 0.25: return "Early Morning"
+        if 0.25 <= time_ratio < 0.45: return "Morning"
+        if 0.45 <= time_ratio < 0.60: return "Midday"
+        if 0.60 <= time_ratio < 0.75: return "Afternoon"
+        if 0.75 <= time_ratio < 0.90: return "Evening"
+        return "Night"
 
     def _find_best_adjacent_tile(self, target_x: int, target_y: int, entity) -> tuple[int | None, int | None]:
         """
@@ -1220,13 +1237,6 @@ class World:
 
         potential_spots.sort(key=lambda s: s['dist_sq'])
         return potential_spots[0]['x'], potential_spots[0]['y']
-        if 0 <= time_ratio < 0.1: return "Dead of Night"
-        if 0.1 <= time_ratio < 0.25: return "Early Morning"
-        if 0.25 <= time_ratio < 0.45: return "Morning"
-        if 0.45 <= time_ratio < 0.60: return "Midday"
-        if 0.60 <= time_ratio < 0.75: return "Afternoon"
-        if 0.75 <= time_ratio < 0.90: return "Evening"
-        return "Night"
 
     def _find_best_adjacent_tile_for_attack(self, target_x: int, target_y: int, attacker_npc: NPC) -> tuple[int | None, int | None]:
         """
@@ -2094,6 +2104,8 @@ class World:
                                     destination_coords = (dest_x, dest_y)
                                     npc.task_target_entity_id = chat_partner.id
                                     npc.leisure_timer = random.randint(50, 150) # Chat for a bit
+                        elif random.random() < 0.1:  # 10% chance to socialize
+                            self._start_npc_socialization(npc)
                         elif random.random() < 0.05: # 5% chance to visit a friend
                             # Filter for NPCs with a positive relationship
                             friends = [n for n in self.village_npcs if n.id != npc.id and npc.social.relationships.get(n.id, 50) > 60]
@@ -3964,12 +3976,80 @@ class World:
             if len(self.chat_ui_history) > self.chat_ui_max_history:
                 self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
             self.chat_ui_scroll_offset = 0
-
-
         except json.JSONDecodeError:
-            error_msg = f"{npc_target.name} gives a non-committal grunt. (LLM response format error)"
-            self.chat_ui_history.append(("System", error_msg))
-            # self.add_message_to_chat_log(f"LLM Raw: {response_str}") # Log raw for debugging if needed
+            self.add_message_to_chat_log(f"{npc_target.name} gives a non-committal grunt. (LLM Format Error)")
+
+    def _handle_npc_conversations(self):
+        conversing_npcs = [npc for npc in self.village_npcs if npc.conversation_partner_id is not None]
+        for npc in conversing_npcs:
+            if npc.last_conversation_time + 10 < self.game_time:
+                partner = next((p for p in self.village_npcs if p.id == npc.conversation_partner_id), None)
+                if partner:
+                    self._continue_npc_conversation(npc, partner)
+                else:
+                    npc.conversation_partner_id = None
+
+    def _continue_npc_conversation(self, speaker, listener):
+        if len(speaker.current_conversation) >= 6:
+            self.add_message_to_chat_log(f"The conversation between {speaker.name} and {listener.name} ends.")
+            speaker.conversation_partner_id = None
+            listener.conversation_partner_id = None
+            speaker.current_conversation = []
+            listener.current_conversation = []
+            speaker.conversation_cooldown = random.randint(100, 200)
+            listener.conversation_cooldown = random.randint(100, 200)
+            return
+
+        event_summary = "the weather"
+        if speaker.known_events:
+            event = random.choice(list(speaker.known_events.values()))
+            event_summary = event.description
+
+        history = "\n".join(speaker.current_conversation)
+        prompt = LLM_PROMPTS["npc_npc_conversation"].format(
+            speaker_name=speaker.name,
+            speaker_personality=speaker.personality,
+            speaker_attitude_to_listener=speaker.relationships.get(listener.id, 50),
+            listener_name=listener.name,
+            listener_personality=listener.personality,
+            event_summary=event_summary,
+            conversation_history=history
+        )
+        dialogue = self._call_ollama(prompt)
+        if dialogue:
+            self.add_message_to_chat_log(f"{speaker.name} to {listener.name}: {dialogue}")
+            speaker.current_conversation.append(f"{speaker.name}: {dialogue}")
+            listener.current_conversation.append(f"{speaker.name}: {dialogue}")
+
+        speaker.last_conversation_time = self.game_time
+        listener.last_conversation_time = self.game_time
+
+        # Swap speaker and listener for the next turn
+        listener.conversation_partner_id = speaker.id
+        speaker.conversation_partner_id = listener.id
+
+    def _start_npc_socialization(self, npc: NPC):
+        if npc.conversation_cooldown > 0:
+            npc.conversation_cooldown -= 1
+            return
+
+        potential_partners = [
+            p for p in self.village_npcs
+            if p.id != npc.id and not p.physical.is_dead and abs(npc.x - p.x) + abs(npc.y - p.y) < 10
+               and p.conversation_partner_id is None and p.conversation_cooldown == 0
+        ]
+
+        if not potential_partners:
+            return
+
+        partner = random.choice(potential_partners)
+        npc.conversation_partner_id = partner.id
+        partner.conversation_partner_id = npc.id
+        npc.last_conversation_time = self.game_time
+        partner.last_conversation_time = self.game_time
+
+        # For now, let's just log that a conversation has started.
+        self.add_message_to_chat_log(f"{npc.name} and {partner.name} start a conversation.")
 
     def player_attempt_attack(self, target_npc: NPC):
         if not target_npc:
@@ -4514,14 +4594,26 @@ class World:
             player_infamy=self.player.social.infamy,
             player_title=self.player.social.title,
             conversation_history=history_str,
-            player_input=player_input_text
+            player_input=player_input_text,
+            npc_current_task=npc_target.schedule.current_task
         )
 
-        npc_response = self._call_ollama(prompt)
-        if not npc_response:
-            npc_response = "... (LLM failed to respond)"
+        response_str = self._call_ollama(prompt)
+        if not response_str:
+            self.chat_ui_history.append((npc_target.name, "... (LLM failed to respond)"))
+            return
 
-        self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+        try:
+            response_json = json.loads(response_str)
+            npc_response = response_json.get("response", "...")
+            goal = response_json.get("goal", "continue_conversation")
+
+            self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+            self._handle_npc_goal(npc_target, goal, player_input_text)
+
+        except json.JSONDecodeError:
+            # If the LLM fails to return valid JSON, just treat the whole response as dialogue
+            self.chat_ui_history.append((npc_target.name, response_str.strip()))
 
         # After NPC response, check if this NPC should offer a job
         if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
@@ -4575,6 +4667,31 @@ class World:
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
+
+    def _handle_npc_goal(self, npc: NPC, goal: str, player_input: str):
+        """Handles the goal set for an NPC by the LLM during conversation."""
+        if goal == "follow_player":
+            npc.schedule.current_task = "following_player"
+            npc.task_target_entity_id = self.player.id
+            npc.schedule.current_path = []  # Clear path to allow recalculation
+            self.add_message_to_chat_log(f"{npc.name} is now following you.")
+        elif goal == "go_to_location":
+            # Placeholder for future implementation where the LLM might specify coordinates
+            self.add_message_to_chat_log(f"{npc.name} wants to go to a location mentioned.")
+            # Example: npc.schedule.current_task = "going_to_location"
+            # npc.task_target_coords = (x, y) # (extracted from player_input or LLM response)
+        elif goal == "start_trade":
+            if npc.profession == "Merchant":
+                self.game_state = "TRADE_MENU"
+                self.trade_ui_npc_target = npc
+                self.initialize_trade_session()
+            else:
+                self.add_message_to_chat_log(f"{npc.name} seems to want to trade, but isn't a merchant.")
+        elif goal == "end_conversation":
+            self.game_state = "PLAYING"
+            self.chat_ui_active = False
+            # The main loop needs to stop text input
+            self.needs_text_input = False
 
 
     def _call_ollama(self, prompt: str) -> str:
@@ -6021,6 +6138,7 @@ class World:
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
         self._handle_npc_speech()
+        self._handle_npc_conversations()
         self._update_entity_titles()
         self._update_npc_reputations()
         self._handle_reputation_based_reactions()
@@ -6220,6 +6338,9 @@ class World:
         Periodically processes an NPC's known events to see if they react.
         """
         for npc in self.village_npcs + self.npcs:
+            if isinstance(npc, Animal):
+                continue
+
             if npc.is_dead or not npc.known_events:
                 continue
 

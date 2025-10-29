@@ -153,7 +153,8 @@ ANIMAL_DEFINITIONS = {
             "item_yield": "raw_wool",
             "quantity": [1, 3],
             "regrowth_days": 7
-        }
+        },
+        "predators": ["wolf", "dire_wolf", "bear", "fox"]
     },
     "fox": {
         "name": "Fox",

@@ -84,34 +84,34 @@ class TestTemperatureSystem(unittest.TestCase):
 
     def test_player_gets_wet_in_rain(self):
         self.world.weather = "rain"
-        self.world.player.is_sheltered = False
+        self.world.player.physical.is_sheltered = False
         self.world._update_player_wetness()
-        self.assertTrue(self.world.player.is_wet)
-        self.assertGreater(self.world.player.wetness_timer, 0)
+        self.assertTrue(self.world.player.physical.is_wet)
+        self.assertGreater(self.world.player.physical.wetness_timer, 0)
 
     def test_clothing_insulation_effect(self):
         player = self.world.player
-        player.temperature = 30 # Set a cold body temp
+        player.physical.temperature = 30 # Set a cold body temp
 
         self.world._update_player_temperature()
-        temp_change_without_cloak = player.temperature - 30
+        temp_change_without_cloak = player.physical.temperature - 30
 
         player.equip_armor("fur_cloak")
-        player.temperature = 30 # Reset temp
+        player.physical.temperature = 30 # Reset temp
 
         self.world._update_player_temperature()
-        temp_change_with_cloak = player.temperature - 30
+        temp_change_with_cloak = player.physical.temperature - 30
 
         self.assertGreater(temp_change_with_cloak, temp_change_without_cloak)
 
     def test_freezing_effect(self):
         player = self.world.player
-        initial_hp = player.hp
-        player.temperature = 34.0 # Below freezing threshold
+        initial_hp = player.combat.hp
+        player.physical.temperature = 34.0 # Below freezing threshold
 
         # Update temperature to apply status effect
         self.world._update_player_temperature()
-        self.assertIn("Freezing", player.status_effects)
+        self.assertIn("Freezing", player.physical.status_effects)
 
         from config import DAY_LENGTH_TICKS
         ticks_for_damage = DAY_LENGTH_TICKS // 25
@@ -120,7 +120,7 @@ class TestTemperatureSystem(unittest.TestCase):
             self.world.game_time += 1
             self.world._apply_temperature_effects(player)
 
-        self.assertLess(player.hp, initial_hp)
+        self.assertLess(player.combat.hp, initial_hp)
 
     def test_rain_extinguishes_fire(self):
         from data.decorations import DECORATION_ITEM_DEFINITIONS
@@ -253,9 +253,9 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = fire_pit_tile
 
         # 3. Manually update NPC temperature to freezing
-        npc.temperature = 34.0
+        npc.physical.temperature = 34.0
         self.world._update_npc_temperature(npc)
-        self.assertIn("Freezing", npc.status_effects)
+        self.assertIn("Freezing", npc.physical.status_effects)
 
         # 4. Advance time to ensure the schedule update runs
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
@@ -264,10 +264,10 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         self.world._update_npc_schedules()
 
         # 6. Assert that the NPC is now seeking warmth and pathfinding to the fire
-        self.assertEqual(npc.current_task, "seeking_warmth")
-        self.assertIsNotNone(npc.current_path)
+        self.assertEqual(npc.schedule.current_task, "seeking_warmth")
+        self.assertIsNotNone(npc.schedule.current_path)
         # The path destination should be adjacent to the fire, not on it, because the fire is not passable.
-        path_dest = npc.current_destination_coords
+        path_dest = npc.schedule.current_destination_coords
         self.assertIsNotNone(path_dest)
         self.assertTrue(abs(path_dest[0] - fire_x) + abs(path_dest[1] - fire_y) == 1)
 
@@ -319,12 +319,12 @@ class TestClothProductionSystem(unittest.TestCase):
         # Find wool in inventory to check quantity
         wool_indices = self.world.player.get_item_instance_indices("raw_wool")
         self.assertTrue(wool_indices)
-        initial_wool_quantity = self.world.player.inventory[wool_indices[0]].get("quantity", 0)
+        initial_wool_quantity = self.world.player.economic.inventory[wool_indices[0]].get("quantity", 0)
         self.assertGreater(initial_wool_quantity, 0)
 
         # Check that sheep can't be shorn again immediately
         self.world.player_attempt_shear(sheep)
-        current_wool_quantity = self.world.player.inventory[wool_indices[0]].get("quantity", 0)
+        current_wool_quantity = self.world.player.economic.inventory[wool_indices[0]].get("quantity", 0)
         self.assertEqual(initial_wool_quantity, current_wool_quantity)
 
 
@@ -350,9 +350,9 @@ class TestClothProductionSystem(unittest.TestCase):
         self.assertTrue(self.world.player.has_item("cloth_tunic"))
 
         # --- 3. Equipping ---
-        initial_insulation = self.world.player.clothing_insulation
+        initial_insulation = self.world.player.physical.clothing_insulation
         self.world.player.equip_armor("cloth_tunic")
-        self.assertGreater(self.world.player.clothing_insulation, initial_insulation)
+        self.assertGreater(self.world.player.physical.clothing_insulation, initial_insulation)
 
 class TestPredatorPreyAI(unittest.TestCase):
     def setUp(self):
@@ -375,12 +375,16 @@ class TestPredatorPreyAI(unittest.TestCase):
         from config import NPC_SCHEDULE_UPDATE_INTERVAL
 
         # 1. Setup: Create predator and prey
-        predator = Animal(x=self.world.player.x + 5, y=self.world.player.y, name="Dire Wolf", animal_type="dire_wolf")
-        prey = Animal(x=self.world.player.x + 10, y=self.world.player.y, name="Sheep", animal_type="sheep")
+        # Move player far away to not interfere with AI
+        self.world.player.x = 1000
+        self.world.player.y = 1000
+
+        predator = Animal(x=50, y=50, name="Dire Wolf", animal_type="dire_wolf")
+        prey = Animal(x=55, y=50, name="Sheep", animal_type="sheep")
 
         # Set predator to be hungry
-        predator.hunger = predator.max_hunger
-        prey.hunger = 0
+        predator.physical.hunger = predator.physical.max_hunger
+        prey.physical.hunger = 0
 
         # HACK: Manually set attributes required by the new AI/movement logic
         # These are not set by default on manually created test animals.
@@ -397,7 +401,7 @@ class TestPredatorPreyAI(unittest.TestCase):
         # Clear a large area to ensure pathfinding works
         for y_offset in range(-15, 16):
             for x_offset in range(-10, 41):
-                clear_x, clear_y = self.world.player.x + x_offset, self.world.player.y + y_offset
+                clear_x, clear_y = predator.x + x_offset, predator.y + y_offset
                 try:
                     self.world.get_tile_at(clear_x, clear_y)
                     chunk_x, chunk_y = clear_x // 20, clear_y // 20
@@ -410,8 +414,8 @@ class TestPredatorPreyAI(unittest.TestCase):
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
         self.world._update_npc_schedules()
 
-        self.assertEqual(predator.current_task, "hunting")
-        self.assertTrue(predator.current_path, "Predator should have a path to the prey.")
+        self.assertEqual(predator.schedule.current_task, "hunting")
+        self.assertTrue(predator.schedule.current_path, "Predator should have a path to the prey.")
         self.assertEqual(predator.task_target_entity_id, prey.id)
 
         # 3. Execution & Assertion (Prey starts fleeing)
@@ -419,22 +423,22 @@ class TestPredatorPreyAI(unittest.TestCase):
         # Run schedules again so prey can react to the hunting predator
         self.world._update_npc_schedules()
 
-        self.assertEqual(prey.current_task, "fleeing")
-        self.assertTrue(prey.current_path, "Prey should have a path to flee.")
+        self.assertEqual(prey.schedule.current_task, "fleeing")
+        self.assertTrue(prey.schedule.current_path, "Prey should have a path to flee.")
         # Check that prey's path is moving it away from the predator
-        if prey.current_path and len(prey.current_path) > 1:
+        if prey.schedule.current_path and len(prey.schedule.current_path) > 1:
             dist_before = (prey.x - predator.x)**2 + (prey.y - predator.y)**2
-            next_pos = prey.current_path[1]
+            next_pos = prey.schedule.current_path[1]
             dist_after = (next_pos[0] - predator.x)**2 + (next_pos[1] - predator.y)**2
             self.assertGreater(dist_after, dist_before, "Prey should be moving away from the predator.")
 
         # 4. Execution (Simulate chase and attack)
-        initial_prey_hp = prey.hp
+        initial_prey_hp = prey.combat.hp
         for _ in range(240): # Simulate a few turns
             self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
             self.world._update_npc_schedules()
             self.world._update_npc_movement()
-            if prey.is_dead:
+            if prey.physical.is_dead:
                 break
 
         # The hunger reset now happens inside npc_attempt_attack_npc, which is called
@@ -442,9 +446,9 @@ class TestPredatorPreyAI(unittest.TestCase):
         # A final update would cause the predator's hunger to start increasing again.
 
         # 5. Assertion (Attack and outcome)
-        self.assertLess(prey.hp, initial_prey_hp, "Prey should have taken damage")
-        self.assertTrue(prey.is_dead, "Prey should be dead after the chase.")
-        self.assertEqual(predator.hunger, 0, "Predator should not be hungry after a successful kill")
+        self.assertLess(prey.combat.hp, initial_prey_hp, "Prey should have taken damage")
+        self.assertTrue(prey.physical.is_dead, "Prey should be dead after the chase.")
+        self.assertEqual(predator.physical.hunger, 0, "Predator should not be hungry after a successful kill")
 
 
 class TestFearSystem(unittest.TestCase):
@@ -494,8 +498,8 @@ class TestFearSystem(unittest.TestCase):
         self.world.buildings_by_id[home_building.id] = home_building
 
         civilian = NPC(x=center_x, y=center_y, name="Civilian")
-        civilian.profession = "Farmer"
-        civilian.home_building_id = home_building.id
+        civilian.economic.profession = "Farmer"
+        civilian.schedule.home_building_id = home_building.id
         self.world.village_npcs.append(civilian)
 
         wolf1 = Animal(x=civilian.x + 2, y=civilian.y + 2, name="Wolf", animal_type="wolf")
@@ -516,9 +520,9 @@ class TestFearSystem(unittest.TestCase):
 
         # 3. Assertion
         self.assertTrue(civilian.is_frightened)
-        self.assertEqual(civilian.current_task, "fleeing_from_threat")
-        self.assertIsNotNone(civilian.current_path)
-        self.assertEqual(civilian.current_destination_coords, (home_building.global_center_x, home_building.global_center_y))
+        self.assertEqual(civilian.schedule.current_task, "fleeing_from_threat")
+        self.assertIsNotNone(civilian.schedule.current_path)
+        self.assertEqual(civilian.schedule.current_destination_coords, (home_building.global_center_x, home_building.global_center_y))
 
     def test_guard_alerts_other_guards(self):
         from entities.base import NPC
@@ -541,11 +545,11 @@ class TestFearSystem(unittest.TestCase):
         self.world.buildings_by_id[home_building.id] = home_building
 
         guard1 = NPC(x=alarm_spot[0] - 5, y=alarm_spot[1], name="Guard")
-        guard1.profession = "Guard"
-        guard1.home_building_id = home_building.id
+        guard1.economic.profession = "Guard"
+        guard1.schedule.home_building_id = home_building.id
 
         guard2 = NPC(x=alarm_spot[0] - 2, y=alarm_spot[1] - 2, name="Alerted Guard")
-        guard2.profession = "Guard"
+        guard2.economic.profession = "Guard"
 
         wolf1 = Animal(x=guard1.x + 2, y=guard1.y, name="Wolf", animal_type="wolf")
         wolf2 = Animal(x=guard1.x + 3, y=guard1.y, name="Wolf", animal_type="wolf")
@@ -571,27 +575,27 @@ class TestFearSystem(unittest.TestCase):
 
         # 3. Assertion (Guard 1 starts alerting)
         self.assertTrue(guard1.is_frightened)
-        self.assertEqual(guard1.current_task, "alerting_guards")
-        self.assertIsNotNone(guard1.current_path, "Guard1 should have a path to the alarm spot")
+        self.assertEqual(guard1.schedule.current_task, "alerting_guards")
+        self.assertIsNotNone(guard1.schedule.current_path, "Guard1 should have a path to the alarm spot")
 
-        destination = guard1.current_destination_coords
+        destination = guard1.schedule.current_destination_coords
         self.assertIsNotNone(destination)
         distance_to_alarm = abs(destination[0] - alarm_spot[0]) + abs(destination[1] - alarm_spot[1])
         self.assertEqual(distance_to_alarm, 1, "Guard should be pathing to a tile adjacent to the alarm spot.")
 
-        self.assertFalse(guard2.is_hostile_to_player, "Guard 2 should not be alerted yet.")
+        self.assertFalse(guard2.combat.is_hostile_to_player, "Guard 2 should not be alerted yet.")
 
         # 4. Manually move guard1 to their destination
         guard1.x, guard1.y = destination
-        guard1.current_path = []
+        guard1.schedule.current_path = []
 
         # 5. Execution (Second update)
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
         self.world._update_npc_schedules()
 
         # 6. Assertion (Guards become hostile)
-        self.assertTrue(guard1.is_hostile_to_player, "Alerting guard should become hostile.")
-        self.assertTrue(guard2.is_hostile_to_player, "Nearby guard should become hostile after alarm.")
+        self.assertTrue(guard1.combat.is_hostile_to_player, "Alerting guard should become hostile.")
+        self.assertTrue(guard2.combat.is_hostile_to_player, "Nearby guard should become hostile after alarm.")
 
     def test_npc_calms_down_when_threat_is_gone(self):
         from entities.base import NPC
@@ -622,7 +626,7 @@ class TestFearSystem(unittest.TestCase):
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
         self.world._update_npc_schedules()
         self.assertTrue(civilian.is_frightened)
-        self.assertNotEqual(civilian.current_task, "idle")
+        self.assertNotEqual(civilian.schedule.current_task, "idle")
 
         # 3. Remove the threat
         self.world.npcs.remove(wolf1)
@@ -638,7 +642,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 5. Assertion
         self.assertFalse(civilian.is_frightened)
-        self.assertEqual(civilian.current_task, "idle")
+        self.assertEqual(civilian.schedule.current_task, "idle")
 
 if __name__ == '__main__':
     unittest.main()

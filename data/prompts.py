@@ -217,7 +217,12 @@ Your current attitude towards the player is: {npc_attitude}.
 **Past Interactions (Long-Term Memory):**
 {long_term_memory}
 
-The player has just initiated conversation with you. Generate a short, in-character greeting that subtly acknowledges the environment (weather, time, location), their reputation, and any relevant past interactions.
+**Specific Need for Help:**
+- You are in dire need of: {npc_help_needed} (e.g., "food", "water", "nothing")
+
+The player has just initiated conversation with you. Generate a short, in-character greeting.
+- If you are in dire need of something, your greeting should be a desperate plea for help.
+- Otherwise, subtly acknowledge the environment (weather, time, location), their reputation, and any relevant past interactions.
 - A comment about the weather ("Nasty weather we're having") or time of day ("A bit late for a stroll, isn't it?") is a good way to start.
 - If the player's Fame is high, your greeting should be respectful or impressed.
 - If the player's Infamy is high, you should sound nervous, fearful, or hostile.

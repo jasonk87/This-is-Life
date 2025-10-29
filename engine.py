@@ -444,6 +444,7 @@ class World:
         self.game_state = "PLAYING"
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
+        self.needs_text_input = False
 
         # Season and Temperature
         self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
@@ -1175,6 +1176,13 @@ class World:
                         # Successfully reached the player, initiate dialogue
                         self.add_message_to_chat_log(f"{npc.name} says hello!")
                         self.start_npc_dialogue(npc)
+                        self.chat_ui_active = True
+                        self.needs_text_input = True
+                        npc.schedule.current_task = "idle"
+                    elif npc.schedule.current_task == "approaching_player_for_help":
+                        self.start_npc_dialogue(npc)
+                        self.chat_ui_active = True
+                        self.needs_text_input = True
                         npc.schedule.current_task = "idle"
                     elif npc.schedule.current_task == "going to work":
                         npc.schedule.current_task = "at work"
@@ -1785,6 +1793,33 @@ class World:
 
 
                 needs_based_action_taken = False
+
+                # --- Proactive Help-Seeking ---
+                if not needs_based_action_taken and random.random() < 0.1: # Give it a chance to trigger
+                    critically_hungry = npc.physical.hunger >= 90
+                    critically_thirsty = npc.physical.thirst >= 90
+
+                    if critically_hungry or critically_thirsty:
+                        knows_food_source = any("tavern" in item for item in npc.knowledge.known_locations)
+                        knows_water_source = any("well" in item for item in npc.knowledge.known_locations)
+
+                        needs_help = False
+                        if critically_hungry and not knows_food_source:
+                            npc.knowledge.help_needed = "food"
+                            needs_help = True
+                        elif critically_thirsty and not knows_water_source:
+                            npc.knowledge.help_needed = "water"
+                            needs_help = True
+
+                        if needs_help and npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
+                            npc.schedule.current_task = "approaching_player_for_help"
+                            dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
+                            if dest_x is not None:
+                                path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                                if path:
+                                    npc.schedule.current_path = path
+                                    npc.schedule.current_destination_coords = (dest_x, dest_y)
+                                    needs_based_action_taken = True
 
                 # --- Crime Reporting Task ---
                 if npc.schedule.current_task == "going_to_report_crime":
@@ -4562,7 +4597,8 @@ class World:
             time_of_day=time_of_day,
             current_weather=current_weather,
             location_description=location_description,
-            long_term_memory=long_term_memory_summary
+            long_term_memory=long_term_memory_summary,
+            npc_help_needed=npc_target.knowledge.help_needed
         )
         greeting = self._call_ollama(prompt)
         if not greeting:

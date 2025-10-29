@@ -199,6 +199,11 @@ def main():
                           title="This is Life", vsync=True) as context:
         while True:
             world.update()
+
+            if world.needs_text_input:
+                context.start_text_input()
+                world.needs_text_input = False
+
             if world.game_state == "PLAYER_DEAD":
                 render_game_over(console, context)
                 break

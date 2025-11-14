@@ -812,7 +812,7 @@ class World:
             )
 
             # NPC Item Perception within their FOV
-            npc.perceived_item_tiles.clear()
+            npc.knowledge.perceived_item_tiles.clear()
             if npc.id in self.npc_fov_maps: # Should always be true if just computed
                 fov_map_for_npc = self.npc_fov_maps[npc.id]
                 # Iterate through coordinates that are visible to the NPC
@@ -821,7 +821,7 @@ class World:
                 for i in range(len(visible_x_coords)):
                     vx, vy = visible_x_coords[i], visible_y_coords[i]
                     if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
-                        npc.perceived_item_tiles.append((vx,vy))
+                        npc.knowledge.perceived_item_tiles.append((vx,vy))
 
 
     def _update_light_level_and_fov(self):
@@ -951,7 +951,7 @@ class World:
         """Updates NPC positions based on their current path."""
         # This combines both lists for iteration
         for npc in self.village_npcs + self.npcs:
-            if npc.is_dead:
+            if npc.physical.is_dead:
                 continue
 
             # --- Handle task-based path recalculation before movement ---
@@ -1087,7 +1087,7 @@ class World:
                     is_occupied = False
                     is_hunting_prey = self._is_predator(npc) and npc.schedule.current_task == "hunting"
                     for other_npc in self.village_npcs + self.npcs:
-                        if other_npc.id != npc.id and other_npc.x == next_x and other_npc.y == next_y and not other_npc.is_dead:
+                        if other_npc.id != npc.id and other_npc.x == next_x and other_npc.y == next_y and not other_npc.physical.is_dead:
                             if is_hunting_prey and other_npc.id == npc.task_target_entity_id:
                                 continue # Predator can move onto prey's tile
                             is_occupied = True
@@ -1105,7 +1105,7 @@ class World:
                 if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
                     npc.schedule.current_path = []
                     # Destination reached, process arrival based on task
-                    if npc.profession == "Traveling Merchant" and npc.schedule.current_task == "traveling_to_village":
+                    if npc.economic.profession == "Traveling Merchant" and npc.schedule.current_task == "traveling_to_village":
                         self.add_message_to_chat_log(f"{npc.name} has arrived at a village.")
                         npc.schedule.current_task = "lingering_in_village"
                         npc.leisure_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS)
@@ -1263,7 +1263,7 @@ class World:
             # Check for occupancy
             occupied = False
             for npc in self.village_npcs + self.npcs:
-                if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.is_dead:
+                if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.physical.is_dead:
                     occupied = True
                     break
             if occupied:
@@ -1303,7 +1303,7 @@ class World:
             # Iterate over all relevant NPC lists
             for npc_list_to_check in [self.village_npcs, self.npcs]:
                 for other_npc in npc_list_to_check:
-                    if other_npc.id != attacker_npc.id and other_npc.x == adj_x and other_npc.y == adj_y and not other_npc.is_dead:
+                    if other_npc.id != attacker_npc.id and other_npc.x == adj_x and other_npc.y == adj_y and not other_npc.physical.is_dead:
                         occupied_by_other_npc = True
                         break
                 if occupied_by_other_npc:
@@ -1369,7 +1369,7 @@ class World:
                 occupied = False
                 for other_npc_list_to_check in [self.village_npcs, self.npcs]:
                     for other_npc in other_npc_list_to_check:
-                        if other_npc.id != npc.id and other_npc.x == spot_x and other_npc.y == spot_y and not other_npc.is_dead:
+                        if other_npc.id != npc.id and other_npc.x == spot_x and other_npc.y == spot_y and not other_npc.physical.is_dead:
                             occupied = True; break
                     if occupied: break
                 if occupied: continue
@@ -1512,10 +1512,12 @@ class World:
                             npc.schedule.current_task = "fleeing_from_threat"
                             safe_spot = self.buildings_by_id.get(npc.schedule.home_building_id) or self._find_nearest_tavern(npc)
                             if safe_spot:
-                                path = self.calculate_path(npc.x, npc.y, safe_spot.global_center_x, safe_spot.global_center_y)
-                                if path:
-                                    npc.schedule.current_path = path
-                                    npc.schedule.current_destination_coords = (safe_spot.global_center_x, safe_spot.global_center_y)
+                                dest_x, dest_y = self._find_best_adjacent_tile(safe_spot.global_center_x, safe_spot.global_center_y, npc)
+                                if dest_x is not None:
+                                    path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                                    if path:
+                                        npc.schedule.current_path = path
+                                        npc.schedule.current_destination_coords = (dest_x, dest_y)
                 else:
                     npc.is_frightened = False
                     npc.threat_source_ids = []
@@ -1964,9 +1966,9 @@ class World:
                 # --- NPC Item Pickup Decision ---
                 # This decision should happen before regular scheduling if items are perceived.
                 made_item_decision = False
-                if npc.perceived_item_tiles and npc.schedule.current_task in ["idle", "wandering", "at home", "at work"]: # Can decide to pickup even at work/home if item is compelling
+                if npc.knowledge.perceived_item_tiles and npc.schedule.current_task in ["idle", "wandering", "at home", "at work"]: # Can decide to pickup even at work/home if item is compelling
                     perceived_items_list = []
-                    for item_x, item_y in npc.perceived_item_tiles:
+                    for item_x, item_y in npc.knowledge.perceived_item_tiles:
                         if (item_x, item_y) in self.items_on_map and self.items_on_map[(item_x, item_y)]:
                             # For simplicity, consider the first item on the tile for the prompt
                             # A more complex NPC might evaluate all items on a tile.
@@ -2911,7 +2913,7 @@ class World:
 
     def _handle_npc_combat_turn(self, npc: NPC):
         """Handles an NPC's decision-making process during their combat turn."""
-        if not npc.is_hostile_to_player or npc.is_dead:
+        if not npc.combat.is_hostile_to_player or npc.physical.is_dead:
             return
 
         # Gather context for LLM
@@ -2961,7 +2963,7 @@ class World:
             npc_combat_behavior=npc.combat.combat_behavior,
             npc_hp=npc.combat.hp,
             npc_max_hp=npc.combat.max_hp,
-            npc_current_task=npc.current_task,
+            npc_current_task=npc.schedule.current_task,
             npc_attack_name=effective_attack_name,
             npc_attack_range=effective_attack_range,
             has_healing_item=has_healing_item,
@@ -5548,55 +5550,72 @@ class World:
         return chunks
 
     def _find_starting_position(self):
-        """Finds a suitable starting tile for the player, searching from the center."""
+        """
+        Finds a suitable starting tile for the player, ensuring it's not too close to the edge.
+        """
         center_x, center_y = self.player.x, self.player.y
-        if self.get_tile_at(center_x, center_y) and self.get_tile_at(center_x, center_y).passable:
+        margin = 15  # Keep player this many tiles away from the edge
+
+        # Check if the initial center position is already valid and safe
+        if (margin <= center_x < WORLD_WIDTH - margin and
+            margin <= center_y < WORLD_HEIGHT - margin and
+            self.get_tile_at(center_x, center_y) and self.get_tile_at(center_x, center_y).passable):
             return
 
-        # First, try to find a plains tile
-        for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
-            for x_offset in range(-r, r + 1):
-                for y_sign in [-1, 1]:
-                    tx, ty = center_x + x_offset, center_y + (r * y_sign)
-                    chunk_x, chunk_y = tx // CHUNK_SIZE, ty // CHUNK_SIZE
-                    if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
-                        chunk = self.chunks[chunk_y][chunk_x]
-                        if chunk.biome == "plains":
-                            tile = self.get_tile_at(tx, ty)
-                            if tile and tile.passable:
-                                self.player.x, self.player.y = tx, ty
-                                return
-            for y_offset in range(-r + 1, r):
-                for x_sign in [-1, 1]:
-                    tx, ty = center_x + (r * x_sign), center_y + y_offset
-                    chunk_x, chunk_y = tx // CHUNK_SIZE, ty // CHUNK_SIZE
-                    if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
-                        chunk = self.chunks[chunk_y][chunk_x]
-                        if chunk.biome == "plains":
-                            tile = self.get_tile_at(tx, ty)
-                            if tile and tile.passable:
-                                self.player.x, self.player.y = tx, ty
-                                return
-
-        # If no plains tile found, search for any passable tile
+        # Search outwards from the center
         for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
             # Check top and bottom rows of the expanding search box
             for x_offset in range(-r, r + 1):
                 for y_sign in [-1, 1]:
                     tx, ty = center_x + x_offset, center_y + (r * y_sign)
+
+                    # Boundary and margin check
+                    if not (margin <= tx < WORLD_WIDTH - margin and margin <= ty < WORLD_HEIGHT - margin):
+                        continue
+
                     tile = self.get_tile_at(tx, ty)
                     if tile and tile.passable and "water" not in tile.name.lower():
-                        self.player.x, self.player.y = tx, ty
-                        return
+                        chunk = self.chunks[ty // CHUNK_SIZE][tx // CHUNK_SIZE]
+                        if chunk.biome == "plains": # Prioritize plains
+                            self.player.x, self.player.y = tx, ty
+                            return
+
             # Check left and right columns
             for y_offset in range(-r + 1, r):
                 for x_sign in [-1, 1]:
                     tx, ty = center_x + (r * x_sign), center_y + y_offset
+
+                    # Boundary and margin check
+                    if not (margin <= tx < WORLD_WIDTH - margin and margin <= ty < WORLD_HEIGHT - margin):
+                        continue
+
                     tile = self.get_tile_at(tx, ty)
                     if tile and tile.passable and "water" not in tile.name.lower():
-                        self.player.x, self.player.y = tx, ty
-                        return
-        print("Warning: No passable starting tile found. Player may be stuck.")
+                        chunk = self.chunks[ty // CHUNK_SIZE][tx // CHUNK_SIZE]
+                        if chunk.biome == "plains": # Prioritize plains
+                            self.player.x, self.player.y = tx, ty
+                            return
+
+        # Fallback if no plains found, search again for any passable tile within margin
+        for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
+            for x_offset in range(-r, r + 1):
+                for y_sign in [-1, 1]:
+                    tx, ty = center_x + x_offset, center_y + (r * y_sign)
+                    if (margin <= tx < WORLD_WIDTH - margin and margin <= ty < WORLD_HEIGHT - margin):
+                        tile = self.get_tile_at(tx, ty)
+                        if tile and tile.passable and "water" not in tile.name.lower():
+                            self.player.x, self.player.y = tx, ty
+                            return
+            for y_offset in range(-r + 1, r):
+                for x_sign in [-1, 1]:
+                    tx, ty = center_x + (r * x_sign), center_y + y_offset
+                    if (margin <= tx < WORLD_WIDTH - margin and margin <= ty < WORLD_HEIGHT - margin):
+                        tile = self.get_tile_at(tx, ty)
+                        if tile and tile.passable and "water" not in tile.name.lower():
+                            self.player.x, self.player.y = tx, ty
+                            return
+
+        print("Warning: No passable starting tile found within the safe margin. Player may be stuck.")
 
     def _generate_chunk_detail(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the detailed tiles for a chunk based on its biome and POI."""

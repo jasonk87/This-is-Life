@@ -2150,11 +2150,12 @@ class World:
                     elif is_leisure_time and npc.schedule.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
                         if npc.leisure_timer > 0:
                             npc.leisure_timer -= 1
-                        elif random.random() < 0.05: # 5% chance to go to the tavern
+                        elif random.random() < 0.15: # 15% chance to go to the tavern
                             tavern = self._find_nearest_tavern(npc)
                             if tavern:
                                 new_task_label = "going to tavern"
                                 destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                                npc.leisure_timer = random.randint(200, 400) # Stay for a while
                         elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
                             # Find a nearby NPC to chat with
                             potential_partners = [

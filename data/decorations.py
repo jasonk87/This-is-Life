@@ -125,6 +125,30 @@ DECORATION_ITEM_DEFINITIONS = {
             "workstation_type": "loom"
         }
     },
+    "grinding_stone": {
+        "name": "Grinding Stone",
+        "description": "A large stone wheel for grinding grain into flour.",
+        "char": "G",
+        "color": COLORS["grey"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "grinding_stone"
+        }
+    },
+    "oven": {
+        "name": "Oven",
+        "description": "A brick oven for baking.",
+        "char": "O",
+        "color": COLORS["dark_orange"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "oven"
+        }
+    },
      "wooden_table": {
         "name": "Wooden Table",
         "description": "A sturdy wooden table.",

@@ -2701,7 +2701,7 @@ class World:
                                 farm.building_inventory["wheat"] -= wheat_to_buy
                                 npc.economic.money -= wheat_price * wheat_to_buy
                                 work_building.building_inventory["wheat"] = work_building.building_inventory.get("wheat", 0) + wheat_to_buy
-                                # self.add_message_to_chat_log(f"{npc.name} bought {wheat_to_buy} wheat.")
+                                self.add_message_to_chat_log(f"{npc.name} the Miller bought {wheat_to_buy} wheat.")
 
                     elif completed_sub_task_id == "fetch_flour":
                         # Baker is at the mill, try to buy flour
@@ -3515,7 +3515,7 @@ class World:
                 actions.append("Attack")
             else: # It's a humanoid NPC
                 actions.extend(["Talk", "Attack"])
-                if entity_data.profession == "Merchant":
+                if entity_data.profession in ["Merchant", "Miller"]:
                     actions.append("Trade")
         elif entity_type == "item":
             actions.append("Pick up")
@@ -3528,6 +3528,12 @@ class World:
                 actions.append("Toggle Door")
             elif entity_data.name == "Animal Corpse":
                 actions.append("Butcher")
+            elif entity_data.name == "Plains" and self.player.has_item("stone_hoe"):
+                actions.append("Till Soil")
+            elif entity_data.name == "Tilled Soil" and self.player.has_item("wheat_seeds"):
+                actions.append("Plant Seeds")
+            elif entity_data.name == "Wheat":
+                actions.append("Harvest")
         elif entity_type == "building":
             if entity_data.building_type == "house" and not entity_data.player_owned and not entity_data.residents:
                 actions.append("Claim House")
@@ -4463,7 +4469,7 @@ class World:
         # Merchant inventory is likely in their work building
         merchant_inventory_source = {}
         merchant_building = self.buildings_by_id.get(self.trade_ui_npc_target.work_building_id)
-        if merchant_building and merchant_building.building_type == "general_store":
+        if merchant_building and merchant_building.building_type in ["general_store", "mill"]:
             merchant_inventory_source = merchant_building.building_inventory
         else: # Fallback to NPC's personal inventory if no store or not a store
             merchant_inventory_source = self.trade_ui_npc_target.economic.npc_inventory
@@ -4490,7 +4496,7 @@ class World:
 
         # Determine merchant's actual inventory (store or personal)
         merchant_true_inventory = {}
-        if merchant_building and merchant_building.building_type == "general_store":
+        if merchant_building and merchant_building.building_type in ["general_store", "mill"]:
             merchant_true_inventory = merchant_building.building_inventory
         else:
             merchant_true_inventory = merchant_npc.economic.npc_inventory
@@ -5035,6 +5041,8 @@ class World:
 
                         # Crop growth
                         elif tile.name == "Growing Wheat":
+                            # Increment growth progress over time
+                            tile.properties["growth_progress"] += 1
                             if tile.properties["growth_progress"] >= tile.properties["growth_needed"]:
                                 evolves_to_key = tile.properties.get("evolves_to")
                                 if evolves_to_key:
@@ -6282,22 +6290,26 @@ class World:
             self.sound_events.clear()
 
 
-            # Check if the player moved onto a flower
-            if destination_tile.char == ord('*'): # This was likely for herb_generic
-                # Add a herb_generic to the player's inventory
-                current_herbs = self.player.economic.inventory.get("herb_generic", 0)
-                self.player.economic.inventory["herb_generic"] = current_herbs + 1
-                
-                self.add_message_to_chat_log(f"You picked a {ITEM_DEFINITIONS['herb_generic']['name']}! You now have {self.player.economic.inventory['herb_generic']}.")
-                
-                # Replace the flower tile with a plains tile
-                chunk_x, chunk_y = new_x // CHUNK_SIZE, new_y // CHUNK_SIZE
-                local_x, local_y = new_x % CHUNK_SIZE, new_y % CHUNK_SIZE
-                # Ensure properties are passed correctly for the new plains tile
-                plains_def = TILE_DEFINITIONS["plains"]
-                self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
-                    plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], plains_def.get("properties", {})
-                )
+            # Check for pass-through yields (e.g., from tall grass)
+            if hasattr(destination_tile, 'properties') and "yields_on_pass_through" in destination_tile.properties:
+                yield_data = destination_tile.properties["yields_on_pass_through"]
+                if random.random() < yield_data.get("chance", 0):
+                    item_key = yield_data["item_key"]
+                    quantity_range = yield_data["quantity"]
+                    quantity = random.randint(quantity_range[0], quantity_range[1]) if isinstance(quantity_range, list) else quantity_range
+
+                    self.player.add_item(item_key, quantity)
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    self.add_message_to_chat_log(f"You found {quantity} {item_name} in the tall grass.")
+
+                    # Replace the tall grass with plains
+                    chunk_x, chunk_y = new_x // CHUNK_SIZE, new_y // CHUNK_SIZE
+                    local_x, local_y = new_x % CHUNK_SIZE, new_y % CHUNK_SIZE
+                    plains_def = TILE_DEFINITIONS["plains"]
+                    self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
+                        plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], plains_def.get("properties", {})
+                    )
+
 
             return movement_cost
         return 0 # No movement if tile is not passable
@@ -7094,6 +7106,85 @@ class World:
                 work_building.building_inventory[f"raw_{fish_caught}"] = work_building.building_inventory.get(f"raw_{fish_caught}", 0) + 1
                 self.add_message_to_chat_log(f"{npc.name} caught a {fish_caught}!")
 
+    def player_attempt_till_soil(self, target_x: int, target_y: int):
+        """Handles the player's attempt to till soil."""
+        hoe_indices = self.player.get_item_instance_indices("stone_hoe")
+        if not hoe_indices:
+            self.add_message_to_chat_log("You need a hoe to till the soil.")
+            return
+
+        target_tile = self.get_tile_at(target_x, target_y)
+        if not (target_tile and target_tile.name == "Plains"):
+            self.add_message_to_chat_log("You can only till plains.")
+            return
+
+        self.add_message_to_chat_log("You till the soil.")
+        tilled_soil_def = TILE_DEFINITIONS["tilled_soil"]
+        self._change_map_tile((target_x, target_y), tilled_soil_def)
+
+        # Handle tool durability
+        hoe_instance = self.player.get_item_by_index(hoe_indices[0])
+        if hoe_instance and "durability" in hoe_instance:
+            hoe_instance["durability"] -= 1
+            if hoe_instance["durability"] <= 0:
+                self.player.remove_item("stone_hoe", 1, specific_instance_index=hoe_indices[0])
+                self.add_message_to_chat_log("Your stone hoe broke!")
+            else:
+                self.add_message_to_chat_log(f"Your stone hoe shows some wear (Durability: {hoe_instance['durability']}/{hoe_instance['max_durability']}).")
+
+    def player_attempt_plant_seeds(self, target_x: int, target_y: int):
+        """Handles the player's attempt to plant seeds."""
+        if not self.player.has_item("wheat_seeds"):
+            self.add_message_to_chat_log("You don't have any seeds to plant.")
+            return
+
+        target_tile = self.get_tile_at(target_x, target_y)
+        if not (target_tile and target_tile.name == "Tilled Soil"):
+            self.add_message_to_chat_log("You can only plant seeds on tilled soil.")
+            return
+
+        self.player.remove_item("wheat_seeds", 1)
+        self.add_message_to_chat_log("You plant the seeds.")
+        wheat_plant_def = TILE_DEFINITIONS["wheat_plant_growing"]
+        self._change_map_tile((target_x, target_y), wheat_plant_def)
+
+    def player_attempt_harvest(self, target_x: int, target_y: int):
+        """Handles the player's attempt to harvest a crop."""
+        target_tile = self.get_tile_at(target_x, target_y)
+        if not (target_tile and hasattr(target_tile, 'properties') and target_tile.properties.get("is_harvestable")):
+            self.add_message_to_chat_log("There is nothing to harvest here.")
+            return
+
+        self.add_message_to_chat_log("You begin to harvest the crop...")
+
+        if random.random() < 0.8: # 80% chance to successfully harvest
+            harvest_yield = target_tile.properties.get("harvest_yield_item_key")
+            if harvest_yield:
+                self.player.add_item(harvest_yield, 1)
+                self.add_message_to_chat_log(f"You harvested one {harvest_yield}.")
+                becomes_on_harvest = target_tile.properties.get("becomes_on_harvest_key")
+                if becomes_on_harvest and becomes_on_harvest in TILE_DEFINITIONS:
+                    revert_tile_def = TILE_DEFINITIONS[becomes_on_harvest]
+                    self._change_map_tile((target_x, target_y), revert_tile_def)
+                else:
+                    # Fallback: turn it back to tilled_soil if key is missing
+                    self._change_map_tile((target_x, target_y), TILE_DEFINITIONS["tilled_soil"])
+            else:
+                 self.add_message_to_chat_log("The crop is not ready to be harvested or yields nothing.")
+
+        else:
+            self.add_message_to_chat_log("You failed to harvest the crop.")
+
+    def complete_quest(self, quest_id: str, quest_giver_npc: NPC):
+        """Handles player attempting to complete a quest."""
+        if quest_id not in self.player.knowledge.active_quests:
+            self.add_message_to_chat_log("Error: Quest not found or not active.")
+            if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
+                 self.chat_ui_history.append((quest_giver_npc.name, "Are you sure we had an arrangement like that?"))
+            return
+
+        active_quest_data = self.player.knowledge.active_quests[quest_id]
+        quest_def = QUEST_DEFINITIONS.get(quest_id)
         if not quest_def:
             self.add_message_to_chat_log(f"Error: Quest definition for '{quest_id}' not found.")
             return

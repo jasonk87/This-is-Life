@@ -218,6 +218,11 @@ for key in wall_keys:
 
 TILE_DEFINITIONS["tall_grass"]["properties"] = TILE_DEFINITIONS["tall_grass"].get("properties", {})
 TILE_DEFINITIONS["tall_grass"]["properties"]["provides_cover_value"] = 0.2
+TILE_DEFINITIONS["tall_grass"]["properties"]["yields_on_pass_through"] = {
+    "item_key": "wheat_seeds",
+    "quantity": [1, 2],
+    "chance": 0.1
+}
 
 TILE_DEFINITIONS["stump_generic"] = {
     "char": "o",
@@ -248,7 +253,7 @@ TILE_DEFINITIONS["tilled_soil"] = {
     "name": "Tilled Soil",
     "properties": {}
 }
-TILE_DEFINITIONS["wheat_growing"] = {
+TILE_DEFINITIONS["wheat_plant_growing"] = {
     "char": "i",
     "color": (144, 238, 144), # Light green
     "passable": True,
@@ -256,14 +261,14 @@ TILE_DEFINITIONS["wheat_growing"] = {
     "properties": {
         "growth_progress": 0,
         "growth_needed": 100, # Example value
-        "evolves_to": "mature_wheat_crop"
+        "evolves_to": "wheat_plant"
     }
 }
-TILE_DEFINITIONS["mature_wheat_crop"] = {
+TILE_DEFINITIONS["wheat_plant"] = {
     "char": "W",
     "color": (255, 223, 0),  # Golden yellow
     "passable": True,
-    "name": "Mature Wheat Crop",
+    "name": "Wheat",
     "properties": {
         "is_harvestable": True,
         "harvest_yield_item_key": "wheat",

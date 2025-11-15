@@ -193,7 +193,7 @@ class TestAgriculturalSystem(unittest.TestCase):
 
         # 1. Place a growing wheat tile
         crop_x, crop_y = self.world.player.x + 2, self.world.player.y
-        growing_def = TILE_DEFINITIONS["wheat_growing"]
+        growing_def = TILE_DEFINITIONS["wheat_plant_growing"]
         # Use .copy() on properties to avoid modifying the global definition
         growing_tile = Tile(char=growing_def['char'], color=growing_def['color'], passable=True, name="Growing Wheat", properties=growing_def['properties'].copy())
 
@@ -223,7 +223,7 @@ class TestAgriculturalSystem(unittest.TestCase):
         # 4. Assert the crop is now mature
         mature_tile = self.world.get_tile_at(crop_x, crop_y)
         self.assertIsNotNone(mature_tile)
-        self.assertEqual(mature_tile.name, "Mature Wheat Crop")
+        self.assertEqual(mature_tile.name, "Wheat")
 
 
 class TestNPCBehaviorSystem(unittest.TestCase):
@@ -678,6 +678,95 @@ class TestFearSystem(unittest.TestCase):
         # 5. Assertion
         self.assertFalse(civilian.is_frightened)
         self.assertEqual(civilian.schedule.current_task, "idle")
+
+
+class TestPlayerFarming(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.world = World(seed=123) # Use a consistent seed for placement
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_player_can_till_soil(self):
+        from data.tiles import TILE_DEFINITIONS
+        player = self.world.player
+        # Give player a hoe
+        player.add_item("stone_hoe", 1)
+        self.assertTrue(player.has_item("stone_hoe"))
+        hoe_instance = player.get_item_by_index(player.get_item_instance_indices("stone_hoe")[0])
+        initial_durability = hoe_instance['durability']
+
+        # Find a plains tile in front of the player
+        target_x, target_y = player.x + 1, player.y
+        self.world.get_tile_at(target_x, target_y) # Ensure chunk is generated
+        chunk_x, chunk_y = target_x // config.CHUNK_SIZE, target_y // config.CHUNK_SIZE
+        local_x, local_y = target_x % config.CHUNK_SIZE, target_y % config.CHUNK_SIZE
+        plains_def = TILE_DEFINITIONS["plains"]
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = engine.Tile(plains_def['char'], plains_def['color'], plains_def['passable'], plains_def['name'])
+
+        # Perform the action
+        self.world.player_attempt_till_soil(target_x, target_y)
+
+        # Assert tile has changed
+        tilled_tile = self.world.get_tile_at(target_x, target_y)
+        self.assertEqual(tilled_tile.name, "Tilled Soil")
+
+        # Assert hoe durability has decreased
+        self.assertLess(hoe_instance['durability'], initial_durability)
+
+    def test_player_can_plant_seeds(self):
+        from data.tiles import TILE_DEFINITIONS
+        player = self.world.player
+        # Give player seeds
+        player.add_item("wheat_seeds", 1)
+        self.assertTrue(player.has_item("wheat_seeds"))
+
+        # Create a tilled soil tile
+        target_x, target_y = player.x + 1, player.y
+        self.world.get_tile_at(target_x, target_y) # Ensure chunk is generated
+        chunk_x, chunk_y = target_x // config.CHUNK_SIZE, target_y // config.CHUNK_SIZE
+        local_x, local_y = target_x % config.CHUNK_SIZE, target_y % config.CHUNK_SIZE
+        tilled_def = TILE_DEFINITIONS["tilled_soil"]
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = engine.Tile(tilled_def['char'], tilled_def['color'], tilled_def['passable'], tilled_def['name'])
+
+        # Perform the action
+        self.world.player_attempt_plant_seeds(target_x, target_y)
+
+        # Assert tile has changed
+        growing_tile = self.world.get_tile_at(target_x, target_y)
+        self.assertEqual(growing_tile.name, "Growing Wheat")
+
+        # Assert player has used one seed
+        self.assertFalse(player.has_item("wheat_seeds"))
+
+    def test_player_can_harvest_crop(self):
+        from data.tiles import TILE_DEFINITIONS
+        player = self.world.player
+
+        # Create a mature wheat tile
+        target_x, target_y = player.x + 1, player.y
+        self.world.get_tile_at(target_x, target_y)
+        chunk_x, chunk_y = target_x // config.CHUNK_SIZE, target_y // config.CHUNK_SIZE
+        local_x, local_y = target_x % config.CHUNK_SIZE, target_y % config.CHUNK_SIZE
+        wheat_def = TILE_DEFINITIONS["wheat_plant"]
+        # Need to use engine.Tile and a copy of properties
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = engine.Tile(wheat_def['char'], wheat_def['color'], wheat_def['passable'], wheat_def['name'], properties=wheat_def['properties'].copy())
+
+        # Perform the action
+        with patch('random.random', return_value=0.1): # Ensure successful harvest
+            self.world.player_attempt_harvest(target_x, target_y)
+
+        # Assert tile has reverted
+        reverted_tile = self.world.get_tile_at(target_x, target_y)
+        self.assertEqual(reverted_tile.name, "Tilled Soil")
+
+        # Assert player received wheat
+        self.assertTrue(player.has_item("wheat"))
+
 
 if __name__ == '__main__':
     unittest.main()

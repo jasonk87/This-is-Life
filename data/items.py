@@ -618,6 +618,25 @@ ITEM_DEFINITIONS = {
             "raw_log": 2
         },
     },
+    "stone_hoe": {
+        "name": "Stone Hoe",
+        "description": "A crude hoe for tilling soil.",
+        "char": "h",
+        "color": COLORS["dark_slate_gray"],
+        "value": 20,
+        "weight": 6,
+        "stackable": False,
+        "item_type_tags": ["tool"],
+        "equip_slot": "main_hand",
+        "properties": {
+            "tool_type": "hoe",
+            "max_durability": 20
+        },
+        "crafting_recipe": {
+            "stone_chunk": 2,
+            "raw_log": 2
+        },
+    },
     "iron_sword": {
         "name": "Iron Sword",
         "description": "A simple but effective iron sword.",

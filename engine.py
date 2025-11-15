@@ -1952,6 +1952,7 @@ class World:
 
                         if food_to_buy and npc.economic.money >= food_price:
                             food_vendor_building.building_inventory[food_to_buy] -= 1
+                            food_vendor_building.building_inventory["money"] = food_vendor_building.building_inventory.get("money", 0) + food_price
                             npc.economic.money -= food_price
                             npc.economic.npc_inventory[food_to_buy] = npc.economic.npc_inventory.get(food_to_buy, 0) + 1
                             # self.add_message_to_chat_log(f"{npc.name} bought a {food_to_buy} for {food_price} coins.")
@@ -2150,11 +2151,12 @@ class World:
                     elif is_leisure_time and npc.schedule.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
                         if npc.leisure_timer > 0:
                             npc.leisure_timer -= 1
-                        elif random.random() < 0.05: # 5% chance to go to the tavern
+                        elif random.random() < 0.15: # 15% chance to go to the tavern
                             tavern = self._find_nearest_tavern(npc)
                             if tavern:
                                 new_task_label = "going to tavern"
                                 destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                                npc.leisure_timer = random.randint(200, 400) # Stay for a while
                         elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
                             # Find a nearby NPC to chat with
                             potential_partners = [
@@ -2663,10 +2665,11 @@ class World:
                             village = self._get_village_for_npc(npc)
                             ore_price = self.get_dynamic_price("iron_ore", village)
                             ore_to_buy = 5 # Try to buy 5 ore
-                            if npc.economic.money >= ore_price * ore_to_buy and mine.building_inventory.get("iron_ore", 0) >= ore_to_buy:
+                            if work_building.building_inventory.get("money", 0) >= ore_price * ore_to_buy and mine.building_inventory.get("iron_ore", 0) >= ore_to_buy:
                                 mine.building_inventory["iron_ore"] -= ore_to_buy
-                                npc.economic.money -= ore_price * ore_to_buy
-                                npc.add_item("iron_ore", ore_to_buy)
+                                mine.building_inventory["money"] = mine.building_inventory.get("money", 0) + (ore_price * ore_to_buy)
+                                work_building.building_inventory["money"] -= ore_price * ore_to_buy
+                                work_building.building_inventory["iron_ore"] = work_building.building_inventory.get("iron_ore", 0) + ore_to_buy
                                 # self.add_message_to_chat_log(f"{npc.name} bought {ore_to_buy} iron ore.")
 
                     elif completed_sub_task_id == "fetch_wood":
@@ -2676,9 +2679,10 @@ class World:
                             village = self._get_village_for_npc(npc)
                             plank_price = self.get_dynamic_price("wooden_plank", village)
                             planks_to_buy = 5 # Try to buy 5 planks
-                            if npc.economic.money >= plank_price * planks_to_buy and lumber_mill.building_inventory.get("wooden_plank", 0) >= planks_to_buy:
+                            if work_building.building_inventory.get("money", 0) >= plank_price * planks_to_buy and lumber_mill.building_inventory.get("wooden_plank", 0) >= planks_to_buy:
                                 lumber_mill.building_inventory["wooden_plank"] -= planks_to_buy
-                                npc.economic.money -= plank_price * planks_to_buy
+                                lumber_mill.building_inventory["money"] = lumber_mill.building_inventory.get("money", 0) + (plank_price * planks_to_buy)
+                                work_building.building_inventory["money"] -= plank_price * planks_to_buy
                                 work_building.building_inventory["wooden_plank"] = work_building.building_inventory.get("wooden_plank", 0) + planks_to_buy
                                 # self.add_message_to_chat_log(f"{npc.name} bought {planks_to_buy} planks.")
 
@@ -2697,11 +2701,33 @@ class World:
                             village = self._get_village_for_npc(npc)
                             wheat_price = self.get_dynamic_price("wheat", village)
                             wheat_to_buy = 5 # Try to buy 5 wheat
-                            if npc.economic.money >= wheat_price * wheat_to_buy and farm.building_inventory.get("wheat", 0) >= wheat_to_buy:
+                            if work_building.building_inventory.get("money", 0) >= wheat_price * wheat_to_buy and farm.building_inventory.get("wheat", 0) >= wheat_to_buy:
                                 farm.building_inventory["wheat"] -= wheat_to_buy
-                                npc.economic.money -= wheat_price * wheat_to_buy
+                                farm.building_inventory["money"] = farm.building_inventory.get("money", 0) + (wheat_price * wheat_to_buy)
+                                work_building.building_inventory["money"] -= wheat_price * wheat_to_buy
                                 work_building.building_inventory["wheat"] = work_building.building_inventory.get("wheat", 0) + wheat_to_buy
                                 # self.add_message_to_chat_log(f"{npc.name} bought {wheat_to_buy} wheat.")
+
+                    elif completed_sub_task_id == "mill_flour":
+                        # Miller is at their grinding stone, try to mill flour
+                        wheat_needed = 1
+                        if work_building.building_inventory.get("wheat", 0) >= wheat_needed:
+                            work_building.building_inventory["wheat"] -= wheat_needed
+                            work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} milled some flour.")
+
+                    elif completed_sub_task_id == "fetch_fish":
+                        # Cook is at the fishing hut, try to buy fish
+                        fishing_hut = self._find_nearest_building_of_type(npc, "fishing_hut")
+                        if fishing_hut:
+                            village = self._get_village_for_npc(npc)
+                            fish_price = self.get_dynamic_price("raw_fish", village)
+                            fish_to_buy = 5 # Try to buy 5 fish
+                            if work_building.building_inventory.get("money", 0) >= fish_price * fish_to_buy and fishing_hut.building_inventory.get("raw_fish", 0) >= fish_to_buy:
+                                fishing_hut.building_inventory["raw_fish"] -= fish_to_buy
+                                fishing_hut.building_inventory["money"] = fishing_hut.building_inventory.get("money", 0) + (fish_price * fish_to_buy)
+                                work_building.building_inventory["money"] -= fish_price * fish_to_buy
+                                work_building.building_inventory["raw_fish"] = work_building.building_inventory.get("raw_fish", 0) + fish_to_buy
 
                     elif completed_sub_task_id == "fetch_flour":
                         # Baker is at the mill, try to buy flour
@@ -2710,10 +2736,20 @@ class World:
                             village = self._get_village_for_npc(npc)
                             flour_price = self.get_dynamic_price("flour", village)
                             flour_to_buy = 5 # Try to buy 5 flour
-                            if npc.economic.money >= flour_price * flour_to_buy and mill.building_inventory.get("flour", 0) >= flour_to_buy:
+                            if work_building.building_inventory.get("money", 0) >= flour_price * flour_to_buy and mill.building_inventory.get("flour", 0) >= flour_to_buy:
                                 mill.building_inventory["flour"] -= flour_to_buy
-                                npc.economic.money -= flour_price * flour_to_buy
+                                mill.building_inventory["money"] = mill.building_inventory.get("money", 0) + (flour_price * flour_to_buy)
+                                work_building.building_inventory["money"] -= flour_price * flour_to_buy
                                 work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + flour_to_buy
+
+                    elif completed_sub_task_id == "bake_bread":
+                        # Baker is at their oven, try to bake bread
+                        flour_needed = 1
+                        if work_building.building_inventory.get("flour", 0) >= flour_needed:
+                            work_building.building_inventory["flour"] -= flour_needed
+                            work_building.building_inventory["bread"] = work_building.building_inventory.get("bread", 0) + 1
+                            # self.add_message_to_chat_log(f"{npc.name} baked some bread.")
+
                     elif completed_sub_task_id == "write_book":
                         # Scribe is at their desk, generate a book
                         known_events_summary = " ".join([event.description for event in npc.knowledge.known_events.values()])
@@ -5816,6 +5852,7 @@ class World:
             chunk.village.add_building(tavern)
             self.buildings_by_id[tavern.id] = tavern
             self._draw_building(tiles, tavern, "wood_wall")
+            tavern.building_inventory["money"] = random.randint(200, 400)
 
         # Generate Lumber Mill (example producer workplace)
         lumber_mill_w, lumber_mill_h = 7, 7
@@ -5892,6 +5929,7 @@ class World:
         chunk.village.add_building(carpenter_shop)
         self.buildings_by_id[carpenter_shop.id] = carpenter_shop
         self._draw_building(tiles, carpenter_shop, "wood_wall")
+        carpenter_shop.building_inventory["money"] = random.randint(100, 200)
 
         # Generate Windmill
         windmill_w, windmill_h = 7, 7
@@ -5912,6 +5950,7 @@ class World:
             gy = windmill.global_origin_y + local_stone_y
             grinding_stone_coords_global.append((gx, gy))
         windmill.work_zone_tiles["grinding_stone"] = grinding_stone_coords_global
+        windmill.building_inventory["money"] = random.randint(100, 200)
 
         # Generate Bakery
         bakery_w, bakery_h = 7, 6
@@ -5923,6 +5962,7 @@ class World:
         chunk.village.add_building(bakery)
         self.buildings_by_id[bakery.id] = bakery
         self._draw_building(tiles, bakery, "wood_wall")
+        bakery.building_inventory["money"] = random.randint(100, 200)
 
         oven_coords_global = []
         if bakery.width > 2 and bakery.height > 2:
@@ -5973,6 +6013,7 @@ class World:
         chunk.village.add_building(blacksmith_shop)
         self.buildings_by_id[blacksmith_shop.id] = blacksmith_shop
         self._draw_building(tiles, blacksmith_shop, "stone_wall")
+        blacksmith_shop.building_inventory["money"] = random.randint(100, 200)
 
         # Define work zones for the Blacksmith Shop
         forge_coords_global = []

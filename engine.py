@@ -6775,14 +6775,17 @@ class World:
             response_json = json.loads(response_str)
             reaction = response_json.get("reaction")
             dialogue = response_json.get("dialogue", f"{witness.name} gasps!")
+            grudge_reason = response_json.get("grudge_reason", "") # Get the new field
 
             self.add_message_to_chat_log(dialogue) # Show the witness's verbal reaction
 
+            # Add a grudge if a reason was provided and the reaction is negative
+            if grudge_reason and reaction != "ignore":
+                witness.add_grudge(criminal.id, grudge_reason)
+
             if reaction == "become_hostile":
                 witness.is_hostile_to_player = True
-                witness.add_grudge(criminal.id, f"Was hostile towards me after witnessing a crime.")
             elif reaction == "report_crime":
-                witness.add_grudge(criminal.id, f"Reported me for {crime_type}.")
                 sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
                 if sheriff_office:
                     witness.current_task = "going_to_report_crime"
@@ -6791,11 +6794,10 @@ class World:
                 else:
                     self.add_message_to_chat_log(f"{witness.name} wants to report the crime but doesn't know where the sheriff is.")
             elif reaction == "flee":
-                witness.add_grudge(criminal.id, f"Saw me commit a crime and fled.")
                 witness.current_task = "combat_action_flee_from_player"
                 witness.current_path = [] # Force path recalculation
             elif reaction == "admonish":
-                witness.relationships[criminal.id] = witness.relationships.get(criminal.id, 50) - 10
+                # The grudge already lowered the relationship, so this is just a verbal action.
                 pass
             elif reaction == "ignore":
                 # Do nothing.

@@ -542,7 +542,10 @@ class TestFearSystem(unittest.TestCase):
             for x_offset in range(-15, 16):
                 self._clear_area_and_place_tile(center_x + x_offset, center_y + y_offset, plains_def)
 
-        self.world.update_fov()
+        self.world._update_player_fov()
+        # Re-calculating individual NPC FOV is now done in _update_npc_schedules
+        # To test this properly, we need to manually call it or run the schedule update
+        self.world._update_npc_fov(civilian)
         self.assertTrue(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y])
 
         # 2. Execution
@@ -601,7 +604,8 @@ class TestFearSystem(unittest.TestCase):
         self._clear_area_and_place_tile(alarm_spot[0], alarm_spot[1], well_def)
         self.assertFalse(self.world.get_tile_at(alarm_spot[0], alarm_spot[1]).passable)
 
-        self.world.update_fov()
+        self.world._update_player_fov()
+        self.world._update_npc_fov(guard1)
         self.assertTrue(self.world.npc_fov_maps[guard1.id][wolf1.x, wolf1.y])
 
         # 2. Execution
@@ -653,7 +657,8 @@ class TestFearSystem(unittest.TestCase):
             for x_offset in range(-5, 6):
                 self._clear_area_and_place_tile(center_x + x_offset, center_y + y_offset, plains_def)
 
-        self.world.update_fov()
+        self.world._update_player_fov()
+        self.world._update_npc_fov(civilian)
         self.assertTrue(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y])
 
 
@@ -668,7 +673,8 @@ class TestFearSystem(unittest.TestCase):
         self.world.npcs.remove(wolf2)
 
         # Update FOV so NPC no longer sees them
-        self.world.update_fov()
+        self.world._update_player_fov()
+        self.world._update_npc_fov(civilian)
         # self.assertFalse(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y]) # This assertion is incorrect
 
         # 4. Execution (Calm down)

@@ -679,29 +679,35 @@ Based on the witness's personality, profession, and attitudes, decide their most
 Return a JSON object with the chosen reaction and a short, in-character dialogue line expressing their reaction.
 - "reaction": string (must be one of the available reactions listed above)
 - "dialogue": string (what the NPC shouts or mutters upon witnessing the act)
+- "grudge_reason": string (A concise summary of why the witness is forming a grudge, from their perspective. E.g., "Attacked my friend in cold blood.", "A violent thug who can't be trusted.", "Shamelessly stole from the market stall.". This should be generated for ANY negative reaction ("become_hostile", "report_crime", "flee", "admonish"). It can be an empty string for "ignore".)
+
 
 Example 1 (Guard witnesses assault):
 {{
   "reaction": "become_hostile",
-  "dialogue": "Stop right there, criminal scum!"
+  "dialogue": "Stop right there, criminal scum!",
+  "grudge_reason": "Violently assaulted a citizen in my presence."
 }}
 
 Example 2 (Cowardly villager witnesses assault):
 {{
   "reaction": "flee",
-  "dialogue": "By the gods! I'm getting out of here!"
+  "dialogue": "By the gods! I'm getting out of here!",
+  "grudge_reason": "A terrifying brute who attacks people randomly."
 }}
 
-Example 3 (Lawful merchant witnesses theft from a rival):
+Example 3 (Lawful merchant witnesses theft from a rival they dislike):
 {{
   "reaction": "report_crime",
-  "dialogue": "I'm telling the sheriff what you've done!"
+  "dialogue": "I'm telling the sheriff what you've done!",
+  "grudge_reason": "A thief who threatens the order of this village."
 }}
 
 Example 4 (Friend of the victim witnesses assault):
 {{
   "reaction": "become_hostile",
-  "dialogue": "Get away from them, you brute!"
+  "dialogue": "Get away from them, you brute!",
+  "grudge_reason": "Attacked my friend for no reason."
 }}
 
 JSON Decision:

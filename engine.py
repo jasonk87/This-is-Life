@@ -547,7 +547,7 @@ class World:
                     self.transparency_map[x_map, y_map] = False
 
         self._update_light_level_and_fov() # Initialize based on game time 0
-        self.update_fov() # Initial FOV calculation
+        self._update_player_fov() # Initial FOV calculation for player
         self._update_player_hunger_thirst(initial_setup=True) # Initial status update
 
     def _update_entity_temperature(self, entity):
@@ -765,25 +765,22 @@ class World:
             self.player.equipment.equipped_light_item_key = None
             self.player.equipment.current_personal_light_radius = 0
             self.player.equipment.light_source_active_until_tick = -1
-            # No need to call self.update_fov() here, as _update_light_level_and_fov (which calls this)
-            # is followed by update_fov() in the main loop.
+            # No need to call self._update_player_fov() here, as _update_light_level_and_fov (which calls this)
+            # is followed by _update_player_fov() in the main loop.
 
-    def update_fov(self) -> None:
+    def _update_player_fov(self) -> None:
         """
         Updates the player's field of view map and explored tiles.
-        Also updates FOV for all NPCs.
         """
         # Player FOV
         base_ambient_fov_radius = self.current_fov_radius
         effective_player_fov_radius = base_ambient_fov_radius
 
         if self.player.equipment.equipped_light_item_key and self.player.equipment.current_personal_light_radius > 0:
-            # Check for burnout if it has a duration
             is_active = True
             if self.player.equipment.light_source_active_until_tick != -1 and \
                self.game_time >= self.player.equipment.light_source_active_until_tick:
-                is_active = False # Burnt out, specific burnout logic is handled elsewhere
-                                  # but for FOV calc, it's not providing light now.
+                is_active = False
 
             if is_active:
                 effective_player_fov_radius = max(base_ambient_fov_radius, self.player.equipment.current_personal_light_radius)
@@ -791,37 +788,34 @@ class World:
         self.player_fov_map = tcod.map.compute_fov(
             self.transparency_map,
             (self.player.x, self.player.y),
-            radius=effective_player_fov_radius, # Use the effective radius
-            algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST # A common algorithm
+            radius=effective_player_fov_radius,
+            algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
         )
-        # Update explored map
         self.explored_map |= self.player_fov_map
 
-        # NPC FOVs
-        self.npc_fov_maps.clear() # Clear previous NPC FOV maps
-        for npc in self.village_npcs + self.npcs: # Iterate all relevant NPCs
-            if npc.physical.is_dead:
-                continue
-            # NPCs use the same global FOV radius for now, can be customized later
-            npc_fov_radius = self.current_fov_radius # Or npc.perception_radius if defined
-            self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
-                self.transparency_map,
-                (npc.x, npc.y),
-                radius=npc_fov_radius,
-                algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
-            )
+    def _update_npc_fov(self, npc: NPC) -> None:
+        """
+        Updates the field of view for a single NPC.
+        """
+        if npc.physical.is_dead:
+            return
 
-            # NPC Item Perception within their FOV
-            npc.knowledge.perceived_item_tiles.clear()
-            if npc.id in self.npc_fov_maps: # Should always be true if just computed
-                fov_map_for_npc = self.npc_fov_maps[npc.id]
-                # Iterate through coordinates that are visible to the NPC
-                # np.where returns a tuple of arrays, one for each dimension
-                visible_y_coords, visible_x_coords = np.where(fov_map_for_npc)
-                for i in range(len(visible_x_coords)):
-                    vx, vy = visible_x_coords[i], visible_y_coords[i]
-                    if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
-                        npc.knowledge.perceived_item_tiles.append((vx,vy))
+        npc_fov_radius = self.current_fov_radius # NPCs use global ambient light for now
+        self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
+            self.transparency_map,
+            (npc.x, npc.y),
+            radius=npc_fov_radius,
+            algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
+        )
+
+        # NPC Item Perception within their FOV
+        npc.knowledge.perceived_item_tiles.clear()
+        fov_map_for_npc = self.npc_fov_maps[npc.id]
+        visible_y_coords, visible_x_coords = np.where(fov_map_for_npc)
+        for i in range(len(visible_x_coords)):
+            vx, vy = visible_x_coords[i], visible_y_coords[i]
+            if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
+                npc.knowledge.perceived_item_tiles.append((vx,vy))
 
 
     def _update_light_level_and_fov(self):
@@ -1434,16 +1428,13 @@ class World:
                 npc.physical.thirst = min(npc.physical.max_thirst, npc.physical.thirst + 3)
 
             if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
-                # Even if not due for a full schedule update, hostile NPCs should still get a combat AI tick
                 if npc.combat.is_hostile_to_player:
-                    # Potentially add a smaller interval check here for combat responsiveness
-                    # For now, combat decisions happen on their schedule update tick too.
-                    # This could be refined for faster combat reactions.
-                    pass # Will be handled below if interval met.
+                    pass
                 else:
-                    continue # Skip non-hostile NPC if not their update interval
+                    continue
 
             npc.schedule.game_time_last_updated = self.game_time
+            self._update_npc_fov(npc)
 
             # --- Mourning and Investigating Tasks ---
             if npc.schedule.current_task in ["mourning", "investigating"]:
@@ -2353,6 +2344,46 @@ class World:
                                 npc.schedule.current_path = path
                                 npc.schedule.current_destination_coords = (dest_x, dest_y)
                                 self.add_message_to_chat_log(f"{npc.name} is traveling to a new village.")
+                elif npc.schedule.current_task == "lingering_in_village":
+                    if npc.leisure_timer > 0:
+                        npc.leisure_timer -= 1
+
+                        # Trade logic
+                        current_village = self._get_village_for_npc(npc, by_coords=True)
+                        if current_village and random.random() < 0.1: # 10% chance to trade each schedule update
+                            # Sell high-demand goods
+                            for item_key, quantity in list(npc.economic.npc_inventory.items()):
+                                if item_key == "money": continue
+                                demand = current_village.demand.get(item_key, 1)
+                                supply = current_village.supply.get(item_key, 1)
+                                if demand / supply > 1.5: # If demand is 50% higher than supply
+                                    price = self.get_dynamic_price(item_key, current_village)
+                                    npc.economic.npc_inventory[item_key] -= 1
+                                    if npc.economic.npc_inventory[item_key] <= 0:
+                                        del npc.economic.npc_inventory[item_key]
+                                    npc.economic.money += price
+                                    current_village.supply[item_key] = current_village.supply.get(item_key, 0) + 1
+                                    self.add_message_to_chat_log(f"{npc.name} sold a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} to the village.")
+
+                            # Buy low-supply goods
+                            inventory_space = 20 - sum(v for k, v in npc.economic.npc_inventory.items() if k != "money")
+                            if inventory_space > 0:
+                                for item_key, quantity in list(current_village.supply.items()):
+                                    if item_key == "money": continue
+                                    demand = current_village.demand.get(item_key, 1)
+                                    supply = current_village.supply.get(item_key, 1)
+                                    if supply / demand > 1.5: # If supply is 50% higher than demand
+                                        price = self.get_dynamic_price(item_key, current_village)
+                                        if npc.economic.money >= price:
+                                            npc.economic.money -= price
+                                            npc.economic.npc_inventory[item_key] = npc.economic.npc_inventory.get(item_key, 0) + 1
+                                            current_village.supply[item_key] -= 1
+                                            if current_village.supply[item_key] <= 0:
+                                                del current_village.supply[item_key]
+                                            self.add_message_to_chat_log(f"{npc.name} bought a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} from the village.")
+                                            break # Only buy one item per trade check
+                    else:
+                        npc.schedule.current_task = "traveling_to_village"
                 elif npc.schedule.current_task == "idle" and random.random() < 0.1:
                      npc.schedule.current_task = "traveling_to_village"
 
@@ -3602,7 +3633,7 @@ class World:
         self.player.economic.bounty = 0
         self.add_message_to_chat_log("Your bounty has been cleared.")
 
-        self.update_fov() # Update FOV from new position
+        self._update_player_fov() # Update FOV from new position
 
 
         del self.player.economic.active_contracts[contract_id]
@@ -3797,7 +3828,7 @@ class World:
         # Move player to the animal's location
         self.player.x = animal_npc.x
         self.player.y = animal_npc.y
-        self.update_fov() # Update FOV from new position
+        self._update_player_fov() # Update FOV from new position
 
         self.add_message_to_chat_log(f"You mount the {animal_npc.name}.")
         # The animal should stop its current path when mounted
@@ -3861,7 +3892,7 @@ class World:
         # Move player
         self.player.x = dismount_x
         self.player.y = dismount_y
-        self.update_fov()
+        self._update_player_fov()
 
         self.add_message_to_chat_log(f"You dismount the {animal_npc.name}.")
 
@@ -5636,7 +5667,6 @@ class World:
             lore_response = self._call_ollama(prompt)
             if lore_response:
                 chunk.village.lore = lore_response.strip()
-                # self.add_message_to_chat_log(f"Village Lore for {chunk_coord_x},{chunk_coord_y}: {chunk.village.lore[:50]}...") # Log snippet
             else:
                 chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             
@@ -6244,7 +6274,7 @@ class World:
                     riding_animal.y = new_y
                     self.player.x = new_x
                     self.player.y = new_y
-                    self.update_fov()
+                    self._update_player_fov()
                     return int(destination_tile.properties.get("movement_cost", 1))
                 else:
                     return 0 # No movement if blocked
@@ -6283,7 +6313,7 @@ class World:
                         # This should ideally not happen if get_building_at found a building
                         self.add_message_to_chat_log("Error: Could not find chunk for building decoration.")
 
-            self.update_fov() # Player moved, so update FOV
+            self._update_player_fov() # Player moved, so update FOV
 
             # Clear sound events after player move (and subsequent NPC updates for that turn)
             # This means sounds last for one full game tick cycle.
@@ -6329,7 +6359,7 @@ class World:
         self._update_season()
         self._update_weather()
         self._update_light_level_and_fov()
-        self.update_fov() # This will update FOV for player and all NPCs
+        self._update_player_fov() # Only update player FOV here
         self._update_player_temperature()
         self._apply_temperature_effects(self.player)
         self._update_player_wetness()
@@ -6498,7 +6528,7 @@ class World:
     def _update_abstract_simulation(self):
         """
         Runs a lightweight simulation for off-screen villages to simulate high-level events
-        like births, deaths, etc., creating a living history.
+        like births, deaths, and economic production/consumption, creating a living history.
         """
         # This should not run on every single tick. Let's run it once per day.
         if self.game_time % DAY_LENGTH_TICKS != 0:
@@ -6517,9 +6547,72 @@ class World:
                 dist = max(abs(x_chunk - player_chunk_x), abs(y_chunk - player_chunk_y))
 
                 if dist > ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
-                    village_npcs = [npc for npc in self.village_npcs if self._get_village_for_npc(npc) == chunk.village]
+                    village = chunk.village
+                    village_npcs = [npc for npc in self.village_npcs if self._get_village_for_npc(npc) == village]
                     if not village_npcs:
                         continue
+
+                    # --- Economic Simulation ---
+                    print(f"--- Abstract Sim for Village at ({x_chunk}, {y_chunk}) ---")
+                    print(f"Before - Supply: {village.supply}, Demand: {village.demand}")
+                    # 1. Production
+                    for npc in village_npcs:
+                        profession_data = get_profession_data(npc.economic.profession)
+                        if not profession_data:
+                            continue
+
+                        # Simplified production logic
+                        # Hardcode for Farmer since their production is tile-based
+                        if npc.economic.profession == "Farmer":
+                            village.supply["wheat"] = village.supply.get("wheat", 0) + 5 # Produces 5 wheat per day
+
+                        # General production from sub-tasks
+                        if "default_sub_task_sequence" in profession_data:
+                            for sub_task_id in profession_data["default_sub_task_sequence"]:
+                                sub_task_data = get_sub_task_data(npc.economic.profession, sub_task_id)
+                                if not sub_task_data: continue
+
+                                # Consume resources
+                                consumes = sub_task_data.get("consumes_item_from_workplace", {})
+                                can_produce = True
+                                for item_key, qty in consumes.items():
+                                    if village.supply.get(item_key, 0) < qty:
+                                        can_produce = False
+                                        # Production failed, increase demand for the missing resource
+                                        village.demand[item_key] = village.demand.get(item_key, 0) + qty
+                                        break # Stop processing this sub-task
+
+                                if can_produce:
+                                    # Consume the items
+                                    for item_key, qty in consumes.items():
+                                        village.supply[item_key] -= qty
+                                        if village.supply[item_key] <= 0:
+                                            del village.supply[item_key]
+
+                                    # Produce the items
+                                    produces = sub_task_data.get("produces_item_at_workplace", {})
+                                    for prod_item_key, prod_qty in produces.items():
+                                        village.supply[prod_item_key] = village.supply.get(prod_item_key, 0) + prod_qty
+
+
+                    # 2. Consumption (basic needs)
+                    num_villagers = len(village_npcs)
+                    # Everyone needs food
+                    food_needed = num_villagers * 1 # 1 food item per person per day
+                    food_supply = village.supply.get("bread", 0) # Assume bread is the primary food
+                    consumed_food = min(food_needed, food_supply)
+
+                    if "bread" in village.supply:
+                        village.supply["bread"] = food_supply - consumed_food
+                        if village.supply["bread"] <= 0:
+                            del village.supply["bread"]
+
+                    # If there's a shortfall, demand for food increases
+                    food_shortfall = food_needed - consumed_food
+                    if food_shortfall > 0:
+                        village.demand["bread"] = village.demand.get("bread", 0) + food_shortfall
+
+                    print(f"After - Supply: {village.supply}, Demand: {village.demand}")
 
                     # --- Birth Simulation ---
                     # Find potential couples (for simplicity, any two adults living together)
@@ -6775,14 +6868,17 @@ class World:
             response_json = json.loads(response_str)
             reaction = response_json.get("reaction")
             dialogue = response_json.get("dialogue", f"{witness.name} gasps!")
+            grudge_reason = response_json.get("grudge_reason", "") # Get the new field
 
             self.add_message_to_chat_log(dialogue) # Show the witness's verbal reaction
 
+            # Add a grudge if a reason was provided and the reaction is negative
+            if grudge_reason and reaction != "ignore":
+                witness.add_grudge(criminal.id, grudge_reason)
+
             if reaction == "become_hostile":
                 witness.is_hostile_to_player = True
-                witness.add_grudge(criminal.id, f"Was hostile towards me after witnessing a crime.")
             elif reaction == "report_crime":
-                witness.add_grudge(criminal.id, f"Reported me for {crime_type}.")
                 sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
                 if sheriff_office:
                     witness.current_task = "going_to_report_crime"
@@ -6791,11 +6887,10 @@ class World:
                 else:
                     self.add_message_to_chat_log(f"{witness.name} wants to report the crime but doesn't know where the sheriff is.")
             elif reaction == "flee":
-                witness.add_grudge(criminal.id, f"Saw me commit a crime and fled.")
                 witness.current_task = "combat_action_flee_from_player"
                 witness.current_path = [] # Force path recalculation
             elif reaction == "admonish":
-                witness.relationships[criminal.id] = witness.relationships.get(criminal.id, 50) - 10
+                # The grudge already lowered the relationship, so this is just a verbal action.
                 pass
             elif reaction == "ignore":
                 # Do nothing.
@@ -6919,7 +7014,7 @@ class World:
             self.player.equipment.equipped_light_item_key = None
             self.player.equipment.current_personal_light_radius = 0
             self.player.equipment.light_source_active_until_tick = -1
-            self.update_fov()
+            self._update_player_fov()
             return
 
         # Standard item usage from inventory
@@ -6950,7 +7045,7 @@ class World:
                 self.player.equipment.light_source_active_until_tick = -1 # Infinite or not applicable
 
             self.add_message_to_chat_log(f"You light the {item_def.get('name', item_key)}. It casts a warm glow.")
-            self.update_fov()
+            self._update_player_fov()
             return
 
         # Existing healing logic (or other on_use dictionary based effects)

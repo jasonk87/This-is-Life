@@ -184,11 +184,12 @@ def main():
     """Sets up the game and runs the main loop."""
     parser = argparse.ArgumentParser(description="This is Life - A Roguelike Simulation")
     parser.add_argument("--headless", action="store_true", help="Run in headless mode.")
+    parser.add_argument("--ticks", type=int, help="Number of ticks to run in headless mode.")
     args = parser.parse_args()
 
     world = World()
     if args.headless:
-        run_headless(world)
+        run_headless(world, args.ticks)
         return
 
     try:
@@ -215,11 +216,13 @@ def main():
             context.present(console)
             handle_events(world, context)
 
-def run_headless(world):
+def run_headless(world, num_ticks):
     """Runs the game for a fixed number of ticks in headless mode."""
-    print("Running in headless mode...")
-    for _ in range(1000):
+    print(f"Running in headless mode for {num_ticks} ticks...")
+    for i in range(num_ticks):
         world.update()
+        if i % 1000 == 0:
+            print(f"  ...tick {i}/{num_ticks}")
     print("Headless mode run complete.")
 
 def render_game_over(console, context):

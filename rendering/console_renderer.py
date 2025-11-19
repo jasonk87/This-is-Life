@@ -8,6 +8,7 @@ from config import (
 )
 from data.tiles import TILE_DEFINITIONS
 from entities.animal import Animal
+from entities.base import NPC
 from engine import Player
 
 def draw_status_panel(console, world):
@@ -152,8 +153,18 @@ def draw(console, world, camera_x, camera_y):
         if isinstance(entity, Player) and entity.state.is_riding:
             continue
         if is_visible(world, entity.x, entity.y):
+            color = entity.color
+            if isinstance(entity, NPC) and not isinstance(entity, Animal) and not isinstance(entity, Player):
+                attitude = entity.attitude_to_player
+                if attitude == "hostile":
+                    color = (255, 0, 0)  # Red
+                elif attitude == "friendly" or attitude == "warm":
+                    color = (0, 255, 0)  # Green
+                else: # neutral, unfriendly
+                    color = (255, 255, 255) # White
+
             console.print(x=entity.x - camera_x, y=entity.y - camera_y,
-                          string=chr(entity.char), fg=entity.color)
+                          string=chr(entity.char), fg=color)
 
     draw_status_panel(console, world)
     # draw_minimap(console, world)

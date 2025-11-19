@@ -142,20 +142,18 @@ def draw(console, world, camera_x, camera_y):
                 is_in_fov = is_visible(world, map_x, map_y)
                 if is_in_fov:
                     console.print(x=x, y=y, string=chr(tile.char), fg=tile.color)
-                    world.explored[map_y][map_x] = True
-                elif world.explored[map_y][map_x]:
+                    world.explored_map[map_y, map_x] = True
+                elif world.explored_map[map_y, map_x]:
                     console.print(x=x, y=y, string=chr(tile.char), fg=(100, 100, 100)) # Explored but not visible
 
     # Draw entities
-    for entity in sorted(world.entities, key=lambda e: e.render_order.value):
+    all_entities = world.npcs + world.village_npcs + [world.player]
+    for entity in sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, 'render_order') else 0):
+        if isinstance(entity, Player) and entity.state.is_riding:
+            continue
         if is_visible(world, entity.x, entity.y):
             console.print(x=entity.x - camera_x, y=entity.y - camera_y,
                           string=chr(entity.char), fg=entity.color)
-
-    # Draw player
-    if not (world.player.state.is_riding and isinstance(world.get_entity_at(world.player.x, world.player.y), Animal)):
-         console.print(x=world.player.x - camera_x, y=world.player.y - camera_y,
-                      string=chr(world.player.char), fg=world.player.color)
 
     draw_status_panel(console, world)
     # draw_minimap(console, world)

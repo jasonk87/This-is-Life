@@ -51,6 +51,22 @@ from data.environment import WEATHER_DEFINITIONS
 import json
 import uuid
 
+class Quest:
+    """A class to represent an active quest."""
+    def __init__(self, quest_id: str, title: str, description: str, quest_type: str, quest_giver_id: int):
+        self.id = quest_id
+        self.title = title
+        self.description = description
+        self.type = quest_type
+        self.quest_giver_id = quest_giver_id
+        self.progress = 0
+        # For 'fetch' quests
+        self.item_key: str | None = None
+        self.required_count: int = 0
+        # For 'kill' quests
+        self.target_name_prefix: str | None = None
+        self.required_kills: int = 0
+
 class Book:
     """A class to represent a book written by a Scribe."""
     def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle"):
@@ -1820,22 +1836,48 @@ class World:
 
                 needs_based_action_taken = False
 
-                # --- Proactive Help-Seeking ---
-                if not needs_based_action_taken and random.random() < 0.1: # Give it a chance to trigger
+                # --- Proactive Help-Seeking & Quest Generation ---
+                if not needs_based_action_taken and not hasattr(npc, 'active_quest') and random.random() < 0.1:
                     critically_hungry = npc.physical.hunger >= 90
                     critically_thirsty = npc.physical.thirst >= 90
 
                     if critically_hungry or critically_thirsty:
-                        knows_food_source = any("tavern" in item for item in npc.knowledge.known_locations)
-                        knows_water_source = any("well" in item for item in npc.knowledge.known_locations)
+                        knows_food_source = "the tavern" in npc.knowledge.known_locations or "bakery" in npc.knowledge.known_locations
+                        knows_water_source = "the village well" in npc.knowledge.known_locations
 
                         needs_help = False
+                        quest_item, quest_count, quest_type_for_help = None, 0, None
+
                         if critically_hungry and not knows_food_source:
                             npc.knowledge.help_needed = "food"
                             needs_help = True
+                            quest_item = "raw_fish" # Example item
+                            quest_count = random.randint(3, 5)
+                            quest_type_for_help = "food"
                         elif critically_thirsty and not knows_water_source:
                             npc.knowledge.help_needed = "water"
                             needs_help = True
+                            # Water is not an inventory item, so this is a placeholder.
+                            # A real water quest might be "fix the well" or similar.
+                            # For now, we'll make it a food quest as a fallback.
+                            quest_item = "bread"
+                            quest_count = 1
+                            quest_type_for_help = "thirst" # Still indicates the root cause
+
+                        if needs_help and quest_item:
+                            quest_id = f"fetch_{quest_item}_{npc.id}_{self.game_time}"
+                            quest = Quest(
+                                quest_id=quest_id,
+                                title=f"A Desperate Need for {quest_item.replace('_', ' ').title()}",
+                                description=f"{npc.name} is in dire need of {quest_count} {quest_item.replace('_', ' ')}.",
+                                quest_type="fetch",
+                                quest_giver_id=npc.id
+                            )
+                            quest.item_key = quest_item
+                            quest.required_count = quest_count
+                            setattr(npc, 'active_quest', quest) # Attach the quest to the NPC
+                            self.add_message_to_chat_log(f"Debug: {npc.name} generated quest '{quest.title}'.")
+
 
                         if needs_help and npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
                             npc.schedule.current_task = "approaching_player_for_help"
@@ -4696,11 +4738,12 @@ class World:
             long_term_memory_summary = "No specific memories of the player."
         # ---
 
-        relationship_score = npc_target.relationships.get(self.player.id, 50)
+        relationship_score = npc_target.social.relationships.get(self.player.id, 50)
 
         prompt = LLM_PROMPTS["npc_conversation_greeting"].format(
             npc_name=npc_target.name,
             npc_personality=npc_target.social.personality,
+            npc_attitude=npc_target.attitude_to_player,
             relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
@@ -4717,6 +4760,13 @@ class World:
 
         self.chat_ui_history.append((npc_target.name, greeting.strip()))
 
+        # If the NPC has a dynamic quest to offer, add it to the dialogue
+        if hasattr(npc_target, 'active_quest') and npc_target.active_quest:
+            quest = npc_target.active_quest
+            offer_text = f"I'm in a bit of a bind. I desperately need {quest.required_count} {quest.item_key.replace('_', ' ')}. Can you help me? (You can 'accept quest' or 'decline quest')"
+            self.chat_ui_history.append((npc_target.name, offer_text))
+
+
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
 
@@ -4726,6 +4776,35 @@ class World:
             return
 
         # --- Handle special keywords before general conversation ---
+        # --- Handle special keywords before general conversation ---
+        # Quest completion
+        if 'complete quest' in player_input_text.lower():
+            for quest_id, quest_data in self.player.knowledge.active_quests.items():
+                if quest_data["quest_giver_id"] == npc_target.id:
+                    self.complete_quest(quest_id, npc_target)
+                    return # End dialogue turn
+
+        # Quest acceptance/rejection
+        if hasattr(npc_target, 'active_quest') and npc_target.active_quest:
+            quest = npc_target.active_quest
+            if 'accept' in player_input_text.lower():
+                self.player.knowledge.active_quests[quest.id] = {
+                    "title": quest.title,
+                    "description": quest.description,
+                    "type": quest.type,
+                    "quest_giver_id": quest.quest_giver_id,
+                    "item_to_fetch_key": quest.item_key,
+                    "item_fetch_count": quest.required_count,
+                    "progress": 0
+                }
+                self.chat_ui_history.append((npc_target.name, "Oh, thank you! Please hurry!"))
+                npc_target.active_quest = None # Quest is now with the player
+                return
+            elif 'decline' in player_input_text.lower():
+                self.chat_ui_history.append((npc_target.name, "Oh, I see. I'll have to find another way then."))
+                npc_target.active_quest = None # NPC gives up offering this quest for now
+                return
+
         share_keywords = ["i know where", "let me tell you about", "have you seen"]
         if any(keyword in player_input_text.lower() for keyword in share_keywords):
             shared = False
@@ -7208,11 +7287,80 @@ class World:
         if quest_id not in self.player.knowledge.active_quests:
             self.add_message_to_chat_log("Error: Quest not found or not active.")
             if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
-                 self.chat_ui_history.append((quest_giver_npc.name, "Are you sure we had an arrangement like that?"))
+                self.chat_ui_history.append((quest_giver_npc.name, "Are you sure we had an arrangement like that?"))
             return
 
         active_quest_data = self.player.knowledge.active_quests[quest_id]
-        quest_def = QUEST_DEFINITIONS.get(quest_id)
+        is_static_quest = quest_id in QUEST_DEFINITIONS
+
+        # --- Check Completion Conditions ---
+        is_complete = False
+        if active_quest_data["type"] == "fetch":
+            if self.player.has_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"]):
+                is_complete = True
+        elif active_quest_data["type"] == "kill":
+            if active_quest_data["progress"] >= active_quest_data["target_count"]:
+                is_complete = True
+
+        # --- Handle Dialogue and Rewards ---
+        if is_complete:
+            # Consume items for fetch quests
+            if active_quest_data["type"] == "fetch":
+                self.player.remove_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"])
+
+            log_message = f"Quest '{active_quest_data['title']}' completed."
+            completion_dialogue = "Thank you so much! You're a lifesaver."
+
+            if is_static_quest:
+                quest_def = QUEST_DEFINITIONS.get(quest_id, {})
+                reward_money = quest_def.get("reward_money", 0)
+                if reward_money > 0:
+                    self.player.economic.money += reward_money
+
+                reward_items = quest_def.get("reward_items", {})
+                for item_key, quantity in reward_items.items():
+                    self.player.add_item(item_key, quantity)
+
+                self.player.social.fame += 10 # Standard fame for static quests
+                log_message = quest_def.get("completion_message_log", log_message)
+                completion_dialogue = quest_def.get("dialogue_complete_report", completion_dialogue)
+
+                self.log_event(
+                    event_type="quest_complete",
+                    description=f"{{subject}} completed the quest: {active_quest_data['title']}",
+                    subject_id=self.player.id,
+                    location=(self.player.x, self.player.y)
+                )
+            else: # Dynamic quest
+                reward_money = 25
+                self.player.economic.money += reward_money
+                self.add_message_to_chat_log(f"You received {reward_money} money.")
+
+                quest_giver_npc.physical.hunger = 0
+                quest_giver_npc.physical.thirst = 0
+                quest_giver_npc.social.relationships[self.player.id] = quest_giver_npc.social.relationships.get(self.player.id, 50) + 15
+
+
+            self.add_message_to_chat_log(log_message)
+
+            # Update quest status
+            del self.player.knowledge.active_quests[quest_id]
+            self.player.knowledge.completed_quests.append(quest_id)
+
+            # Dialogue
+            if self.chat_ui_active:
+                self.chat_ui_history.append((quest_giver_npc.name, completion_dialogue))
+        else:
+            # Dialogue for incomplete quest
+            if self.chat_ui_active:
+                if active_quest_data["type"] == "fetch":
+                    item_name = active_quest_data['item_to_fetch_key'].replace('_', ' ')
+                    self.chat_ui_history.append((quest_giver_npc.name, f"It looks like you still don't have the {active_quest_data['item_fetch_count']} {item_name} I need."))
+                elif active_quest_data["type"] == "kill":
+                    quest_def = QUEST_DEFINITIONS.get(quest_id, {})
+                    remaining = active_quest_data["target_count"] - active_quest_data["progress"]
+                    incomplete_dialogue = quest_def.get("dialogue_incomplete_report", f"You still need to defeat {remaining} more.").format(remaining_count=remaining)
+                    self.chat_ui_history.append((quest_giver_npc.name, incomplete_dialogue))
     def player_attempt_fish(self, water_x: int, water_y: int):
         """Handles the player's attempt to fish."""
         if not self.player.has_item("fishing_rod"):
@@ -7316,101 +7464,3 @@ class World:
 
         else:
             self.add_message_to_chat_log("You failed to harvest the crop.")
-
-    def complete_quest(self, quest_id: str, quest_giver_npc: NPC):
-        """Handles player attempting to complete a quest."""
-        if quest_id not in self.player.knowledge.active_quests:
-            self.add_message_to_chat_log("Error: Quest not found or not active.")
-            if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
-                 self.chat_ui_history.append((quest_giver_npc.name, "Are you sure we had an arrangement like that?"))
-            return
-
-        active_quest_data = self.player.knowledge.active_quests[quest_id]
-        quest_def = QUEST_DEFINITIONS.get(quest_id)
-        if not quest_def:
-            self.add_message_to_chat_log(f"Error: Quest definition for '{quest_id}' not found.")
-            return
-
-        # Check if this is the correct NPC to turn into
-        # For now, simple check on NPC's role or ID.
-        # A more robust system might store the specific NPC instance ID who gave the quest.
-        giver_match = False
-        if active_quest_data.get("npc_offerer_id") == quest_giver_npc.id:
-            giver_match = True
-        elif active_quest_data.get("quest_giver_id_or_role") == quest_giver_npc.profession: # Fallback to role
-            giver_match = True
-
-        if not giver_match:
-            self.add_message_to_chat_log("This isn't the right person to talk to about this quest.")
-            if self.chat_ui_active: self.chat_ui_history.append((quest_giver_npc.name, "I don't think that's for me."))
-            return
-
-        is_complete = False
-        if active_quest_data["type"] == "kill":
-            if active_quest_data.get("progress", 0) >= active_quest_data.get("target_count", 0):
-                is_complete = True
-        elif active_quest_data["type"] == "fetch":
-            if self.player.has_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"]):
-                is_complete = True
-
-        dialogue_key = "dialogue_complete_report" if is_complete else "dialogue_incomplete_report"
-        npc_dialogue = quest_def.get(dialogue_key, "...")
-
-        if not is_complete and active_quest_data["type"] == "kill":
-            remaining_count = active_quest_data.get("target_count", 0) - active_quest_data.get("progress", 0)
-            npc_dialogue = npc_dialogue.format(remaining_count=remaining_count)
-        elif not is_complete and active_quest_data["type"] == "fetch":
-            player_has = 0
-            for item_instance in self.player.economic.inventory: # Check new inventory
-                if item_instance["key"] == active_quest_data["item_to_fetch_key"]:
-                    player_has = item_instance.get("quantity", 0)
-                    break
-            remaining_count = active_quest_data["item_fetch_count"] - player_has
-            npc_dialogue = npc_dialogue.format(remaining_count=remaining_count)
-
-
-        if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
-            self.chat_ui_history.append((quest_giver_npc.name, npc_dialogue))
-        else: # If not in chat, at least log it
-            self.add_message_to_chat_log(f"{quest_giver_npc.name}: \"{npc_dialogue}\"")
-
-
-        if is_complete:
-            # Log the event before giving rewards
-            self.log_event(
-                event_type="quest_complete",
-                description=f"{{subject}} completed the quest '{active_quest_data['title']}'.",
-                subject_id=self.player.id,
-                location=(self.player.x, self.player.y)
-            )
-
-            if active_quest_data["type"] == "fetch": # Consume items for fetch quests
-                self.player.remove_item(active_quest_data["item_to_fetch_key"], active_quest_data["item_fetch_count"])
-
-            reward_money = quest_def.get("reward_money", 0)
-            if reward_money > 0:
-                self.player.economic.money += reward_money
-                self.add_message_to_chat_log(f"You received {reward_money} money.")
-
-            # Grant Fame for completing a quest
-            self.player.social.fame += 10
-            self.add_message_to_chat_log("Your fame has increased by 10.")
-
-            reward_items = quest_def.get("reward_items", {})
-            for item_key, qty in reward_items.items():
-                self.player.add_item(item_key, qty)
-                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                self.add_message_to_chat_log(f"You received {qty}x {item_name}.")
-
-            log_completion_msg = quest_def.get("completion_message_log", f"Quest '{active_quest_data['title']}' completed.")
-            self.add_message_to_chat_log(log_completion_msg)
-
-            del self.player.knowledge.active_quests[quest_id]
-            self.player.knowledge.completed_quests.append(quest_id)
-
-            if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
-                # Add a follow-up generic line from NPC after quest completion.
-                self.chat_ui_history.append((quest_giver_npc.name, "Anything else I can help you with today?"))
-                if len(self.chat_ui_history) > self.chat_ui_max_history:
-                    self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
-                self.chat_ui_scroll_offset = 0

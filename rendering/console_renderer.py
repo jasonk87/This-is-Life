@@ -316,6 +316,17 @@ def draw_info_menu(console, world):
         console.print(x=x + 3, y=inv_y, string=f"- {item_name}: {quantity}")
         inv_y += 1
 
+    inv_y += 2
+    console.print(x=x + 2, y=inv_y, string="Active Quests:", fg=(255, 255, 0))
+    inv_y += 1
+    if not world.player.knowledge.active_quests:
+        console.print(x=x + 3, y=inv_y, string="- None", fg=(128, 128, 128))
+    else:
+        for quest_id, quest_data in world.player.knowledge.active_quests.items():
+            console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
+            inv_y += 1
+
+
 def draw_knowledge_menu(console, world):
     """Draws the player's knowledge menu (known books, etc.)."""
     menu_width = 60

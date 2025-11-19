@@ -774,5 +774,125 @@ class TestPlayerFarming(unittest.TestCase):
         self.assertTrue(player.has_item("wheat"))
 
 
+class TestQuestSystem(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        # Default mock for NPC generation
+        self.mock_npc_data = {
+            "name": "Quest Giver", "personality": "desperate", "dialogue": ["Help me!"],
+            "wealth_level": "poor", "combat_behavior": "cowardly", "base_attack_name": "pleading"
+        }
+        self.mock_call_ollama.return_value = json.dumps(self.mock_npc_data)
+        self.world = World(seed=101)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_dynamic_fetch_quest_lifecycle(self):
+        from entities.base import NPC
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        # 1. Setup: Create a needy NPC
+        npc = NPC(x=self.world.player.x + 2, y=self.world.player.y, name="Hungry Hal", player_id=self.world.player.id)
+        npc.physical.hunger = 95
+        self.world.village_npcs.append(npc)
+        initial_relationship = npc.social.relationships.get(self.world.player.id, 50)
+
+        # 2. Quest Generation
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        with patch('random.random', return_value=0.05): # Ensure quest generation check passes
+            self.world._update_npc_schedules()
+
+        self.assertTrue(hasattr(npc, 'active_quest') and npc.active_quest is not None, "NPC should have generated a quest.")
+        self.assertEqual(npc.active_quest.type, "fetch")
+
+        quest_item = npc.active_quest.item_key
+        quest_item_count = npc.active_quest.required_count
+        quest_id = npc.active_quest.id
+
+        # 3. Quest Offer & Acceptance
+        # Mock dialogue responses
+        def dialogue_side_effect(prompt):
+            if "conversation_greeting" in prompt:
+                return f"Oh, hello! I'm so hungry..."
+            elif "conversation_continue" in prompt:
+                # Mock a response for when player accepts
+                return json.dumps({"response": "Thank you, thank you! Please hurry!", "goal": "continue_conversation"})
+            return json.dumps(self.mock_npc_data)
+        self.mock_call_ollama.side_effect = dialogue_side_effect
+
+        self.world.start_npc_dialogue(npc)
+        # The offer text is hardcoded, so it should be in the history
+        self.assertTrue(any("desperately need" in text for _, text in self.world.chat_ui_history))
+
+        self.world.continue_npc_dialogue(npc, "I will accept your quest")
+
+        # 4. Quest Tracking
+        self.assertIn(quest_id, self.world.player.knowledge.active_quests)
+        self.assertIsNone(npc.active_quest, "NPC's active quest should be cleared after player accepts it.")
+        active_quest_data = self.world.player.knowledge.active_quests[quest_id]
+        self.assertEqual(active_quest_data["item_to_fetch_key"], quest_item)
+
+        # 5. Quest Completion
+        initial_money = self.world.player.economic.money
+        self.world.player.add_item(quest_item, quest_item_count)
+        self.assertTrue(self.world.player.has_item(quest_item, quest_item_count))
+
+        # Re-initiate dialogue to turn in the quest
+        self.world.start_npc_dialogue(npc)
+        self.world.continue_npc_dialogue(npc, "I have what you need, complete quest")
+
+        # 6. Verification
+        self.assertFalse(self.world.player.has_item(quest_item, quest_item_count), "Quest items should be removed from player inventory.")
+        self.assertGreater(self.world.player.economic.money, initial_money, "Player should have received money.")
+        self.assertEqual(npc.physical.hunger, 0, "NPC's hunger should be satisfied.")
+        self.assertGreater(npc.social.relationships.get(self.world.player.id, 50), initial_relationship, "NPC relationship with player should improve.")
+        self.assertNotIn(quest_id, self.world.player.knowledge.active_quests, "Quest should be removed from active quests.")
+        self.assertIn(quest_id, self.world.player.knowledge.completed_quests, "Quest should be in completed quests.")
+
+    def test_static_fetch_quest_completion_and_rewards(self):
+        from entities.base import NPC
+        from data.quests import QUEST_DEFINITIONS
+
+        # 1. Setup
+        quest_id = "fetch_herbs_01"
+        quest_def = QUEST_DEFINITIONS[quest_id]
+        npc = NPC(x=self.world.player.x + 1, y=self.world.player.y, name="Healer", player_id=self.world.player.id)
+        npc.economic.profession = "Healer" # Matches quest giver role
+        self.world.village_npcs.append(npc)
+
+        # Manually add the quest to the player's active quests
+        self.world.player.knowledge.active_quests[quest_id] = {
+            "title": quest_def["title"], "description": quest_def["description"], "type": "fetch",
+            "quest_giver_id": npc.id, "item_to_fetch_key": quest_def["item_to_fetch_key"],
+            "item_fetch_count": quest_def["item_fetch_count"], "progress": 0,
+            "quest_giver_id_or_role": "Healer"
+        }
+
+        # Give player the required items
+        self.world.player.add_item(quest_def["item_to_fetch_key"], quest_def["item_fetch_count"])
+        initial_fame = self.world.player.social.fame
+        initial_money = self.world.player.economic.money
+
+        # 2. Execution
+        self.world.complete_quest(quest_id, npc)
+
+        # 3. Verification
+        # Check rewards
+        self.assertGreater(self.world.player.social.fame, initial_fame, "Fame should be awarded for static quests.")
+        expected_money = initial_money + quest_def["reward_money"]
+        self.assertEqual(self.world.player.economic.money, expected_money, "Money reward should match quest definition.")
+        for item_key, quantity in quest_def["reward_items"].items():
+            self.assertTrue(self.world.player.has_item(item_key, quantity), f"Player should have received {quantity}x {item_key}.")
+
+        # Check quest state
+        self.assertNotIn(quest_id, self.world.player.knowledge.active_quests)
+        self.assertIn(quest_id, self.world.player.knowledge.completed_quests)
+
+        # Check that quest items were consumed
+        self.assertFalse(self.world.player.has_item(quest_def["item_to_fetch_key"]), "Quest items should have been consumed.")
+
+
 if __name__ == '__main__':
     unittest.main()

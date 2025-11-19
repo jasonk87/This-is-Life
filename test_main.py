@@ -774,5 +774,58 @@ class TestPlayerFarming(unittest.TestCase):
         self.assertTrue(player.has_item("wheat"))
 
 
+class TestNPCRendering(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+
+        self.world = World(seed=1)
+        # Mock tcod console
+        self.mock_console = unittest.mock.Mock()
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_npc_color_based_on_attitude(self):
+        from entities.base import NPC
+        import rendering.console_renderer
+
+        # 1. Create NPCs with different attitudes and unique characters for testing
+        friendly_npc = NPC(x=self.world.player.x + 2, y=self.world.player.y, name="Friendly", attitude_to_player="friendly", player_id=self.world.player.id)
+        friendly_npc.char = ord('F')
+        hostile_npc = NPC(x=self.world.player.x - 2, y=self.world.player.y, name="Hostile", attitude_to_player="hostile", player_id=self.world.player.id)
+        hostile_npc.char = ord('H')
+        self.world.village_npcs.extend([friendly_npc, hostile_npc])
+
+        # Ensure they are visible
+        self.world._update_player_fov()
+
+        # 2. Render the world
+        camera_x = self.world.player.x - config.MAP_WIDTH // 2
+        camera_y = self.world.player.y - config.MAP_HEIGHT // 2
+        rendering.console_renderer.draw(self.mock_console, self.world, camera_x, camera_y)
+
+        # 3. Assert the correct colors were used in console.print calls
+        friendly_call_found = False
+        hostile_call_found = False
+
+        for call in self.mock_console.print.call_args_list:
+            args, kwargs = call
+            # Check for friendly NPC render call
+            if 'string' in kwargs and kwargs['string'] == chr(friendly_npc.char):
+                self.assertEqual(kwargs.get('fg'), (0, 255, 0))
+                friendly_call_found = True
+            # Check for hostile NPC render call
+            if 'string' in kwargs and kwargs['string'] == chr(hostile_npc.char):
+                self.assertEqual(kwargs.get('fg'), (255, 0, 0))
+                hostile_call_found = True
+
+        self.assertTrue(friendly_call_found, "Friendly NPC was not rendered with the correct color.")
+        self.assertTrue(hostile_call_found, "Hostile NPC was not rendered with the correct color.")
+
+
 if __name__ == '__main__':
     unittest.main()

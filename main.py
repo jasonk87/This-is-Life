@@ -9,6 +9,7 @@ import tcod.tileset
 from engine import World
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
 from data.items import ITEM_DEFINITIONS
+from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
 
 def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler):
@@ -29,6 +30,10 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
             key for key, definition in ITEM_DEFINITIONS.items() if "crafting_recipe" in definition
         ]
         world.crafting_menu_context["all_recipes"].sort(key=lambda k: ITEM_DEFINITIONS[k].get("name", k))
+    elif event.sym == tcod.event.KeySym.B:
+        world.game_state = "BUILDING_MENU"
+        world.building_menu_context["all_recipes"] = list(CONSTRUCTION_RECIPES.keys())
+        world.building_menu_context["all_recipes"].sort(key=lambda k: CONSTRUCTION_RECIPES[k].get("name", k))
     elif event.sym == tcod.event.KeySym.E:
         target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
         open_interaction_menu(world, target_x, target_y)
@@ -61,6 +66,23 @@ def handle_crafting_input(event: tcod.event.KeyDown, world: World):
     elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx["selected_recipe_index"] < len(ctx["all_recipes"]):
         selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
         world.craft_item(selected_key)
+
+def handle_building_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the 'BUILDING_MENU' state."""
+    ctx = world.building_menu_context
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.B):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP and ctx["all_recipes"]:
+        ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] - 1) % len(ctx["all_recipes"])
+    elif event.sym == tcod.event.KeySym.DOWN and ctx["all_recipes"]:
+        ctx["selected_recipe_index"] = (ctx["selected_recipe_index"] + 1) % len(ctx["all_recipes"])
+    elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx["selected_recipe_index"] < len(ctx["all_recipes"]):
+        selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
+        # Build at the location in front of the player
+        target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
+        world.player_attempt_build(selected_key, target_x, target_y)
+        # Optionally close menu after build? Or keep open for multiple builds?
+        # Let's keep it open for now, maybe they want to build a wall.
 
 def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler):
     """Handles input when the interaction menu is active."""
@@ -254,6 +276,8 @@ def handle_events(world, context):
                 handle_interaction_input(event, world, context)
             elif world.game_state == "CRAFTING_MENU":
                 handle_crafting_input(event, world)
+            elif world.game_state == "BUILDING_MENU":
+                handle_building_input(event, world)
             elif world.game_state == "DIALOGUE":
                 handle_dialogue_input(event, world, context)
             elif world.game_state == "PLAYING":

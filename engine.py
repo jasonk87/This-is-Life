@@ -47,6 +47,7 @@ from data.decorations import DECORATION_ITEM_DEFINITIONS as ALL_DECORATION_DEFS
 from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
 from data.environment import WEATHER_DEFINITIONS
+from data.construction import CONSTRUCTION_RECIPES
 
 import json
 import uuid
@@ -510,6 +511,13 @@ class World:
 
         # Crafting Menu State
         self.crafting_menu_context = {
+            "selected_recipe_index": 0,
+            "scroll_offset": 0,
+            "all_recipes": [] # This will be populated when the menu is opened
+        }
+
+        # Building Menu State
+        self.building_menu_context = {
             "selected_recipe_index": 0,
             "scroll_offset": 0,
             "all_recipes": [] # This will be populated when the menu is opened
@@ -5823,7 +5831,8 @@ class World:
                                 else: # 30% are Pear
                                     tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
                                 # Update transparency map for the new tree
-                                self.transparency_map[tree_x_world, tree_y_world] = False # Trees block FOV
+                                if 0 <= tree_y_world < WORLD_HEIGHT and 0 <= tree_x_world < WORLD_WIDTH:
+                                    self.transparency_map[tree_y_world, tree_x_world] = False # Trees block FOV
                             elif random.random() < 0.01: # 1% chance for a sapling
                                 sapling_def = TILE_DEFINITIONS["sapling"]
                                 tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
@@ -7464,3 +7473,60 @@ class World:
 
         else:
             self.add_message_to_chat_log("You failed to harvest the crop.")
+
+    def player_attempt_build(self, recipe_key: str, x: int, y: int):
+        """Handles the player's attempt to build a structure or furniture."""
+        if recipe_key not in CONSTRUCTION_RECIPES:
+            self.add_message_to_chat_log("Unknown construction recipe.")
+            return
+
+        recipe = CONSTRUCTION_RECIPES[recipe_key]
+        materials = recipe.get("materials", {})
+
+        # Check resources
+        for item_key, count in materials.items():
+            if not self.player.has_item(item_key, count):
+                item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                self.add_message_to_chat_log(f"You need {count} {item_name} to build this.")
+                return
+
+        # Validate location
+        target_tile = self.get_tile_at(x, y)
+        if not target_tile:
+            return # Off map
+
+        # Basic checks: prevent building on water or deep water unless it's a bridge (future)
+        if target_tile.name in ["Water", "Deep Water"]:
+             self.add_message_to_chat_log("You cannot build on water.")
+             return
+
+        # Check collision with entities (Player, NPCs, Animals)
+        # We don't want to build a wall on top of someone
+        for entity in [self.player] + self.npcs + self.village_npcs:
+            if entity.x == x and entity.y == y:
+                 self.add_message_to_chat_log("You cannot build here; someone is in the way.")
+                 return
+
+        # Prevent building on top of existing structures or blocking items if not allowed
+        # For tiles (walls/floors), we generally replace the existing tile.
+        # For decorations (furniture), we check if passability is required or if it overlaps.
+
+        build_source = recipe.get("source", "decoration")
+        tile_def_key = recipe.get("tile_def_key")
+
+        if build_source == "tile":
+            new_tile_def = TILE_DEFINITIONS.get(tile_def_key)
+        else:
+            new_tile_def = DECORATION_ITEM_DEFINITIONS.get(tile_def_key)
+
+        if not new_tile_def:
+            self.add_message_to_chat_log("Error: Construction definition not found.")
+            return
+
+        # Consume resources
+        for item_key, count in materials.items():
+            self.player.remove_item(item_key, count)
+
+        # Perform the build
+        self._change_map_tile((x, y), new_tile_def)
+        self.add_message_to_chat_log(f"You built a {recipe['name']}.")

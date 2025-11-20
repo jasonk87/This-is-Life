@@ -7,6 +7,7 @@ from config import (
     COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT
 )
 from data.tiles import TILE_DEFINITIONS
+from data.construction import CONSTRUCTION_RECIPES
 from entities.animal import Animal
 from engine import Player
 
@@ -166,6 +167,9 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "CRAFTING_MENU":
         draw_crafting_menu(console, world)
 
+    if world.game_state == "BUILDING_MENU":
+        draw_building_menu(console, world)
+
     if world.game_state == "INFO_MENU":
         draw_info_menu(console, world)
 
@@ -278,6 +282,85 @@ def draw_crafting_menu(console, world):
             is_near = world._is_player_near_workstation(req_station)
             color = (255, 255, 255) if is_near else (255, 0, 0)
             console.print(x=details_x + 2, y=detail_y, string=f"Needs: {req_station}", fg=color)
+
+def draw_building_menu(console, world):
+    """Draws the building menu UI."""
+    menu_width = 50
+    x = (MAP_WIDTH - menu_width) // 2
+    all_recipes = world.building_menu_context.get("all_recipes", [])
+    num_recipes = len(all_recipes)
+    menu_height = min(30, num_recipes + 4)
+    y = (SCREEN_HEIGHT - menu_height) // 2
+
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Construction", clear=True)
+
+    if not all_recipes:
+        console.print_box(x=x+1, y=y+1, width=menu_width-2, height=menu_height-2,
+                          string="No construction options.", fg=(128, 128, 128))
+        return
+
+    selected_index = world.building_menu_context.get("selected_recipe_index", 0)
+    scroll_offset = world.building_menu_context.get("scroll_offset", 0)
+    display_height = menu_height - 2
+
+    if selected_index < scroll_offset:
+        scroll_offset = selected_index
+    elif selected_index >= scroll_offset + display_height:
+        scroll_offset = selected_index - display_height + 1
+    world.building_menu_context["scroll_offset"] = scroll_offset
+
+    for i in range(display_height):
+        list_index = scroll_offset + i
+        if list_index < num_recipes:
+            recipe_key = all_recipes[list_index]
+            recipe = CONSTRUCTION_RECIPES.get(recipe_key, {})
+            name = recipe.get("name", recipe_key)
+
+            # Check if player has materials
+            can_build = True
+            for mat_key, mat_qty in recipe.get("materials", {}).items():
+                if not world.player.has_item(mat_key, mat_qty):
+                    can_build = False
+                    break
+
+            color = (255, 255, 255) if can_build else (128, 128, 128)
+            if list_index == selected_index:
+                color = (0, 255, 255)
+            console.print(x=x + 2, y=y + 1 + i, string=name, fg=color)
+
+    # Display details
+    if 0 <= selected_index < num_recipes:
+        details_x = x + menu_width
+        details_width = 40
+        details_height = 20
+        console.draw_frame(x=details_x, y=y, width=details_width, height=details_height, title="Build Details", clear=True)
+
+        selected_key = all_recipes[selected_index]
+        recipe = CONSTRUCTION_RECIPES.get(selected_key, {})
+
+        detail_y = y + 2
+        console.print(x=details_x + 2, y=detail_y, string=f"Materials:", fg=(255, 255, 0))
+        detail_y += 1
+        for mat_key, mat_qty in recipe.get("materials", {}).items():
+            item_def = TILE_DEFINITIONS.get(mat_key, {}) # Assuming item definitions are accessible via this or separate import if needed.
+            # Wait, TILE_DEFINITIONS contains tiles. ITEM_DEFINITIONS is in data/items.py but not imported here except TILE_DEFINITIONS?
+            # render_console imports TILE_DEFINITIONS. engine imports ITEM_DEFINITIONS.
+            # Let's trust that main passes world which has access, or just print key if def missing.
+            # Actually, render_console doesn't import ITEM_DEFINITIONS. We should probably import it or just use keys/world.
+            # Let's just use key for now or try to use TILE_DEFINITIONS if it happens to be there (some items are tiles)
+            # Better: Import ITEM_DEFINITIONS in this file.
+
+            # For now, let's just print the key formatted nicely.
+            mat_name = mat_key.replace("_", " ").title()
+            has_enough = world.player.has_item(mat_key, mat_qty)
+            color = (255, 255, 255) if has_enough else (255, 0, 0)
+            console.print(x=details_x + 3, y=detail_y, string=f"- {mat_name}: {mat_qty}", fg=color)
+            detail_y += 1
+
+        description = recipe.get("description", "")
+        if description:
+            detail_y += 1
+            console.print_box(x=details_x + 2, y=detail_y, width=details_width-4, height=5, string=description, fg=(200, 200, 200))
 
 def draw_info_menu(console, world):
     """Draws the player information menu (stats and inventory)."""

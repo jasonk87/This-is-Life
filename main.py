@@ -6,11 +6,14 @@ import tcod
 import tcod.console
 import tcod.event
 import tcod.tileset
+import os
+import sys
 from engine import World
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
+from save_manager import save_game, load_game
 
 def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler):
     """Handles input when the player is in the 'PLAYING' state."""
@@ -53,6 +56,10 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
             start_dialogue(world, closest_npc, context_handler)
         else:
             world.add_message_to_chat_log("There's no one nearby to talk to.")
+    elif event.sym == tcod.event.KeySym.ESCAPE:
+        # Show in-game menu or save prompt
+        save_game(world)
+        world.add_message_to_chat_log("Game Saved.")
 
 def handle_crafting_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'CRAFTING_MENU' state."""
@@ -209,8 +216,8 @@ def main():
     parser.add_argument("--ticks", type=int, help="Number of ticks to run in headless mode.")
     args = parser.parse_args()
 
-    world = World()
     if args.headless:
+        world = World()
         run_headless(world, args.ticks)
         return
 
@@ -221,22 +228,126 @@ def main():
         return
 
     console = tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="F")
+
+    # Main Menu State
+    main_menu_loop(console, tileset)
+
+def main_menu_loop(console, tileset):
+    """Displays the main menu and handles selection."""
     with tcod.context.new(columns=console.width, rows=console.height, tileset=tileset,
                           title="This is Life", vsync=True) as context:
+        selected_index = 0
+        options = ["New Game", "Load Game", "Exit"]
+
         while True:
-            world.update()
+            console.clear()
 
-            if world.needs_text_input:
-                context.start_text_input()
-                world.needs_text_input = False
+            # Draw Menu
+            title = "THIS IS LIFE"
+            console.print(console.width // 2, console.height // 3, title, alignment=tcod.CENTER, fg=(255, 255, 0))
 
-            if world.game_state == "PLAYER_DEAD":
-                render_game_over(console, context)
-                break
-            camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
-            draw(console, world, camera_x, camera_y)
+            for i, option in enumerate(options):
+                color = (255, 255, 255) if i == selected_index else (100, 100, 100)
+                console.print(console.width // 2, console.height // 2 + i * 2, option, alignment=tcod.CENTER, fg=color)
+
             context.present(console)
-            handle_events(world, context)
+
+            for event in tcod.event.wait():
+                if isinstance(event, tcod.event.Quit):
+                    raise SystemExit()
+                elif isinstance(event, tcod.event.KeyDown):
+                    if event.sym == tcod.event.KeySym.UP:
+                        selected_index = (selected_index - 1) % len(options)
+                    elif event.sym == tcod.event.KeySym.DOWN:
+                        selected_index = (selected_index + 1) % len(options)
+                    elif event.sym == tcod.event.KeySym.RETURN:
+                        if options[selected_index] == "New Game":
+                            start_game(context, console, None)
+                        elif options[selected_index] == "Load Game":
+                            loaded_world = load_game_menu(console, context)
+                            if loaded_world:
+                                start_game(context, console, loaded_world)
+                        elif options[selected_index] == "Exit":
+                            raise SystemExit()
+
+def load_game_menu(console, context):
+    """Displays available save files."""
+    if not os.path.exists("saves"):
+        return None
+
+    saves = [f for f in os.listdir("saves") if f.endswith(".sav")]
+    if not saves:
+        return None
+
+    selected_index = 0
+    while True:
+        console.clear()
+        console.print(console.width // 2, 5, "LOAD GAME", alignment=tcod.CENTER)
+
+        for i, save in enumerate(saves):
+            color = (255, 255, 255) if i == selected_index else (100, 100, 100)
+            console.print(console.width // 2, 10 + i, save, alignment=tcod.CENTER, fg=color)
+
+        console.print(console.width // 2, console.height - 5, "Press ESC to cancel", alignment=tcod.CENTER)
+
+        context.present(console)
+
+        for event in tcod.event.wait():
+            if isinstance(event, tcod.event.KeyDown):
+                if event.sym == tcod.event.KeySym.UP:
+                    selected_index = (selected_index - 1) % len(saves)
+                elif event.sym == tcod.event.KeySym.DOWN:
+                    selected_index = (selected_index + 1) % len(saves)
+                elif event.sym == tcod.event.KeySym.RETURN:
+                    return load_game(saves[selected_index])
+                elif event.sym == tcod.event.KeySym.ESCAPE:
+                    return None
+
+def start_game(context, console, world_state=None):
+    """Starts the actual gameplay loop."""
+    if world_state:
+        world = world_state
+        # Check if the player in the loaded world is dead
+        if world.player.combat.hp <= 0: # Assuming HP <= 0 means dead
+            console.clear()
+            console.print(console.width // 2, console.height // 2, "Previous character is dead.", alignment=tcod.CENTER)
+            console.print(console.width // 2, console.height // 2 + 2, "Starting as a new character in this world...", alignment=tcod.CENTER)
+            context.present(console)
+            tcod.event.wait(1.0) # Pause briefly
+
+            # Create a new player
+            from engine import Player
+            # Find a safe starting spot (e.g., a random village or the original start logic)
+            # Re-using _find_starting_position logic on the existing world
+            world.player = Player(0, 0) # Temp coords
+            world._find_starting_position() # Re-calculate safe start
+            world.player.world_ref = world # Re-link world reference
+            world.game_state = "PLAYING" # Reset state
+
+        world.ensure_player_surroundings_generated() # Ensure visuals are ready after load
+    else:
+        # Show loading message
+        console.clear()
+        console.print(console.width // 2, console.height // 2, "Generating World...", alignment=tcod.CENTER)
+        context.present(console)
+        world = World()
+
+    while True:
+        world.update()
+
+        if world.needs_text_input:
+            context.start_text_input()
+            world.needs_text_input = False
+
+        if world.game_state == "PLAYER_DEAD":
+            render_game_over(console, context)
+            break # Break to return to main menu? Or just exit?
+                  # Currently breaks the loop, which falls out of start_game back to main_menu_loop
+
+        camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
+        draw(console, world, camera_x, camera_y)
+        context.present(console)
+        handle_events(world, context)
 
 def run_headless(world, num_ticks):
     """Runs the game for a fixed number of ticks in headless mode."""
@@ -252,6 +363,7 @@ def render_game_over(console, context):
     console.clear()
     console.print_box(x=console.width // 2 - 10, y=console.height // 2 - 2,
                       width=20, height=4, string="GAME OVER", alignment=tcod.CENTER)
+    console.print(console.width // 2, console.height // 2 + 3, "Press any key...", alignment=tcod.CENTER)
     context.present(console)
     for event in tcod.event.wait():
         context.convert_event(event)

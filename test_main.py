@@ -500,11 +500,16 @@ class TestFearSystem(unittest.TestCase):
         from tile_types import Tile
         self.world.get_tile_at(x, y) # Ensure chunk generation
         chunk_x, chunk_y = x // config.CHUNK_SIZE, y // config.CHUNK_SIZE
+
+        # Ensure is_terrain_generated is true if we manually touch tiles
+        if not self.world.chunks[chunk_y][chunk_x].is_terrain_generated:
+             self.world._generate_chunk_detail(self.world.chunks[chunk_y][chunk_x])
+
         local_x, local_y = x % config.CHUNK_SIZE, y % config.CHUNK_SIZE
         tile = Tile(char=tile_def['char'], color=tile_def['color'], passable=tile_def['passable'], name=tile_def['name'], properties=tile_def.get('properties', {}).copy())
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = tile
         # Also update the transparency map for FOV calculations
-        self.world.transparency_map[x, y] = not tile.blocks_fov
+        self.world.transparency_map[y, x] = not tile.blocks_fov
 
     def test_civilian_flees_from_wolf_pack(self):
         from entities.base import NPC
@@ -643,6 +648,9 @@ class TestFearSystem(unittest.TestCase):
         from config import NPC_SCHEDULE_UPDATE_INTERVAL
 
         # 1. Manual Setup
+        # Clear existing NPCs to prevent interference from procedurally generated animals
+        self.world.npcs.clear()
+
         center_x, center_y = 50, 50
         civilian = NPC(x=center_x, y=center_y, name="Civilian")
         civilian.profession = "Farmer"
@@ -893,6 +901,42 @@ class TestQuestSystem(unittest.TestCase):
         # Check that quest items were consumed
         self.assertFalse(self.world.player.has_item(quest_def["item_to_fetch_key"]), "Quest items should have been consumed.")
 
+class TestSaveLoadSystem(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_ollama')
+        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
+        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.world = World(seed=999)
+        self.test_save_file = "test_save.sav"
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+        import os
+        if os.path.exists(f"saves/{self.test_save_file}"):
+            os.remove(f"saves/{self.test_save_file}")
+        if os.path.exists("saves") and not os.listdir("saves"):
+            os.rmdir("saves")
+
+    def test_save_and_load(self):
+        from save_manager import save_game, load_game
+
+        # Modify world state
+        self.world.player.economic.money = 9999
+        self.world.game_time = 12345
+
+        # Save
+        success = save_game(self.world, self.test_save_file)
+        self.assertTrue(success, "Game should save successfully.")
+
+        # Load
+        loaded_world = load_game(self.test_save_file)
+        self.assertIsNotNone(loaded_world, "Game should load successfully.")
+
+        # Verify state
+        self.assertEqual(loaded_world.player.economic.money, 9999)
+        self.assertEqual(loaded_world.game_time, 12345)
+        self.assertEqual(len(loaded_world.chunks), len(self.world.chunks))
 
 if __name__ == '__main__':
     unittest.main()

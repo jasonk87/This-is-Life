@@ -7,6 +7,8 @@ from tcod import libtcodpy
 import tcod.noise
 import requests
 import time
+import pickle
+import os
 from entities.base import NPC, DireWolf # Added DireWolf
 from entities.animal import Animal
 from data.animals import ANIMAL_DEFINITIONS
@@ -198,7 +200,8 @@ class Chunk:
         self.biome = biome
         self.poi_type = poi_type
         self.tiles = None
-        self.is_generated = False
+        self.is_generated = False # Tracks if macro data (villages/NPCs) is generated
+        self.is_terrain_generated = False # Tracks if tiles/visuals are generated
         self.village = None # To store Village object if POI is a village
         self.ruin = None # To store Ruin object if POI is a ruin
 
@@ -563,21 +566,17 @@ class World:
         self.global_events: list[Event] = []
         self.books: list[Book] = []
 
-        # Pre-generate all chunks to avoid lazy-loading issues in tests
+        # Generate macro structure for all chunks (villages, NPCs) but defer tile generation
         for y in range(self.chunk_height):
             for x in range(self.chunk_width):
-                self._generate_chunk_detail(self.chunks[y][x], x, y)
+                self._generate_chunk_macro(self.chunks[y][x], x, y)
 
         self._spawn_traveling_merchants()
         self._find_starting_position()
 
-        # Build transparency map - this is expensive on init as it forces all chunks to generate.
-        # Consider dynamic updates or pre-generation if performance becomes an issue.
-        for y_map in range(WORLD_HEIGHT):
-            for x_map in range(WORLD_WIDTH):
-                tile = self.get_tile_at(x_map, y_map) # Forces chunk generation
-                if tile and tile.blocks_fov:
-                    self.transparency_map[y_map, x_map] = False
+        # Transparency map is now updated lazily as chunks are generated/visited
+        # We might want to ensure the player's starting area is generated immediately
+        self.ensure_player_surroundings_generated()
 
         self._update_light_level_and_fov() # Initialize based on game time 0
         self._update_player_fov() # Initial FOV calculation for player
@@ -1640,6 +1639,7 @@ class World:
                         threat = next((n for n in self.npcs if n.id == threat_id), None)
                         if not threat:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
+
 
                         if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.x, threat.y]:
                             threats_still_visible = True
@@ -5942,87 +5942,94 @@ class World:
 
         print("Warning: No passable starting tile found within the safe margin. Player may be stuck.")
 
-    def _generate_chunk_detail(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
-        """Generates the detailed tiles for a chunk based on its biome and POI."""
+    def _generate_chunk_macro(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+        """Generates the macro structure (village, buildings, NPCs) for a chunk."""
         if chunk.is_generated: return
 
         if chunk.poi_type == "village":
             chunk.village = Village()
             chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
-            
-            tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
+            self._generate_village_structure(chunk, chunk_coord_x, chunk_coord_y)
         elif chunk.poi_type == "ruin":
             chunk.ruin = Ruin()
             chunk.ruin.lore = "The origins of this place are lost to time."
+            # Ruins are simple, we can just init the object and generate details later.
 
-            tiles = self._generate_ruin_layout(chunk, chunk_coord_x, chunk_coord_y)
-        else:
-            # Generate the base biome tiles
-            biome_def = TILE_DEFINITIONS[chunk.biome]
-            tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
-
-            # If the biome is plains, add some detail
-            if chunk.biome == "plains":
-                for y_local in range(CHUNK_SIZE):
-                    for x_local in range(CHUNK_SIZE):
-                        # Add patches of tall grass, flowers, and then attempt to place trees
-                        # Ensure trees don't overwrite existing non-plains features if any were placed by other logic (though unlikely here)
-                        if tiles[y_local][x_local].name == "Plains": # Only try to place on base plains tiles
-                            if random.random() < 0.03: # 3% chance for any tree
-                                tree_type_roll = random.random()
-                                tree_x_world = chunk_coord_x * CHUNK_SIZE + x_local
-                                tree_y_world = chunk_coord_y * CHUNK_SIZE + y_local
-                                if tree_type_roll < 0.4: # 40% of that 3% are Oaks
-                                    tiles[y_local][x_local] = OakTree(tree_x_world, tree_y_world)
-                                elif tree_type_roll < 0.7: # 30% are Apple
-                                    tiles[y_local][x_local] = AppleTree(tree_x_world, tree_y_world)
-                                else: # 30% are Pear
-                                    tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
-                                # Update transparency map for the new tree
-                                if 0 <= tree_y_world < WORLD_HEIGHT and 0 <= tree_x_world < WORLD_WIDTH:
-                                    self.transparency_map[tree_y_world, tree_x_world] = False # Trees block FOV
-                            elif random.random() < 0.01: # 1% chance for a sapling
-                                sapling_def = TILE_DEFINITIONS["sapling"]
-                                tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
-                            elif random.random() < 0.15: # 15% chance for tall grass (if not a tree)
-                                tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
-                            elif random.random() < 0.01: # 1% chance for a flower (if not a tree or grass)
-                                tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
-                            # Animal Spawning
-                            for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
-                                if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
-                                    animal_x_world = chunk_coord_x * CHUNK_SIZE + x_local
-                                    animal_y_world = chunk_coord_y * CHUNK_SIZE + y_local
-                                    if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
-                                        new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
-                                        new_animal.char = ord(animal_def["char"])
-                                        new_animal.color = animal_def["color"]
-                                        new_animal.max_hp = animal_def["max_hp"]
-                                        new_animal.hp = new_animal.max_hp
-                                        new_animal.behavior = animal_def.get("behavior")
-                                        new_animal.is_hostile_to_player = animal_def["hostile"]
-                                        new_animal.base_attack_name = animal_def["base_attack_name"]
-                                        new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
-                                        new_animal.combat_behavior = animal_def["combat_behavior"]
-                                        new_animal.gender = random.choice(["male", "female"])
-                                        if "prey" in animal_def:
-                                            new_animal.speed = 2
-                                        self.npcs.append(new_animal)
-        chunk.tiles = tiles
         chunk.is_generated = True
 
-    def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
-        tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+    def _generate_chunk_detail(self, chunk: Chunk, chunk_x: int, chunk_y: int):
+        """Generates the detailed tiles for a chunk based on its macro structure."""
+        if chunk.is_terrain_generated: return
 
-        # Add a pond to the village
-        if random.random() < 0.5:
-            pond_center_x = random.randint(5, CHUNK_SIZE - 6)
-            pond_center_y = random.randint(5, CHUNK_SIZE - 6)
-            pond_radius = random.randint(3, 5)
-            for y in range(CHUNK_SIZE):
-                for x in range(CHUNK_SIZE):
-                    if (x - pond_center_x)**2 + (y - pond_center_y)**2 < pond_radius**2:
-                        tiles[y][x] = Tile(TILE_DEFINITIONS["water"]["char"], TILE_DEFINITIONS["water"]["color"], TILE_DEFINITIONS["water"]["passable"], TILE_DEFINITIONS["water"]["name"])
+        # Generate base terrain
+        biome_def = TILE_DEFINITIONS[chunk.biome]
+        tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        chunk.tiles = tiles # Assign initially
+
+        # Add biome-specific details
+        self._render_biome_details(chunk, chunk_x, chunk_y)
+
+        # Render structures
+        if chunk.village:
+            self._render_village_tiles(chunk)
+        elif chunk.ruin:
+            self._generate_ruin_layout(chunk) # Renders directly to tiles
+
+        chunk.is_terrain_generated = True
+
+    def _render_biome_details(self, chunk, chunk_x, chunk_y):
+        """Renders trees, grass, and animals for a chunk."""
+        tiles = chunk.tiles
+
+        if chunk.biome == "plains":
+            for y_local in range(CHUNK_SIZE):
+                for x_local in range(CHUNK_SIZE):
+                    if tiles[y_local][x_local].name == "Plains":
+                        if random.random() < 0.03:
+                            tree_type_roll = random.random()
+                            tree_x_world = chunk_x * CHUNK_SIZE + x_local
+                            tree_y_world = chunk_y * CHUNK_SIZE + y_local
+                            # Avoid overwriting buildings or roads (checked by name/passable later but buildings aren't drawn yet)
+                            # We render biome BEFORE buildings, so buildings will overwrite trees. This is fine.
+                            if tree_type_roll < 0.4:
+                                tiles[y_local][x_local] = OakTree(tree_x_world, tree_y_world)
+                            elif tree_type_roll < 0.7:
+                                tiles[y_local][x_local] = AppleTree(tree_x_world, tree_y_world)
+                            else:
+                                tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
+                            if 0 <= tree_y_world < WORLD_HEIGHT and 0 <= tree_x_world < WORLD_WIDTH:
+                                self.transparency_map[tree_y_world, tree_x_world] = False
+                        elif random.random() < 0.01:
+                            sapling_def = TILE_DEFINITIONS["sapling"]
+                            tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
+                        elif random.random() < 0.15:
+                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
+                        elif random.random() < 0.01:
+                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
+
+                        # Animal Spawning
+                        for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
+                            if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
+                                animal_x_world = chunk_x * CHUNK_SIZE + x_local
+                                animal_y_world = chunk_y * CHUNK_SIZE + y_local
+                                if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
+                                    new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
+                                    new_animal.char = ord(animal_def["char"])
+                                    new_animal.color = animal_def["color"]
+                                    new_animal.max_hp = animal_def["max_hp"]
+                                    new_animal.hp = new_animal.max_hp
+                                    new_animal.behavior = animal_def.get("behavior")
+                                    new_animal.is_hostile_to_player = animal_def["hostile"]
+                                    new_animal.base_attack_name = animal_def["base_attack_name"]
+                                    new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                    new_animal.combat_behavior = animal_def["combat_behavior"]
+                                    new_animal.gender = random.choice(["male", "female"])
+                                    if "prey" in animal_def:
+                                        new_animal.speed = 2
+                                    self.npcs.append(new_animal)
+
+    def _generate_village_structure(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+        """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""
 
         llm_prompt = LLM_PROMPTS["village_lore"].format(biome=chunk.biome)
         llm_response = self._call_ollama(llm_prompt)
@@ -6035,443 +6042,199 @@ class World:
         chunk_global_start_x = chunk_coord_x * CHUNK_SIZE
         chunk_global_start_y = chunk_coord_y * CHUNK_SIZE
 
-        # Generate a more structured road network
+        # Layout strategy:
+        # Use a temporary layout grid to manage collision during generation
+        layout_grid = [[0 for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)] # 0 = empty, 1 = occupied/road
+
         # Main road down the middle
         road_y = CHUNK_SIZE // 2
         for x in range(CHUNK_SIZE):
-            tiles[road_y][x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+            layout_grid[road_y][x] = 1
 
         # Cross road
         road_x = CHUNK_SIZE // 2
         for y in range(CHUNK_SIZE):
-            tiles[y][road_x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+            layout_grid[y][road_x] = 1
 
-        # Place well at the center intersection
-        well_local_x, well_local_y = road_x, road_y # These are local to chunk grid
-        tiles[well_local_y][well_local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
+        # Place well at center
+        global_well_x = chunk_global_start_x + road_x
+        global_well_y = chunk_global_start_y + road_y
+        chunk.village.interaction_points["well"] = [(global_well_x, global_well_y)]
 
-        # Store global coordinates of the well
-        global_well_x = chunk_global_start_x + well_local_x
-        global_well_y = chunk_global_start_y + well_local_y
-        if "well" not in chunk.village.interaction_points:
-            chunk.village.interaction_points["well"] = []
-        chunk.village.interaction_points["well"].append((global_well_x, global_well_y))
-        # self.add_message_to_chat_log(f"Village well registered at G({global_well_x},{global_well_y})")
+        # Helper to place building
+        def try_place_building(b_type, category, width, height, x_hint=None, y_hint=None, max_workers=2):
+            for attempt in range(20):
+                # Use hints if provided and valid, otherwise random
+                if x_hint is not None and attempt == 0 and 0 <= x_hint < CHUNK_SIZE - width:
+                    bx = x_hint
+                else:
+                    bx = random.randint(1, CHUNK_SIZE - width - 1)
 
+                if y_hint is not None and attempt == 0 and 0 <= y_hint < CHUNK_SIZE - height:
+                    by = y_hint
+                else:
+                    by = random.randint(1, CHUNK_SIZE - height - 1)
 
-        # Generate Capital Hall
-        capital_hall_w, capital_hall_h = 9, 7
-        capital_hall_x = road_x - capital_hall_w - 2
-        capital_hall_y = road_y - capital_hall_h // 2
-        capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h,
-                                building_type="capital_hall", category="civic",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        capital_hall.max_workers = 3 # Town official and helpers
-        chunk.village.add_building(capital_hall)
-        self.buildings_by_id[capital_hall.id] = capital_hall
-        self._draw_building(tiles, capital_hall, "capital_hall_wall")
-
-        # Generate Jail
-        jail_w, jail_h = 7, 5
-        jail_x = road_x + 2
-        jail_y = road_y - jail_h // 2
-        jail = Building(jail_x, jail_y, jail_w, jail_h,
-                        building_type="jail", category="civic",
-                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        jail.max_workers = 2 # Guards
-        chunk.village.add_building(jail)
-        self.buildings_by_id[jail.id] = jail
-        self._draw_building(tiles, jail, "jail_bars")
-
-        # Generate Sheriff's Office
-        sheriff_office_w, sheriff_office_h = 7, 5
-        sheriff_office_x = road_x + 2
-        sheriff_office_y = jail_y + jail_h + 2
-        sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h,
-                                  building_type="sheriff_office", category="civic_workplace",
-                                  global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        sheriff_office.max_workers = 2 # Sheriff and deputy
-        chunk.village.add_building(sheriff_office)
-        self.buildings_by_id[sheriff_office.id] = sheriff_office
-        self._draw_building(tiles, sheriff_office, "sheriff_office_wall")
-
-        # Generate General Store
-        store_w, store_h = 8, 6
-        store_x = road_x - store_w - 2 # To the left of the main road, below capital hall if space
-        store_y = capital_hall_y + capital_hall_h + 2
-        # Basic placement, ensure it's within bounds (0 to CHUNK_SIZE - size)
-        store_x = max(1, min(store_x, CHUNK_SIZE - store_w - 1))
-        store_y = max(1, min(store_y, CHUNK_SIZE - store_h - 1))
-
-        general_store = Building(store_x, store_y, store_w, store_h,
-                                 building_type="general_store", category="commercial_workplace", # Workplace for merchant
-                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        general_store.max_workers = 2 # Merchant and assistant
-        chunk.village.add_building(general_store)
-        self.buildings_by_id[general_store.id] = general_store
-        self._draw_building(tiles, general_store, "wood_wall")
-
-        # Generate Tavern
-        tavern_w, tavern_h = 9, 7
-        tavern_x, tavern_y = 0, 0
-
-        attempts = 0
-        while attempts < 100:
-            tavern_x = random.randint(1, CHUNK_SIZE - tavern_w - 1)
-            tavern_y = random.randint(1, CHUNK_SIZE - tavern_h - 1)
-            overlap = False
-            for i in range(tavern_h):
-                for j in range(tavern_w):
-                    if tiles[tavern_y + i][tavern_x + j].name == "road":
-                        overlap = True
-                        break
-                if overlap:
-                    break
-            for existing_building in chunk.village.buildings:
-                if not (tavern_x + tavern_w < existing_building.x or tavern_x > existing_building.x + existing_building.width or
-                        tavern_y + tavern_h < existing_building.y or tavern_y > existing_building.y + existing_building.height):
-                    overlap = True
-                    break
-            if not overlap:
-                break
-            attempts += 1
-
-        if attempts < 100:
-            tavern = Building(tavern_x, tavern_y, tavern_w, tavern_h,
-                                building_type="tavern", category="commercial_workplace",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-            tavern.max_workers = 3 # Keeper, Cook, maybe helper
-            chunk.village.add_building(tavern)
-            self.buildings_by_id[tavern.id] = tavern
-            self._draw_building(tiles, tavern, "wood_wall")
-
-        # Generate Lumber Mill (example producer workplace)
-        lumber_mill_w, lumber_mill_h = 7, 7
-        # Try to place it somewhat out of the way, e.g., near an edge
-        lumber_mill_x = 1
-        lumber_mill_y = CHUNK_SIZE - lumber_mill_h - 1
-        # Basic check to avoid overlap with roads (very simple, could be improved)
-        if tiles[lumber_mill_y][lumber_mill_x].name == "road" or tiles[lumber_mill_y+lumber_mill_h-1][lumber_mill_x+lumber_mill_w-1].name == "road":
-            lumber_mill_x = CHUNK_SIZE - lumber_mill_w -1 # Try other side
-
-        lumber_mill = Building(lumber_mill_x, lumber_mill_y, lumber_mill_w, lumber_mill_h,
-                               building_type="lumber_mill", category="industrial_workplace",
-                               global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        lumber_mill.max_workers = 4 # Foreman and woodcutters
-        chunk.village.add_building(lumber_mill)
-        self.buildings_by_id[lumber_mill.id] = lumber_mill
-        self._draw_building(tiles, lumber_mill, "wood_wall")
-
-        # Define work zones for the lumber mill after it's drawn
-        # These coordinates are GLOBAL world coordinates
-        # Chopping area is conceptual (nearby trees), so we mark it as existing but don't define specific tiles here.
-        lumber_mill.work_zone_tiles["chopping_area"] = [] # Placeholder, logic will find trees
-
-        # Log pile area: a 2x2 area inside or next to the mill.
-        # Example: Place it near the bottom-left of the building interior (adjusting for walls)
-        # Building.x and .y are local to chunk. Building.global_origin_x/y are world coords.
-        log_pile_coords_global = []
-        # Try to place it 1 tile in from the left wall, 1 tile up from the bottom wall.
-        # Ensure it's within the building's actual floor space.
-        # (building.width - 2) and (building.height - 2) give inner dimensions.
-        # We need to place it relative to building.global_origin_x and building.global_origin_y
-        if lumber_mill.width > 3 and lumber_mill.height > 3: # Ensure mill is large enough
-            # Relative local coords for the start of the 2x2 log pile area
-            local_pile_start_x = 1
-            local_pile_start_y = lumber_mill.height - 3 # 1 up from bottom floor, then 1 more for 2x2
-
-            for i in range(2): # y_offset
-                for j in range(2): # x_offset
-                    gx = lumber_mill.global_origin_x + local_pile_start_x + j
-                    gy = lumber_mill.global_origin_y + local_pile_start_y + i
-                    log_pile_coords_global.append((gx, gy))
-            lumber_mill.work_zone_tiles["log_pile_area"] = log_pile_coords_global
-            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Log Pile at {log_pile_coords_global}")
-
-
-        # Splitting area: another 2x2 area, perhaps near the log pile or another side.
-        # Example: Place it near the bottom-right.
-        splitting_area_coords_global = []
-        if lumber_mill.width > 5 and lumber_mill.height > 3: # Need more width to avoid overlap if simple placement
-            local_split_start_x = lumber_mill.width - 3
-            local_split_start_y = lumber_mill.height - 3
-
-            for i in range(2): # y_offset
-                for j in range(2): # x_offset
-                    gx = lumber_mill.global_origin_x + local_split_start_x + j
-                    gy = lumber_mill.global_origin_y + local_split_start_y + i
-                    splitting_area_coords_global.append((gx, gy))
-            lumber_mill.work_zone_tiles["splitting_area"] = splitting_area_coords_global
-            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area at {splitting_area_coords_global}")
-        elif "log_pile_area" in lumber_mill.work_zone_tiles: # Fallback if not wide enough, use same as log pile
-            lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
-            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area (fallback) at {lumber_mill.work_zone_tiles['splitting_area']}")
-        else: # If no log pile area either, mark as empty
-            lumber_mill.work_zone_tiles["splitting_area"] = []
-
-        # Generate Carpenter Shop
-        carpenter_w, carpenter_h = 7, 6
-        carpenter_x = road_x + 2
-        carpenter_y = sheriff_office_y + sheriff_office_h + 2
-        carpenter_x = max(1, min(carpenter_x, CHUNK_SIZE - carpenter_w - 1))
-        carpenter_y = max(1, min(carpenter_y, CHUNK_SIZE - carpenter_h - 1))
-        carpenter_shop = Building(carpenter_x, carpenter_y, carpenter_w, carpenter_h,
-                                building_type="carpenter_shop", category="industrial_workplace",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        carpenter_shop.max_workers = 2
-        chunk.village.add_building(carpenter_shop)
-        self.buildings_by_id[carpenter_shop.id] = carpenter_shop
-        self._draw_building(tiles, carpenter_shop, "wood_wall")
-
-        # Generate Windmill
-        windmill_w, windmill_h = 7, 7
-        windmill_x = CHUNK_SIZE - windmill_w - 1
-        windmill_y = CHUNK_SIZE - windmill_h - 1
-        windmill = Building(windmill_x, windmill_y, windmill_w, windmill_h,
-                            building_type="mill", category="industrial_workplace",
-                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        windmill.max_workers = 2 # Miller and apprentice
-        chunk.village.add_building(windmill)
-        self.buildings_by_id[windmill.id] = windmill
-        self._draw_building(tiles, windmill, "wood_wall")
-
-        grinding_stone_coords_global = []
-        if windmill.width > 2 and windmill.height > 2:
-            local_stone_x = windmill.width // 2
-            local_stone_y = windmill.height // 2
-            gx = windmill.global_origin_x + local_stone_x
-            gy = windmill.global_origin_y + local_stone_y
-            grinding_stone_coords_global.append((gx, gy))
-        windmill.work_zone_tiles["grinding_stone"] = grinding_stone_coords_global
-
-        # Generate Bakery
-        bakery_w, bakery_h = 7, 6
-        bakery_x = 1
-        bakery_y = 1
-        bakery = Building(bakery_x, bakery_y, bakery_w, bakery_h,
-                          building_type="bakery", category="commercial_workplace",
-                          global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        bakery.max_workers = 2 # Baker and apprentice
-        chunk.village.add_building(bakery)
-        self.buildings_by_id[bakery.id] = bakery
-        self._draw_building(tiles, bakery, "wood_wall")
-
-        oven_coords_global = []
-        if bakery.width > 2 and bakery.height > 2:
-            local_oven_x = bakery.width // 2
-            local_oven_y = 1
-            gx = bakery.global_origin_x + local_oven_x
-            gy = bakery.global_origin_y + local_oven_y
-            oven_coords_global.append((gx, gy))
-        bakery.work_zone_tiles["oven"] = oven_coords_global
-
-        # Generate Mine
-        mine_w, mine_h = 8, 6
-        mine_x = 1
-        mine_y = 1
-        mine = Building(mine_x, mine_y, mine_w, mine_h,
-                        building_type="mine", category="industrial_workplace",
-                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        mine.max_workers = 5 # Mines need many workers
-        chunk.village.add_building(mine)
-        self.buildings_by_id[mine.id] = mine
-        self._draw_building(tiles, mine, "stone_wall")
-
-        # Define work zones for the Mine
-        mine_face_coords_global = []
-        if mine.width > 2 and mine.height > 2:
-            # Example: Mine face is the back wall
-            for i in range(1, mine.width - 1):
-                gx = mine.global_origin_x + i
-                gy = mine.global_origin_y + 1
-                mine_face_coords_global.append((gx, gy))
-        mine.work_zone_tiles["mine_face"] = mine_face_coords_global
-
-        storage_area_coords_global = []
-        if mine.width > 2 and mine.height > 2:
-            # Example: Storage area is near the entrance
-            for i in range(1, mine.width - 1):
-                gx = mine.global_origin_x + i
-                gy = mine.global_origin_y + mine.height - 2
-                storage_area_coords_global.append((gx, gy))
-        mine.work_zone_tiles["storage_area"] = storage_area_coords_global
-
-        # Generate Blacksmith Shop
-        blacksmith_w, blacksmith_h = 7, 6
-        blacksmith_x = road_x + 2
-        blacksmith_y = road_y + 2
-        blacksmith_shop = Building(blacksmith_x, blacksmith_y, blacksmith_w, blacksmith_h,
-                                   building_type="blacksmith_shop", category="industrial_workplace",
-                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        blacksmith_shop.max_workers = 2
-        chunk.village.add_building(blacksmith_shop)
-        self.buildings_by_id[blacksmith_shop.id] = blacksmith_shop
-        self._draw_building(tiles, blacksmith_shop, "stone_wall")
-
-        # Define work zones for the Blacksmith Shop
-        forge_coords_global = []
-        if blacksmith_shop.width > 2 and blacksmith_shop.height > 2:
-            local_forge_x = 1
-            local_forge_y = 1
-            gx = blacksmith_shop.global_origin_x + local_forge_x
-            gy = blacksmith_shop.global_origin_y + local_forge_y
-            forge_coords_global.append((gx, gy))
-        blacksmith_shop.work_zone_tiles["forge"] = forge_coords_global
-
-        anvil_coords_global = []
-        if blacksmith_shop.width > 2 and blacksmith_shop.height > 2:
-            local_anvil_x = blacksmith_shop.width - 2
-            local_anvil_y = blacksmith_shop.height - 2
-            gx = blacksmith_shop.global_origin_x + local_anvil_x
-            gy = blacksmith_shop.global_origin_y + local_anvil_y
-            anvil_coords_global.append((gx, gy))
-        blacksmith_shop.work_zone_tiles["anvil"] = anvil_coords_global
-
-        # Generate Farm (example agricultural workplace)
-        if random.random() < 0.7: # Chance to generate a farm
-            farm_w, farm_h = 8, 6 # Farmhouse size
-            # Try to place it somewhat out of the way, similar to lumber mill
-            farm_x = CHUNK_SIZE - farm_w - 1
-            farm_y = 1
-            # Basic check to avoid overlap with roads (very simple)
-            if tiles[farm_y][farm_x].name == "road" or tiles[farm_y+farm_h-1][farm_x+farm_w-1].name == "road":
-                farm_x = 1 # Try other side
-                farm_y = CHUNK_SIZE - farm_h - 5 # Move it down a bit too to vary from lumber mill
-
-            farm_building = Building(farm_x, farm_y, farm_w, farm_h,
-                                   building_type="farm", category="agricultural_workplace",
-                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-            farm_building.max_workers = 3 # Farmers and farmhands
-            chunk.village.add_building(farm_building)
-            self.buildings_by_id[farm_building.id] = farm_building
-            self._draw_building(tiles, farm_building, "wood_wall") # Farmhouse uses wood wall
-
-            # Define "field_patch" zone for the farm
-            field_patch_coords_global = []
-            field_width = 5  # e.g., 5x5 field
-            field_height = 5
-            # Place field to the south of the farmhouse, with a 1-tile gap
-            field_start_local_x = farm_building.x + (farm_building.width // 2) - (field_width // 2) # Centered with farmhouse
-            field_start_local_y = farm_building.y + farm_building.height + 1 # 1 tile below farmhouse
-
-            # Ensure field patch is within chunk boundaries
-            field_start_local_x = max(0, min(field_start_local_x, CHUNK_SIZE - field_width))
-            field_start_local_y = max(0, min(field_start_local_y, CHUNK_SIZE - field_height))
-
-            for r_y in range(field_height):
-                for r_x in range(field_width):
-                    # Check if tile is within overall chunk bounds before adding
-                    # Also, for now, we assume these tiles are plains and will be tilled.
-                    # A more robust version would check tiles[field_start_local_y + r_y][field_start_local_x + r_x]
-                    # to ensure it's a suitable type before adding to field_patch.
-                    if 0 <= field_start_local_x + r_x < CHUNK_SIZE and \
-                       0 <= field_start_local_y + r_y < CHUNK_SIZE:
-
-                        # Ensure the field tiles are initially plains (or similar farmable land)
-                        # For now, we just define the zone. The farmer will till plains tiles within it.
-                        # The actual tile objects at these coords are already set (e.g. to plains by default chunk gen)
-                        # We are just collecting their global coordinates.
-                        gx = chunk_global_start_x + field_start_local_x + r_x
-                        gy = chunk_global_start_y + field_start_local_y + r_y
-                        field_patch_coords_global.append((gx, gy))
-
-            farm_building.work_zone_tiles["field_patch"] = field_patch_coords_global
-            # self.add_message_to_chat_log(f"Farm {farm_building.id[:4]}: Field Patch at {field_patch_coords_global}")
-
-            # Pre-populate farm with some seeds for the farmer to use
-            if "wheat_seeds" in ITEM_DEFINITIONS:
-                 farm_building.building_inventory["wheat_seeds"] = random.randint(5, 15)
-
-
-        # Generate Fishing Hut
-        if any(tiles[y][x].name == "water" for x in range(CHUNK_SIZE) for y in range(CHUNK_SIZE)):
-            hut_w, hut_h = 5, 5
-            for _ in range(100): # Attempts to place hut
-                hut_x = random.randint(1, CHUNK_SIZE - hut_w - 1)
-                hut_y = random.randint(1, CHUNK_SIZE - hut_h - 1)
-
-                # Check for proximity to water
-                is_near_water = False
-                for i in range(-1, hut_h + 1):
-                    for j in range(-1, hut_w + 1):
-                        check_x, check_y = hut_x + j, hut_y + i
-                        if 0 <= check_x < CHUNK_SIZE and 0 <= check_y < CHUNK_SIZE:
-                            if tiles[check_y][check_x].name == "water":
-                                is_near_water = True
-                                break
-                    if is_near_water:
-                        break
-
-                if is_near_water:
-                    fishing_hut = Building(hut_x, hut_y, hut_w, hut_h, building_type="fishing_hut", category="industrial_workplace", global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-                    fishing_hut.max_workers = 2
-                    chunk.village.add_building(fishing_hut)
-                    self.buildings_by_id[fishing_hut.id] = fishing_hut
-                    self._draw_building(tiles, fishing_hut, "wood_wall")
-
-                    # Designate a fishing spot
-                    for i in range(-2, hut_h + 2):
-                        for j in range(-2, hut_w + 2):
-                            spot_x, spot_y = hut_x + j, hut_y + i
-                            if 0 <= spot_x < CHUNK_SIZE and 0 <= spot_y < CHUNK_SIZE:
-                                if tiles[spot_y][spot_x].name == "water":
-                                    if "fishing_spot" not in chunk.village.interaction_points:
-                                        chunk.village.interaction_points["fishing_spot"] = []
-                                    chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + spot_x, chunk_global_start_y + spot_y))
-                                    break
-                        if "fishing_spot" in chunk.village.interaction_points:
-                            break
-                    break
-
-        # Generate a few regular houses
-        num_houses = random.randint(3, 5)
-        for _ in range(num_houses):
-            w, h = random.randint(5, 9), random.randint(5, 9)
-            attempts = 0
-            while attempts < 100:
-                bx = random.randint(1, CHUNK_SIZE - w - 1)
-                by = random.randint(1, CHUNK_SIZE - h - 1)
+                # Check collision with layout_grid (roads and other buildings)
                 overlap = False
-                for i in range(h):
-                    for j in range(w):
-                        if tiles[by + i][bx + j].char == TILE_DEFINITIONS["road"]["char"]:
-                            overlap = True; break
+                for i in range(height):
+                    for j in range(width):
+                        # Ensure we don't go out of bounds (though generation logic should prevent this)
+                        if not (0 <= by + i < CHUNK_SIZE and 0 <= bx + j < CHUNK_SIZE):
+                            overlap = True
+                            break
+                        if layout_grid[by + i][bx + j] == 1:
+                            overlap = True
+                            break
                     if overlap: break
-                for existing_building in chunk.village.buildings:
-                    if not (bx + w < existing_building.x or bx > existing_building.x + existing_building.width or
-                            by + h < existing_building.y or by > existing_building.y + existing_building.height):
-                        overlap = True; break
-                if not overlap: break
-                attempts += 1
-            if attempts == 100: continue
 
-            house = Building(bx, by, w, h, building_type="house", category="residential",
-                             global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-            chunk.village.add_building(house)
-            self.buildings_by_id[house.id] = house
-            self._draw_building(tiles, house, "wood_wall")
+                if not overlap:
+                    # Mark grid
+                    for i in range(height):
+                        for j in range(width):
+                            layout_grid[by + i][bx + j] = 1
 
-        # Generate Library
-        library_w, library_h = 8, 6
-        library_x = road_x - library_w - 2
-        library_y = road_y + 2
-        library_x = max(1, min(library_x, CHUNK_SIZE - library_w - 1))
-        library_y = max(1, min(library_y, CHUNK_SIZE - library_h - 1))
-        library = Building(library_x, library_y, library_w, library_h,
-                                building_type="library", category="civic_workplace",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        library.max_workers = 2
-        chunk.village.add_building(library)
-        self.buildings_by_id[library.id] = library
-        self._draw_building(tiles, library, "stone_wall")
+                    building = Building(bx, by, width, height, building_type=b_type, category=category,
+                                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                    building.max_workers = max_workers
+                    chunk.village.add_building(building)
+                    self.buildings_by_id[building.id] = building
+                    return building
+            return None
+
+        # --- Generate Buildings ---
+
+        # Capital Hall
+        try_place_building("capital_hall", "civic", 9, 7, road_x - 11, road_y - 3, max_workers=3)
+
+        # Jail
+        jail = try_place_building("jail", "civic", 7, 5, road_x + 2, road_y - 2, max_workers=2)
+
+        # Sheriff's Office
+        if jail:
+            try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, jail.y + 7, max_workers=2)
+        else:
+            try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, road_y + 5, max_workers=2)
+
+        # General Store
+        try_place_building("general_store", "commercial_workplace", 8, 6, road_x - 10, road_y + 5, max_workers=2)
+
+        # Tavern
+        try_place_building("tavern", "commercial_workplace", 9, 7, max_workers=3)
+
+        # Lumber Mill
+        lumber_mill = try_place_building("lumber_mill", "industrial_workplace", 7, 7, 1, CHUNK_SIZE - 8, max_workers=4)
+        if lumber_mill:
+            # Define zones (simplified logic)
+            lumber_mill.work_zone_tiles["chopping_area"] = []
+            # Add dummy global coords for internal zones based on offset
+            lumber_mill.work_zone_tiles["log_pile_area"] = [(lumber_mill.global_origin_x + 1, lumber_mill.global_origin_y + lumber_mill.height - 3)]
+            lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
+
+        # Carpenter
+        try_place_building("carpenter_shop", "industrial_workplace", 7, 6, max_workers=2)
+
+        # Windmill
+        windmill = try_place_building("mill", "industrial_workplace", 7, 7, CHUNK_SIZE - 8, CHUNK_SIZE - 8, max_workers=2)
+        if windmill:
+            windmill.work_zone_tiles["grinding_stone"] = [(windmill.global_origin_x + 3, windmill.global_origin_y + 3)]
+
+        # Bakery
+        bakery = try_place_building("bakery", "commercial_workplace", 7, 6, 1, 1, max_workers=2)
+        if bakery:
+            bakery.work_zone_tiles["oven"] = [(bakery.global_origin_x + 3, bakery.global_origin_y + 1)]
+
+        # Mine
+        mine = try_place_building("mine", "industrial_workplace", 8, 6, 1, 1, max_workers=5)
+        if mine:
+            mine.work_zone_tiles["mine_face"] = [(mine.global_origin_x + i, mine.global_origin_y + 1) for i in range(1, 7)]
+            mine.work_zone_tiles["storage_area"] = [(mine.global_origin_x + 1, mine.global_origin_y + 4)]
+
+        # Blacksmith
+        blacksmith = try_place_building("blacksmith_shop", "industrial_workplace", 7, 6, road_x + 2, road_y + 2, max_workers=2)
+        if blacksmith:
+            blacksmith.work_zone_tiles["forge"] = [(blacksmith.global_origin_x + 1, blacksmith.global_origin_y + 1)]
+            blacksmith.work_zone_tiles["anvil"] = [(blacksmith.global_origin_x + 5, blacksmith.global_origin_y + 4)]
+
+        # Farm
+        farm = try_place_building("farm", "agricultural_workplace", 8, 6, max_workers=3)
+        if farm:
+            # Logic for field patch
+            field_width, field_height = 5, 5
+            field_x = farm.x + 2
+            field_y = farm.y + farm.height + 1
+            # Ensure field fits in chunk
+            if field_y + field_height < CHUNK_SIZE:
+                farm.work_zone_tiles["field_patch"] = [
+                    (chunk_global_start_x + field_x + rx, chunk_global_start_y + field_y + ry)
+                    for ry in range(field_height) for rx in range(field_width)
+                ]
+                # Mark field in grid to prevent others
+                for ry in range(field_height):
+                    for rx in range(field_width):
+                        if 0 <= field_y + ry < CHUNK_SIZE and 0 <= field_x + rx < CHUNK_SIZE:
+                            layout_grid[field_y + ry][field_x + rx] = 1
+            if "wheat_seeds" in ITEM_DEFINITIONS:
+                 farm.building_inventory["wheat_seeds"] = random.randint(5, 15)
+
+        # Fishing Hut
+        # Needs water check. We don't have tiles yet.
+        # We can use the pond logic: if we generate a pond, we know where it is.
+        # Or we check macro elevation.
+        # For simplicity, we'll assume water exists if we decide to place one,
+        # but without tile map, precise placement next to water is hard.
+        # Strategy: Postpone Fishing Hut placement to render time? No, need Building object for NPCs.
+        # Strategy: Assume water at edges or specific spot.
+        # Let's skip dynamic water placement dependency for now or assume a pond exists at fixed location.
+
+        # Houses
+        for _ in range(random.randint(3, 5)):
+            try_place_building("house", "residential", random.randint(5, 9), random.randint(5, 9))
+
+        # Library
+        try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         self._initialize_economy(chunk.village)
-        return tiles
 
-    def _generate_ruin_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+    def _render_village_tiles(self, chunk: Chunk):
+        """Renders the buildings and roads of a village onto the chunk's tiles."""
+        tiles = chunk.tiles
+
+        # Render roads
+        road_y = CHUNK_SIZE // 2
+        road_x = CHUNK_SIZE // 2
+        for x in range(CHUNK_SIZE):
+            tiles[road_y][x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+        for y in range(CHUNK_SIZE):
+            tiles[y][road_x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+
+        # Render buildings
+        for building in chunk.village.buildings:
+            wall_type = "wood_wall"
+            if building.building_type in ["mine", "blacksmith_shop", "library", "sheriff_office", "jail", "capital_hall"]:
+                wall_type = "stone_wall"
+            elif building.building_type == "jail":
+                wall_type = "jail_bars"
+            elif building.building_type == "sheriff_office":
+                wall_type = "sheriff_office_wall"
+            elif building.building_type == "capital_hall":
+                wall_type = "capital_hall_wall"
+
+            self._draw_building(tiles, building, wall_type)
+
+        # Render Well (if exists)
+        if "well" in chunk.village.interaction_points:
+            for wx, wy in chunk.village.interaction_points["well"]:
+                # Convert global to local
+                local_x = wx % CHUNK_SIZE
+                local_y = wy % CHUNK_SIZE
+                tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
+
+    def _generate_ruin_layout(self, chunk: Chunk):
         """Generates a ruined structure within a chunk."""
-        tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        tiles = chunk.tiles if chunk.tiles else [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        chunk.tiles = tiles
 
         wall_tile = TILE_DEFINITIONS["cracked_stone_wall"]
         floor_tile = TILE_DEFINITIONS["mossy_cobblestone"]
@@ -6508,26 +6271,61 @@ class World:
                 is_window = (i == 1 and j == 0) or (i == 1 and j == building.width - 1) or \
                             (i == building.height - 2 and j == 0) or (i == building.height - 2 and j == building.width - 1)
 
+                target_y = building.y + i
+                target_x = building.x + j
+                global_x = building.global_origin_x + j
+                global_y = building.global_origin_y + i
+
                 if is_border:
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS[wall_tile_key]["char"], TILE_DEFINITIONS[wall_tile_key]["color"], TILE_DEFINITIONS[wall_tile_key]["passable"], TILE_DEFINITIONS[wall_tile_key]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS[wall_tile_key]["char"], TILE_DEFINITIONS[wall_tile_key]["color"], TILE_DEFINITIONS[wall_tile_key]["passable"], TILE_DEFINITIONS[wall_tile_key]["name"])
+                    tiles[target_y][target_x] = new_tile
+                    if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                         self.transparency_map[global_y, global_x] = not new_tile.blocks_fov
+
                 elif is_window and building.building_type == "house": # Only houses have windows for now
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS["window"]["char"], TILE_DEFINITIONS["window"]["color"], TILE_DEFINITIONS["window"]["passable"], TILE_DEFINITIONS["window"]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS["window"]["char"], TILE_DEFINITIONS["window"]["color"], TILE_DEFINITIONS["window"]["passable"], TILE_DEFINITIONS["window"]["name"])
+                    tiles[target_y][target_x] = new_tile
+                    if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                         self.transparency_map[global_y, global_x] = not new_tile.blocks_fov
+
                 else:
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS["wood_floor"]["char"], TILE_DEFINITIONS["wood_floor"]["color"], TILE_DEFINITIONS["wood_floor"]["passable"], TILE_DEFINITIONS["wood_floor"]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS["wood_floor"]["char"], TILE_DEFINITIONS["wood_floor"]["color"], TILE_DEFINITIONS["wood_floor"]["passable"], TILE_DEFINITIONS["wood_floor"]["name"])
+                    tiles[target_y][target_x] = new_tile
+                    # Floors usually don't block FOV, but update just in case
+                    if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                         self.transparency_map[global_y, global_x] = True
 
         # Place door for houses and capital hall
         if building.building_type in ["house", "capital_hall", "sheriff_office", "jail"]:
             door_x = building.x + building.width // 2
             door_y = building.y + building.height - 1 # Bottom wall
 
+            global_door_x = building.global_origin_x + building.width // 2
+            global_door_y = building.global_origin_y + building.height - 1
+
             door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"] # Default to closed door
-            tiles[door_y][door_x] = Tile(
+            new_tile = Tile(
                 char=door_def["char"],
                 color=door_def["color"],
                 passable=door_def["passable"],
                 name=door_def["name"],
                 properties=door_def["properties"] # Store door properties on the tile
             )
+            tiles[door_y][door_x] = new_tile
+            if 0 <= global_door_x < WORLD_WIDTH and 0 <= global_door_y < WORLD_HEIGHT:
+                 self.transparency_map[global_door_y, global_door_x] = not new_tile.blocks_fov
+
+    def ensure_player_surroundings_generated(self):
+        """Ensures chunks around the player are generated."""
+        chunk_x = self.player.x // CHUNK_SIZE
+        chunk_y = self.player.y // CHUNK_SIZE
+
+        for y in range(chunk_y - 1, chunk_y + 2):
+            for x in range(chunk_x - 1, chunk_x + 2):
+                if 0 <= x < self.chunk_width and 0 <= y < self.chunk_height:
+                    chunk = self.chunks[y][x]
+                    if not chunk.is_terrain_generated:
+                        self._generate_chunk_detail(chunk, x, y)
 
     def get_tile_at(self, x, y):
         if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
@@ -6539,8 +6337,8 @@ class World:
             return None
 
         chunk = self.chunks[chunk_y][chunk_x]
-        if not chunk.is_generated:
-            self._generate_chunk_detail(chunk, chunk_x, chunk_y) # Pass chunk_x, chunk_y
+        if not chunk.is_terrain_generated:
+            self._generate_chunk_detail(chunk, chunk_x, chunk_y)
         return chunk.tiles[local_y][local_x]
 
     def get_building_at(self, x, y):

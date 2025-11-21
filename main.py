@@ -179,7 +179,7 @@ def start_dialogue(world, npc, context_handler):
 
 def start_trade(world, npc):
     """Starts a trade session with an NPC."""
-    if npc.profession == "Merchant":
+    if npc.economic.profession == "Merchant":
         world.trade_ui_npc_target = npc
         world.initialize_trade_session()
         world.trade_ui_active = True

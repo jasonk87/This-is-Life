@@ -37,7 +37,7 @@ class PhysicalState:
 class SocialState:
     """Stores social and reputational attributes for an entity."""
     personality: str = "normal"
-    family_ties: str = "none"
+    family_ties: dict = field(default_factory=lambda: {"description": "none"})
     relationships: dict = field(default_factory=dict)
     grudges: dict[int, list[str]] = field(default_factory=dict)
     fame: int = 0
@@ -51,6 +51,9 @@ class EconomicState:
     money: int = 0
     npc_inventory: dict = field(default_factory=dict)
     profession: str = "unemployed"
+    job_satisfaction: int = 50
+    days_unemployed: int = 0
+    work_performance: int = 50 # 0-100, tracks recent job performance
 
 @dataclass
 class Schedule:
@@ -113,7 +116,10 @@ class NPC:
         self.equipment, self.knowledge = Equipment(), Knowledge()
 
         self.social.personality = personality
-        self.social.family_ties = family_ties
+        if isinstance(family_ties, str):
+            self.social.family_ties = {"description": family_ties}
+        else:
+            self.social.family_ties = family_ties
         self.economic.wealth_level = wealth_level
 
         if self.player_id:

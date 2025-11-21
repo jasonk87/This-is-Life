@@ -160,6 +160,15 @@ class Building:
         self.global_center_x = self.global_origin_x + width // 2
         self.global_center_y = self.global_origin_y + height // 2
         self.player_owned: bool = False # New attribute for player housing
+        self.max_workers: int = 2 # Default capacity, updated during generation
+
+    @property
+    def max_workers(self):
+        return getattr(self, "_max_workers", 2)
+
+    @max_workers.setter
+    def max_workers(self, value):
+        self._max_workers = value
 
     def contains_global_coords(self, world_x: int, world_y: int) -> bool:
         """Checks if the given global world coordinates are within this building's footprint."""
@@ -1133,7 +1142,7 @@ class World:
                             key_npcs = [
                                 other_npc for other_npc in self.village_npcs
                                 if self._get_village_for_npc(other_npc) == arrival_village and
-                                other_npc.profession in ["Tavern Keeper", "Town Official", "Sheriff"]
+                                other_npc.economic.profession in ["Tavern Keeper", "Town Official", "Sheriff"]
                             ]
                             if key_npcs:
                                 gossip_recipient = random.choice(key_npcs)
@@ -1237,6 +1246,14 @@ class World:
                         npc.schedule.current_task = "idle"
                     elif npc.schedule.current_task == "going to work":
                         npc.schedule.current_task = "at work"
+                    elif npc.schedule.current_task == "looking_for_work":
+                        # Arrived at potential workplace
+                        npc.schedule.current_task = "idle" # Or "lingering" if handled elsewhere, for now idle means they stay put
+                        # self.add_message_to_chat_log(f"Debug: {npc.name} is looking for work at a building.")
+                    elif npc.schedule.current_task == "leaving_village":
+                        # NPC has arrived at the edge of the map
+                        self._remove_npc_from_world(npc, reason="emigrated")
+                        continue # Stop processing this NPC
                     elif npc.schedule.current_task in ["going home", "going home to sleep", "going to bed"]:
                         npc.schedule.current_task = "at home"
                     else:
@@ -1327,6 +1344,24 @@ class World:
 
         potential_spots.sort(key=lambda s: s['dist_sq'])
         return potential_spots[0]['x'], potential_spots[0]['y']
+
+    def _find_nearest_map_edge(self, npc: NPC) -> tuple[int, int]:
+        """Finds the nearest map edge coordinate for an NPC to exit."""
+        dist_to_left = npc.x
+        dist_to_right = WORLD_WIDTH - 1 - npc.x
+        dist_to_top = npc.y
+        dist_to_bottom = WORLD_HEIGHT - 1 - npc.y
+
+        min_dist = min(dist_to_left, dist_to_right, dist_to_top, dist_to_bottom)
+
+        if min_dist == dist_to_left:
+            return (0, npc.y)
+        elif min_dist == dist_to_right:
+            return (WORLD_WIDTH - 1, npc.y)
+        elif min_dist == dist_to_top:
+            return (npc.x, 0)
+        else:
+            return (npc.x, WORLD_HEIGHT - 1)
 
     def _find_best_adjacent_tile_for_attack(self, target_x: int, target_y: int, attacker_npc: NPC) -> tuple[int | None, int | None]:
         """
@@ -1464,11 +1499,87 @@ class World:
 
         return candidate_spots[0]['x'], candidate_spots[0]['y']
 
+    def _update_npc_relationships_dynamic(self):
+        """Periodically updates NPC relationships based on interactions, personality, and random chance."""
+        if self.game_time % DAY_LENGTH_TICKS != 0: # Run once a day
+            return
+
+        for npc in self.village_npcs:
+            if npc.physical.is_dead: continue
+
+            # Decay/Growth towards baseline
+            for target_id in list(npc.social.relationships.keys()):
+                current_score = npc.social.relationships[target_id]
+
+                # Decay logic: Drift towards 50 (neutral) if no recent significant interaction
+                # This is a slow drift.
+                if current_score > 50:
+                    npc.social.relationships[target_id] = max(50, current_score - 1)
+                elif current_score < 50:
+                    npc.social.relationships[target_id] = min(50, current_score + 1)
+
+            # Random relationship events
+            if random.random() < 0.1: # 10% chance per day for a random social event
+                other_npc = random.choice(self.village_npcs)
+                if other_npc.id != npc.id and not other_npc.physical.is_dead:
+                    # Check compatibility (simple personality check for now)
+                    compatibility = 0
+                    if npc.social.personality == other_npc.social.personality:
+                        compatibility = 10
+
+                    current_rel = npc.social.relationships.get(other_npc.id, 50)
+
+                    # "Breakup" or fallout logic
+                    if current_rel > 70 and random.random() < 0.05: # 5% chance for friends to fight
+                        change = -20
+                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} had a falling out.")
+                    # "Making up" logic
+                    elif current_rel < 30 and random.random() < 0.05: # 5% chance for enemies to make up
+                        change = 20
+                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} seem to be getting along better.")
+                    else:
+                        # General random fluctuation based on compatibility
+                        change = random.randint(-5, 5) + compatibility
+
+                    new_rel = max(0, min(100, current_rel + change))
+                    npc.social.relationships[other_npc.id] = new_rel
+                    other_npc.social.relationships[npc.id] = new_rel # Assuming symmetric for simple events
+
+                    # Check for romantic breakup
+                    partner_id = npc.social.family_ties.get("partner_id")
+                    if partner_id == other_npc.id and new_rel < 30:
+                        del npc.social.family_ties["partner_id"]
+                        if "partner_id" in other_npc.social.family_ties:
+                            del other_npc.social.family_ties["partner_id"]
+                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} have broken up.")
+
+                        # Move out logic (simplified: if living together, one leaves)
+                        if npc.schedule.home_building_id and npc.schedule.home_building_id == other_npc.schedule.home_building_id:
+                             # Remove npc from current home residents
+                             old_home = self.buildings_by_id.get(npc.schedule.home_building_id)
+                             if old_home and npc in old_home.residents:
+                                 old_home.residents.remove(npc)
+
+                             npc.schedule.home_building_id = None # Become homeless momentarily
+                             self.add_message_to_chat_log(f"{npc.name} has moved out.")
+
+                             # Try to find a new vacant home
+                             village = self._get_village_for_npc(npc)
+                             if village:
+                                 vacant_homes = [b for b in village.buildings if b.category == "residential" and not b.residents]
+                                 if vacant_homes:
+                                     new_home = random.choice(vacant_homes)
+                                     npc.schedule.home_building_id = new_home.id
+                                     new_home.residents.append(npc)
+                                     self.add_message_to_chat_log(f"{npc.name} has found a new home.")
+
     def _update_npc_schedules(self):
         """
         Periodically updates NPC tasks based on game time and current state.
         Also handles routing to combat AI if NPC is hostile.
         """
+        self._update_npc_relationships_dynamic()
+
         for npc in self.village_npcs + self.npcs:
             if npc.physical.is_dead:
                 continue
@@ -2219,6 +2330,21 @@ class World:
                              npc.schedule.current_task = f"Working ({npc.economic.profession})" if npc.economic.profession != "Unemployed" else "At Work (Idle)"
                              if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
 
+                        # Unemployed Behavior: Look for work during "work hours"
+                        elif npc.economic.profession.lower() == "unemployed" and npc.schedule.current_task != "looking_for_work":
+                             if random.random() < 0.02: # Low chance each tick to decide to look for work
+                                 npc_village = self._get_village_for_npc(npc)
+                                 if npc_village:
+                                     workplaces = [b for b in npc_village.buildings if "workplace" in b.category]
+                                     if workplaces:
+                                         target_workplace = random.choice(workplaces)
+                                         dest_coords = (target_workplace.global_center_x, target_workplace.global_center_y)
+
+                                         if (npc.x, npc.y) != dest_coords:
+                                             new_task_label = "looking_for_work"
+                                             destination_coords = dest_coords
+                                             npc.leisure_timer = random.randint(50, 100) # Use timer to linger at workplace
+
                     # Leisure time logic
                     elif is_leisure_time and npc.schedule.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
                         if npc.leisure_timer > 0:
@@ -2597,7 +2723,7 @@ class World:
             if mine:
                 return (mine.global_center_x, mine.global_center_y)
             return None
-        elif npc.profession == "Farmer" and target_zone_tag == "field_patch":
+        elif npc.economic.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
                 # self.add_message_to_chat_log(f"Warning: Farm {work_building.id} has no field_patch zone defined.")
@@ -3001,7 +3127,7 @@ class World:
 
                 if not found_viable_task:
                     # If no task in the entire sequence is possible, the NPC is stalled.
-                    npc.current_task = f"Working ({npc.profession} - No available tasks)"
+                    npc.current_task = f"Working ({npc.economic.profession} - No available tasks)"
                     return True # Handled for this cycle
 
 
@@ -3048,9 +3174,18 @@ class World:
                 if npc.sub_task_timer <= 0:
                     # Action complete, output handled at start of next cycle. Current_sub_task will be cleared.
                     # self.add_message_to_chat_log(f"Debug: {npc.name} finished action for sub-task {npc.current_sub_task}.")
+
+                    # Boost work performance for completing a sub-task
+                    npc.economic.work_performance = min(100, npc.economic.work_performance + 5)
+
                     # The loop will pick this up at the top of the function next call.
                     pass
             return True # Sub-task logic was processed
+
+        # If we reach here, no sub-task was found or processed, implying idleness at work
+        # Decrease work performance slightly if supposed to be working but doing nothing
+        if npc.schedule.current_task == "at work" or npc.schedule.current_task.startswith("Working ("):
+             npc.economic.work_performance = max(0, npc.economic.work_performance - 1)
 
         return False # No current sub-task or target to act upon
 
@@ -3580,10 +3715,10 @@ class World:
                 # Future: More nuanced logic based on NPC personality, relationship to player, etc.
                 if action_type in ["assault", "lockpicking", "theft"]:
                     # Guards and Sheriffs will always be witnesses
-                    if npc.profession in ["Guard", "Sheriff"]:
+                    if npc.economic.profession in ["Guard", "Sheriff"]:
                         witnesses.append(npc)
                     # For other NPCs, maybe a chance based on personality
-                    elif npc.personality not in ["careless", "fearful"]: # Example personalities who might not report
+                    elif npc.social.personality not in ["careless", "fearful"]: # Example personalities who might not report
                         witnesses.append(npc)
         return witnesses
 
@@ -4364,6 +4499,31 @@ class World:
                 if witness.id != target_npc.id:
                     self._handle_witness_reaction(witness, "assault", self.player, victim=target_npc)
 
+    def _remove_npc_from_world(self, npc: NPC, reason="departed"):
+        """
+        Removes an NPC from the world lists (village_npcs, npcs, buildings) without killing them.
+        Used for emigration or cleanup.
+        """
+        if npc in self.village_npcs:
+            self.village_npcs.remove(npc)
+        if npc in self.npcs:
+            self.npcs.remove(npc)
+
+        for building_obj in self.buildings_by_id.values():
+            if npc in building_obj.residents:
+                building_obj.residents.remove(npc)
+            if npc in building_obj.occupants:
+                building_obj.occupants.remove(npc)
+
+        # Clear NPC from UI states if they were targeted
+        if self.interaction_context["active"] and npc in self.interaction_context["target_entities"]:
+            self.interaction_context["active"] = False
+        if self.chat_ui_target_npc == npc: self.chat_ui_target_npc, self.chat_ui_active = None, False
+        if self.trade_ui_npc_target == npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
+        if self.last_talked_to_npc == npc: self.last_talked_to_npc = None
+
+        # self.add_message_to_chat_log(f"Debug: {npc.name} has {reason}.")
+
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
 
@@ -4401,19 +4561,7 @@ class World:
 
         if not corpse_placed_on_map: self.add_message_to_chat_log(f"(Could not place corpse for {dead_npc.name} on map)")
 
-        self.village_npcs = [npc for npc in self.village_npcs if npc.id != dead_npc.id]
-        self.npcs = [npc for npc in self.npcs if npc.id != dead_npc.id]
-
-        for building_obj in self.buildings_by_id.values():
-            building_obj.residents = [res for res in building_obj.residents if res.id != dead_npc.id]
-            building_obj.occupants = [occ for occ in building_obj.occupants if occ.id != dead_npc.id]
-
-        # Clear NPC from UI states if they were targeted
-        if self.interaction_context["active"] and dead_npc in self.interaction_context["target_entities"]:
-            self.interaction_context["active"] = False
-        if self.chat_ui_target_npc == dead_npc: self.chat_ui_target_npc, self.chat_ui_active = None, False # Main loop should handle context.stop_text_input()
-        if self.trade_ui_npc_target == dead_npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
-        if self.last_talked_to_npc == dead_npc: self.last_talked_to_npc = None
+        self._remove_npc_from_world(dead_npc, reason="died")
 
         # --- Item Drops ---
         items_dropped_messages = []
@@ -4850,10 +4998,10 @@ class World:
 
                 gossip_prompt = LLM_PROMPTS["npc_share_gossip"].format(
                     npc_name=npc_target.name,
-                    npc_personality=npc_target.personality,
-                    npc_relationship_with_player=npc_target.relationships.get(self.player.id, 50),
-                    npc_relationship_with_subject=npc_target.relationships.get(event_to_share.subject_id, 50),
-                    npc_relationship_with_target=npc_target.relationships.get(event_to_share.target_id, 50) if event_to_share.target_id else 50,
+                    npc_personality=npc_target.social.personality,
+                    npc_relationship_with_player=npc_target.social.relationships.get(self.player.id, 50),
+                    npc_relationship_with_subject=npc_target.social.relationships.get(event_to_share.subject_id, 50),
+                    npc_relationship_with_target=npc_target.social.relationships.get(event_to_share.target_id, 50) if event_to_share.target_id else 50,
                     event_description=event_to_share.description,
                     subject_name=subject_name,
                     target_name=target_name,
@@ -4926,7 +5074,7 @@ class World:
             self.chat_ui_history.append((npc_target.name, response_str.strip()))
 
         # After NPC response, check if this NPC should offer a job
-        if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
+        if npc_target.economic.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
             # Check if player's response was affirmative to a previous implicit offer or just general talk
             # This is tricky without more state. For now, let's assume if they talk to Foreman, job is offered.
             # A better way: Foreman's initial greeting (start_npc_dialogue) could offer.
@@ -4942,7 +5090,7 @@ class World:
 
             offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
                 npc_name=npc_target.name,
-                npc_profession=npc_target.profession,
+                npc_profession=npc_target.economic.profession,
                 npc_personality=npc_target.social.personality,
                 npc_attitude=npc_target.attitude_to_player,
                 player_criminal_points=self.player.social.reputation.get(REP_CRIMINAL,0),
@@ -4966,7 +5114,7 @@ class World:
 
         # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
         # This is a simplified trigger; more robust would be keyword matching or LLM intent.
-        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.knowledge.active_quests and \
+        if npc_target.economic.profession == "Sheriff" and "kill_wolves_01" not in self.player.knowledge.active_quests and \
            "kill_wolves_01" not in self.player.knowledge.completed_quests:
 
             quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
@@ -4991,7 +5139,7 @@ class World:
             # Example: npc.schedule.current_task = "going_to_location"
             # npc.task_target_coords = (x, y) # (extracted from player_input or LLM response)
         elif goal == "start_trade":
-            if npc.profession == "Merchant":
+            if npc.economic.profession == "Merchant":
                 self.game_state = "TRADE_MENU"
                 self.trade_ui_npc_target = npc
                 self.initialize_trade_session()
@@ -5019,7 +5167,7 @@ class World:
 
         prompt = LLM_PROMPTS["summarize_conversation_for_memory"].format(
             npc_name=npc.name,
-            npc_personality=npc.personality,
+            npc_personality=npc.social.personality,
             conversation_history=history_str
         )
         summary = self._call_ollama(prompt)
@@ -5545,9 +5693,9 @@ class World:
             for i, resident_npc in enumerate(building.residents):
                 detail = (
                     f"Inhabitant {i+1}: Name: {resident_npc.name}, "
-                    f"Personality: {resident_npc.personality}, "
-                    f"Wealth: {resident_npc.wealth_level}, "
-                    f"Profession: {resident_npc.profession}."
+                    f"Personality: {resident_npc.social.personality}, "
+                    f"Wealth: {resident_npc.economic.wealth_level}, "
+                    f"Profession: {resident_npc.economic.profession}."
                 )
                 inhabitant_details_parts.append(detail)
 
@@ -5703,7 +5851,7 @@ class World:
             prompt = (
                 f"The player (Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}) "
                 f"approaches {closest_npc.name}. "
-                f"{closest_npc.name} is {closest_npc.personality}, their family ties are '{closest_npc.family_ties}', "
+                f"{closest_npc.name} is {closest_npc.social.personality}, their family ties are '{closest_npc.social.family_ties.get('description')}', "
                 f"and their current attitude towards the player is '{closest_npc.attitude_to_player}'. "
                 f"Generate a short, in-character dialogue response from {closest_npc.name} to the player. "
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
@@ -5918,6 +6066,7 @@ class World:
         capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h,
                                 building_type="capital_hall", category="civic",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        capital_hall.max_workers = 3 # Town official and helpers
         chunk.village.add_building(capital_hall)
         self.buildings_by_id[capital_hall.id] = capital_hall
         self._draw_building(tiles, capital_hall, "capital_hall_wall")
@@ -5929,6 +6078,7 @@ class World:
         jail = Building(jail_x, jail_y, jail_w, jail_h,
                         building_type="jail", category="civic",
                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        jail.max_workers = 2 # Guards
         chunk.village.add_building(jail)
         self.buildings_by_id[jail.id] = jail
         self._draw_building(tiles, jail, "jail_bars")
@@ -5940,6 +6090,7 @@ class World:
         sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h,
                                   building_type="sheriff_office", category="civic_workplace",
                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        sheriff_office.max_workers = 2 # Sheriff and deputy
         chunk.village.add_building(sheriff_office)
         self.buildings_by_id[sheriff_office.id] = sheriff_office
         self._draw_building(tiles, sheriff_office, "sheriff_office_wall")
@@ -5955,6 +6106,7 @@ class World:
         general_store = Building(store_x, store_y, store_w, store_h,
                                  building_type="general_store", category="commercial_workplace", # Workplace for merchant
                                  global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        general_store.max_workers = 2 # Merchant and assistant
         chunk.village.add_building(general_store)
         self.buildings_by_id[general_store.id] = general_store
         self._draw_building(tiles, general_store, "wood_wall")
@@ -5988,6 +6140,7 @@ class World:
             tavern = Building(tavern_x, tavern_y, tavern_w, tavern_h,
                                 building_type="tavern", category="commercial_workplace",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+            tavern.max_workers = 3 # Keeper, Cook, maybe helper
             chunk.village.add_building(tavern)
             self.buildings_by_id[tavern.id] = tavern
             self._draw_building(tiles, tavern, "wood_wall")
@@ -6004,6 +6157,7 @@ class World:
         lumber_mill = Building(lumber_mill_x, lumber_mill_y, lumber_mill_w, lumber_mill_h,
                                building_type="lumber_mill", category="industrial_workplace",
                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        lumber_mill.max_workers = 4 # Foreman and woodcutters
         chunk.village.add_building(lumber_mill)
         self.buildings_by_id[lumber_mill.id] = lumber_mill
         self._draw_building(tiles, lumber_mill, "wood_wall")
@@ -6064,6 +6218,7 @@ class World:
         carpenter_shop = Building(carpenter_x, carpenter_y, carpenter_w, carpenter_h,
                                 building_type="carpenter_shop", category="industrial_workplace",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        carpenter_shop.max_workers = 2
         chunk.village.add_building(carpenter_shop)
         self.buildings_by_id[carpenter_shop.id] = carpenter_shop
         self._draw_building(tiles, carpenter_shop, "wood_wall")
@@ -6075,6 +6230,7 @@ class World:
         windmill = Building(windmill_x, windmill_y, windmill_w, windmill_h,
                             building_type="mill", category="industrial_workplace",
                             global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        windmill.max_workers = 2 # Miller and apprentice
         chunk.village.add_building(windmill)
         self.buildings_by_id[windmill.id] = windmill
         self._draw_building(tiles, windmill, "wood_wall")
@@ -6095,6 +6251,7 @@ class World:
         bakery = Building(bakery_x, bakery_y, bakery_w, bakery_h,
                           building_type="bakery", category="commercial_workplace",
                           global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        bakery.max_workers = 2 # Baker and apprentice
         chunk.village.add_building(bakery)
         self.buildings_by_id[bakery.id] = bakery
         self._draw_building(tiles, bakery, "wood_wall")
@@ -6115,6 +6272,7 @@ class World:
         mine = Building(mine_x, mine_y, mine_w, mine_h,
                         building_type="mine", category="industrial_workplace",
                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        mine.max_workers = 5 # Mines need many workers
         chunk.village.add_building(mine)
         self.buildings_by_id[mine.id] = mine
         self._draw_building(tiles, mine, "stone_wall")
@@ -6145,6 +6303,7 @@ class World:
         blacksmith_shop = Building(blacksmith_x, blacksmith_y, blacksmith_w, blacksmith_h,
                                    building_type="blacksmith_shop", category="industrial_workplace",
                                    global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        blacksmith_shop.max_workers = 2
         chunk.village.add_building(blacksmith_shop)
         self.buildings_by_id[blacksmith_shop.id] = blacksmith_shop
         self._draw_building(tiles, blacksmith_shop, "stone_wall")
@@ -6182,6 +6341,7 @@ class World:
             farm_building = Building(farm_x, farm_y, farm_w, farm_h,
                                    building_type="farm", category="agricultural_workplace",
                                    global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+            farm_building.max_workers = 3 # Farmers and farmhands
             chunk.village.add_building(farm_building)
             self.buildings_by_id[farm_building.id] = farm_building
             self._draw_building(tiles, farm_building, "wood_wall") # Farmhouse uses wood wall
@@ -6244,6 +6404,7 @@ class World:
 
                 if is_near_water:
                     fishing_hut = Building(hut_x, hut_y, hut_w, hut_h, building_type="fishing_hut", category="industrial_workplace", global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                    fishing_hut.max_workers = 2
                     chunk.village.add_building(fishing_hut)
                     self.buildings_by_id[fishing_hut.id] = fishing_hut
                     self._draw_building(tiles, fishing_hut, "wood_wall")
@@ -6299,6 +6460,7 @@ class World:
         library = Building(library_x, library_y, library_w, library_h,
                                 building_type="library", category="civic_workplace",
                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+        library.max_workers = 2
         chunk.village.add_building(library)
         self.buildings_by_id[library.id] = library
         self._draw_building(tiles, library, "stone_wall")
@@ -6506,6 +6668,7 @@ class World:
         self._update_world_environment()
         self._update_economy()
         self._update_npc_ages()
+        self._update_npc_careers()
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
@@ -6661,6 +6824,315 @@ class World:
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
             for npc in self.village_npcs + self.npcs:
                 npc.age += 1
+
+    def _evaluate_job_suitability(self, npc: NPC, job_building: Building) -> int:
+        """Calculates a suitability score for an NPC and a potential job building."""
+        score = random.randint(0, 20) # Base randomness
+
+        # Personality fit
+        b_type = job_building.building_type
+        personality = npc.social.personality.lower()
+
+        if "brave" in personality or "aggressive" in personality:
+            if b_type in ["sheriff_office", "jail"]: score += 20
+            elif b_type in ["mine", "lumber_mill"]: score += 10
+        elif "smart" in personality or "studious" in personality:
+            if b_type in ["library", "capital_hall"]: score += 20
+            elif b_type in ["general_store"]: score += 10
+        elif "greedy" in personality or "merchant" in personality:
+            if b_type in ["general_store", "tavern"]: score += 20
+        elif "nature" in personality or "outdoors" in personality:
+            if b_type in ["farm", "fishing_hut", "lumber_mill"]: score += 20
+
+        # Physical Stats fit (implied by combat stats)
+        if hasattr(npc, 'combat') and npc.combat.max_hp > 25: # Strong/Tough
+            if b_type in ["mine", "lumber_mill", "blacksmith_shop", "sheriff_office"]: score += 15
+
+        return score
+
+    def _update_npc_careers(self):
+        """
+        Simulates a job market where NPCs can quit unhappy jobs and find new ones.
+        Run once per day.
+        """
+        # Logic runs if it's exactly the start of a day (after day 0)
+        # Or if force-called in tests where game_time is set manually to a multiple.
+        # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
+        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+             # print("DEBUG: Skipping career update (wrong time).")
+             return
+
+        # --- Job Satisfaction Update & Quitting ---
+        # Iterate over a copy to allow modification of lists if needed (though we modify npc attributes)
+        for npc in list(self.village_npcs):
+            # print(f"DEBUG: Processing {npc.name}. Profession: {npc.economic.profession}, Satisfaction: {npc.economic.job_satisfaction}")
+            if npc.physical.is_dead:
+                continue
+
+            if npc.economic.profession.lower() != "unemployed":
+                # Factors affecting satisfaction
+                satisfaction_change = 0
+
+                # 1. Hunger/Thirst penalty
+                if npc.physical.hunger > 50: satisfaction_change -= 5
+                if npc.physical.thirst > 50: satisfaction_change -= 5
+
+                # 2. Wealth impact
+                if npc.economic.money < 10:
+                    satisfaction_change -= 2 # Stress of poverty
+                elif npc.economic.money > 200:
+                    satisfaction_change += 1 # Financial security
+
+                # 3. Random fluctuation (good day/bad day)
+                satisfaction_change += random.randint(-5, 5)
+
+                npc.economic.job_satisfaction = max(0, min(100, npc.economic.job_satisfaction + satisfaction_change))
+
+                # print(f"DEBUG: {npc.name} new satisfaction: {npc.economic.job_satisfaction} (change: {satisfaction_change})")
+
+                # Firing Logic (Performance check)
+                if npc.economic.work_performance < 20 and random.random() < 0.1: # 10% chance to be fired if performance is very low
+                    old_profession = npc.economic.profession
+                    npc.economic.profession = "Unemployed"
+                    npc.economic.job_satisfaction = 30 # Fired creates unhappiness
+                    npc.economic.days_unemployed = 0
+                    npc.economic.work_performance = 50 # Reset for next job
+
+                    if npc.schedule.work_building_id:
+                        # Just clear the schedule ID. 'occupants' tracks physical presence,
+                        # so we don't remove them from the building list here (they might still be standing there).
+                        npc.schedule.work_building_id = None
+
+                    self.add_message_to_chat_log(f"{npc.name} was fired from their job as a {old_profession} for poor performance.")
+
+                    # Log firing event
+                    self.log_event(
+                        event_type="npc_fired",
+                        description=f"{{subject}} was fired from their job as {old_profession}.",
+                        subject_id=npc.id,
+                        location=(npc.x, npc.y)
+                    )
+
+                # Quitting Logic
+                elif npc.economic.job_satisfaction < 10:
+                    # NPC Quits
+                    old_profession = npc.economic.profession
+                    npc.economic.profession = "Unemployed"
+                    npc.economic.job_satisfaction = 50 # Reset for "new life"
+                    npc.economic.days_unemployed = 0
+                    npc.economic.work_performance = 50
+
+                    if npc.schedule.work_building_id:
+                        # Just clear the schedule ID. 'occupants' tracks physical presence.
+                        npc.schedule.work_building_id = None
+
+                    self.add_message_to_chat_log(f"{npc.name} has quit their job as a {old_profession} due to low satisfaction.")
+
+                    # Log quitting event
+                    self.log_event(
+                        event_type="npc_quit_job",
+                        description=f"{{subject}} quit their job as {old_profession}.",
+                        subject_id=npc.id,
+                        location=(npc.x, npc.y)
+                    )
+
+            else: # Is Unemployed
+                npc.economic.days_unemployed += 1
+                # Satisfaction drops while unemployed
+                npc.economic.job_satisfaction = max(0, npc.economic.job_satisfaction - 2)
+
+        # --- Hiring Logic ---
+        unemployed_npcs = [n for n in self.village_npcs if n.economic.profession.lower() == "unemployed" and not n.physical.is_dead]
+        random.shuffle(unemployed_npcs) # Randomize who gets first pick
+
+        for npc in unemployed_npcs:
+            village = self._get_village_for_npc(npc)
+            if not village: continue
+
+            # Find workplaces with vacancies
+            potential_jobs = []
+            for building in village.buildings:
+                if "workplace" in building.category:
+                    # Count actual employees based on their assigned work building ID
+                    current_workers_count = sum(1 for villager in self.village_npcs if villager.schedule.work_building_id == building.id and not villager.physical.is_dead)
+
+                    if current_workers_count < building.max_workers:
+                        potential_jobs.append(building)
+
+            if potential_jobs:
+                # Score jobs based on suitability
+                best_job = None
+                best_score = -1
+
+                for job_building in potential_jobs:
+                    score = self._evaluate_job_suitability(npc, job_building)
+                    if score > best_score:
+                        best_score = score
+                        best_job = job_building
+
+                new_workplace = best_job if best_job else random.choice(potential_jobs)
+                self._assign_job(npc, new_workplace)
+
+            # --- Emigration Logic ---
+            # If unemployed for too long, leave the village
+            elif npc.economic.days_unemployed > 7 and npc.economic.money < 50: # Unemployed for a week and poor
+                npc.schedule.current_task = "leaving_village"
+                # Set target to edge of map
+                edge_x, edge_y = self._find_nearest_map_edge(npc)
+
+                npc.schedule.current_path = self.calculate_path(npc.x, npc.y, edge_x, edge_y)
+                npc.schedule.current_destination_coords = (edge_x, edge_y)
+
+                self.add_message_to_chat_log(f"{npc.name} has decided to leave the village in search of better opportunities.")
+                self.log_event(event_type="npc_emigrated", description=f"{{subject}} left the village.", subject_id=npc.id, location=(npc.x, npc.y))
+
+        # --- Job Hopping (for Employed NPCs) ---
+        # Check if employed NPCs want to switch jobs
+        for npc in list(self.village_npcs):
+            if npc.physical.is_dead or npc.economic.profession.lower() == "unemployed": continue
+
+            # Only consider switching if somewhat dissatisfied
+            if npc.economic.job_satisfaction < 60:
+                village = self._get_village_for_npc(npc)
+                if not village: continue
+
+                current_work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                if not current_work_building: continue
+
+                current_job_score = self._evaluate_job_suitability(npc, current_work_building)
+
+                # Look for better vacancies
+                potential_jobs = []
+                for building in village.buildings:
+                    if "workplace" in building.category and building.id != npc.schedule.work_building_id:
+                        current_workers_count = sum(1 for villager in self.village_npcs if villager.schedule.work_building_id == building.id and not villager.physical.is_dead)
+                        if current_workers_count < building.max_workers:
+                            potential_jobs.append(building)
+
+                if potential_jobs:
+                    best_new_job = None
+                    best_new_score = -1
+
+                    for job_building in potential_jobs:
+                        score = self._evaluate_job_suitability(npc, job_building)
+                        if score > best_new_score:
+                            best_new_score = score
+                            best_new_job = job_building
+
+                    # Switch if significantly better (20% better + switching friction)
+                    if best_new_job and best_new_score > current_job_score * 1.2 + 5:
+                        old_profession = npc.economic.profession
+                        self._assign_job(npc, best_new_job)
+                        self.add_message_to_chat_log(f"{npc.name} left their job as {old_profession} to become a {npc.economic.profession}.")
+
+
+        # --- Immigration Logic ---
+        # Check overall vacancies in villages and spawn new migrants
+        # We'll do this per village found in chunks
+        processed_villages = set()
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if chunk.village and chunk.village not in processed_villages:
+                    village = chunk.village
+                    processed_villages.add(village)
+
+                    total_vacancies = 0
+                    for building in village.buildings:
+                        if "workplace" in building.category:
+                            current_workers = sum(1 for v in self.village_npcs if v.schedule.work_building_id == building.id and not v.physical.is_dead)
+                            total_vacancies += max(0, building.max_workers - current_workers)
+
+                    # If there are significant vacancies, chance to spawn an immigrant
+                    if total_vacancies >= 2 and random.random() < 0.2: # 20% chance if 2+ jobs open
+                        # Spawn a new NPC
+                        # We use _populate_village_npcs logic but for just one person
+                        # Place them at town square or random edge
+                        spawn_x = x_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
+                        spawn_y = y_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
+                        if "town_square_center" in village.interaction_points:
+                            spawn_x, spawn_y = village.interaction_points["town_square_center"]
+
+                        # Create a dummy chunk object to reuse population logic or just manually create
+                        # Reusing _populate_village_npcs is hard because it does a batch.
+                        # Let's create manually using similar logic.
+                        self._spawn_migrant(village, spawn_x, spawn_y)
+
+    def _assign_job(self, npc: NPC, work_building: Building):
+        """Assigns a job to an NPC at a specific building."""
+        npc.schedule.work_building_id = work_building.id
+
+        # Determine profession name based on building type
+        new_profession = "Worker" # Default
+        if work_building.building_type == "sheriff_office":
+            has_sheriff = any(o.economic.profession == "Sheriff" and o.schedule.work_building_id == work_building.id for o in self.village_npcs if o.id != npc.id)
+            new_profession = "Deputy" if has_sheriff else "Sheriff"
+        elif work_building.building_type == "general_store": new_profession = "Merchant"
+        elif work_building.building_type == "tavern": new_profession = "Tavern Keeper"
+        elif work_building.building_type == "lumber_mill":
+            has_foreman = any(o.economic.profession == "Lumber Mill Foreman" and o.schedule.work_building_id == work_building.id for o in self.village_npcs if o.id != npc.id)
+            new_profession = "Woodcutter" if has_foreman else "Lumber Mill Foreman"
+        elif work_building.building_type == "farm": new_profession = "Farmer"
+        elif work_building.building_type == "mine": new_profession = "Miner"
+        elif work_building.building_type == "carpenter_shop": new_profession = "Carpenter"
+        elif work_building.building_type == "mill": new_profession = "Miller"
+        elif work_building.building_type == "bakery": new_profession = "Baker"
+        elif work_building.building_type == "fishing_hut": new_profession = "Fisherman"
+        elif work_building.building_type == "library": new_profession = "Scribe"
+        elif work_building.building_type == "capital_hall": new_profession = "Town Official"
+        elif work_building.building_type == "jail": new_profession = "Guard"
+        elif work_building.building_type == "blacksmith_shop": new_profession = "Blacksmith"
+
+        npc.economic.profession = new_profession
+        npc.economic.job_satisfaction = 70
+        npc.economic.days_unemployed = 0
+        npc.economic.work_performance = 50 # Reset performance
+
+        self.add_message_to_chat_log(f"{npc.name} has been hired as a {new_profession}.")
+
+        self.log_event(
+            event_type="npc_hired",
+            description=f"{{subject}} started a new job as a {new_profession}.",
+            subject_id=npc.id,
+            location=(work_building.global_center_x, work_building.global_center_y)
+        )
+
+    def _spawn_migrant(self, village: Village, x: int, y: int):
+        """Spawns a new migrant NPC into the village."""
+        prompt = LLM_PROMPTS["npc_personality"].format(
+            player_criminal_points=0,
+            player_hero_points=0,
+            name_hint="a newcomer",
+            personality_hint="hopeful, looking for work",
+            family_ties_hint="none",
+            attitude_to_player_hint="neutral"
+        )
+        llm_response = self._call_ollama(prompt)
+        try:
+            npc_data = json.loads(llm_response)
+            npc = NPC(
+                x=x, y=y,
+                name=npc_data.get("name", "Migrant"),
+                dialogue=npc_data.get("dialogue", ["Hello, I'm looking for work."]),
+                personality=npc_data.get("personality", "commoner"),
+                player_id=None
+            )
+            npc.economic.profession = "Unemployed"
+            npc.economic.money = random.randint(10, 50) # Modest starting funds
+
+            # Try to find a home
+            vacant_homes = [b for b in village.buildings if b.category == "residential" and not b.residents]
+            if vacant_homes:
+                home = random.choice(vacant_homes)
+                npc.schedule.home_building_id = home.id
+                home.residents.append(npc)
+                npc.knowledge.known_locations["my home"] = (home.global_center_x, home.global_center_y)
+
+            self.village_npcs.append(npc)
+            self.add_message_to_chat_log(f"A migrant named {npc.name} has arrived in the village looking for work.")
+
+        except json.JSONDecodeError:
+            pass
 
     def _update_abstract_simulation(self):
         """
@@ -6857,9 +7329,9 @@ class World:
 
             prompt = LLM_PROMPTS["npc_gossip_reaction"].format(
                 npc_name=npc.name,
-                npc_personality=npc.personality,
-                npc_attitude_to_subject=npc.relationships.get(event_to_process.subject_id, 50), # Use relationship score
-                npc_attitude_to_target=npc.relationships.get(event_to_process.target_id, 50) if event_to_process.target_id else 50,
+                npc_personality=npc.social.personality,
+                npc_attitude_to_subject=npc.social.relationships.get(event_to_process.subject_id, 50), # Use relationship score
+                npc_attitude_to_target=npc.social.relationships.get(event_to_process.target_id, 50) if event_to_process.target_id else 50,
                 event_summary=event_summary,
                 event_type=event_to_process.type
             )
@@ -6884,11 +7356,11 @@ class World:
 
                 # Apply relationship changes
                 if relationship_change_subject != 0 and subject_entity:
-                    npc.relationships[subject_entity.id] = npc.relationships.get(subject_entity.id, 50) + relationship_change_subject
+                    npc.social.relationships[subject_entity.id] = npc.social.relationships.get(subject_entity.id, 50) + relationship_change_subject
                     # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {subject_name} changed by {relationship_change_subject}.")
 
                 if relationship_change_target != 0 and target_entity:
-                    npc.relationships[target_entity.id] = npc.relationships.get(target_entity.id, 50) + relationship_change_target
+                    npc.social.relationships[target_entity.id] = npc.social.relationships.get(target_entity.id, 50) + relationship_change_target
                     # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {target_name} changed by {relationship_change_target}.")
 
                 if action == "form_grudge" and subject_entity:
@@ -6984,7 +7456,7 @@ class World:
         prompt = LLM_PROMPTS["npc_witness_reaction"].format(
             witness_name=witness.name,
             witness_personality=witness.social.personality,
-            witness_profession=witness.profession,
+            witness_profession=witness.economic.profession,
             witness_attitude_to_criminal=witness.attitude_to_player,
             witness_attitude_to_victim=witness_attitude_to_victim,
             crime_type=crime_type,

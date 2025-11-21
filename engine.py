@@ -1199,6 +1199,29 @@ class World:
                                 friend.relationships[npc.id] = min(100, friend.relationships.get(npc.id, 50) + 10)
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
                         npc.schedule.current_task = "idle" # Done visiting
+                    elif npc.schedule.current_task == "applying_for_job":
+                        # Arrived at potential workplace to apply
+                        target_building = None
+                        village = self._get_village_for_npc(npc, by_coords=True)
+                        if village:
+                            for b in village.buildings:
+                                if (b.global_center_x, b.global_center_y) == (npc.x, npc.y):
+                                    target_building = b
+                                    break
+
+                        if target_building:
+                             current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == target_building.id and not n.physical.is_dead)
+                             if current_workers < target_building.max_workers:
+                                 self._assign_job(npc, target_building)
+                                 npc.schedule.current_task = "at work"
+                                 self.add_message_to_chat_log(f"{npc.name} got the job at the {target_building.building_type.replace('_', ' ')} thanks to your tip!")
+                                 npc.social.relationships[self.player.id] = min(100, npc.social.relationships.get(self.player.id, 50) + 20)
+                             else:
+                                 self.add_message_to_chat_log(f"{npc.name} was told there are no vacancies at the {target_building.building_type.replace('_', ' ')}.")
+                                 npc.schedule.current_task = "idle"
+                        else:
+                            npc.schedule.current_task = "idle"
+
                     elif npc.schedule.current_task == "greeting_player":
                         # Successfully reached the player, initiate dialogue
                         self.add_message_to_chat_log(f"{npc.name} says hello!")
@@ -4978,6 +5001,30 @@ class World:
                 self.chat_ui_history.append((npc_target.name, "I'm not sure what you mean."))
             return
 
+        # Job Referral Logic
+        if npc_target.economic.profession == "Unemployed" and any(word in player_input_text.lower() for word in ["job", "work", "hiring", "vacancy"]):
+            # Check if player mentioned a specific known building that has a vacancy
+            referred_building = None
+            for loc_id, coords in self.player.knowledge.known_locations.items():
+                building = self.buildings_by_id.get(loc_id)
+                if building and building.building_type.replace('_', ' ') in player_input_text.lower():
+                     # Check vacancy
+                     current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == building.id and not n.physical.is_dead)
+                     if current_workers < building.max_workers:
+                         referred_building = building
+                         break
+
+            if referred_building:
+                self.chat_ui_history.append((npc_target.name, f"The {referred_building.building_type.replace('_', ' ')}? I'll go apply right now! Thank you!"))
+                npc_target.schedule.current_task = "applying_for_job"
+                npc_target.schedule.current_destination_coords = (referred_building.global_center_x, referred_building.global_center_y)
+                npc_target.schedule.current_path = [] # Clear path to trigger recalculation
+                return # End conversation turn to act
+            else:
+                # Optional: If player mentions "job" but no specific building matched, NPC could ask "Where?"
+                # For now, fall through to LLM which might handle it conversationally.
+                pass
+
         gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
         if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
             if not npc_target.known_events:
@@ -6623,6 +6670,24 @@ class World:
             for npc in self.village_npcs + self.npcs:
                 npc.age += 1
 
+    def _find_boss_for_npc(self, npc: NPC, building: Building) -> NPC | None:
+        """Finds a supervisor or senior coworker for an NPC at a building."""
+        possible_bosses = []
+        for other_npc in self.village_npcs:
+            if other_npc.id == npc.id or other_npc.physical.is_dead:
+                continue
+            if other_npc.schedule.work_building_id == building.id:
+                prof = other_npc.economic.profession
+                # Explicit leaders
+                if prof in ["Sheriff", "Lumber Mill Foreman", "Tavern Keeper", "Town Official", "Merchant"]:
+                    return other_npc
+                possible_bosses.append(other_npc)
+
+        # If no explicit leader, pick a random coworker to blame/thank
+        if possible_bosses:
+            return random.choice(possible_bosses)
+        return None
+
     def _evaluate_job_suitability(self, npc: NPC, job_building: Building) -> int:
         """Calculates a suitability score for an NPC and a potential job building."""
         score = random.randint(0, 20) # Base randomness
@@ -6691,6 +6756,15 @@ class World:
                 # Firing Logic (Performance check)
                 if npc.economic.work_performance < 20 and random.random() < 0.1: # 10% chance to be fired if performance is very low
                     old_profession = npc.economic.profession
+
+                    # Social Fallout: Find someone to blame (Boss)
+                    work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                    if work_building:
+                        boss = self._find_boss_for_npc(npc, work_building)
+                        if boss:
+                            npc.add_grudge(boss.id, f"Fired me from my job as {old_profession}.")
+                            # self.add_message_to_chat_log(f"{npc.name} blames {boss.name} for their termination.")
+
                     npc.economic.profession = "Unemployed"
                     npc.economic.job_satisfaction = 30 # Fired creates unhappiness
                     npc.economic.days_unemployed = 0
@@ -6704,11 +6778,13 @@ class World:
                     self.add_message_to_chat_log(f"{npc.name} was fired from their job as a {old_profession} for poor performance.")
 
                     # Log firing event
+                    # Use workplace location for the event if possible, so gossiping unemployed NPCs know where to go
+                    fired_location = (work_building.global_center_x, work_building.global_center_y) if work_building else (npc.x, npc.y)
                     self.log_event(
                         event_type="npc_fired",
                         description=f"{{subject}} was fired from their job as {old_profession}.",
                         subject_id=npc.id,
-                        location=(npc.x, npc.y)
+                        location=fired_location
                     )
 
                 # Quitting Logic
@@ -6727,11 +6803,14 @@ class World:
                     self.add_message_to_chat_log(f"{npc.name} has quit their job as a {old_profession} due to low satisfaction.")
 
                     # Log quitting event
+                    work_building = self.buildings_by_id.get(npc.schedule.work_building_id) if npc.schedule.work_building_id else None
+                    quit_location = (work_building.global_center_x, work_building.global_center_y) if work_building else (npc.x, npc.y)
+
                     self.log_event(
                         event_type="npc_quit_job",
                         description=f"{{subject}} quit their job as {old_profession}.",
                         subject_id=npc.id,
-                        location=(npc.x, npc.y)
+                        location=quit_location
                     )
 
             else: # Is Unemployed
@@ -6887,6 +6966,13 @@ class World:
         npc.economic.work_performance = 50 # Reset performance
 
         self.add_message_to_chat_log(f"{npc.name} has been hired as a {new_profession}.")
+
+        # Social Boost: Gratitude to Boss
+        boss = self._find_boss_for_npc(npc, work_building)
+        if boss:
+            npc.social.relationships[boss.id] = min(100, npc.social.relationships.get(boss.id, 50) + 20)
+            # Boss likes the new hire too
+            boss.social.relationships[npc.id] = min(100, boss.social.relationships.get(npc.id, 50) + 10)
 
         self.log_event(
             event_type="npc_hired",
@@ -7178,6 +7264,12 @@ class World:
                     npc.task_target_coords = event_to_process.location
                     npc.current_path = []
                     npc.task_timer = random.randint(50, 100) # Investigate for a bit
+                elif action == "apply_for_vacancy" and event_to_process.location and npc.economic.profession == "Unemployed":
+                    # Trigger application logic
+                    npc.schedule.current_task = "applying_for_job"
+                    npc.schedule.current_destination_coords = event_to_process.location
+                    npc.schedule.current_path = []
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} heard about a vacancy and is going to apply.")
 
             except json.JSONDecodeError:
                 # self.add_message_to_chat_log(f"Debug: Failed to parse gossip reaction for {npc.name}: {response_str}")

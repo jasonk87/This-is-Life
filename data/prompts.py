@@ -765,22 +765,23 @@ You are an AI determining an NPC's internal reaction to hearing a piece of gossi
 - Current Relationship with Gossip Target: {npc_attitude_to_target} (0-100, 50 is neutral)
 
 **Gossip Details:**
-- Event Type: {event_type} (e.g., "combat_attack", "entity_death", "theft", "npc_birth")
+- Event Type: {event_type} (e.g., "combat_attack", "entity_death", "theft", "npc_birth", "npc_fired", "npc_hired", "npc_quit_job")
 - Event Summary: {event_summary}
 
 **Task:**
 Based on the NPC's personality, relationships, and the nature of the event, determine their reaction. This can be a simple social adjustment or a concrete action.
 
 **Available Actions:**
-1.  "update_relationships": Only adjust relationship scores and have an internal thought. This is the most common reaction for minor events.
+1.  "update_relationships": Only adjust relationship scores and have an internal thought. This is the most common reaction for minor events or career news.
 2.  "mourn_death": If the NPC hears about the death (`entity_death`) of someone they have a high relationship with (e.g., > 70).
 3.  "investigate_crime_scene": If a 'lawful', 'curious', or 'Sheriff'/'Guard' NPC hears about a serious crime like 'entity_death' or 'theft' and they didn't cause it.
 4.  "celebrate_birth": If the NPC hears about a birth (`npc_birth`) and has a high relationship with one of the parents.
+5.  "apply_for_vacancy": If the NPC is currently unemployed and hears about someone being fired or quitting (`npc_fired`, `npc_quit_job`), they can decide to go apply for that job.
 
 **Decision Factors:**
-- **Event Type:** `entity_death` and `npc_birth` are major events that can trigger actions. `combat_attack` and `theft` might trigger actions for lawful NPCs or friends of the victim.
-- **Relationships:** A high relationship with the victim of a crime or the deceased is a strong motivator for "mourn_death" or "investigate_crime_scene". A low relationship might lead to indifference ("update_relationships" with 0 change).
-- **Personality/Profession:** A 'Sheriff' should "investigate_crime_scene". A 'loyal' NPC will "mourn_death" for a friend. A 'cowardly' NPC will likely just use "update_relationships" even for serious events they hear about.
+- **Event Type:** `entity_death` and `npc_birth` are major events. `combat_attack` and `theft` trigger lawful/friend responses. Career changes (`npc_fired`, `npc_hired`) usually trigger `update_relationships` unless the listener is Unemployed and opportunistic (`apply_for_vacancy`).
+- **Relationships:** High relationships drive emotional responses. Low relationships lead to indifference or Schadenfreude.
+- **Personality/Profession:** A 'Sheriff' investigates crimes. A 'loyal' NPC mourns friends. An 'ambitious' or 'unemployed' NPC might `apply_for_vacancy` if they hear a job opened up.
 
 **Output Format (JSON):**
 Return a JSON object with the following fields:

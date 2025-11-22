@@ -46,7 +46,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "2d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [3, 6]
             },
@@ -92,7 +92,7 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.9,
                 "quantity": 1
             },
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 0.5,
                 "quantity": [1, 2]
             }
@@ -118,7 +118,7 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.9,
                 "quantity": [1, 2]
             },
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 0.7,
                 "quantity": [2, 4]
             }
@@ -189,7 +189,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [2, 4]
             }
@@ -246,7 +246,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d1",
         "combat_behavior": "cowardly",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": 1
             }
@@ -266,7 +266,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "2d6",
         "combat_behavior": "herd_defensive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [5, 10]
             },
@@ -289,7 +289,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [1, 2]
             },

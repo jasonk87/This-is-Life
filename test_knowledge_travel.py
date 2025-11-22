@@ -94,5 +94,76 @@ class TestKnowledgeTravel(unittest.TestCase):
         self.assertTrue(len(threat_events) > 0)
         self.assertEqual(threat_events[0].subject_id, hunter.id)
 
+    def test_traveling_merchant_gossip(self):
+        # Create two villages (conceptually)
+        # Ensure they are in different chunks. If CHUNK_SIZE is 40 (from config), then 10 and 80 are different chunks.
+        # But to be safe and robust against config changes, we use multipliers.
+        village1_loc = (10, 10)
+        village2_loc = (CHUNK_SIZE * 2 + 10, CHUNK_SIZE * 2 + 10)
+
+        # Create Merchant at Village 1
+        merchant = NPC(village1_loc[0], village1_loc[1], name="Traveling Merchant")
+        merchant.economic.profession = "Traveling Merchant"
+        merchant.schedule.current_task = "traveling_to_village"
+        self.world.npcs.append(merchant)
+
+        # Create an event in Village 1 (remote from Village 2)
+        event_v1 = Event("village1_event", "Big news in Village 1!", 999, self.world.game_time, location=village1_loc)
+
+        # Merchant learns about event_v1
+        merchant.knowledge.known_events[event_v1.id] = event_v1
+
+        # Create a recipient at Village 2
+        recipient = NPC(village2_loc[0], village2_loc[1], name="Innkeeper")
+        recipient.economic.profession = "Tavern Keeper"
+        # Mock finding village for recipient (needed for logic)
+        # We can just mock _get_village_for_npc to return a mock village object for the recipient
+        mock_village2 = MagicMock()
+        mock_village2.buildings = []
+
+        # We need the merchant to arrive at Village 2.
+        # The logic checks _get_village_for_npc(merchant, by_coords=True).
+        # So if we move merchant to recipient's location and ensure world returns a village there.
+
+        merchant.x, merchant.y = recipient.x, recipient.y
+
+        # Ensure ONLY the recipient is in village_npcs to prevent random choice from picking another NPC
+        # The setUp adds test NPCs to village_npcs, so we must clear it.
+        self.world.village_npcs = [recipient]
+
+        # Patch _get_village_for_npc to simulate arrival context
+        with patch.object(self.world, '_get_village_for_npc') as mock_get_village:
+            def get_village_side_effect(npc, by_coords=False):
+                if npc == merchant and by_coords:
+                    return mock_village2
+                if npc == recipient:
+                    return mock_village2
+                return None
+            mock_get_village.side_effect = get_village_side_effect
+
+            # Trigger the arrival logic manually or by mocking path completion
+            # The logic is inside _update_npc_movement when path is empty/done.
+            # IMPORTANT: The logic block is inside `if npc.schedule.current_path:`.
+            # So we need a path of length 1 (arrived) to enter the block.
+            merchant.schedule.current_path = [(merchant.x, merchant.y)]
+
+            # We need to make sure the "arrival" block runs. It runs if task is "traveling_to_village" and path empty.
+            # And it selects a recipient from village_npcs. We only have one, so it should pick 'recipient'.
+
+            self.world._update_npc_movement()
+
+            # Debug print if assertion fails
+            if event_v1.id not in recipient.knowledge.known_events:
+                print(f"DEBUG FAILURE: Recipient known events: {recipient.knowledge.known_events.keys()}")
+                print(f"DEBUG FAILURE: Merchant known events: {merchant.knowledge.known_events.keys()}")
+                print(f"DEBUG FAILURE: Merchant task: {merchant.schedule.current_task}")
+
+            # Assert recipient learned the news
+            self.assertIn(event_v1.id, recipient.knowledge.known_events)
+
+            # Assert merchant cleared old news and relearned local news (if any)
+            # Since there are no global events near Village 2, merchant's known_events should be empty/cleared of v1
+            self.assertNotIn(event_v1.id, merchant.knowledge.known_events)
+
 if __name__ == '__main__':
     unittest.main()

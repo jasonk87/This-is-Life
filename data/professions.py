@@ -264,6 +264,23 @@ PROFESSIONS = {
                 "action_verb": "hunting"
             },
             {
+                "id": "butcher_carcass",
+                "display_name": "Butchering",
+                "duration_ticks": 100,
+                "target_zone_tag": "corpse", # Special tag to find nearest corpse
+                "action_verb": "butchering",
+                # No direct production here, handled by special logic in _produce_sub_task_output due to variable drops
+            },
+            {
+                "id": "deposit_meat",
+                "display_name": "Depositing Meat",
+                "duration_ticks": 30,
+                "target_zone_tag": "storage_area",
+                "action_verb": "storing meat",
+                "deposits_item_to_workplace": {"raw_meat": 1, "raw_venison": 1, "animal_pelt": 1, "raw_mutton": 1}
+                # Note: Deposits all matching items from inventory
+            },
+            {
                 "id": "scout_area",
                 "display_name": "Scouting",
                 "duration_ticks": 200,
@@ -271,7 +288,7 @@ PROFESSIONS = {
                 "action_verb": "scouting"
             }
         ],
-        "default_sub_task_sequence": ["scout_area", "hunt_animals"]
+        "default_sub_task_sequence": ["scout_area", "hunt_animals"] # butchering is dynamic
     },
     "Cook": {
         "display_name": "Cook",

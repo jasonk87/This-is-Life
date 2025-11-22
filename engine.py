@@ -1151,7 +1151,7 @@ class World:
                                 gossip_recipient = random.choice(key_npcs)
                                 events_shared = 0
                                 # Share remote events (distant news)
-                                for event_id, event_obj in npc.known_events.items():
+                                for event_id, event_obj in npc.knowledge.known_events.items():
                                     # Only share if event didn't happen in this village
                                     is_local = False
                                     if event_obj.location:
@@ -1162,42 +1162,42 @@ class World:
                                         if chunk_x == current_chunk_x and chunk_y == current_chunk_y:
                                             is_local = True
 
-                                    if not is_local and event_id not in gossip_recipient.known_events:
-                                        gossip_recipient.known_events[event_id] = event_obj
+                                    if not is_local and event_id not in gossip_recipient.knowledge.known_events:
+                                        gossip_recipient.knowledge.known_events[event_id] = event_obj
                                         events_shared += 1
                                 if events_shared > 0:
                                     self.add_message_to_chat_log(f"{npc.name} shared news from afar with {gossip_recipient.name}.")
 
                         # Clear old events but keep some "news" to carry
                         # Actually, better to clear all and relearn local news to carry to next village
-                        npc.known_events.clear()
+                        npc.knowledge.known_events.clear()
                         village_center_x = (npc.x // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
                         village_center_y = (npc.y // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
                         for event in self.global_events:
                             if event.location:
                                 dist_sq = (event.location[0] - village_center_x)**2 + (event.location[1] - village_center_y)**2
                                 if dist_sq < (CHUNK_SIZE * 1.5)**2:
-                                    if event.id not in npc.known_events:
-                                        npc.known_events[event.id] = event
-                        if npc.known_events:
-                            self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.known_events)} events in the new village.")
+                                    if event.id not in npc.knowledge.known_events:
+                                        npc.knowledge.known_events[event.id] = event
+                        if npc.knowledge.known_events:
+                            self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.")
 
                     elif npc.schedule.current_task == "socializing" and npc.task_target_entity_id:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
                             # Successfully met up, now exchange gossip
                             # NPC shares one piece of news with partner
-                            if npc.known_events:
-                                event_id_to_share = random.choice(list(npc.known_events.keys()))
-                                if event_id_to_share not in chat_partner.known_events:
-                                    chat_partner.known_events[event_id_to_share] = npc.known_events[event_id_to_share]
+                            if npc.knowledge.known_events:
+                                event_id_to_share = random.choice(list(npc.knowledge.known_events.keys()))
+                                if event_id_to_share not in chat_partner.knowledge.known_events:
+                                    chat_partner.knowledge.known_events[event_id_to_share] = npc.knowledge.known_events[event_id_to_share]
                                     # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about event {event_id_to_share[:8]}.")
 
                             # Partner shares one piece of news back
-                            if chat_partner.known_events:
-                                event_id_to_share_back = random.choice(list(chat_partner.known_events.keys()))
-                                if event_id_to_share_back not in npc.known_events:
-                                    npc.known_events[event_id_to_share_back] = chat_partner.known_events[event_id_to_share_back]
+                            if chat_partner.knowledge.known_events:
+                                event_id_to_share_back = random.choice(list(chat_partner.knowledge.known_events.keys()))
+                                if event_id_to_share_back not in npc.knowledge.known_events:
+                                    npc.knowledge.known_events[event_id_to_share_back] = chat_partner.knowledge.known_events[event_id_to_share_back]
                                     # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about event {event_id_to_share_back[:8]}.")
 
                             # Increase relationship
@@ -2839,12 +2839,42 @@ class World:
         npc.woodcutter_search_radius += 5
         return None
 
+    def _find_nearest_corpse(self, npc: NPC) -> tuple[int, int] | None:
+        """Finds the nearest animal corpse for the NPC to butcher."""
+        search_radius = 20
+        closest_corpse_coords = None
+        min_dist_sq = float('inf')
+
+        for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+            for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and tile.name == "Animal Corpse":
+                        # Check if another NPC is already targeting this corpse
+                        is_targeted = False
+                        for other_npc in self.village_npcs:
+                             if other_npc.id != npc.id and \
+                                other_npc.current_sub_task == "butcher_carcass" and \
+                                other_npc.sub_task_target_coords == (x, y):
+                                 is_targeted = True
+                                 break
+
+                        if not is_targeted:
+                            dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                            if dist_sq < min_dist_sq:
+                                min_dist_sq = dist_sq
+                                closest_corpse_coords = (x, y)
+        return closest_corpse_coords
+
     def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
         """Determines the global target coordinates for a given sub-task."""
         target_zone_tag = sub_task_data.get("target_zone_tag")
         if not target_zone_tag:
             # self.add_message_to_chat_log(f"Error: Sub-task {sub_task_data.get('id')} for {npc.name} has no target_zone_tag.")
             return None
+
+        if target_zone_tag == "corpse":
+            return self._find_nearest_corpse(npc)
 
         if target_zone_tag == "chopping_area":
             # For chopping, we find a dynamic tree target near the building.
@@ -3080,6 +3110,29 @@ class World:
                                 npc.add_item("raw_log", logs_collected)
                         # else:
                             # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
+                    elif completed_sub_task_id == "butcher_carcass":
+                        target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+                        if target_tile_obj and target_tile_obj.name == "Animal Corpse":
+                            animal_type = target_tile_obj.properties.get("animal_type")
+                            # Loot logic
+                            if animal_type in ANIMAL_DEFINITIONS:
+                                animal_def = ANIMAL_DEFINITIONS[animal_type]
+                                loot_table = animal_def.get("loot_drops", {})
+                                for item_key, loot_info in loot_table.items():
+                                    if random.random() < loot_info.get("chance", 0):
+                                        quantity_info = loot_info["quantity"]
+                                        if isinstance(quantity_info, list) and len(quantity_info) == 2:
+                                            quantity = random.randint(quantity_info[0], quantity_info[1])
+                                        else:
+                                            quantity = int(quantity_info)
+                                        if quantity > 0:
+                                            npc.add_item(item_key, quantity)
+                                            # self.add_message_to_chat_log(f"Debug: {npc.name} butchered {quantity} {item_key}.")
+
+                            # Replace corpse with bones
+                            bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
+                            self._change_map_tile(npc.sub_task_target_coords, bones_def)
+
                     elif completed_sub_task_id == "mine_ore":
                         # Miner is at the mine face, generate ore
                         npc.add_item("iron_ore", 1)
@@ -3980,6 +4033,17 @@ class World:
             animal_def = ANIMAL_DEFINITIONS.get(entity_data.animal_type, {})
             if "shearable" in animal_def:
                 actions.append("Shear")
+
+        if entity_type == "tile" and entity_data.properties.get("workstation_type") == "fire":
+             # Check if player has raw food
+             has_raw_food = False
+             for item in self.player.economic.inventory:
+                 item_def = ITEM_DEFINITIONS.get(item["key"], {})
+                 if "food_ingredient_raw" in item_def.get("item_type_tags", []):
+                     has_raw_food = True
+                     break
+             if has_raw_food:
+                 actions.append("Cook")
 
         actions.append("Examine") # Universal action
         return actions
@@ -7453,7 +7517,7 @@ class World:
                 continue
 
             # Select a random event from known events to react to
-            event_to_process = random.choice(list(npc.known_events.values()))
+            event_to_process = random.choice(list(npc.knowledge.known_events.values()))
 
             # Avoid reacting to very old news repeatedly
             time_since_event = time.time() - event_to_process.timestamp
@@ -8103,6 +8167,45 @@ class World:
 
         else:
             self.add_message_to_chat_log("You failed to harvest the crop.")
+
+    def player_attempt_cook(self, x: int, y: int):
+        """Handles the player's attempt to cook food at a fire."""
+        target_tile = self.get_tile_at(x, y)
+        if not (target_tile and target_tile.properties.get("workstation_type") == "fire"):
+            self.add_message_to_chat_log("You need a fire to cook.")
+            return
+
+        # Find cookable items in inventory
+        cookable_items = []
+        for item in self.player.economic.inventory:
+            item_key = item["key"]
+            item_def = ITEM_DEFINITIONS.get(item_key, {})
+            # Look for items that have a crafting recipe requiring 'fire' and use themselves as ingredient
+            # Or simpler: check for items that can be made from this ingredient using fire
+            # Reverse lookup: Find what recipes require this item + fire
+
+            # Iterate all items to find if they are a product of cooking this ingredient
+            for product_key, product_def in ITEM_DEFINITIONS.items():
+                recipe = product_def.get("crafting_recipe")
+                workstation = product_def.get("required_workstation")
+
+                if recipe and workstation == "fire" and item_key in recipe:
+                     cookable_items.append((item_key, product_key))
+
+        if not cookable_items:
+            self.add_message_to_chat_log("You have nothing to cook.")
+            return
+
+        # For now, just cook the first available item found
+        # Future: Context menu selection
+        ingredient_key, product_key = cookable_items[0]
+
+        if self.player.remove_item(ingredient_key, 1):
+            self.player.add_item(product_key, 1)
+            product_name = ITEM_DEFINITIONS[product_key]["name"]
+            self.add_message_to_chat_log(f"You cook a {product_name}.")
+        else:
+             self.add_message_to_chat_log("Something went wrong with cooking.")
 
     def player_attempt_build(self, recipe_key: str, x: int, y: int):
         """Handles the player's attempt to build a structure or furniture."""

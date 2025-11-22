@@ -427,6 +427,33 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"],
     },
+    "raw_meat": {
+        "name": "Raw Meat",
+        "description": "A chunk of raw meat from an animal.",
+        "char": "m",
+        "color": COLORS["crimson"],
+        "value": 5,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["resource", "food_ingredient_raw"],
+    },
+    "cooked_meat": {
+        "name": "Cooked Meat",
+        "description": "Meat cooked over a fire. Savory and filling.",
+        "char": "m",
+        "color": COLORS["saddlebrown"],
+        "value": 10,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "on_use": {
+            "reduces_hunger": 45
+        },
+        "crafting_recipe": {
+            "raw_meat": 1
+        },
+        "required_workstation": "fire"
+    },
     "animal_pelt": {
         "name": "Animal Pelt",
         "description": "The uncured hide of an animal, with fur intact.",
@@ -843,6 +870,40 @@ ITEM_DEFINITIONS = {
         "required_workstation": "fire",
         "on_use": {
             "reduces_hunger": 40
+        }
+    },
+    "cooked_venison": {
+        "name": "Cooked Venison",
+        "description": "Delicious roasted deer meat.",
+        "char": "m",
+        "color": COLORS["saddlebrown"],
+        "value": 15,
+        "weight": 2,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "crafting_recipe": {
+            "raw_venison": 1
+        },
+        "required_workstation": "fire",
+        "on_use": {
+            "reduces_hunger": 60
+        }
+    },
+    "cooked_mutton": {
+        "name": "Cooked Mutton",
+        "description": "Hearty roasted sheep meat.",
+        "char": "m",
+        "color": COLORS["saddlebrown"],
+        "value": 12,
+        "weight": 2,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "crafting_recipe": {
+            "raw_mutton": 1
+        },
+        "required_workstation": "fire",
+        "on_use": {
+            "reduces_hunger": 50
         }
     },
     "book_census": {

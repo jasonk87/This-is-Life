@@ -1606,24 +1606,75 @@ class World:
             if npc.physical.is_dead:
                 continue
 
+            # --- Real-time Logic (Runs every tick or frequently) ---
+            if npc.combat.is_hostile_to_player:
+                self._handle_npc_combat_turn(npc)
+                # If creature is not actively pathing from combat AI (e.g. holding, or just attacked)
+                # and not investigating a sound, they could wander a bit.
+                if not npc.schedule.current_path and npc.schedule.current_task not in ["investigating_sound", "combat_action_attack_player"]:
+                    if random.random() < 0.1: # Small chance to wander if not actively fighting/pathing
+                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
+                        potential_x, potential_y = npc.x + dx, npc.y + dy
+                        target_tile = self.get_tile_at(potential_x, potential_y)
+                        if target_tile and target_tile.passable:
+                            npc.schedule.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
+                            npc.schedule.current_destination_coords = (potential_x, potential_y)
+                            npc.schedule.current_task = "wandering_hostile"
+
+            # --- Sound Perception (Runs every tick for responsiveness) ---
+            heard_compelling_sound = False
+            if self.sound_events:
+                for sound in self.sound_events:
+                    if sound.get("source_id") and sound["source_id"] == npc.id: continue
+
+                    dist_to_sound = math.sqrt((npc.x - sound["x"])**2 + (npc.y - sound["y"])**2)
+                    if dist_to_sound <= npc.hearing_radius and dist_to_sound <= sound["volume"]:
+                        if npc.schedule.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]:
+                            sound_type = sound["type"]
+                            if sound_type in ["combat_attack", "tree_fall"]: # Hostile creatures also investigate these
+                                npc.schedule.current_task = "investigating_sound"
+                                npc.schedule.current_destination_coords = (sound["x"], sound["y"])
+                                npc.schedule.current_path = []
+                                self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
+                                heard_compelling_sound = True
+                                break
+
+            if heard_compelling_sound:
+                if npc.schedule.current_task == "investigating_sound" and npc.schedule.current_destination_coords and not npc.schedule.current_path:
+                    path = self.calculate_path(npc.x, npc.y, npc.schedule.current_destination_coords[0], npc.schedule.current_destination_coords[1])
+                    if path: npc.schedule.current_path = path
+                    else: npc.schedule.current_task = "idle_confused"; npc.schedule.current_destination_coords = None
+
+            # --- FEAR SYSTEM (Real-time check) ---
+            # Only update fear if not already hostile/combat to avoid overriding combat AI
+            if not npc.combat.is_hostile_to_player:
+                can_be_frightened = (npc.economic.profession != "Creature" and
+                                     npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player"])
+
+                # Optimization: only check fear periodically or if nearby entities moved?
+                # For now, we'll leave it in the main loop but rely on FOV.
+                # Note: We only calculate FOV in the schedule block below, so fear might be slightly delayed or rely on old FOV.
+                # If we want instant fear, we'd need to update FOV every tick for everyone, which is expensive.
+                # Let's assume fear updates on the schedule tick or if forced.
+                pass
+
+
+            # --- SCHEDULED UPDATES (Low Frequency) ---
+            if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
+                continue
+
+            npc.schedule.game_time_last_updated = self.game_time
+            self._update_npc_fov(npc) # Update vision for AI decisions
+
             current_time_in_day = self.game_time % DAY_LENGTH_TICKS
             time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
-            # --- NPC NEEDS AND STATUS UPDATE ---
+            # --- NPC NEEDS AND STATUS UPDATE (Run periodically) ---
             self._update_npc_temperature(npc)
             self._apply_temperature_effects(npc)
             if npc.economic.profession != "Creature":
                 npc.physical.hunger = min(npc.physical.max_hunger, npc.physical.hunger + 2)
                 npc.physical.thirst = min(npc.physical.max_thirst, npc.physical.thirst + 3)
-
-            if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
-                if npc.combat.is_hostile_to_player:
-                    pass
-                else:
-                    continue
-
-            npc.schedule.game_time_last_updated = self.game_time
-            self._update_npc_fov(npc)
 
             # --- Mourning and Investigating Tasks ---
             if npc.schedule.current_task in ["mourning", "investigating"]:
@@ -1634,7 +1685,7 @@ class World:
                     npc.task_target_coords = None
                 continue # Skip normal scheduling
 
-            # --- FEAR SYSTEM (High Priority) ---
+            # --- FEAR SYSTEM (Schedule-based check using updated FOV) ---
             can_be_frightened = (npc.economic.profession != "Creature" and
                                  not npc.combat.is_hostile_to_player and
                                  npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player"])
@@ -1707,46 +1758,8 @@ class World:
                     self.add_message_to_chat_log(f"{npc.name} calms down as the threat is gone.")
                 continue
 
-            if npc.combat.is_hostile_to_player:
-                self._handle_npc_combat_turn(npc)
-                # If creature is not actively pathing from combat AI (e.g. holding, or just attacked)
-                # and not investigating a sound, they could wander a bit.
-                if not npc.schedule.current_path and npc.schedule.current_task not in ["investigating_sound", "combat_action_attack_player"]:
-                    if random.random() < 0.1: # Small chance to wander if not actively fighting/pathing
-                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
-                        potential_x, potential_y = npc.x + dx, npc.y + dy
-                        target_tile = self.get_tile_at(potential_x, potential_y)
-                        if target_tile and target_tile.passable:
-                            npc.schedule.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
-                            npc.schedule.current_destination_coords = (potential_x, potential_y)
-                            npc.schedule.current_task = "wandering_hostile" # A specific task if needed
-
-            # --- Sound Perception (runs for all NPCs, might make non-hostile investigate or hostile change target/behavior) ---
-            heard_compelling_sound = False
-            if self.sound_events:
-                for sound in self.sound_events:
-                    if sound.get("source_id") and sound["source_id"] == npc.id: continue
-
-                    dist_to_sound = math.sqrt((npc.x - sound["x"])**2 + (npc.y - sound["y"])**2)
-                    if dist_to_sound <= npc.hearing_radius and dist_to_sound <= sound["volume"]:
-                        if npc.schedule.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]:
-                            sound_type = sound["type"]
-                            if sound_type in ["combat_attack", "tree_fall"]: # Hostile creatures also investigate these
-                                npc.schedule.current_task = "investigating_sound"
-                                npc.schedule.current_destination_coords = (sound["x"], sound["y"])
-                                npc.schedule.current_path = []
-                                self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
-                                heard_compelling_sound = True
-                                break
-
-            if heard_compelling_sound:
-                if npc.schedule.current_task == "investigating_sound" and npc.schedule.current_destination_coords and not npc.schedule.current_path:
-                    path = self.calculate_path(npc.x, npc.y, npc.schedule.current_destination_coords[0], npc.schedule.current_destination_coords[1])
-                    if path: npc.schedule.current_path = path
-                    else: npc.schedule.current_task = "idle_confused"; npc.schedule.current_destination_coords = None
-
             # --- Animal Behavior (Predator & Prey) ---
-            elif isinstance(npc, Animal):
+            if isinstance(npc, Animal):
                 animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
 
                 # 1. PREDATOR AI (Highest Priority)
@@ -2304,11 +2317,21 @@ class World:
                             new_task_label = "going home"
                             destination_coords = dest_coords_temp
                     elif llm_chosen_goal == "Wander the village":
-                        # Pick a random passable point in the current chunk or nearby for simplicity
-                        # This needs a robust implementation: find current chunk, pick random point
-                        # For now, let's make them stay put if they choose to wander.
-                        npc.schedule.current_task = "wandering" # No movement, just state change
-                        # self.add_message_to_chat_log(f"{npc.name} is now wandering (staying put).")
+                        # Pick a random spot in the village
+                        village = self._get_village_for_npc(npc)
+                        if village and village.buildings:
+                            # Pick a spot near a random building
+                            target_b = random.choice(village.buildings)
+                            # Random offset
+                            off_x, off_y = random.randint(-5, 5), random.randint(-5, 5)
+                            tx, ty = target_b.global_center_x + off_x, target_b.global_center_y + off_y
+                            # Validate
+                            if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
+                                # Find passable
+                                tx, ty = self._find_best_adjacent_tile(tx, ty, npc) # hacky re-use
+                                if tx:
+                                    new_task_label = "wandering"
+                                    destination_coords = (tx, ty)
                     elif llm_chosen_goal == "Stay put":
                         npc.schedule.current_task = "idle" if npc.schedule.current_task not in ["at home", "at work"] else npc.schedule.current_task
                         # self.add_message_to_chat_log(f"{npc.name} is staying put.")
@@ -2775,9 +2798,17 @@ class World:
                 # Or compare against the actual name string from TILE_DEFINITIONS
                 expected_tile_name = TILE_DEFINITIONS.get(target_tile_type_key, {}).get("name")
                 if tile and tile.name == expected_tile_name:
-                    # TODO: Add a check here to ensure another NPC isn't already targeting this exact tile for the same sub-task type.
-                    # This is similar to the tree targeting check. For now, proceed without it for simplicity.
-                    return (tx, ty)
+                    # Check if this tile is already targeted by another NPC for the same task
+                    is_already_targeted = False
+                    for other_npc in self.village_npcs:
+                        if other_npc.id != npc.id and \
+                           other_npc.current_sub_task == sub_task_data["id"] and \
+                           other_npc.sub_task_target_coords == (tx, ty):
+                            is_already_targeted = True
+                            break
+
+                    if not is_already_targeted:
+                        return (tx, ty)
             # self.add_message_to_chat_log(f"Debug: {npc.name} could not find suitable '{expected_tile_name}' tile in field_patch for {sub_task_data['id']}.")
             return None
         else:
@@ -7110,15 +7141,47 @@ class World:
                         parent1 = random.choice(potential_parents)
                         parent2 = random.choice(potential_parents)
                         if parent1.id != parent2.id:
-                            # For now, we don't create a new NPC object as it would be complex to place and manage.
-                            # We just log the historical event.
+                            # Create a new Child NPC
+                            child_name = f"Child of {parent1.name}"
+                            # Inherit home from parent1
+                            home_id = parent1.schedule.home_building_id
+                            home_coords = (parent1.x, parent1.y) # Default to parent's location if home not found
+                            if home_id:
+                                home_building = self.buildings_by_id.get(home_id)
+                                if home_building:
+                                    home_coords = (home_building.global_center_x, home_building.global_center_y)
+
+                            child = NPC(
+                                x=home_coords[0],
+                                y=home_coords[1],
+                                name=child_name,
+                                dialogue=["Goo goo gaga."],
+                                personality="child",
+                                player_id=self.player.id
+                            )
+                            child.age = 0
+                            child.economic.profession = "Child"
+                            child.schedule.home_building_id = home_id
+
+                            # Add to family ties
+                            child.social.family_ties["mother_id"] = parent1.id # Simplified
+                            child.social.family_ties["father_id"] = parent2.id
+
+                            # Add to world
+                            self.village_npcs.append(child)
+                            if home_id:
+                                home_building = self.buildings_by_id.get(home_id)
+                                if home_building:
+                                    home_building.residents.append(child)
+
                             self.log_event(
                                 event_type="npc_birth",
-                                description=f"A child was born to {parent1.name} and {parent2.name}.",
+                                description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
                                 subject_id=parent1.id,
                                 target_id=parent2.id,
                                 location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE)
                             )
+                            # self.add_message_to_chat_log(f"A child was born in a distant village.")
 
                     # --- Death Simulation (Old Age) ---
                     elderly_npcs = [npc for npc in village_npcs if npc.age > 70]

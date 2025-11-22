@@ -551,7 +551,8 @@ class TestFearSystem(unittest.TestCase):
         # Re-calculating individual NPC FOV is now done in _update_npc_schedules
         # To test this properly, we need to manually call it or run the schedule update
         self.world._update_npc_fov(civilian)
-        self.assertTrue(self.world.npc_fov_maps[civilian.id][wolf1.x, wolf1.y])
+        # FOV map is now indexed [y, x]
+        self.assertTrue(self.world.npc_fov_maps[civilian.id][wolf1.y, wolf1.x])
 
         # 2. Execution
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
@@ -611,7 +612,8 @@ class TestFearSystem(unittest.TestCase):
 
         self.world._update_player_fov()
         self.world._update_npc_fov(guard1)
-        self.assertTrue(self.world.npc_fov_maps[guard1.id][wolf1.x, wolf1.y])
+        # FOV map is now indexed [y, x]
+        self.assertTrue(self.world.npc_fov_maps[guard1.id][wolf1.y, wolf1.x])
 
         # 2. Execution
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL

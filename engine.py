@@ -822,7 +822,7 @@ class World:
 
         self.player_fov_map = tcod.map.compute_fov(
             self.transparency_map,
-            (self.player.x, self.player.y),
+            (self.player.y, self.player.x),
             radius=effective_player_fov_radius,
             algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
         )
@@ -838,7 +838,7 @@ class World:
         npc_fov_radius = self.current_fov_radius # NPCs use global ambient light for now
         self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
             self.transparency_map,
-            (npc.x, npc.y),
+            (npc.y, npc.x),
             radius=npc_fov_radius,
             algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
         )
@@ -848,7 +848,8 @@ class World:
         fov_map_for_npc = self.npc_fov_maps[npc.id]
         visible_y_coords, visible_x_coords = np.where(fov_map_for_npc)
         for i in range(len(visible_x_coords)):
-            vx, vy = visible_x_coords[i], visible_y_coords[i]
+            vx, vy = visible_x_coords[i], visible_y_coords[i] # numpy where returns (row, col) -> (y, x)
+
             if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
                 npc.knowledge.perceived_item_tiles.append((vx,vy))
 
@@ -1149,13 +1150,26 @@ class World:
                             if key_npcs:
                                 gossip_recipient = random.choice(key_npcs)
                                 events_shared = 0
+                                # Share remote events (distant news)
                                 for event_id, event_obj in npc.known_events.items():
-                                    if event_id not in gossip_recipient.known_events:
+                                    # Only share if event didn't happen in this village
+                                    is_local = False
+                                    if event_obj.location:
+                                        chunk_x = event_obj.location[0] // CHUNK_SIZE
+                                        chunk_y = event_obj.location[1] // CHUNK_SIZE
+                                        current_chunk_x = npc.x // CHUNK_SIZE
+                                        current_chunk_y = npc.y // CHUNK_SIZE
+                                        if chunk_x == current_chunk_x and chunk_y == current_chunk_y:
+                                            is_local = True
+
+                                    if not is_local and event_id not in gossip_recipient.known_events:
                                         gossip_recipient.known_events[event_id] = event_obj
                                         events_shared += 1
                                 if events_shared > 0:
-                                    self.add_message_to_chat_log(f"Debug: {npc.name} shared {events_shared} rumors with {gossip_recipient.name}.")
+                                    self.add_message_to_chat_log(f"{npc.name} shared news from afar with {gossip_recipient.name}.")
 
+                        # Clear old events but keep some "news" to carry
+                        # Actually, better to clear all and relearn local news to carry to next village
                         npc.known_events.clear()
                         village_center_x = (npc.x // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
                         village_center_y = (npc.y // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
@@ -1691,20 +1705,38 @@ class World:
             # --- FEAR SYSTEM (Schedule-based check using updated FOV) ---
             can_be_frightened = (npc.economic.profession != "Creature" and
                                  not npc.combat.is_hostile_to_player and
-                                 npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player"])
+                                 npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player", "returning_to_warn"])
 
             if can_be_frightened and npc.id in self.npc_fov_maps:
                 fov_map = self.npc_fov_maps[npc.id]
                 visible_npcs = [
                     other_npc for other_npc in self.npcs + self.village_npcs
-                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.x, other_npc.y]
+                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.y, other_npc.x]
                 ]
-                visible_wolves = [vn for vn in visible_npcs if isinstance(vn, Animal) and vn.animal_type == "wolf"]
-                if len(visible_wolves) >= 2:
+                # Expanded threat detection for Hunters and others
+                visible_threats = [
+                    vn for vn in visible_npcs
+                    if (isinstance(vn, Animal) and vn.animal_type == "wolf") or
+                       (isinstance(vn, DireWolf)) or
+                       (vn.economic.profession == "Creature" and vn.combat.is_hostile_to_player)
+                ]
+
+                # Hunter specific logic
+                if npc.economic.profession == "Hunter" and len(visible_threats) >= 1:
+                     if not npc.is_frightened: # Using is_frightened as generic "threat state"
+                        npc.is_frightened = True
+                        npc.threat_source_ids = [threat.id for threat in visible_threats]
+                        self.add_message_to_chat_log(f"Hunter {npc.name} spots a threat and prepares to warn the village!")
+                        # Create event
+                        threat_desc = f"{len(visible_threats)} threats" if len(visible_threats) > 1 else "a threat"
+                        self.log_event("threat_detected", f"Hunter {npc.name} spotted {threat_desc} nearby.", npc.id, location=(npc.x, npc.y))
+                        npc.schedule.current_path = []
+
+                elif len(visible_threats) >= 2:
                     if not npc.is_frightened:
                         npc.is_frightened = True
-                        npc.threat_source_ids = [wolf.id for wolf in visible_wolves]
-                        self.add_message_to_chat_log(f"{npc.name} sees a wolf pack and is terrified!")
+                        npc.threat_source_ids = [threat.id for threat in visible_threats]
+                        self.add_message_to_chat_log(f"{npc.name} sees threats and is terrified!")
                         npc.schedule.current_path = []
 
             if npc.is_frightened:
@@ -1718,11 +1750,36 @@ class World:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
 
 
-                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.x, threat.y]:
+                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.y, threat.x]:
                             threats_still_visible = True
                             break
                 if threats_still_visible:
-                    if npc.economic.profession in ["Guard", "Sheriff"]:
+                    if npc.economic.profession == "Hunter":
+                        # Hunters return to warn instead of just alerting/fleeing
+                        if npc.schedule.current_task != "returning_to_warn":
+                            npc.schedule.current_task = "returning_to_warn"
+                            # Find village center
+                            village = self._get_village_for_npc(npc)
+                            target_coords = None
+                            if village and "town_square_center" in village.interaction_points:
+                                target_coords = village.interaction_points["town_square_center"][0]
+
+                            if target_coords:
+                                path = self.calculate_path(npc.x, npc.y, target_coords[0], target_coords[1])
+                                if path:
+                                    npc.schedule.current_path = path
+                                    npc.schedule.current_destination_coords = target_coords
+                        elif npc.schedule.current_task == "returning_to_warn":
+                            # Check arrival
+                            if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                                # Arrived
+                                threat_event = next((e for e in self.global_events if e.type == "threat_detected" and e.subject_id == npc.id), None)
+                                self.broadcast_news(npc, 20, threat_event)
+                                npc.is_frightened = False # Job done
+                                npc.threat_source_ids = []
+                                npc.schedule.current_task = "idle"
+
+                    elif npc.economic.profession in ["Guard", "Sheriff"]:
                         if npc.schedule.current_task == "alerting_guards" and (not npc.schedule.current_path or len(npc.schedule.current_path) <= 1):
                             self.add_message_to_chat_log(f"{npc.name} raises the alarm about the threat!")
                             npc.combat.is_hostile_to_player = True
@@ -2403,6 +2460,34 @@ class World:
                             if tavern:
                                 new_task_label = "going to tavern"
                                 destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                        elif npc.economic.profession == "Town Official" and random.random() < 0.1:
+                            # Town Crier behavior: Go to town square and shout news
+                            village = self._get_village_for_npc(npc)
+                            if village and "town_square_center" in village.interaction_points:
+                                # Check if we have news to shout
+                                if npc.knowledge.known_events:
+                                    # Pick an event we haven't shouted recently (simplified: just pick most recent)
+                                    # Or prefer 'remote' events from other villages
+                                    event_to_shout = None
+                                    # Try to find a remote event first
+                                    for event in reversed(list(npc.knowledge.known_events.values())):
+                                        # Assuming event.location is (x,y), check if it's far
+                                        # or simply check event type
+                                        if event.type in ["trade_deal", "threat_detected", "crime_witnessed"]:
+                                            event_to_shout = event
+                                            break
+
+                                    if not event_to_shout:
+                                        event_to_shout = list(npc.knowledge.known_events.values())[-1]
+
+                                    if event_to_shout:
+                                        new_task_label = "crying_news"
+                                        destination_coords = village.interaction_points["town_square_center"][0] # It's a list of points, take first
+                                        npc.current_sub_task_sequence_index = 0 # repurposed to store event? No, simpler to store in temp
+                                        npc.task_target_entity_id = None # Not targeting entity
+                                        # We need to store the event to shout.
+                                        # Let's attach it to the NPC temporarily or re-find it when task starts.
+                                        # Let's re-find it.
                         elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
                             # Find a nearby NPC to chat with
                             potential_partners = [
@@ -2455,6 +2540,23 @@ class World:
 
                     if npc.schedule.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
                         self.npc_attempt_fish(npc, npc.x, npc.y)
+
+                    elif npc.schedule.current_task == "crying_news" and (npc.x, npc.y) == destination_coords:
+                        # Perform the shout
+                        if npc.knowledge.known_events:
+                             # Re-select best event
+                            event_to_shout = None
+                            for event in reversed(list(npc.knowledge.known_events.values())):
+                                if event.type in ["trade_deal", "threat_detected", "crime_witnessed"]:
+                                    event_to_shout = event
+                                    break
+                            if not event_to_shout:
+                                event_to_shout = list(npc.knowledge.known_events.values())[-1]
+
+                            self.broadcast_news(npc, 15, event_to_shout)
+
+                        npc.schedule.current_task = "idle" # Done shouting
+                        npc.leisure_timer = 50 # Wait a bit before moving
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in ["sleeping", "going home to sleep"]:
@@ -6531,6 +6633,35 @@ class World:
             "source_id": source_entity_id # Optional: ID of player/NPC that made the sound
         })
         # self.add_message_to_chat_log(f"Debug: Sound '{sound_type}' emitted at ({origin_x},{origin_y}) vol {volume}")
+
+    def broadcast_news(self, speaker_npc: NPC, radius: int, event_to_share: Event):
+        """
+        Broadcasts an event to all entities within a radius.
+        Used for Town Criers, warning shouts, etc.
+        """
+        if not event_to_share:
+            return
+
+        shout_message = f"{speaker_npc.name} shouts: 'Hear ye! {event_to_share.description}'"
+
+        # Log if player is in range
+        dist_to_player = math.sqrt((speaker_npc.x - self.player.x)**2 + (speaker_npc.y - self.player.y)**2)
+        if dist_to_player <= radius:
+            self.add_message_to_chat_log(shout_message)
+
+        # Spread to nearby NPCs
+        count_listeners = 0
+        for npc in self.village_npcs + self.npcs:
+            if npc.id == speaker_npc.id or npc.physical.is_dead:
+                continue
+
+            dist = math.sqrt((speaker_npc.x - npc.x)**2 + (speaker_npc.y - npc.y)**2)
+            if dist <= radius:
+                if event_to_share.id not in npc.knowledge.known_events:
+                    npc.knowledge.known_events[event_to_share.id] = event_to_share
+                    count_listeners += 1
+
+        # self.add_message_to_chat_log(f"Debug: {speaker_npc.name} broadcasted news to {count_listeners} people.")
 
     def update(self):
         """Main update function for the world, called once per game tick."""

@@ -250,6 +250,29 @@ PROFESSIONS = {
         "sub_tasks": [],
         "default_sub_task_sequence": []
     },
+    "Hunter": {
+        "display_name": "Hunter",
+        "wage": 22,
+        "description": "Hunts wild animals and scouts the wilderness.",
+        "work_building_categories": ["Hunter's Lodge", "Town Hall"], # Or no fixed building
+        "sub_tasks": [
+            {
+                "id": "hunt_animals",
+                "display_name": "Hunting",
+                "duration_ticks": 300,
+                "target_zone_tag": "wilderness",
+                "action_verb": "hunting"
+            },
+            {
+                "id": "scout_area",
+                "display_name": "Scouting",
+                "duration_ticks": 200,
+                "target_zone_tag": "scout_route",
+                "action_verb": "scouting"
+            }
+        ],
+        "default_sub_task_sequence": ["scout_area", "hunt_animals"]
+    },
     "Cook": {
         "display_name": "Cook",
         "wage": 22,

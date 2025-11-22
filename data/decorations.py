@@ -262,5 +262,91 @@ DECORATION_ITEM_DEFINITIONS = {
         "properties": {
             "interaction_hint": "read"
         }
+    },
+    # --- Animal Dens ---
+    "wolf_den": {
+        "name": "Wolf Den",
+        "description": "A dark cave entrance surrounded by bones.",
+        "char": "0",
+        "color": COLORS["darkest_grey"],
+        "passable": False,
+        "blocks_fov": True,
+        "item_type_tags": ["den", "spawner"],
+        "properties": {
+            "spawn_type": "wolf",
+            "max_population": 5,
+            "spawn_rate": 0.001
+        }
+    },
+    "rabbit_hole": {
+        "name": "Rabbit Hole",
+        "description": "A small burrow in the ground.",
+        "char": "o",
+        "color": COLORS["sienna"],
+        "passable": True, # Small enough to walk over
+        "blocks_fov": False,
+        "item_type_tags": ["den", "spawner"],
+        "properties": {
+            "spawn_type": "rabbit",
+            "max_population": 10,
+            "spawn_rate": 0.005
+        }
+    },
+    "bear_cave": {
+        "name": "Bear Cave",
+        "description": "A large, ominous cave entrance.",
+        "char": "0",
+        "color": COLORS["saddlebrown"],
+        "passable": False,
+        "blocks_fov": True,
+        "item_type_tags": ["den", "spawner"],
+        "properties": {
+            "spawn_type": "bear",
+            "max_population": 2,
+            "spawn_rate": 0.0005
+        }
+    },
+    "fox_burrow": {
+        "name": "Fox Burrow",
+        "description": "A hidden den beneath roots.",
+        "char": "o",
+        "color": COLORS["dark_orange"],
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["den", "spawner"],
+        "properties": {
+            "spawn_type": "fox",
+            "max_population": 3,
+            "spawn_rate": 0.002
+        }
+    },
+    "badger_sett": {
+        "name": "Badger Sett",
+        "description": "A complex of holes dug by badgers.",
+        "char": "o",
+        "color": COLORS["grey"],
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["den", "spawner"],
+        "properties": {
+            "spawn_type": "badger",
+            "max_population": 4,
+            "spawn_rate": 0.002
+        }
+    },
+    "thicket": {
+        "name": "Dense Thicket",
+        "description": "A dense patch of bushes where animals hide.",
+        "char": "#",
+        "color": COLORS["forest_fg"],
+        "passable": True, # Difficult terrain
+        "blocks_fov": True,
+        "item_type_tags": ["den", "spawner"],
+        "properties": {
+            "spawn_type": "deer", # Or boar
+            "max_population": 6,
+            "spawn_rate": 0.003,
+            "movement_cost": 2
+        }
     }
 }

@@ -1858,8 +1858,43 @@ class World:
                                         npc.schedule.current_path = path
                                         npc.schedule.current_destination_coords = (prey.x, prey.y)
                         else:
-                            npc.schedule.current_task = "idle"
+                            # Prey is dead or gone. Check if there's a corpse at last known location to eat.
+                            if npc.sub_task_target_coords:
+                                # We might have stored the location if we killed it?
+                                # Actually, handle_npc_death places a corpse.
+                                # Let's search for a corpse nearby to eat.
+                                corpse_x, corpse_y = self._find_nearest_corpse(npc) if hasattr(self, '_find_nearest_corpse') else (None, None)
+                                if corpse_x is not None:
+                                    # Move to eat corpse
+                                    npc.schedule.current_task = "eating_corpse"
+                                    npc.schedule.current_destination_coords = (corpse_x, corpse_y)
+                                    path = self.calculate_path(npc.x, npc.y, corpse_x, corpse_y)
+                                    if path:
+                                        npc.schedule.current_path = path
+                                    else:
+                                         npc.schedule.current_task = "idle"
+                                else:
+                                    npc.schedule.current_task = "idle"
+                            else:
+                                npc.schedule.current_task = "idle"
                             npc.task_target_entity_id = None
+                        continue
+
+                    elif npc.schedule.current_task == "eating_corpse":
+                        if npc.schedule.current_destination_coords and (npc.x, npc.y) == npc.schedule.current_destination_coords:
+                            # Eat corpse
+                            tile = self.get_tile_at(npc.x, npc.y)
+                            if tile and tile.name == "Animal Corpse":
+                                npc.physical.hunger = 0
+                                self.add_message_to_chat_log(f"The {npc.name} devours the carcass.")
+                                # Replace corpse with bones
+                                bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
+                                self._change_map_tile((npc.x, npc.y), bones_def)
+                            npc.schedule.current_task = "idle"
+                            npc.schedule.current_destination_coords = None
+                        elif not npc.schedule.current_path:
+                             # Path failed or interrupted
+                             npc.schedule.current_task = "idle"
                         continue
 
                 # 2. PREY/FLEEING AI (Second Priority)
@@ -1919,6 +1954,52 @@ class World:
                         npc.combat.is_hostile_to_player = True
 
                 # 4. OTHER BEHAVIORS (Lower Priority)
+                # Herbivore Grazing (High priority for survival)
+                if animal_def.get("diet_type") == "herbivore" and npc.physical.hunger >= 30:
+                     if npc.schedule.current_task == "grazing" and npc.schedule.current_destination_coords == (npc.x, npc.y):
+                         # Arrived at grazing spot, eat!
+                         tile = self.get_tile_at(npc.x, npc.y)
+                         food_sources = animal_def.get("food_sources", [])
+                         if tile and tile.name in food_sources:
+                             npc.physical.hunger = max(0, npc.physical.hunger - 50)
+                             self.add_message_to_chat_log(f"The {npc.name} grazes on {tile.name}.")
+                             # Degrade tile
+                             if tile.name == "Tall Grass":
+                                 plains_def = TILE_DEFINITIONS["plains"]
+                                 self._change_map_tile((npc.x, npc.y), plains_def)
+                             elif tile.name == "Growing Wheat":
+                                 tilled_def = TILE_DEFINITIONS["tilled_soil"]
+                                 self._change_map_tile((npc.x, npc.y), tilled_def)
+                             elif tile.name == "Flower":
+                                 plains_def = TILE_DEFINITIONS["plains"]
+                                 self._change_map_tile((npc.x, npc.y), plains_def)
+
+                             npc.schedule.current_task = "idle"
+                         else:
+                             npc.schedule.current_task = "idle"
+                     elif npc.schedule.current_task != "grazing":
+                         # Look for food nearby
+                         search_radius = 10
+                         found_food = False
+                         for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+                             for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                                 if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                                     tile = self.get_tile_at(x, y)
+                                     food_sources = animal_def.get("food_sources", [])
+                                     if tile and tile.name in food_sources:
+                                          path = self.calculate_path(npc.x, npc.y, x, y)
+                                          if path:
+                                              npc.schedule.current_path = path
+                                              npc.schedule.current_destination_coords = (x, y)
+                                              npc.schedule.current_task = "grazing"
+                                              found_food = True
+                                              break
+                             if found_food: break
+
+                     # If found food (task changed to grazing), we are done for this tick logic
+                     if npc.schedule.current_task == "grazing":
+                         continue
+
                 if npc.is_pregnant:
                     npc.pregnancy_timer -= 1
                     if npc.pregnancy_timer <= 0:
@@ -1937,7 +2018,7 @@ class World:
                         else:
                             npc.pregnancy_timer = 1
 
-                if npc.behavior == "Follow-Owner" and npc.owner == self.player:
+                elif npc.behavior == "Follow-Owner" and npc.owner == self.player:
                     distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
                     if distance_to_player > 3 and not npc.schedule.current_path:
                         target_x, target_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
@@ -1947,6 +2028,30 @@ class World:
                                 npc.schedule.current_path = path
                                 npc.schedule.current_destination_coords = (target_x, target_y)
                                 npc.schedule.current_task = "following"
+
+                    # Return to Den Logic
+                    elif npc.den_location and (is_night_time or npc.combat.hp < npc.combat.max_hp * 0.3) and npc.schedule.current_task not in ["sleeping", "returning_to_den"]:
+                        # If injured or night, return to den
+                        den_x, den_y = npc.den_location
+                        if (npc.x, npc.y) == (den_x, den_y):
+                            npc.schedule.current_task = "sleeping"
+                            npc.original_char_before_sleep = npc.char
+                            npc.char = ord('z')
+                        else:
+                            npc.schedule.current_task = "returning_to_den"
+                            path = self.calculate_path(npc.x, npc.y, den_x, den_y)
+                            if path:
+                                npc.schedule.current_path = path
+                                npc.schedule.current_destination_coords = (den_x, den_y)
+                            else:
+                                # Can't path to den, maybe blocked or far away. Just wander.
+                                npc.schedule.current_task = "wandering"
+
+                    elif npc.schedule.current_task == "returning_to_den":
+                        if npc.den_location and (npc.x, npc.y) == npc.den_location:
+                             npc.schedule.current_task = "sleeping"
+                             npc.original_char_before_sleep = npc.char
+                             npc.char = ord('z')
 
                 elif animal_def.get("can_mate") and animal_def.get("mating_season") == self.seasons[self.current_season_index] and not npc.is_pregnant:
                     if npc.schedule.current_task not in ["seeking_mate", "mating"]:
@@ -1977,6 +2082,55 @@ class World:
                                     if path:
                                         npc.schedule.current_path = path
                                         npc.schedule.current_destination_coords = (target_x, target_y)
+
+                elif npc.schedule.current_task in ["idle", "wandering", "grazing"] and not npc.schedule.current_path:
+                    # Hunger increases when idle
+                    if npc.physical.hunger < npc.physical.max_hunger:
+                        npc.physical.hunger += 1
+
+                    # Grazing Logic for Herbivores
+                    if animal_def.get("diet_type") == "herbivore" and npc.physical.hunger >= 30: # Start looking for food earlier
+                         if npc.schedule.current_task == "grazing" and npc.schedule.current_destination_coords == (npc.x, npc.y):
+                             # Arrived at grazing spot, eat!
+                             tile = self.get_tile_at(npc.x, npc.y)
+                             food_sources = animal_def.get("food_sources", [])
+                             if tile and tile.name in food_sources:
+                                 npc.physical.hunger = max(0, npc.physical.hunger - 50)
+                                 self.add_message_to_chat_log(f"The {npc.name} grazes on {tile.name}.")
+                                 # Degrade tile (e.g. Tall Grass -> Plains)
+                                 if tile.name == "Tall Grass":
+                                     plains_def = TILE_DEFINITIONS["plains"]
+                                     self._change_map_tile((npc.x, npc.y), plains_def)
+                                 elif tile.name == "Growing Wheat":
+                                     # Revert to tilled soil or plains
+                                     tilled_def = TILE_DEFINITIONS["tilled_soil"]
+                                     self._change_map_tile((npc.x, npc.y), tilled_def)
+                                 elif tile.name == "Flower":
+                                     plains_def = TILE_DEFINITIONS["plains"]
+                                     self._change_map_tile((npc.x, npc.y), plains_def)
+
+                                 npc.schedule.current_task = "idle"
+                             else:
+                                 # Food gone or invalid, stop grazing
+                                 npc.schedule.current_task = "idle"
+                         elif npc.schedule.current_task != "grazing":
+                             # Look for food nearby
+                             search_radius = 10
+                             found_food = False
+                             for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+                                 for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                                     if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                                         tile = self.get_tile_at(x, y)
+                                         food_sources = animal_def.get("food_sources", [])
+                                         if tile and tile.name in food_sources:
+                                              path = self.calculate_path(npc.x, npc.y, x, y)
+                                              if path:
+                                                  npc.schedule.current_path = path
+                                                  npc.schedule.current_destination_coords = (x, y)
+                                                  npc.schedule.current_task = "grazing"
+                                                  found_food = True
+                                                  break
+                                 if found_food: break
 
                 elif npc.schedule.current_task in ["idle", "wandering"] and not npc.schedule.current_path:
                     # Hunger increases when idle
@@ -2875,6 +3029,28 @@ class World:
 
         if target_zone_tag == "corpse":
             return self._find_nearest_corpse(npc)
+
+        if target_zone_tag == "scout_route":
+            # For scouting, pick a random point in a wider radius around the village/workplace
+            # to simulate patrolling the wilderness.
+            center_x = work_building.global_center_x
+            center_y = work_building.global_center_y
+            scout_radius = 40
+
+            for _ in range(10): # Try a few times to find a valid spot
+                offset_x = random.randint(-scout_radius, scout_radius)
+                offset_y = random.randint(-scout_radius, scout_radius)
+                scout_x = center_x + offset_x
+                scout_y = center_y + offset_y
+
+                # Ensure bounds
+                scout_x = max(0, min(WORLD_WIDTH - 1, scout_x))
+                scout_y = max(0, min(WORLD_HEIGHT - 1, scout_y))
+
+                tile = self.get_tile_at(scout_x, scout_y)
+                if tile and tile.passable:
+                    return (scout_x, scout_y)
+            return None
 
         if target_zone_tag == "chopping_area":
             # For chopping, we find a dynamic tree target near the building.
@@ -6255,7 +6431,12 @@ class World:
                         elif random.random() < 0.01:
                             tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
 
-                        # Animal Spawning
+                        # Add Dens if missing (fallback logic for existing generation)
+                        # (This section was already added in previous step, ensuring it remains)
+
+                        # Animal Spawning (Legacy / Random Wanderer)
+                        # NOTE: Den-based spawning logic should ideally replace or supplement this.
+                        # For now, we keep this to ensure animals populate even without dens, but reduce chance if den-based.
                         for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
                             if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
                                 animal_x_world = chunk_x * CHUNK_SIZE + x_local
@@ -6275,6 +6456,59 @@ class World:
                                     if "prey" in animal_def:
                                         new_animal.speed = 2
                                     self.npcs.append(new_animal)
+
+                        # Den Placement Logic
+                        if random.random() < 0.002: # Chance to spawn a den per tile (low chance)
+                            # Determine suitable den for this biome
+                            potential_dens = []
+                            for den_key, item_def in DECORATION_ITEM_DEFINITIONS.items():
+                                if "den" in item_def.get("item_type_tags", []):
+                                    spawn_type = item_def["properties"].get("spawn_type")
+                                    animal_def = ANIMAL_DEFINITIONS.get(spawn_type)
+                                    if animal_def and chunk.biome in animal_def.get("spawn_biomes", []):
+                                        potential_dens.append(den_key)
+
+                            if potential_dens:
+                                den_key = random.choice(potential_dens)
+                                den_def = DECORATION_ITEM_DEFINITIONS[den_key]
+                                world_x = chunk_x * CHUNK_SIZE + x_local
+                                world_y = chunk_y * CHUNK_SIZE + y_local
+
+                                # Place the den
+                                tiles[y_local][x_local] = Tile(
+                                    char=den_def["char"],
+                                    color=den_def["color"],
+                                    passable=den_def["passable"],
+                                    name=den_def["name"],
+                                    properties=den_def.get("properties", {}).copy()
+                                )
+                                if 0 <= world_x < WORLD_WIDTH and 0 <= world_y < WORLD_HEIGHT:
+                                    self.transparency_map[world_y, world_x] = not den_def.get("blocks_fov", False)
+
+                                    # Spawn initial inhabitants for the den
+                                    spawn_type = den_def["properties"].get("spawn_type")
+                                    max_pop = den_def["properties"].get("max_population", 3)
+                                    initial_pop = random.randint(1, max_pop)
+                                    animal_def = ANIMAL_DEFINITIONS.get(spawn_type)
+
+                                    for _ in range(initial_pop):
+                                        spawn_x, spawn_y = self._find_best_adjacent_tile(world_x, world_y, self.player) # Use player dummy or self for now
+                                        if spawn_x is not None:
+                                            new_animal = Animal(spawn_x, spawn_y, name=animal_def["name"], animal_type=spawn_type)
+                                            new_animal.char = ord(animal_def["char"])
+                                            new_animal.color = animal_def["color"]
+                                            new_animal.max_hp = animal_def["max_hp"]
+                                            new_animal.hp = new_animal.max_hp
+                                            new_animal.behavior = animal_def.get("behavior")
+                                            new_animal.is_hostile_to_player = animal_def["hostile"]
+                                            new_animal.base_attack_name = animal_def["base_attack_name"]
+                                            new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                            new_animal.combat_behavior = animal_def["combat_behavior"]
+                                            new_animal.gender = random.choice(["male", "female"])
+                                            new_animal.den_location = (world_x, world_y) # Assign this den as home
+                                            if "prey" in animal_def:
+                                                new_animal.speed = 2
+                                            self.npcs.append(new_animal)
 
     def _generate_village_structure(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""

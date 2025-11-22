@@ -184,6 +184,8 @@ class Village:
         self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
         self.supply = {}  # item_key: count
         self.demand = {}  # item_key: count
+        self.local_events = [] # List of Event objects specific to this village location
+        self.known_events = {} # Event ID -> Event object (knowledge spread)
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -468,6 +470,7 @@ class World:
         self.chunks = self._initialize_chunks()
         self.npcs = []
         self.village_npcs = []
+        self.villages = [] # List of all Village objects in the world
         self.buildings_by_id = {}
         self.mouse_x = 0
         self.mouse_y = 0
@@ -6028,6 +6031,7 @@ class World:
             chunk.village = Village()
             chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             self._generate_village_structure(chunk, chunk_coord_x, chunk_coord_y)
+            self.villages.append(chunk.village)
         elif chunk.poi_type == "ruin":
             chunk.ruin = Ruin()
             chunk.ruin.lore = "The origins of this place are lost to time."
@@ -7084,9 +7088,21 @@ class World:
                             continue
 
                         # Simplified production logic
-                        # Hardcode for Farmer since their production is tile-based
+                        # Seasonal Farmer Production
                         if npc.economic.profession == "Farmer":
-                            village.supply["wheat"] = village.supply.get("wheat", 0) + 5 # Produces 5 wheat per day
+                            current_season = self.seasons[self.current_season_index]
+                            production_amount = 0
+                            if current_season == "Spring":
+                                production_amount = 2 # Planting season, low output
+                            elif current_season == "Summer":
+                                production_amount = 5 # Growing/maintenance
+                            elif current_season == "Autumn":
+                                production_amount = 15 # Harvest!
+                            elif current_season == "Winter":
+                                production_amount = 0 # Nothing grows
+
+                            if production_amount > 0:
+                                village.supply["wheat"] = village.supply.get("wheat", 0) + production_amount
 
                         # General production from sub-tasks
                         if profession_data and "default_sub_task_sequence" in profession_data:
@@ -7133,6 +7149,64 @@ class World:
                     food_shortfall = food_needed - consumed_food
                     if food_shortfall > 0:
                         village.demand["bread"] = village.demand.get("bread", 0) + food_shortfall
+
+                    # --- Abstract Trade Simulation ---
+                    # Find a partner village to trade with
+                    # For simplicity, pick a random other village. In future, use distance.
+                    if len(self.villages) > 1:
+                        partner_village = random.choice([v for v in self.villages if v != village])
+
+                        # Export Surplus Logic
+                        # If we have too much of something (Supply > Demand * 2 or absolute > 50) and they have low supply
+                        for item_key, qty in list(village.supply.items()):
+                            if qty > 50 or qty > village.demand.get(item_key, 0) * 2:
+                                partner_supply = partner_village.supply.get(item_key, 0)
+                                if partner_supply < 10: # They are low
+                                    trade_qty = 10
+                                    village.supply[item_key] -= trade_qty
+                                    partner_village.supply[item_key] = partner_supply + trade_qty
+
+                                    # Log the trade event
+                                    self.log_event(
+                                        event_type="trade_deal",
+                                        description=f"A caravan from this village sold {trade_qty} {item_key} to a neighboring settlement.",
+                                        subject_id=-1, # System event
+                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                    )
+                                    # Record local event for history
+                                    village.local_events.append(self.global_events[-1])
+
+                    # --- Abstract History/Scribing ---
+                    # Check if there is a Scribe in this village
+                    has_scribe = any(n.economic.profession == "Scribe" for n in village_npcs)
+                    if has_scribe and len(village.local_events) >= 3:
+                        if random.random() < 0.1: # 10% chance per day to write a history book if events exist
+                            scribe = next(n for n in village_npcs if n.economic.profession == "Scribe")
+                            recent_events_summary = "\n".join([e.description for e in village.local_events[-5:]])
+
+                            prompt = LLM_PROMPTS["scribe_write_book"].format(
+                                scribe_name=scribe.name,
+                                scribe_personality=scribe.social.personality,
+                                known_events_summary=recent_events_summary,
+                                year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+                            )
+                            llm_response = self._call_ollama(prompt)
+                            try:
+                                book_data = json.loads(llm_response)
+                                new_book = Book(
+                                    title=book_data.get("title", "Local History"),
+                                    author_id=scribe.id,
+                                    author_name=scribe.name,
+                                    year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                                    content=book_data.get("content", "..."),
+                                    book_type="chronicle"
+                                )
+                                self.books.append(new_book)
+                                village.supply[f"book_{new_book.id}"] = village.supply.get(f"book_{new_book.id}", 0) + 1
+                                # Clear events so we don't write the same history forever
+                                village.local_events = []
+                            except json.JSONDecodeError:
+                                pass
 
                     # --- Birth Simulation ---
                     # Find potential couples (for simplicity, any two adults living together)

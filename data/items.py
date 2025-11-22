@@ -497,16 +497,6 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource", "fiber"],
     },
-     "raw_meat_scrap": {
-        "name": "Raw Meat Scrap",
-        "description": "A piece of raw meat. Needs cooking.",
-        "char": "m",
-        "color": COLORS["crimson"],
-        "value": 1,
-        "weight": 0.5,
-        "stackable": True,
-        "item_type_tags": ["resource", "food_ingredient_raw"]
-    },
     "rusty_sword": {
         "name": "Rusty Sword",
         "description": "A worn, but still somewhat sharp sword.",

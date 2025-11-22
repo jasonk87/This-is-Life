@@ -7,6 +7,8 @@ from tcod import libtcodpy
 import tcod.noise
 import requests
 import time
+import pickle
+import os
 from entities.base import NPC, DireWolf # Added DireWolf
 from entities.animal import Animal
 from data.animals import ANIMAL_DEFINITIONS
@@ -160,6 +162,15 @@ class Building:
         self.global_center_x = self.global_origin_x + width // 2
         self.global_center_y = self.global_origin_y + height // 2
         self.player_owned: bool = False # New attribute for player housing
+        self.max_workers: int = 2 # Default capacity, updated during generation
+
+    @property
+    def max_workers(self):
+        return getattr(self, "_max_workers", 2)
+
+    @max_workers.setter
+    def max_workers(self, value):
+        self._max_workers = value
 
     def contains_global_coords(self, world_x: int, world_y: int) -> bool:
         """Checks if the given global world coordinates are within this building's footprint."""
@@ -189,7 +200,8 @@ class Chunk:
         self.biome = biome
         self.poi_type = poi_type
         self.tiles = None
-        self.is_generated = False
+        self.is_generated = False # Tracks if macro data (villages/NPCs) is generated
+        self.is_terrain_generated = False # Tracks if tiles/visuals are generated
         self.village = None # To store Village object if POI is a village
         self.ruin = None # To store Ruin object if POI is a ruin
 
@@ -554,21 +566,17 @@ class World:
         self.global_events: list[Event] = []
         self.books: list[Book] = []
 
-        # Pre-generate all chunks to avoid lazy-loading issues in tests
+        # Generate macro structure for all chunks (villages, NPCs) but defer tile generation
         for y in range(self.chunk_height):
             for x in range(self.chunk_width):
-                self._generate_chunk_detail(self.chunks[y][x], x, y)
+                self._generate_chunk_macro(self.chunks[y][x], x, y)
 
         self._spawn_traveling_merchants()
         self._find_starting_position()
 
-        # Build transparency map - this is expensive on init as it forces all chunks to generate.
-        # Consider dynamic updates or pre-generation if performance becomes an issue.
-        for y_map in range(WORLD_HEIGHT):
-            for x_map in range(WORLD_WIDTH):
-                tile = self.get_tile_at(x_map, y_map) # Forces chunk generation
-                if tile and tile.blocks_fov:
-                    self.transparency_map[y_map, x_map] = False
+        # Transparency map is now updated lazily as chunks are generated/visited
+        # We might want to ensure the player's starting area is generated immediately
+        self.ensure_player_surroundings_generated()
 
         self._update_light_level_and_fov() # Initialize based on game time 0
         self._update_player_fov() # Initial FOV calculation for player
@@ -1133,7 +1141,7 @@ class World:
                             key_npcs = [
                                 other_npc for other_npc in self.village_npcs
                                 if self._get_village_for_npc(other_npc) == arrival_village and
-                                other_npc.profession in ["Tavern Keeper", "Town Official", "Sheriff"]
+                                other_npc.economic.profession in ["Tavern Keeper", "Town Official", "Sheriff"]
                             ]
                             if key_npcs:
                                 gossip_recipient = random.choice(key_npcs)
@@ -1191,6 +1199,29 @@ class World:
                                 friend.relationships[npc.id] = min(100, friend.relationships.get(npc.id, 50) + 10)
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
                         npc.schedule.current_task = "idle" # Done visiting
+                    elif npc.schedule.current_task == "applying_for_job":
+                        # Arrived at potential workplace to apply
+                        target_building = None
+                        village = self._get_village_for_npc(npc, by_coords=True)
+                        if village:
+                            for b in village.buildings:
+                                if (b.global_center_x, b.global_center_y) == (npc.x, npc.y):
+                                    target_building = b
+                                    break
+
+                        if target_building:
+                             current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == target_building.id and not n.physical.is_dead)
+                             if current_workers < target_building.max_workers:
+                                 self._assign_job(npc, target_building)
+                                 npc.schedule.current_task = "at work"
+                                 self.add_message_to_chat_log(f"{npc.name} got the job at the {target_building.building_type.replace('_', ' ')} thanks to your tip!")
+                                 npc.social.relationships[self.player.id] = min(100, npc.social.relationships.get(self.player.id, 50) + 20)
+                             else:
+                                 self.add_message_to_chat_log(f"{npc.name} was told there are no vacancies at the {target_building.building_type.replace('_', ' ')}.")
+                                 npc.schedule.current_task = "idle"
+                        else:
+                            npc.schedule.current_task = "idle"
+
                     elif npc.schedule.current_task == "greeting_player":
                         # Successfully reached the player, initiate dialogue
                         self.add_message_to_chat_log(f"{npc.name} says hello!")
@@ -1237,6 +1268,14 @@ class World:
                         npc.schedule.current_task = "idle"
                     elif npc.schedule.current_task == "going to work":
                         npc.schedule.current_task = "at work"
+                    elif npc.schedule.current_task == "looking_for_work":
+                        # Arrived at potential workplace
+                        npc.schedule.current_task = "idle" # Or "lingering" if handled elsewhere, for now idle means they stay put
+                        # self.add_message_to_chat_log(f"Debug: {npc.name} is looking for work at a building.")
+                    elif npc.schedule.current_task == "leaving_village":
+                        # NPC has arrived at the edge of the map
+                        self._remove_npc_from_world(npc, reason="emigrated")
+                        continue # Stop processing this NPC
                     elif npc.schedule.current_task in ["going home", "going home to sleep", "going to bed"]:
                         npc.schedule.current_task = "at home"
                     else:
@@ -1327,6 +1366,24 @@ class World:
 
         potential_spots.sort(key=lambda s: s['dist_sq'])
         return potential_spots[0]['x'], potential_spots[0]['y']
+
+    def _find_nearest_map_edge(self, npc: NPC) -> tuple[int, int]:
+        """Finds the nearest map edge coordinate for an NPC to exit."""
+        dist_to_left = npc.x
+        dist_to_right = WORLD_WIDTH - 1 - npc.x
+        dist_to_top = npc.y
+        dist_to_bottom = WORLD_HEIGHT - 1 - npc.y
+
+        min_dist = min(dist_to_left, dist_to_right, dist_to_top, dist_to_bottom)
+
+        if min_dist == dist_to_left:
+            return (0, npc.y)
+        elif min_dist == dist_to_right:
+            return (WORLD_WIDTH - 1, npc.y)
+        elif min_dist == dist_to_top:
+            return (npc.x, 0)
+        else:
+            return (npc.x, WORLD_HEIGHT - 1)
 
     def _find_best_adjacent_tile_for_attack(self, target_x: int, target_y: int, attacker_npc: NPC) -> tuple[int | None, int | None]:
         """
@@ -1464,11 +1521,87 @@ class World:
 
         return candidate_spots[0]['x'], candidate_spots[0]['y']
 
+    def _update_npc_relationships_dynamic(self):
+        """Periodically updates NPC relationships based on interactions, personality, and random chance."""
+        if self.game_time % DAY_LENGTH_TICKS != 0: # Run once a day
+            return
+
+        for npc in self.village_npcs:
+            if npc.physical.is_dead: continue
+
+            # Decay/Growth towards baseline
+            for target_id in list(npc.social.relationships.keys()):
+                current_score = npc.social.relationships[target_id]
+
+                # Decay logic: Drift towards 50 (neutral) if no recent significant interaction
+                # This is a slow drift.
+                if current_score > 50:
+                    npc.social.relationships[target_id] = max(50, current_score - 1)
+                elif current_score < 50:
+                    npc.social.relationships[target_id] = min(50, current_score + 1)
+
+            # Random relationship events
+            if random.random() < 0.1: # 10% chance per day for a random social event
+                other_npc = random.choice(self.village_npcs)
+                if other_npc.id != npc.id and not other_npc.physical.is_dead:
+                    # Check compatibility (simple personality check for now)
+                    compatibility = 0
+                    if npc.social.personality == other_npc.social.personality:
+                        compatibility = 10
+
+                    current_rel = npc.social.relationships.get(other_npc.id, 50)
+
+                    # "Breakup" or fallout logic
+                    if current_rel > 70 and random.random() < 0.05: # 5% chance for friends to fight
+                        change = -20
+                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} had a falling out.")
+                    # "Making up" logic
+                    elif current_rel < 30 and random.random() < 0.05: # 5% chance for enemies to make up
+                        change = 20
+                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} seem to be getting along better.")
+                    else:
+                        # General random fluctuation based on compatibility
+                        change = random.randint(-5, 5) + compatibility
+
+                    new_rel = max(0, min(100, current_rel + change))
+                    npc.social.relationships[other_npc.id] = new_rel
+                    other_npc.social.relationships[npc.id] = new_rel # Assuming symmetric for simple events
+
+                    # Check for romantic breakup
+                    partner_id = npc.social.family_ties.get("partner_id")
+                    if partner_id == other_npc.id and new_rel < 30:
+                        del npc.social.family_ties["partner_id"]
+                        if "partner_id" in other_npc.social.family_ties:
+                            del other_npc.social.family_ties["partner_id"]
+                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} have broken up.")
+
+                        # Move out logic (simplified: if living together, one leaves)
+                        if npc.schedule.home_building_id and npc.schedule.home_building_id == other_npc.schedule.home_building_id:
+                             # Remove npc from current home residents
+                             old_home = self.buildings_by_id.get(npc.schedule.home_building_id)
+                             if old_home and npc in old_home.residents:
+                                 old_home.residents.remove(npc)
+
+                             npc.schedule.home_building_id = None # Become homeless momentarily
+                             self.add_message_to_chat_log(f"{npc.name} has moved out.")
+
+                             # Try to find a new vacant home
+                             village = self._get_village_for_npc(npc)
+                             if village:
+                                 vacant_homes = [b for b in village.buildings if b.category == "residential" and not b.residents]
+                                 if vacant_homes:
+                                     new_home = random.choice(vacant_homes)
+                                     npc.schedule.home_building_id = new_home.id
+                                     new_home.residents.append(npc)
+                                     self.add_message_to_chat_log(f"{npc.name} has found a new home.")
+
     def _update_npc_schedules(self):
         """
         Periodically updates NPC tasks based on game time and current state.
         Also handles routing to combat AI if NPC is hostile.
         """
+        self._update_npc_relationships_dynamic()
+
         for npc in self.village_npcs + self.npcs:
             if npc.physical.is_dead:
                 continue
@@ -1529,6 +1662,7 @@ class World:
                         threat = next((n for n in self.npcs if n.id == threat_id), None)
                         if not threat:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
+
 
                         if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.x, threat.y]:
                             threats_still_visible = True
@@ -2219,6 +2353,21 @@ class World:
                              npc.schedule.current_task = f"Working ({npc.economic.profession})" if npc.economic.profession != "Unemployed" else "At Work (Idle)"
                              if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
 
+                        # Unemployed Behavior: Look for work during "work hours"
+                        elif npc.economic.profession.lower() == "unemployed" and npc.schedule.current_task != "looking_for_work":
+                             if random.random() < 0.02: # Low chance each tick to decide to look for work
+                                 npc_village = self._get_village_for_npc(npc)
+                                 if npc_village:
+                                     workplaces = [b for b in npc_village.buildings if "workplace" in b.category]
+                                     if workplaces:
+                                         target_workplace = random.choice(workplaces)
+                                         dest_coords = (target_workplace.global_center_x, target_workplace.global_center_y)
+
+                                         if (npc.x, npc.y) != dest_coords:
+                                             new_task_label = "looking_for_work"
+                                             destination_coords = dest_coords
+                                             npc.leisure_timer = random.randint(50, 100) # Use timer to linger at workplace
+
                     # Leisure time logic
                     elif is_leisure_time and npc.schedule.current_task not in ["at leisure", "going to tavern", "socializing", "going home", "visiting friend"]:
                         if npc.leisure_timer > 0:
@@ -2597,7 +2746,7 @@ class World:
             if mine:
                 return (mine.global_center_x, mine.global_center_y)
             return None
-        elif npc.profession == "Farmer" and target_zone_tag == "field_patch":
+        elif npc.economic.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
                 # self.add_message_to_chat_log(f"Warning: Farm {work_building.id} has no field_patch zone defined.")
@@ -3001,7 +3150,7 @@ class World:
 
                 if not found_viable_task:
                     # If no task in the entire sequence is possible, the NPC is stalled.
-                    npc.current_task = f"Working ({npc.profession} - No available tasks)"
+                    npc.current_task = f"Working ({npc.economic.profession} - No available tasks)"
                     return True # Handled for this cycle
 
 
@@ -3048,9 +3197,18 @@ class World:
                 if npc.sub_task_timer <= 0:
                     # Action complete, output handled at start of next cycle. Current_sub_task will be cleared.
                     # self.add_message_to_chat_log(f"Debug: {npc.name} finished action for sub-task {npc.current_sub_task}.")
+
+                    # Boost work performance for completing a sub-task
+                    npc.economic.work_performance = min(100, npc.economic.work_performance + 5)
+
                     # The loop will pick this up at the top of the function next call.
                     pass
             return True # Sub-task logic was processed
+
+        # If we reach here, no sub-task was found or processed, implying idleness at work
+        # Decrease work performance slightly if supposed to be working but doing nothing
+        if npc.schedule.current_task == "at work" or npc.schedule.current_task.startswith("Working ("):
+             npc.economic.work_performance = max(0, npc.economic.work_performance - 1)
 
         return False # No current sub-task or target to act upon
 
@@ -3580,10 +3738,10 @@ class World:
                 # Future: More nuanced logic based on NPC personality, relationship to player, etc.
                 if action_type in ["assault", "lockpicking", "theft"]:
                     # Guards and Sheriffs will always be witnesses
-                    if npc.profession in ["Guard", "Sheriff"]:
+                    if npc.economic.profession in ["Guard", "Sheriff"]:
                         witnesses.append(npc)
                     # For other NPCs, maybe a chance based on personality
-                    elif npc.personality not in ["careless", "fearful"]: # Example personalities who might not report
+                    elif npc.social.personality not in ["careless", "fearful"]: # Example personalities who might not report
                         witnesses.append(npc)
         return witnesses
 
@@ -4364,6 +4522,31 @@ class World:
                 if witness.id != target_npc.id:
                     self._handle_witness_reaction(witness, "assault", self.player, victim=target_npc)
 
+    def _remove_npc_from_world(self, npc: NPC, reason="departed"):
+        """
+        Removes an NPC from the world lists (village_npcs, npcs, buildings) without killing them.
+        Used for emigration or cleanup.
+        """
+        if npc in self.village_npcs:
+            self.village_npcs.remove(npc)
+        if npc in self.npcs:
+            self.npcs.remove(npc)
+
+        for building_obj in self.buildings_by_id.values():
+            if npc in building_obj.residents:
+                building_obj.residents.remove(npc)
+            if npc in building_obj.occupants:
+                building_obj.occupants.remove(npc)
+
+        # Clear NPC from UI states if they were targeted
+        if self.interaction_context["active"] and npc in self.interaction_context["target_entities"]:
+            self.interaction_context["active"] = False
+        if self.chat_ui_target_npc == npc: self.chat_ui_target_npc, self.chat_ui_active = None, False
+        if self.trade_ui_npc_target == npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
+        if self.last_talked_to_npc == npc: self.last_talked_to_npc = None
+
+        # self.add_message_to_chat_log(f"Debug: {npc.name} has {reason}.")
+
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
 
@@ -4401,19 +4584,7 @@ class World:
 
         if not corpse_placed_on_map: self.add_message_to_chat_log(f"(Could not place corpse for {dead_npc.name} on map)")
 
-        self.village_npcs = [npc for npc in self.village_npcs if npc.id != dead_npc.id]
-        self.npcs = [npc for npc in self.npcs if npc.id != dead_npc.id]
-
-        for building_obj in self.buildings_by_id.values():
-            building_obj.residents = [res for res in building_obj.residents if res.id != dead_npc.id]
-            building_obj.occupants = [occ for occ in building_obj.occupants if occ.id != dead_npc.id]
-
-        # Clear NPC from UI states if they were targeted
-        if self.interaction_context["active"] and dead_npc in self.interaction_context["target_entities"]:
-            self.interaction_context["active"] = False
-        if self.chat_ui_target_npc == dead_npc: self.chat_ui_target_npc, self.chat_ui_active = None, False # Main loop should handle context.stop_text_input()
-        if self.trade_ui_npc_target == dead_npc: self.trade_ui_npc_target, self.trade_ui_active = None, False
-        if self.last_talked_to_npc == dead_npc: self.last_talked_to_npc = None
+        self._remove_npc_from_world(dead_npc, reason="died")
 
         # --- Item Drops ---
         items_dropped_messages = []
@@ -4830,6 +5001,30 @@ class World:
                 self.chat_ui_history.append((npc_target.name, "I'm not sure what you mean."))
             return
 
+        # Job Referral Logic
+        if npc_target.economic.profession == "Unemployed" and any(word in player_input_text.lower() for word in ["job", "work", "hiring", "vacancy"]):
+            # Check if player mentioned a specific known building that has a vacancy
+            referred_building = None
+            for loc_id, coords in self.player.knowledge.known_locations.items():
+                building = self.buildings_by_id.get(loc_id)
+                if building and building.building_type.replace('_', ' ') in player_input_text.lower():
+                     # Check vacancy
+                     current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == building.id and not n.physical.is_dead)
+                     if current_workers < building.max_workers:
+                         referred_building = building
+                         break
+
+            if referred_building:
+                self.chat_ui_history.append((npc_target.name, f"The {referred_building.building_type.replace('_', ' ')}? I'll go apply right now! Thank you!"))
+                npc_target.schedule.current_task = "applying_for_job"
+                npc_target.schedule.current_destination_coords = (referred_building.global_center_x, referred_building.global_center_y)
+                npc_target.schedule.current_path = [] # Clear path to trigger recalculation
+                return # End conversation turn to act
+            else:
+                # Optional: If player mentions "job" but no specific building matched, NPC could ask "Where?"
+                # For now, fall through to LLM which might handle it conversationally.
+                pass
+
         gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
         if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
             if not npc_target.known_events:
@@ -4850,10 +5045,10 @@ class World:
 
                 gossip_prompt = LLM_PROMPTS["npc_share_gossip"].format(
                     npc_name=npc_target.name,
-                    npc_personality=npc_target.personality,
-                    npc_relationship_with_player=npc_target.relationships.get(self.player.id, 50),
-                    npc_relationship_with_subject=npc_target.relationships.get(event_to_share.subject_id, 50),
-                    npc_relationship_with_target=npc_target.relationships.get(event_to_share.target_id, 50) if event_to_share.target_id else 50,
+                    npc_personality=npc_target.social.personality,
+                    npc_relationship_with_player=npc_target.social.relationships.get(self.player.id, 50),
+                    npc_relationship_with_subject=npc_target.social.relationships.get(event_to_share.subject_id, 50),
+                    npc_relationship_with_target=npc_target.social.relationships.get(event_to_share.target_id, 50) if event_to_share.target_id else 50,
                     event_description=event_to_share.description,
                     subject_name=subject_name,
                     target_name=target_name,
@@ -4926,7 +5121,7 @@ class World:
             self.chat_ui_history.append((npc_target.name, response_str.strip()))
 
         # After NPC response, check if this NPC should offer a job
-        if npc_target.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
+        if npc_target.economic.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
             # Check if player's response was affirmative to a previous implicit offer or just general talk
             # This is tricky without more state. For now, let's assume if they talk to Foreman, job is offered.
             # A better way: Foreman's initial greeting (start_npc_dialogue) could offer.
@@ -4942,7 +5137,7 @@ class World:
 
             offer_prompt = LLM_PROMPTS["npc_job_offer_lumber"].format(
                 npc_name=npc_target.name,
-                npc_profession=npc_target.profession,
+                npc_profession=npc_target.economic.profession,
                 npc_personality=npc_target.social.personality,
                 npc_attitude=npc_target.attitude_to_player,
                 player_criminal_points=self.player.social.reputation.get(REP_CRIMINAL,0),
@@ -4966,7 +5161,7 @@ class World:
 
         # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
         # This is a simplified trigger; more robust would be keyword matching or LLM intent.
-        if npc_target.profession == "Sheriff" and "kill_wolves_01" not in self.player.knowledge.active_quests and \
+        if npc_target.economic.profession == "Sheriff" and "kill_wolves_01" not in self.player.knowledge.active_quests and \
            "kill_wolves_01" not in self.player.knowledge.completed_quests:
 
             quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
@@ -4991,7 +5186,7 @@ class World:
             # Example: npc.schedule.current_task = "going_to_location"
             # npc.task_target_coords = (x, y) # (extracted from player_input or LLM response)
         elif goal == "start_trade":
-            if npc.profession == "Merchant":
+            if npc.economic.profession == "Merchant":
                 self.game_state = "TRADE_MENU"
                 self.trade_ui_npc_target = npc
                 self.initialize_trade_session()
@@ -5019,7 +5214,7 @@ class World:
 
         prompt = LLM_PROMPTS["summarize_conversation_for_memory"].format(
             npc_name=npc.name,
-            npc_personality=npc.personality,
+            npc_personality=npc.social.personality,
             conversation_history=history_str
         )
         summary = self._call_ollama(prompt)
@@ -5545,9 +5740,9 @@ class World:
             for i, resident_npc in enumerate(building.residents):
                 detail = (
                     f"Inhabitant {i+1}: Name: {resident_npc.name}, "
-                    f"Personality: {resident_npc.personality}, "
-                    f"Wealth: {resident_npc.wealth_level}, "
-                    f"Profession: {resident_npc.profession}."
+                    f"Personality: {resident_npc.social.personality}, "
+                    f"Wealth: {resident_npc.economic.wealth_level}, "
+                    f"Profession: {resident_npc.economic.profession}."
                 )
                 inhabitant_details_parts.append(detail)
 
@@ -5703,7 +5898,7 @@ class World:
             prompt = (
                 f"The player (Criminal Points: {player_rep.get(REP_CRIMINAL, 0)}, Hero Points: {player_rep.get(REP_HERO, 0)}) "
                 f"approaches {closest_npc.name}. "
-                f"{closest_npc.name} is {closest_npc.personality}, their family ties are '{closest_npc.family_ties}', "
+                f"{closest_npc.name} is {closest_npc.social.personality}, their family ties are '{closest_npc.social.family_ties.get('description')}', "
                 f"and their current attitude towards the player is '{closest_npc.attitude_to_player}'. "
                 f"Generate a short, in-character dialogue response from {closest_npc.name} to the player. "
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
@@ -5794,87 +5989,94 @@ class World:
 
         print("Warning: No passable starting tile found within the safe margin. Player may be stuck.")
 
-    def _generate_chunk_detail(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
-        """Generates the detailed tiles for a chunk based on its biome and POI."""
+    def _generate_chunk_macro(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+        """Generates the macro structure (village, buildings, NPCs) for a chunk."""
         if chunk.is_generated: return
 
         if chunk.poi_type == "village":
             chunk.village = Village()
             chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
-            
-            tiles = self._generate_village_layout(chunk, chunk_coord_x, chunk_coord_y)
+            self._generate_village_structure(chunk, chunk_coord_x, chunk_coord_y)
         elif chunk.poi_type == "ruin":
             chunk.ruin = Ruin()
             chunk.ruin.lore = "The origins of this place are lost to time."
+            # Ruins are simple, we can just init the object and generate details later.
 
-            tiles = self._generate_ruin_layout(chunk, chunk_coord_x, chunk_coord_y)
-        else:
-            # Generate the base biome tiles
-            biome_def = TILE_DEFINITIONS[chunk.biome]
-            tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
-
-            # If the biome is plains, add some detail
-            if chunk.biome == "plains":
-                for y_local in range(CHUNK_SIZE):
-                    for x_local in range(CHUNK_SIZE):
-                        # Add patches of tall grass, flowers, and then attempt to place trees
-                        # Ensure trees don't overwrite existing non-plains features if any were placed by other logic (though unlikely here)
-                        if tiles[y_local][x_local].name == "Plains": # Only try to place on base plains tiles
-                            if random.random() < 0.03: # 3% chance for any tree
-                                tree_type_roll = random.random()
-                                tree_x_world = chunk_coord_x * CHUNK_SIZE + x_local
-                                tree_y_world = chunk_coord_y * CHUNK_SIZE + y_local
-                                if tree_type_roll < 0.4: # 40% of that 3% are Oaks
-                                    tiles[y_local][x_local] = OakTree(tree_x_world, tree_y_world)
-                                elif tree_type_roll < 0.7: # 30% are Apple
-                                    tiles[y_local][x_local] = AppleTree(tree_x_world, tree_y_world)
-                                else: # 30% are Pear
-                                    tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
-                                # Update transparency map for the new tree
-                                if 0 <= tree_y_world < WORLD_HEIGHT and 0 <= tree_x_world < WORLD_WIDTH:
-                                    self.transparency_map[tree_y_world, tree_x_world] = False # Trees block FOV
-                            elif random.random() < 0.01: # 1% chance for a sapling
-                                sapling_def = TILE_DEFINITIONS["sapling"]
-                                tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
-                            elif random.random() < 0.15: # 15% chance for tall grass (if not a tree)
-                                tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
-                            elif random.random() < 0.01: # 1% chance for a flower (if not a tree or grass)
-                                tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
-                            # Animal Spawning
-                            for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
-                                if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
-                                    animal_x_world = chunk_coord_x * CHUNK_SIZE + x_local
-                                    animal_y_world = chunk_coord_y * CHUNK_SIZE + y_local
-                                    if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
-                                        new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
-                                        new_animal.char = ord(animal_def["char"])
-                                        new_animal.color = animal_def["color"]
-                                        new_animal.max_hp = animal_def["max_hp"]
-                                        new_animal.hp = new_animal.max_hp
-                                        new_animal.behavior = animal_def.get("behavior")
-                                        new_animal.is_hostile_to_player = animal_def["hostile"]
-                                        new_animal.base_attack_name = animal_def["base_attack_name"]
-                                        new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
-                                        new_animal.combat_behavior = animal_def["combat_behavior"]
-                                        new_animal.gender = random.choice(["male", "female"])
-                                        if "prey" in animal_def:
-                                            new_animal.speed = 2
-                                        self.npcs.append(new_animal)
-        chunk.tiles = tiles
         chunk.is_generated = True
 
-    def _generate_village_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
-        tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+    def _generate_chunk_detail(self, chunk: Chunk, chunk_x: int, chunk_y: int):
+        """Generates the detailed tiles for a chunk based on its macro structure."""
+        if chunk.is_terrain_generated: return
 
-        # Add a pond to the village
-        if random.random() < 0.5:
-            pond_center_x = random.randint(5, CHUNK_SIZE - 6)
-            pond_center_y = random.randint(5, CHUNK_SIZE - 6)
-            pond_radius = random.randint(3, 5)
-            for y in range(CHUNK_SIZE):
-                for x in range(CHUNK_SIZE):
-                    if (x - pond_center_x)**2 + (y - pond_center_y)**2 < pond_radius**2:
-                        tiles[y][x] = Tile(TILE_DEFINITIONS["water"]["char"], TILE_DEFINITIONS["water"]["color"], TILE_DEFINITIONS["water"]["passable"], TILE_DEFINITIONS["water"]["name"])
+        # Generate base terrain
+        biome_def = TILE_DEFINITIONS[chunk.biome]
+        tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        chunk.tiles = tiles # Assign initially
+
+        # Add biome-specific details
+        self._render_biome_details(chunk, chunk_x, chunk_y)
+
+        # Render structures
+        if chunk.village:
+            self._render_village_tiles(chunk)
+        elif chunk.ruin:
+            self._generate_ruin_layout(chunk) # Renders directly to tiles
+
+        chunk.is_terrain_generated = True
+
+    def _render_biome_details(self, chunk, chunk_x, chunk_y):
+        """Renders trees, grass, and animals for a chunk."""
+        tiles = chunk.tiles
+
+        if chunk.biome == "plains":
+            for y_local in range(CHUNK_SIZE):
+                for x_local in range(CHUNK_SIZE):
+                    if tiles[y_local][x_local].name == "Plains":
+                        if random.random() < 0.03:
+                            tree_type_roll = random.random()
+                            tree_x_world = chunk_x * CHUNK_SIZE + x_local
+                            tree_y_world = chunk_y * CHUNK_SIZE + y_local
+                            # Avoid overwriting buildings or roads (checked by name/passable later but buildings aren't drawn yet)
+                            # We render biome BEFORE buildings, so buildings will overwrite trees. This is fine.
+                            if tree_type_roll < 0.4:
+                                tiles[y_local][x_local] = OakTree(tree_x_world, tree_y_world)
+                            elif tree_type_roll < 0.7:
+                                tiles[y_local][x_local] = AppleTree(tree_x_world, tree_y_world)
+                            else:
+                                tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
+                            if 0 <= tree_y_world < WORLD_HEIGHT and 0 <= tree_x_world < WORLD_WIDTH:
+                                self.transparency_map[tree_y_world, tree_x_world] = False
+                        elif random.random() < 0.01:
+                            sapling_def = TILE_DEFINITIONS["sapling"]
+                            tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
+                        elif random.random() < 0.15:
+                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
+                        elif random.random() < 0.01:
+                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
+
+                        # Animal Spawning
+                        for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
+                            if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
+                                animal_x_world = chunk_x * CHUNK_SIZE + x_local
+                                animal_y_world = chunk_y * CHUNK_SIZE + y_local
+                                if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
+                                    new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
+                                    new_animal.char = ord(animal_def["char"])
+                                    new_animal.color = animal_def["color"]
+                                    new_animal.max_hp = animal_def["max_hp"]
+                                    new_animal.hp = new_animal.max_hp
+                                    new_animal.behavior = animal_def.get("behavior")
+                                    new_animal.is_hostile_to_player = animal_def["hostile"]
+                                    new_animal.base_attack_name = animal_def["base_attack_name"]
+                                    new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                    new_animal.combat_behavior = animal_def["combat_behavior"]
+                                    new_animal.gender = random.choice(["male", "female"])
+                                    if "prey" in animal_def:
+                                        new_animal.speed = 2
+                                    self.npcs.append(new_animal)
+
+    def _generate_village_structure(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+        """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""
 
         llm_prompt = LLM_PROMPTS["village_lore"].format(biome=chunk.biome)
         llm_response = self._call_ollama(llm_prompt)
@@ -5887,429 +6089,199 @@ class World:
         chunk_global_start_x = chunk_coord_x * CHUNK_SIZE
         chunk_global_start_y = chunk_coord_y * CHUNK_SIZE
 
-        # Generate a more structured road network
+        # Layout strategy:
+        # Use a temporary layout grid to manage collision during generation
+        layout_grid = [[0 for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)] # 0 = empty, 1 = occupied/road
+
         # Main road down the middle
         road_y = CHUNK_SIZE // 2
         for x in range(CHUNK_SIZE):
-            tiles[road_y][x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+            layout_grid[road_y][x] = 1
 
         # Cross road
         road_x = CHUNK_SIZE // 2
         for y in range(CHUNK_SIZE):
-            tiles[y][road_x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+            layout_grid[y][road_x] = 1
 
-        # Place well at the center intersection
-        well_local_x, well_local_y = road_x, road_y # These are local to chunk grid
-        tiles[well_local_y][well_local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
+        # Place well at center
+        global_well_x = chunk_global_start_x + road_x
+        global_well_y = chunk_global_start_y + road_y
+        chunk.village.interaction_points["well"] = [(global_well_x, global_well_y)]
 
-        # Store global coordinates of the well
-        global_well_x = chunk_global_start_x + well_local_x
-        global_well_y = chunk_global_start_y + well_local_y
-        if "well" not in chunk.village.interaction_points:
-            chunk.village.interaction_points["well"] = []
-        chunk.village.interaction_points["well"].append((global_well_x, global_well_y))
-        # self.add_message_to_chat_log(f"Village well registered at G({global_well_x},{global_well_y})")
+        # Helper to place building
+        def try_place_building(b_type, category, width, height, x_hint=None, y_hint=None, max_workers=2):
+            for attempt in range(20):
+                # Use hints if provided and valid, otherwise random
+                if x_hint is not None and attempt == 0 and 0 <= x_hint < CHUNK_SIZE - width:
+                    bx = x_hint
+                else:
+                    bx = random.randint(1, CHUNK_SIZE - width - 1)
 
+                if y_hint is not None and attempt == 0 and 0 <= y_hint < CHUNK_SIZE - height:
+                    by = y_hint
+                else:
+                    by = random.randint(1, CHUNK_SIZE - height - 1)
 
-        # Generate Capital Hall
-        capital_hall_w, capital_hall_h = 9, 7
-        capital_hall_x = road_x - capital_hall_w - 2
-        capital_hall_y = road_y - capital_hall_h // 2
-        capital_hall = Building(capital_hall_x, capital_hall_y, capital_hall_w, capital_hall_h,
-                                building_type="capital_hall", category="civic",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(capital_hall)
-        self.buildings_by_id[capital_hall.id] = capital_hall
-        self._draw_building(tiles, capital_hall, "capital_hall_wall")
-
-        # Generate Jail
-        jail_w, jail_h = 7, 5
-        jail_x = road_x + 2
-        jail_y = road_y - jail_h // 2
-        jail = Building(jail_x, jail_y, jail_w, jail_h,
-                        building_type="jail", category="civic",
-                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(jail)
-        self.buildings_by_id[jail.id] = jail
-        self._draw_building(tiles, jail, "jail_bars")
-
-        # Generate Sheriff's Office
-        sheriff_office_w, sheriff_office_h = 7, 5
-        sheriff_office_x = road_x + 2
-        sheriff_office_y = jail_y + jail_h + 2
-        sheriff_office = Building(sheriff_office_x, sheriff_office_y, sheriff_office_w, sheriff_office_h,
-                                  building_type="sheriff_office", category="civic_workplace",
-                                  global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(sheriff_office)
-        self.buildings_by_id[sheriff_office.id] = sheriff_office
-        self._draw_building(tiles, sheriff_office, "sheriff_office_wall")
-
-        # Generate General Store
-        store_w, store_h = 8, 6
-        store_x = road_x - store_w - 2 # To the left of the main road, below capital hall if space
-        store_y = capital_hall_y + capital_hall_h + 2
-        # Basic placement, ensure it's within bounds (0 to CHUNK_SIZE - size)
-        store_x = max(1, min(store_x, CHUNK_SIZE - store_w - 1))
-        store_y = max(1, min(store_y, CHUNK_SIZE - store_h - 1))
-
-        general_store = Building(store_x, store_y, store_w, store_h,
-                                 building_type="general_store", category="commercial_workplace", # Workplace for merchant
-                                 global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(general_store)
-        self.buildings_by_id[general_store.id] = general_store
-        self._draw_building(tiles, general_store, "wood_wall")
-
-        # Generate Tavern
-        tavern_w, tavern_h = 9, 7
-        tavern_x, tavern_y = 0, 0
-
-        attempts = 0
-        while attempts < 100:
-            tavern_x = random.randint(1, CHUNK_SIZE - tavern_w - 1)
-            tavern_y = random.randint(1, CHUNK_SIZE - tavern_h - 1)
-            overlap = False
-            for i in range(tavern_h):
-                for j in range(tavern_w):
-                    if tiles[tavern_y + i][tavern_x + j].name == "road":
-                        overlap = True
-                        break
-                if overlap:
-                    break
-            for existing_building in chunk.village.buildings:
-                if not (tavern_x + tavern_w < existing_building.x or tavern_x > existing_building.x + existing_building.width or
-                        tavern_y + tavern_h < existing_building.y or tavern_y > existing_building.y + existing_building.height):
-                    overlap = True
-                    break
-            if not overlap:
-                break
-            attempts += 1
-
-        if attempts < 100:
-            tavern = Building(tavern_x, tavern_y, tavern_w, tavern_h,
-                                building_type="tavern", category="commercial_workplace",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-            chunk.village.add_building(tavern)
-            self.buildings_by_id[tavern.id] = tavern
-            self._draw_building(tiles, tavern, "wood_wall")
-
-        # Generate Lumber Mill (example producer workplace)
-        lumber_mill_w, lumber_mill_h = 7, 7
-        # Try to place it somewhat out of the way, e.g., near an edge
-        lumber_mill_x = 1
-        lumber_mill_y = CHUNK_SIZE - lumber_mill_h - 1
-        # Basic check to avoid overlap with roads (very simple, could be improved)
-        if tiles[lumber_mill_y][lumber_mill_x].name == "road" or tiles[lumber_mill_y+lumber_mill_h-1][lumber_mill_x+lumber_mill_w-1].name == "road":
-            lumber_mill_x = CHUNK_SIZE - lumber_mill_w -1 # Try other side
-
-        lumber_mill = Building(lumber_mill_x, lumber_mill_y, lumber_mill_w, lumber_mill_h,
-                               building_type="lumber_mill", category="industrial_workplace",
-                               global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(lumber_mill)
-        self.buildings_by_id[lumber_mill.id] = lumber_mill
-        self._draw_building(tiles, lumber_mill, "wood_wall")
-
-        # Define work zones for the lumber mill after it's drawn
-        # These coordinates are GLOBAL world coordinates
-        # Chopping area is conceptual (nearby trees), so we mark it as existing but don't define specific tiles here.
-        lumber_mill.work_zone_tiles["chopping_area"] = [] # Placeholder, logic will find trees
-
-        # Log pile area: a 2x2 area inside or next to the mill.
-        # Example: Place it near the bottom-left of the building interior (adjusting for walls)
-        # Building.x and .y are local to chunk. Building.global_origin_x/y are world coords.
-        log_pile_coords_global = []
-        # Try to place it 1 tile in from the left wall, 1 tile up from the bottom wall.
-        # Ensure it's within the building's actual floor space.
-        # (building.width - 2) and (building.height - 2) give inner dimensions.
-        # We need to place it relative to building.global_origin_x and building.global_origin_y
-        if lumber_mill.width > 3 and lumber_mill.height > 3: # Ensure mill is large enough
-            # Relative local coords for the start of the 2x2 log pile area
-            local_pile_start_x = 1
-            local_pile_start_y = lumber_mill.height - 3 # 1 up from bottom floor, then 1 more for 2x2
-
-            for i in range(2): # y_offset
-                for j in range(2): # x_offset
-                    gx = lumber_mill.global_origin_x + local_pile_start_x + j
-                    gy = lumber_mill.global_origin_y + local_pile_start_y + i
-                    log_pile_coords_global.append((gx, gy))
-            lumber_mill.work_zone_tiles["log_pile_area"] = log_pile_coords_global
-            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Log Pile at {log_pile_coords_global}")
-
-
-        # Splitting area: another 2x2 area, perhaps near the log pile or another side.
-        # Example: Place it near the bottom-right.
-        splitting_area_coords_global = []
-        if lumber_mill.width > 5 and lumber_mill.height > 3: # Need more width to avoid overlap if simple placement
-            local_split_start_x = lumber_mill.width - 3
-            local_split_start_y = lumber_mill.height - 3
-
-            for i in range(2): # y_offset
-                for j in range(2): # x_offset
-                    gx = lumber_mill.global_origin_x + local_split_start_x + j
-                    gy = lumber_mill.global_origin_y + local_split_start_y + i
-                    splitting_area_coords_global.append((gx, gy))
-            lumber_mill.work_zone_tiles["splitting_area"] = splitting_area_coords_global
-            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area at {splitting_area_coords_global}")
-        elif "log_pile_area" in lumber_mill.work_zone_tiles: # Fallback if not wide enough, use same as log pile
-            lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
-            # self.add_message_to_chat_log(f"Lumber Mill {lumber_mill.id[:4]}: Splitting Area (fallback) at {lumber_mill.work_zone_tiles['splitting_area']}")
-        else: # If no log pile area either, mark as empty
-            lumber_mill.work_zone_tiles["splitting_area"] = []
-
-        # Generate Carpenter Shop
-        carpenter_w, carpenter_h = 7, 6
-        carpenter_x = road_x + 2
-        carpenter_y = sheriff_office_y + sheriff_office_h + 2
-        carpenter_x = max(1, min(carpenter_x, CHUNK_SIZE - carpenter_w - 1))
-        carpenter_y = max(1, min(carpenter_y, CHUNK_SIZE - carpenter_h - 1))
-        carpenter_shop = Building(carpenter_x, carpenter_y, carpenter_w, carpenter_h,
-                                building_type="carpenter_shop", category="industrial_workplace",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(carpenter_shop)
-        self.buildings_by_id[carpenter_shop.id] = carpenter_shop
-        self._draw_building(tiles, carpenter_shop, "wood_wall")
-
-        # Generate Windmill
-        windmill_w, windmill_h = 7, 7
-        windmill_x = CHUNK_SIZE - windmill_w - 1
-        windmill_y = CHUNK_SIZE - windmill_h - 1
-        windmill = Building(windmill_x, windmill_y, windmill_w, windmill_h,
-                            building_type="mill", category="industrial_workplace",
-                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(windmill)
-        self.buildings_by_id[windmill.id] = windmill
-        self._draw_building(tiles, windmill, "wood_wall")
-
-        grinding_stone_coords_global = []
-        if windmill.width > 2 and windmill.height > 2:
-            local_stone_x = windmill.width // 2
-            local_stone_y = windmill.height // 2
-            gx = windmill.global_origin_x + local_stone_x
-            gy = windmill.global_origin_y + local_stone_y
-            grinding_stone_coords_global.append((gx, gy))
-        windmill.work_zone_tiles["grinding_stone"] = grinding_stone_coords_global
-
-        # Generate Bakery
-        bakery_w, bakery_h = 7, 6
-        bakery_x = 1
-        bakery_y = 1
-        bakery = Building(bakery_x, bakery_y, bakery_w, bakery_h,
-                          building_type="bakery", category="commercial_workplace",
-                          global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(bakery)
-        self.buildings_by_id[bakery.id] = bakery
-        self._draw_building(tiles, bakery, "wood_wall")
-
-        oven_coords_global = []
-        if bakery.width > 2 and bakery.height > 2:
-            local_oven_x = bakery.width // 2
-            local_oven_y = 1
-            gx = bakery.global_origin_x + local_oven_x
-            gy = bakery.global_origin_y + local_oven_y
-            oven_coords_global.append((gx, gy))
-        bakery.work_zone_tiles["oven"] = oven_coords_global
-
-        # Generate Mine
-        mine_w, mine_h = 8, 6
-        mine_x = 1
-        mine_y = 1
-        mine = Building(mine_x, mine_y, mine_w, mine_h,
-                        building_type="mine", category="industrial_workplace",
-                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(mine)
-        self.buildings_by_id[mine.id] = mine
-        self._draw_building(tiles, mine, "stone_wall")
-
-        # Define work zones for the Mine
-        mine_face_coords_global = []
-        if mine.width > 2 and mine.height > 2:
-            # Example: Mine face is the back wall
-            for i in range(1, mine.width - 1):
-                gx = mine.global_origin_x + i
-                gy = mine.global_origin_y + 1
-                mine_face_coords_global.append((gx, gy))
-        mine.work_zone_tiles["mine_face"] = mine_face_coords_global
-
-        storage_area_coords_global = []
-        if mine.width > 2 and mine.height > 2:
-            # Example: Storage area is near the entrance
-            for i in range(1, mine.width - 1):
-                gx = mine.global_origin_x + i
-                gy = mine.global_origin_y + mine.height - 2
-                storage_area_coords_global.append((gx, gy))
-        mine.work_zone_tiles["storage_area"] = storage_area_coords_global
-
-        # Generate Blacksmith Shop
-        blacksmith_w, blacksmith_h = 7, 6
-        blacksmith_x = road_x + 2
-        blacksmith_y = road_y + 2
-        blacksmith_shop = Building(blacksmith_x, blacksmith_y, blacksmith_w, blacksmith_h,
-                                   building_type="blacksmith_shop", category="industrial_workplace",
-                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(blacksmith_shop)
-        self.buildings_by_id[blacksmith_shop.id] = blacksmith_shop
-        self._draw_building(tiles, blacksmith_shop, "stone_wall")
-
-        # Define work zones for the Blacksmith Shop
-        forge_coords_global = []
-        if blacksmith_shop.width > 2 and blacksmith_shop.height > 2:
-            local_forge_x = 1
-            local_forge_y = 1
-            gx = blacksmith_shop.global_origin_x + local_forge_x
-            gy = blacksmith_shop.global_origin_y + local_forge_y
-            forge_coords_global.append((gx, gy))
-        blacksmith_shop.work_zone_tiles["forge"] = forge_coords_global
-
-        anvil_coords_global = []
-        if blacksmith_shop.width > 2 and blacksmith_shop.height > 2:
-            local_anvil_x = blacksmith_shop.width - 2
-            local_anvil_y = blacksmith_shop.height - 2
-            gx = blacksmith_shop.global_origin_x + local_anvil_x
-            gy = blacksmith_shop.global_origin_y + local_anvil_y
-            anvil_coords_global.append((gx, gy))
-        blacksmith_shop.work_zone_tiles["anvil"] = anvil_coords_global
-
-        # Generate Farm (example agricultural workplace)
-        if random.random() < 0.7: # Chance to generate a farm
-            farm_w, farm_h = 8, 6 # Farmhouse size
-            # Try to place it somewhat out of the way, similar to lumber mill
-            farm_x = CHUNK_SIZE - farm_w - 1
-            farm_y = 1
-            # Basic check to avoid overlap with roads (very simple)
-            if tiles[farm_y][farm_x].name == "road" or tiles[farm_y+farm_h-1][farm_x+farm_w-1].name == "road":
-                farm_x = 1 # Try other side
-                farm_y = CHUNK_SIZE - farm_h - 5 # Move it down a bit too to vary from lumber mill
-
-            farm_building = Building(farm_x, farm_y, farm_w, farm_h,
-                                   building_type="farm", category="agricultural_workplace",
-                                   global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-            chunk.village.add_building(farm_building)
-            self.buildings_by_id[farm_building.id] = farm_building
-            self._draw_building(tiles, farm_building, "wood_wall") # Farmhouse uses wood wall
-
-            # Define "field_patch" zone for the farm
-            field_patch_coords_global = []
-            field_width = 5  # e.g., 5x5 field
-            field_height = 5
-            # Place field to the south of the farmhouse, with a 1-tile gap
-            field_start_local_x = farm_building.x + (farm_building.width // 2) - (field_width // 2) # Centered with farmhouse
-            field_start_local_y = farm_building.y + farm_building.height + 1 # 1 tile below farmhouse
-
-            # Ensure field patch is within chunk boundaries
-            field_start_local_x = max(0, min(field_start_local_x, CHUNK_SIZE - field_width))
-            field_start_local_y = max(0, min(field_start_local_y, CHUNK_SIZE - field_height))
-
-            for r_y in range(field_height):
-                for r_x in range(field_width):
-                    # Check if tile is within overall chunk bounds before adding
-                    # Also, for now, we assume these tiles are plains and will be tilled.
-                    # A more robust version would check tiles[field_start_local_y + r_y][field_start_local_x + r_x]
-                    # to ensure it's a suitable type before adding to field_patch.
-                    if 0 <= field_start_local_x + r_x < CHUNK_SIZE and \
-                       0 <= field_start_local_y + r_y < CHUNK_SIZE:
-
-                        # Ensure the field tiles are initially plains (or similar farmable land)
-                        # For now, we just define the zone. The farmer will till plains tiles within it.
-                        # The actual tile objects at these coords are already set (e.g. to plains by default chunk gen)
-                        # We are just collecting their global coordinates.
-                        gx = chunk_global_start_x + field_start_local_x + r_x
-                        gy = chunk_global_start_y + field_start_local_y + r_y
-                        field_patch_coords_global.append((gx, gy))
-
-            farm_building.work_zone_tiles["field_patch"] = field_patch_coords_global
-            # self.add_message_to_chat_log(f"Farm {farm_building.id[:4]}: Field Patch at {field_patch_coords_global}")
-
-            # Pre-populate farm with some seeds for the farmer to use
-            if "wheat_seeds" in ITEM_DEFINITIONS:
-                 farm_building.building_inventory["wheat_seeds"] = random.randint(5, 15)
-
-
-        # Generate Fishing Hut
-        if any(tiles[y][x].name == "water" for x in range(CHUNK_SIZE) for y in range(CHUNK_SIZE)):
-            hut_w, hut_h = 5, 5
-            for _ in range(100): # Attempts to place hut
-                hut_x = random.randint(1, CHUNK_SIZE - hut_w - 1)
-                hut_y = random.randint(1, CHUNK_SIZE - hut_h - 1)
-
-                # Check for proximity to water
-                is_near_water = False
-                for i in range(-1, hut_h + 1):
-                    for j in range(-1, hut_w + 1):
-                        check_x, check_y = hut_x + j, hut_y + i
-                        if 0 <= check_x < CHUNK_SIZE and 0 <= check_y < CHUNK_SIZE:
-                            if tiles[check_y][check_x].name == "water":
-                                is_near_water = True
-                                break
-                    if is_near_water:
-                        break
-
-                if is_near_water:
-                    fishing_hut = Building(hut_x, hut_y, hut_w, hut_h, building_type="fishing_hut", category="industrial_workplace", global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-                    chunk.village.add_building(fishing_hut)
-                    self.buildings_by_id[fishing_hut.id] = fishing_hut
-                    self._draw_building(tiles, fishing_hut, "wood_wall")
-
-                    # Designate a fishing spot
-                    for i in range(-2, hut_h + 2):
-                        for j in range(-2, hut_w + 2):
-                            spot_x, spot_y = hut_x + j, hut_y + i
-                            if 0 <= spot_x < CHUNK_SIZE and 0 <= spot_y < CHUNK_SIZE:
-                                if tiles[spot_y][spot_x].name == "water":
-                                    if "fishing_spot" not in chunk.village.interaction_points:
-                                        chunk.village.interaction_points["fishing_spot"] = []
-                                    chunk.village.interaction_points["fishing_spot"].append((chunk_global_start_x + spot_x, chunk_global_start_y + spot_y))
-                                    break
-                        if "fishing_spot" in chunk.village.interaction_points:
-                            break
-                    break
-
-        # Generate a few regular houses
-        num_houses = random.randint(3, 5)
-        for _ in range(num_houses):
-            w, h = random.randint(5, 9), random.randint(5, 9)
-            attempts = 0
-            while attempts < 100:
-                bx = random.randint(1, CHUNK_SIZE - w - 1)
-                by = random.randint(1, CHUNK_SIZE - h - 1)
+                # Check collision with layout_grid (roads and other buildings)
                 overlap = False
-                for i in range(h):
-                    for j in range(w):
-                        if tiles[by + i][bx + j].char == TILE_DEFINITIONS["road"]["char"]:
-                            overlap = True; break
+                for i in range(height):
+                    for j in range(width):
+                        # Ensure we don't go out of bounds (though generation logic should prevent this)
+                        if not (0 <= by + i < CHUNK_SIZE and 0 <= bx + j < CHUNK_SIZE):
+                            overlap = True
+                            break
+                        if layout_grid[by + i][bx + j] == 1:
+                            overlap = True
+                            break
                     if overlap: break
-                for existing_building in chunk.village.buildings:
-                    if not (bx + w < existing_building.x or bx > existing_building.x + existing_building.width or
-                            by + h < existing_building.y or by > existing_building.y + existing_building.height):
-                        overlap = True; break
-                if not overlap: break
-                attempts += 1
-            if attempts == 100: continue
 
-            house = Building(bx, by, w, h, building_type="house", category="residential",
-                             global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-            chunk.village.add_building(house)
-            self.buildings_by_id[house.id] = house
-            self._draw_building(tiles, house, "wood_wall")
+                if not overlap:
+                    # Mark grid
+                    for i in range(height):
+                        for j in range(width):
+                            layout_grid[by + i][bx + j] = 1
 
-        # Generate Library
-        library_w, library_h = 8, 6
-        library_x = road_x - library_w - 2
-        library_y = road_y + 2
-        library_x = max(1, min(library_x, CHUNK_SIZE - library_w - 1))
-        library_y = max(1, min(library_y, CHUNK_SIZE - library_h - 1))
-        library = Building(library_x, library_y, library_w, library_h,
-                                building_type="library", category="civic_workplace",
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-        chunk.village.add_building(library)
-        self.buildings_by_id[library.id] = library
-        self._draw_building(tiles, library, "stone_wall")
+                    building = Building(bx, by, width, height, building_type=b_type, category=category,
+                                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                    building.max_workers = max_workers
+                    chunk.village.add_building(building)
+                    self.buildings_by_id[building.id] = building
+                    return building
+            return None
+
+        # --- Generate Buildings ---
+
+        # Capital Hall
+        try_place_building("capital_hall", "civic", 9, 7, road_x - 11, road_y - 3, max_workers=3)
+
+        # Jail
+        jail = try_place_building("jail", "civic", 7, 5, road_x + 2, road_y - 2, max_workers=2)
+
+        # Sheriff's Office
+        if jail:
+            try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, jail.y + 7, max_workers=2)
+        else:
+            try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, road_y + 5, max_workers=2)
+
+        # General Store
+        try_place_building("general_store", "commercial_workplace", 8, 6, road_x - 10, road_y + 5, max_workers=2)
+
+        # Tavern
+        try_place_building("tavern", "commercial_workplace", 9, 7, max_workers=3)
+
+        # Lumber Mill
+        lumber_mill = try_place_building("lumber_mill", "industrial_workplace", 7, 7, 1, CHUNK_SIZE - 8, max_workers=4)
+        if lumber_mill:
+            # Define zones (simplified logic)
+            lumber_mill.work_zone_tiles["chopping_area"] = []
+            # Add dummy global coords for internal zones based on offset
+            lumber_mill.work_zone_tiles["log_pile_area"] = [(lumber_mill.global_origin_x + 1, lumber_mill.global_origin_y + lumber_mill.height - 3)]
+            lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
+
+        # Carpenter
+        try_place_building("carpenter_shop", "industrial_workplace", 7, 6, max_workers=2)
+
+        # Windmill
+        windmill = try_place_building("mill", "industrial_workplace", 7, 7, CHUNK_SIZE - 8, CHUNK_SIZE - 8, max_workers=2)
+        if windmill:
+            windmill.work_zone_tiles["grinding_stone"] = [(windmill.global_origin_x + 3, windmill.global_origin_y + 3)]
+
+        # Bakery
+        bakery = try_place_building("bakery", "commercial_workplace", 7, 6, 1, 1, max_workers=2)
+        if bakery:
+            bakery.work_zone_tiles["oven"] = [(bakery.global_origin_x + 3, bakery.global_origin_y + 1)]
+
+        # Mine
+        mine = try_place_building("mine", "industrial_workplace", 8, 6, 1, 1, max_workers=5)
+        if mine:
+            mine.work_zone_tiles["mine_face"] = [(mine.global_origin_x + i, mine.global_origin_y + 1) for i in range(1, 7)]
+            mine.work_zone_tiles["storage_area"] = [(mine.global_origin_x + 1, mine.global_origin_y + 4)]
+
+        # Blacksmith
+        blacksmith = try_place_building("blacksmith_shop", "industrial_workplace", 7, 6, road_x + 2, road_y + 2, max_workers=2)
+        if blacksmith:
+            blacksmith.work_zone_tiles["forge"] = [(blacksmith.global_origin_x + 1, blacksmith.global_origin_y + 1)]
+            blacksmith.work_zone_tiles["anvil"] = [(blacksmith.global_origin_x + 5, blacksmith.global_origin_y + 4)]
+
+        # Farm
+        farm = try_place_building("farm", "agricultural_workplace", 8, 6, max_workers=3)
+        if farm:
+            # Logic for field patch
+            field_width, field_height = 5, 5
+            field_x = farm.x + 2
+            field_y = farm.y + farm.height + 1
+            # Ensure field fits in chunk
+            if field_y + field_height < CHUNK_SIZE:
+                farm.work_zone_tiles["field_patch"] = [
+                    (chunk_global_start_x + field_x + rx, chunk_global_start_y + field_y + ry)
+                    for ry in range(field_height) for rx in range(field_width)
+                ]
+                # Mark field in grid to prevent others
+                for ry in range(field_height):
+                    for rx in range(field_width):
+                        if 0 <= field_y + ry < CHUNK_SIZE and 0 <= field_x + rx < CHUNK_SIZE:
+                            layout_grid[field_y + ry][field_x + rx] = 1
+            if "wheat_seeds" in ITEM_DEFINITIONS:
+                 farm.building_inventory["wheat_seeds"] = random.randint(5, 15)
+
+        # Fishing Hut
+        # Needs water check. We don't have tiles yet.
+        # We can use the pond logic: if we generate a pond, we know where it is.
+        # Or we check macro elevation.
+        # For simplicity, we'll assume water exists if we decide to place one,
+        # but without tile map, precise placement next to water is hard.
+        # Strategy: Postpone Fishing Hut placement to render time? No, need Building object for NPCs.
+        # Strategy: Assume water at edges or specific spot.
+        # Let's skip dynamic water placement dependency for now or assume a pond exists at fixed location.
+
+        # Houses
+        for _ in range(random.randint(3, 5)):
+            try_place_building("house", "residential", random.randint(5, 9), random.randint(5, 9))
+
+        # Library
+        try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         self._initialize_economy(chunk.village)
-        return tiles
 
-    def _generate_ruin_layout(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
+    def _render_village_tiles(self, chunk: Chunk):
+        """Renders the buildings and roads of a village onto the chunk's tiles."""
+        tiles = chunk.tiles
+
+        # Render roads
+        road_y = CHUNK_SIZE // 2
+        road_x = CHUNK_SIZE // 2
+        for x in range(CHUNK_SIZE):
+            tiles[road_y][x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+        for y in range(CHUNK_SIZE):
+            tiles[y][road_x] = Tile(TILE_DEFINITIONS["road"]["char"], TILE_DEFINITIONS["road"]["color"], TILE_DEFINITIONS["road"]["passable"], TILE_DEFINITIONS["road"]["name"])
+
+        # Render buildings
+        for building in chunk.village.buildings:
+            wall_type = "wood_wall"
+            if building.building_type in ["mine", "blacksmith_shop", "library", "sheriff_office", "jail", "capital_hall"]:
+                wall_type = "stone_wall"
+            elif building.building_type == "jail":
+                wall_type = "jail_bars"
+            elif building.building_type == "sheriff_office":
+                wall_type = "sheriff_office_wall"
+            elif building.building_type == "capital_hall":
+                wall_type = "capital_hall_wall"
+
+            self._draw_building(tiles, building, wall_type)
+
+        # Render Well (if exists)
+        if "well" in chunk.village.interaction_points:
+            for wx, wy in chunk.village.interaction_points["well"]:
+                # Convert global to local
+                local_x = wx % CHUNK_SIZE
+                local_y = wy % CHUNK_SIZE
+                tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
+
+    def _generate_ruin_layout(self, chunk: Chunk):
         """Generates a ruined structure within a chunk."""
-        tiles = [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        tiles = chunk.tiles if chunk.tiles else [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        chunk.tiles = tiles
 
         wall_tile = TILE_DEFINITIONS["cracked_stone_wall"]
         floor_tile = TILE_DEFINITIONS["mossy_cobblestone"]
@@ -6346,26 +6318,61 @@ class World:
                 is_window = (i == 1 and j == 0) or (i == 1 and j == building.width - 1) or \
                             (i == building.height - 2 and j == 0) or (i == building.height - 2 and j == building.width - 1)
 
+                target_y = building.y + i
+                target_x = building.x + j
+                global_x = building.global_origin_x + j
+                global_y = building.global_origin_y + i
+
                 if is_border:
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS[wall_tile_key]["char"], TILE_DEFINITIONS[wall_tile_key]["color"], TILE_DEFINITIONS[wall_tile_key]["passable"], TILE_DEFINITIONS[wall_tile_key]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS[wall_tile_key]["char"], TILE_DEFINITIONS[wall_tile_key]["color"], TILE_DEFINITIONS[wall_tile_key]["passable"], TILE_DEFINITIONS[wall_tile_key]["name"])
+                    tiles[target_y][target_x] = new_tile
+                    if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                         self.transparency_map[global_y, global_x] = not new_tile.blocks_fov
+
                 elif is_window and building.building_type == "house": # Only houses have windows for now
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS["window"]["char"], TILE_DEFINITIONS["window"]["color"], TILE_DEFINITIONS["window"]["passable"], TILE_DEFINITIONS["window"]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS["window"]["char"], TILE_DEFINITIONS["window"]["color"], TILE_DEFINITIONS["window"]["passable"], TILE_DEFINITIONS["window"]["name"])
+                    tiles[target_y][target_x] = new_tile
+                    if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                         self.transparency_map[global_y, global_x] = not new_tile.blocks_fov
+
                 else:
-                    tiles[building.y + i][building.x + j] = Tile(TILE_DEFINITIONS["wood_floor"]["char"], TILE_DEFINITIONS["wood_floor"]["color"], TILE_DEFINITIONS["wood_floor"]["passable"], TILE_DEFINITIONS["wood_floor"]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS["wood_floor"]["char"], TILE_DEFINITIONS["wood_floor"]["color"], TILE_DEFINITIONS["wood_floor"]["passable"], TILE_DEFINITIONS["wood_floor"]["name"])
+                    tiles[target_y][target_x] = new_tile
+                    # Floors usually don't block FOV, but update just in case
+                    if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                         self.transparency_map[global_y, global_x] = True
 
         # Place door for houses and capital hall
         if building.building_type in ["house", "capital_hall", "sheriff_office", "jail"]:
             door_x = building.x + building.width // 2
             door_y = building.y + building.height - 1 # Bottom wall
 
+            global_door_x = building.global_origin_x + building.width // 2
+            global_door_y = building.global_origin_y + building.height - 1
+
             door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"] # Default to closed door
-            tiles[door_y][door_x] = Tile(
+            new_tile = Tile(
                 char=door_def["char"],
                 color=door_def["color"],
                 passable=door_def["passable"],
                 name=door_def["name"],
                 properties=door_def["properties"] # Store door properties on the tile
             )
+            tiles[door_y][door_x] = new_tile
+            if 0 <= global_door_x < WORLD_WIDTH and 0 <= global_door_y < WORLD_HEIGHT:
+                 self.transparency_map[global_door_y, global_door_x] = not new_tile.blocks_fov
+
+    def ensure_player_surroundings_generated(self):
+        """Ensures chunks around the player are generated."""
+        chunk_x = self.player.x // CHUNK_SIZE
+        chunk_y = self.player.y // CHUNK_SIZE
+
+        for y in range(chunk_y - 1, chunk_y + 2):
+            for x in range(chunk_x - 1, chunk_x + 2):
+                if 0 <= x < self.chunk_width and 0 <= y < self.chunk_height:
+                    chunk = self.chunks[y][x]
+                    if not chunk.is_terrain_generated:
+                        self._generate_chunk_detail(chunk, x, y)
 
     def get_tile_at(self, x, y):
         if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
@@ -6377,8 +6384,8 @@ class World:
             return None
 
         chunk = self.chunks[chunk_y][chunk_x]
-        if not chunk.is_generated:
-            self._generate_chunk_detail(chunk, chunk_x, chunk_y) # Pass chunk_x, chunk_y
+        if not chunk.is_terrain_generated:
+            self._generate_chunk_detail(chunk, chunk_x, chunk_y)
         return chunk.tiles[local_y][local_x]
 
     def get_building_at(self, x, y):
@@ -6506,6 +6513,7 @@ class World:
         self._update_world_environment()
         self._update_economy()
         self._update_npc_ages()
+        self._update_npc_careers()
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
@@ -6661,6 +6669,354 @@ class World:
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
             for npc in self.village_npcs + self.npcs:
                 npc.age += 1
+
+    def _find_boss_for_npc(self, npc: NPC, building: Building) -> NPC | None:
+        """Finds a supervisor or senior coworker for an NPC at a building."""
+        possible_bosses = []
+        for other_npc in self.village_npcs:
+            if other_npc.id == npc.id or other_npc.physical.is_dead:
+                continue
+            if other_npc.schedule.work_building_id == building.id:
+                prof = other_npc.economic.profession
+                # Explicit leaders
+                if prof in ["Sheriff", "Lumber Mill Foreman", "Tavern Keeper", "Town Official", "Merchant"]:
+                    return other_npc
+                possible_bosses.append(other_npc)
+
+        # If no explicit leader, pick a random coworker to blame/thank
+        if possible_bosses:
+            return random.choice(possible_bosses)
+        return None
+
+    def _evaluate_job_suitability(self, npc: NPC, job_building: Building) -> int:
+        """Calculates a suitability score for an NPC and a potential job building."""
+        score = random.randint(0, 20) # Base randomness
+
+        # Personality fit
+        b_type = job_building.building_type
+        personality = npc.social.personality.lower()
+
+        if "brave" in personality or "aggressive" in personality:
+            if b_type in ["sheriff_office", "jail"]: score += 20
+            elif b_type in ["mine", "lumber_mill"]: score += 10
+        elif "smart" in personality or "studious" in personality:
+            if b_type in ["library", "capital_hall"]: score += 20
+            elif b_type in ["general_store"]: score += 10
+        elif "greedy" in personality or "merchant" in personality:
+            if b_type in ["general_store", "tavern"]: score += 20
+        elif "nature" in personality or "outdoors" in personality:
+            if b_type in ["farm", "fishing_hut", "lumber_mill"]: score += 20
+
+        # Physical Stats fit (implied by combat stats)
+        if hasattr(npc, 'combat') and npc.combat.max_hp > 25: # Strong/Tough
+            if b_type in ["mine", "lumber_mill", "blacksmith_shop", "sheriff_office"]: score += 15
+
+        return score
+
+    def _update_npc_careers(self):
+        """
+        Simulates a job market where NPCs can quit unhappy jobs and find new ones.
+        Run once per day.
+        """
+        # Logic runs if it's exactly the start of a day (after day 0)
+        # Or if force-called in tests where game_time is set manually to a multiple.
+        # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
+        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+             # print("DEBUG: Skipping career update (wrong time).")
+             return
+
+        # --- Job Satisfaction Update & Quitting ---
+        # Iterate over a copy to allow modification of lists if needed (though we modify npc attributes)
+        for npc in list(self.village_npcs):
+            # print(f"DEBUG: Processing {npc.name}. Profession: {npc.economic.profession}, Satisfaction: {npc.economic.job_satisfaction}")
+            if npc.physical.is_dead:
+                continue
+
+            if npc.economic.profession.lower() != "unemployed":
+                # Factors affecting satisfaction
+                satisfaction_change = 0
+
+                # 1. Hunger/Thirst penalty
+                if npc.physical.hunger > 50: satisfaction_change -= 5
+                if npc.physical.thirst > 50: satisfaction_change -= 5
+
+                # 2. Wealth impact
+                if npc.economic.money < 10:
+                    satisfaction_change -= 2 # Stress of poverty
+                elif npc.economic.money > 200:
+                    satisfaction_change += 1 # Financial security
+
+                # 3. Random fluctuation (good day/bad day)
+                satisfaction_change += random.randint(-5, 5)
+
+                npc.economic.job_satisfaction = max(0, min(100, npc.economic.job_satisfaction + satisfaction_change))
+
+                # print(f"DEBUG: {npc.name} new satisfaction: {npc.economic.job_satisfaction} (change: {satisfaction_change})")
+
+                # Firing Logic (Performance check)
+                if npc.economic.work_performance < 20 and random.random() < 0.1: # 10% chance to be fired if performance is very low
+                    old_profession = npc.economic.profession
+
+                    # Social Fallout: Find someone to blame (Boss)
+                    work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                    if work_building:
+                        boss = self._find_boss_for_npc(npc, work_building)
+                        if boss:
+                            npc.add_grudge(boss.id, f"Fired me from my job as {old_profession}.")
+                            # self.add_message_to_chat_log(f"{npc.name} blames {boss.name} for their termination.")
+
+                    npc.economic.profession = "Unemployed"
+                    npc.economic.job_satisfaction = 30 # Fired creates unhappiness
+                    npc.economic.days_unemployed = 0
+                    npc.economic.work_performance = 50 # Reset for next job
+
+                    if npc.schedule.work_building_id:
+                        # Just clear the schedule ID. 'occupants' tracks physical presence,
+                        # so we don't remove them from the building list here (they might still be standing there).
+                        npc.schedule.work_building_id = None
+
+                    self.add_message_to_chat_log(f"{npc.name} was fired from their job as a {old_profession} for poor performance.")
+
+                    # Log firing event
+                    # Use workplace location for the event if possible, so gossiping unemployed NPCs know where to go
+                    fired_location = (work_building.global_center_x, work_building.global_center_y) if work_building else (npc.x, npc.y)
+                    self.log_event(
+                        event_type="npc_fired",
+                        description=f"{{subject}} was fired from their job as {old_profession}.",
+                        subject_id=npc.id,
+                        location=fired_location
+                    )
+
+                # Quitting Logic
+                elif npc.economic.job_satisfaction < 10:
+                    # NPC Quits
+                    old_profession = npc.economic.profession
+                    npc.economic.profession = "Unemployed"
+                    npc.economic.job_satisfaction = 50 # Reset for "new life"
+                    npc.economic.days_unemployed = 0
+                    npc.economic.work_performance = 50
+
+                    if npc.schedule.work_building_id:
+                        # Just clear the schedule ID. 'occupants' tracks physical presence.
+                        npc.schedule.work_building_id = None
+
+                    self.add_message_to_chat_log(f"{npc.name} has quit their job as a {old_profession} due to low satisfaction.")
+
+                    # Log quitting event
+                    work_building = self.buildings_by_id.get(npc.schedule.work_building_id) if npc.schedule.work_building_id else None
+                    quit_location = (work_building.global_center_x, work_building.global_center_y) if work_building else (npc.x, npc.y)
+
+                    self.log_event(
+                        event_type="npc_quit_job",
+                        description=f"{{subject}} quit their job as {old_profession}.",
+                        subject_id=npc.id,
+                        location=quit_location
+                    )
+
+            else: # Is Unemployed
+                npc.economic.days_unemployed += 1
+                # Satisfaction drops while unemployed
+                npc.economic.job_satisfaction = max(0, npc.economic.job_satisfaction - 2)
+
+        # --- Hiring Logic ---
+        unemployed_npcs = [n for n in self.village_npcs if n.economic.profession.lower() == "unemployed" and not n.physical.is_dead]
+        random.shuffle(unemployed_npcs) # Randomize who gets first pick
+
+        for npc in unemployed_npcs:
+            village = self._get_village_for_npc(npc)
+            if not village: continue
+
+            # Find workplaces with vacancies
+            potential_jobs = []
+            for building in village.buildings:
+                if "workplace" in building.category:
+                    # Count actual employees based on their assigned work building ID
+                    current_workers_count = sum(1 for villager in self.village_npcs if villager.schedule.work_building_id == building.id and not villager.physical.is_dead)
+
+                    if current_workers_count < building.max_workers:
+                        potential_jobs.append(building)
+
+            if potential_jobs:
+                # Score jobs based on suitability
+                best_job = None
+                best_score = -1
+
+                for job_building in potential_jobs:
+                    score = self._evaluate_job_suitability(npc, job_building)
+                    if score > best_score:
+                        best_score = score
+                        best_job = job_building
+
+                new_workplace = best_job if best_job else random.choice(potential_jobs)
+                self._assign_job(npc, new_workplace)
+
+            # --- Emigration Logic ---
+            # If unemployed for too long, leave the village
+            elif npc.economic.days_unemployed > 7 and npc.economic.money < 50: # Unemployed for a week and poor
+                npc.schedule.current_task = "leaving_village"
+                # Set target to edge of map
+                edge_x, edge_y = self._find_nearest_map_edge(npc)
+
+                npc.schedule.current_path = self.calculate_path(npc.x, npc.y, edge_x, edge_y)
+                npc.schedule.current_destination_coords = (edge_x, edge_y)
+
+                self.add_message_to_chat_log(f"{npc.name} has decided to leave the village in search of better opportunities.")
+                self.log_event(event_type="npc_emigrated", description=f"{{subject}} left the village.", subject_id=npc.id, location=(npc.x, npc.y))
+
+        # --- Job Hopping (for Employed NPCs) ---
+        # Check if employed NPCs want to switch jobs
+        for npc in list(self.village_npcs):
+            if npc.physical.is_dead or npc.economic.profession.lower() == "unemployed": continue
+
+            # Only consider switching if somewhat dissatisfied
+            if npc.economic.job_satisfaction < 60:
+                village = self._get_village_for_npc(npc)
+                if not village: continue
+
+                current_work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                if not current_work_building: continue
+
+                current_job_score = self._evaluate_job_suitability(npc, current_work_building)
+
+                # Look for better vacancies
+                potential_jobs = []
+                for building in village.buildings:
+                    if "workplace" in building.category and building.id != npc.schedule.work_building_id:
+                        current_workers_count = sum(1 for villager in self.village_npcs if villager.schedule.work_building_id == building.id and not villager.physical.is_dead)
+                        if current_workers_count < building.max_workers:
+                            potential_jobs.append(building)
+
+                if potential_jobs:
+                    best_new_job = None
+                    best_new_score = -1
+
+                    for job_building in potential_jobs:
+                        score = self._evaluate_job_suitability(npc, job_building)
+                        if score > best_new_score:
+                            best_new_score = score
+                            best_new_job = job_building
+
+                    # Switch if significantly better (20% better + switching friction)
+                    if best_new_job and best_new_score > current_job_score * 1.2 + 5:
+                        old_profession = npc.economic.profession
+                        self._assign_job(npc, best_new_job)
+                        self.add_message_to_chat_log(f"{npc.name} left their job as {old_profession} to become a {npc.economic.profession}.")
+
+
+        # --- Immigration Logic ---
+        # Check overall vacancies in villages and spawn new migrants
+        # We'll do this per village found in chunks
+        processed_villages = set()
+        for y_chunk in range(self.chunk_height):
+            for x_chunk in range(self.chunk_width):
+                chunk = self.chunks[y_chunk][x_chunk]
+                if chunk.village and chunk.village not in processed_villages:
+                    village = chunk.village
+                    processed_villages.add(village)
+
+                    total_vacancies = 0
+                    for building in village.buildings:
+                        if "workplace" in building.category:
+                            current_workers = sum(1 for v in self.village_npcs if v.schedule.work_building_id == building.id and not v.physical.is_dead)
+                            total_vacancies += max(0, building.max_workers - current_workers)
+
+                    # If there are significant vacancies, chance to spawn an immigrant
+                    if total_vacancies >= 2 and random.random() < 0.2: # 20% chance if 2+ jobs open
+                        # Spawn a new NPC
+                        # We use _populate_village_npcs logic but for just one person
+                        # Place them at town square or random edge
+                        spawn_x = x_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
+                        spawn_y = y_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
+                        if "town_square_center" in village.interaction_points:
+                            spawn_x, spawn_y = village.interaction_points["town_square_center"]
+
+                        # Create a dummy chunk object to reuse population logic or just manually create
+                        # Reusing _populate_village_npcs is hard because it does a batch.
+                        # Let's create manually using similar logic.
+                        self._spawn_migrant(village, spawn_x, spawn_y)
+
+    def _assign_job(self, npc: NPC, work_building: Building):
+        """Assigns a job to an NPC at a specific building."""
+        npc.schedule.work_building_id = work_building.id
+
+        # Determine profession name based on building type
+        new_profession = "Worker" # Default
+        if work_building.building_type == "sheriff_office":
+            has_sheriff = any(o.economic.profession == "Sheriff" and o.schedule.work_building_id == work_building.id for o in self.village_npcs if o.id != npc.id)
+            new_profession = "Deputy" if has_sheriff else "Sheriff"
+        elif work_building.building_type == "general_store": new_profession = "Merchant"
+        elif work_building.building_type == "tavern": new_profession = "Tavern Keeper"
+        elif work_building.building_type == "lumber_mill":
+            has_foreman = any(o.economic.profession == "Lumber Mill Foreman" and o.schedule.work_building_id == work_building.id for o in self.village_npcs if o.id != npc.id)
+            new_profession = "Woodcutter" if has_foreman else "Lumber Mill Foreman"
+        elif work_building.building_type == "farm": new_profession = "Farmer"
+        elif work_building.building_type == "mine": new_profession = "Miner"
+        elif work_building.building_type == "carpenter_shop": new_profession = "Carpenter"
+        elif work_building.building_type == "mill": new_profession = "Miller"
+        elif work_building.building_type == "bakery": new_profession = "Baker"
+        elif work_building.building_type == "fishing_hut": new_profession = "Fisherman"
+        elif work_building.building_type == "library": new_profession = "Scribe"
+        elif work_building.building_type == "capital_hall": new_profession = "Town Official"
+        elif work_building.building_type == "jail": new_profession = "Guard"
+        elif work_building.building_type == "blacksmith_shop": new_profession = "Blacksmith"
+
+        npc.economic.profession = new_profession
+        npc.economic.job_satisfaction = 70
+        npc.economic.days_unemployed = 0
+        npc.economic.work_performance = 50 # Reset performance
+
+        self.add_message_to_chat_log(f"{npc.name} has been hired as a {new_profession}.")
+
+        # Social Boost: Gratitude to Boss
+        boss = self._find_boss_for_npc(npc, work_building)
+        if boss:
+            npc.social.relationships[boss.id] = min(100, npc.social.relationships.get(boss.id, 50) + 20)
+            # Boss likes the new hire too
+            boss.social.relationships[npc.id] = min(100, boss.social.relationships.get(npc.id, 50) + 10)
+
+        self.log_event(
+            event_type="npc_hired",
+            description=f"{{subject}} started a new job as a {new_profession}.",
+            subject_id=npc.id,
+            location=(work_building.global_center_x, work_building.global_center_y)
+        )
+
+    def _spawn_migrant(self, village: Village, x: int, y: int):
+        """Spawns a new migrant NPC into the village."""
+        prompt = LLM_PROMPTS["npc_personality"].format(
+            player_criminal_points=0,
+            player_hero_points=0,
+            name_hint="a newcomer",
+            personality_hint="hopeful, looking for work",
+            family_ties_hint="none",
+            attitude_to_player_hint="neutral"
+        )
+        llm_response = self._call_ollama(prompt)
+        try:
+            npc_data = json.loads(llm_response)
+            npc = NPC(
+                x=x, y=y,
+                name=npc_data.get("name", "Migrant"),
+                dialogue=npc_data.get("dialogue", ["Hello, I'm looking for work."]),
+                personality=npc_data.get("personality", "commoner"),
+                player_id=None
+            )
+            npc.economic.profession = "Unemployed"
+            npc.economic.money = random.randint(10, 50) # Modest starting funds
+
+            # Try to find a home
+            vacant_homes = [b for b in village.buildings if b.category == "residential" and not b.residents]
+            if vacant_homes:
+                home = random.choice(vacant_homes)
+                npc.schedule.home_building_id = home.id
+                home.residents.append(npc)
+                npc.knowledge.known_locations["my home"] = (home.global_center_x, home.global_center_y)
+
+            self.village_npcs.append(npc)
+            self.add_message_to_chat_log(f"A migrant named {npc.name} has arrived in the village looking for work.")
+
+        except json.JSONDecodeError:
+            pass
 
     def _update_abstract_simulation(self):
         """
@@ -6857,9 +7213,9 @@ class World:
 
             prompt = LLM_PROMPTS["npc_gossip_reaction"].format(
                 npc_name=npc.name,
-                npc_personality=npc.personality,
-                npc_attitude_to_subject=npc.relationships.get(event_to_process.subject_id, 50), # Use relationship score
-                npc_attitude_to_target=npc.relationships.get(event_to_process.target_id, 50) if event_to_process.target_id else 50,
+                npc_personality=npc.social.personality,
+                npc_attitude_to_subject=npc.social.relationships.get(event_to_process.subject_id, 50), # Use relationship score
+                npc_attitude_to_target=npc.social.relationships.get(event_to_process.target_id, 50) if event_to_process.target_id else 50,
                 event_summary=event_summary,
                 event_type=event_to_process.type
             )
@@ -6884,11 +7240,11 @@ class World:
 
                 # Apply relationship changes
                 if relationship_change_subject != 0 and subject_entity:
-                    npc.relationships[subject_entity.id] = npc.relationships.get(subject_entity.id, 50) + relationship_change_subject
+                    npc.social.relationships[subject_entity.id] = npc.social.relationships.get(subject_entity.id, 50) + relationship_change_subject
                     # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {subject_name} changed by {relationship_change_subject}.")
 
                 if relationship_change_target != 0 and target_entity:
-                    npc.relationships[target_entity.id] = npc.relationships.get(target_entity.id, 50) + relationship_change_target
+                    npc.social.relationships[target_entity.id] = npc.social.relationships.get(target_entity.id, 50) + relationship_change_target
                     # self.add_message_to_chat_log(f"Debug: {npc.name}'s opinion of {target_name} changed by {relationship_change_target}.")
 
                 if action == "form_grudge" and subject_entity:
@@ -6908,6 +7264,12 @@ class World:
                     npc.task_target_coords = event_to_process.location
                     npc.current_path = []
                     npc.task_timer = random.randint(50, 100) # Investigate for a bit
+                elif action == "apply_for_vacancy" and event_to_process.location and npc.economic.profession == "Unemployed":
+                    # Trigger application logic
+                    npc.schedule.current_task = "applying_for_job"
+                    npc.schedule.current_destination_coords = event_to_process.location
+                    npc.schedule.current_path = []
+                    # self.add_message_to_chat_log(f"Debug: {npc.name} heard about a vacancy and is going to apply.")
 
             except json.JSONDecodeError:
                 # self.add_message_to_chat_log(f"Debug: Failed to parse gossip reaction for {npc.name}: {response_str}")
@@ -6984,7 +7346,7 @@ class World:
         prompt = LLM_PROMPTS["npc_witness_reaction"].format(
             witness_name=witness.name,
             witness_personality=witness.social.personality,
-            witness_profession=witness.profession,
+            witness_profession=witness.economic.profession,
             witness_attitude_to_criminal=witness.attitude_to_player,
             witness_attitude_to_victim=witness_attitude_to_victim,
             crime_type=crime_type,

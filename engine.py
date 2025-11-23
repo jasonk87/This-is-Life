@@ -1716,7 +1716,7 @@ class World:
                 # Expanded threat detection for Hunters and others
                 visible_threats = [
                     vn for vn in visible_npcs
-                    if (isinstance(vn, Animal) and vn.animal_type == "wolf") or
+                    if (isinstance(vn, Animal) and vn.animal_type in ["wolf", "dire_wolf"]) or
                        (isinstance(vn, DireWolf)) or
                        (vn.economic.profession == "Creature" and vn.combat.is_hostile_to_player)
                 ]
@@ -5689,7 +5689,7 @@ class World:
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
+                if not chunk.is_terrain_generated or not chunk.tiles:
                     continue
 
                 for y_local in range(CHUNK_SIZE):
@@ -5719,7 +5719,7 @@ class World:
             for y_chunk in range(self.chunk_height):
                 for x_chunk in range(self.chunk_width):
                     chunk = self.chunks[y_chunk][x_chunk]
-                    if not chunk.is_generated:
+                    if not chunk.is_terrain_generated or not chunk.tiles:
                         continue
 
                     for y_local in range(CHUNK_SIZE):
@@ -5739,7 +5739,7 @@ class World:
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
+                if not chunk.is_terrain_generated or not chunk.tiles:
                     continue
 
                 for y_local in range(CHUNK_SIZE):
@@ -6390,6 +6390,9 @@ class World:
         tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
         chunk.tiles = tiles # Assign initially
 
+        # Mark as generated immediately to prevent recursion in get_tile_at calls during decoration
+        chunk.is_terrain_generated = True
+
         # Add biome-specific details
         self._render_biome_details(chunk, chunk_x, chunk_y)
 
@@ -6398,8 +6401,6 @@ class World:
             self._render_village_tiles(chunk)
         elif chunk.ruin:
             self._generate_ruin_layout(chunk) # Renders directly to tiles
-
-        chunk.is_terrain_generated = True
 
     def _render_biome_details(self, chunk, chunk_x, chunk_y):
         """Renders trees, grass, and animals for a chunk."""
@@ -7087,7 +7088,13 @@ class World:
 
         for npc in self.village_npcs + self.npcs:
             # Check for heroic kills
-            heroic_kills = [e for e in self.global_events if e.subject_id == npc.id and e.type == "entity_death" and e.target_id and isinstance(self.get_entity_by_id(e.target_id), DireWolf)]
+            heroic_kills = []
+            for e in self.global_events:
+                if e.subject_id == npc.id and e.type == "entity_death" and e.target_id:
+                    target = self.get_entity_by_id(e.target_id)
+                    if target and (isinstance(target, DireWolf) or (isinstance(target, Animal) and target.animal_type == "dire_wolf")):
+                        heroic_kills.append(e)
+
             for kill in heroic_kills:
                 npc.fame += 20
                 self.add_message_to_chat_log(f"{npc.name} gains fame for killing a dire wolf!")
@@ -7133,6 +7140,110 @@ class World:
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
             for npc in self.village_npcs + self.npcs:
                 npc.age += 1
+
+    def _update_inventory_spoilage(self):
+        """Checks for food spoilage in all inventories once per day."""
+        # Only run once per day
+        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+            return
+
+        # Helper to process a specific inventory dict
+        def process_inventory(inventory, owner_name="Container"):
+            items_to_remove = []
+            items_to_add = []
+
+            for item_key, quantity in inventory.items():
+                if item_key == "money": continue
+
+                item_def = ITEM_DEFINITIONS.get(item_key)
+                if not item_def: continue
+
+                spoilage_chance = item_def.get("properties", {}).get("spoilage_chance", 0.0)
+
+                if spoilage_chance > 0:
+                    spoiled_count = 0
+                    # For large stacks, use binomial distribution for performance approximation
+                    # For small stacks, iterate
+                    if quantity > 10:
+                        # Expected value approx
+                        spoiled_count = np.random.binomial(quantity, spoilage_chance)
+                    else:
+                        for _ in range(quantity):
+                            if random.random() < spoilage_chance:
+                                spoiled_count += 1
+
+                    if spoiled_count > 0:
+                        items_to_remove.append((item_key, spoiled_count))
+                        rots_into = item_def.get("properties", {}).get("rots_into", "rotten_food")
+                        items_to_add.append((rots_into, spoiled_count))
+
+                        # Optional: Log significant spoilage for player
+                        if owner_name == "Player" and spoiled_count > 0:
+                            self.add_message_to_chat_log(f"{spoiled_count} {item_def['name']} rotted away.")
+
+            # Apply changes
+            for key, count in items_to_remove:
+                inventory[key] -= count
+                if inventory[key] <= 0:
+                    del inventory[key]
+
+            for key, count in items_to_add:
+                inventory[key] = inventory.get(key, 0) + count
+
+        # 1. Player Inventory
+        # Player inventory is a list of dicts, need to handle differently or convert temporarily
+        # The current player structure is list[dict] e.g. [{"key": "apple", "quantity": 5}, ...]
+        # My helper above expects a dict {key: qty}. Let's write a specific one for player list.
+
+        items_to_remove_indices = []
+        items_to_add_player = []
+
+        for i, item_entry in enumerate(self.player.economic.inventory):
+            item_key = item_entry["key"]
+            quantity = item_entry.get("quantity", 1)
+            item_def = ITEM_DEFINITIONS.get(item_key)
+
+            if item_def:
+                spoilage_chance = item_def.get("properties", {}).get("spoilage_chance", 0.0)
+                if spoilage_chance > 0:
+                    spoiled_count = 0
+                    if quantity > 10:
+                        spoiled_count = np.random.binomial(quantity, spoilage_chance)
+                    else:
+                        for _ in range(quantity):
+                            if random.random() < spoilage_chance:
+                                spoiled_count += 1
+
+                    if spoiled_count > 0:
+                        # For stackable items in list
+                        if item_def.get("stackable"):
+                            item_entry["quantity"] -= spoiled_count
+                            if item_entry["quantity"] <= 0:
+                                items_to_remove_indices.append(i)
+                        else:
+                            # Non-stackable (e.g. unique food?), remove instance
+                            items_to_remove_indices.append(i)
+
+                        rots_into = item_def.get("properties", {}).get("rots_into", "rotten_food")
+                        items_to_add_player.append((rots_into, spoiled_count))
+                        self.add_message_to_chat_log(f"One of your {item_def['name']} has rotted.")
+
+        # Remove from end to avoid index shifting issues
+        for i in sorted(items_to_remove_indices, reverse=True):
+            self.player.economic.inventory.pop(i)
+
+        # Add spoiled items
+        for key, count in items_to_add_player:
+            self.player.add_item(key, count)
+
+        # 2. NPC Inventories (dicts)
+        for npc in self.village_npcs + self.npcs:
+            if not npc.physical.is_dead:
+                process_inventory(npc.economic.npc_inventory, owner_name="NPC")
+
+        # 3. Building Inventories (dicts)
+        for building in self.buildings_by_id.values():
+            process_inventory(building.building_inventory, owner_name="Building")
 
     def _find_boss_for_npc(self, npc: NPC, building: Building) -> NPC | None:
         """Finds a supervisor or senior coworker for an NPC at a building."""
@@ -8413,11 +8524,6 @@ class World:
         cookable_items = []
         for item in self.player.economic.inventory:
             item_key = item["key"]
-            item_def = ITEM_DEFINITIONS.get(item_key, {})
-            # Look for items that have a crafting recipe requiring 'fire' and use themselves as ingredient
-            # Or simpler: check for items that can be made from this ingredient using fire
-            # Reverse lookup: Find what recipes require this item + fire
-
             # Iterate all items to find if they are a product of cooking this ingredient
             for product_key, product_def in ITEM_DEFINITIONS.items():
                 recipe = product_def.get("crafting_recipe")
@@ -8440,6 +8546,52 @@ class World:
             self.add_message_to_chat_log(f"You cook a {product_name}.")
         else:
              self.add_message_to_chat_log("Something went wrong with cooking.")
+
+    def player_attempt_smoke(self, x: int, y: int):
+        """Handles the player's attempt to smoke meat at a smoking rack."""
+        target_tile = self.get_tile_at(x, y)
+        if not (target_tile and target_tile.properties.get("workstation_type") == "smoking_rack"):
+            self.add_message_to_chat_log("You need a smoking rack to smoke meat.")
+            return
+
+        # Smoking requires raw meat/fish AND fuel (raw_log)
+        if not self.player.has_item("raw_log", 1):
+            self.add_message_to_chat_log("You need wood to fuel the smoking rack.")
+            return
+
+        # Find smokable items
+        smokable_items = []
+        for item in self.player.economic.inventory:
+            item_key = item["key"]
+
+            # Map raw -> smoked
+            smoked_version = None
+            if item_key == "raw_meat" or item_key == "raw_venison" or item_key == "raw_mutton":
+                smoked_version = "smoked_meat"
+            elif item_key == "raw_fish":
+                smoked_version = "smoked_fish"
+
+            if smoked_version:
+                smokable_items.append((item_key, smoked_version))
+
+        if not smokable_items:
+            self.add_message_to_chat_log("You have no raw meat or fish to smoke.")
+            return
+
+        # Smoke the first available item
+        ingredient_key, product_key = smokable_items[0]
+
+        if self.player.remove_item(ingredient_key, 1):
+            if self.player.remove_item("raw_log", 1):
+                self.player.add_item(product_key, 1)
+                product_name = ITEM_DEFINITIONS[product_key]["name"]
+                self.add_message_to_chat_log(f"You smoke the meat into {product_name}.")
+            else:
+                # Refund meat if wood failed (shouldn't happen due to check, but safety)
+                self.player.add_item(ingredient_key, 1)
+                self.add_message_to_chat_log("Error: Failed to consume wood.")
+        else:
+             self.add_message_to_chat_log("Something went wrong with smoking.")
 
     def player_attempt_build(self, recipe_key: str, x: int, y: int):
         """Handles the player's attempt to build a structure or furniture."""

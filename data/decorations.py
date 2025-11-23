@@ -63,7 +63,6 @@ DECORATION_ITEM_DEFINITIONS = {
             "interaction_hint": "sleep"
         }
     },
-    # More to be added by agent...
     "wooden_chair": {
         "name": "Wooden Chair",
         "description": "A simple wooden chair.",
@@ -123,6 +122,19 @@ DECORATION_ITEM_DEFINITIONS = {
         "item_type_tags": ["interactable", "furniture", "workstation"],
         "properties": {
             "workstation_type": "loom"
+        }
+    },
+    "smoking_rack": {
+        "name": "Smoking Rack",
+        "description": "A wooden rack for smoking meat and fish.",
+        "char": "#",
+        "color": COLORS["saddlebrown"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "workstation_type": "smoking_rack",
+            "interaction_hint": "smoke"
         }
     },
      "wooden_table": {

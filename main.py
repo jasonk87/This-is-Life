@@ -150,7 +150,8 @@ def execute_interaction(world: World, context_handler):
         "Trade": lambda: start_trade(world, entity_data),
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
         "Claim House": lambda: claim_house(world, entity_data),
-        "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}.")
+        "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
+        "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y)
     }
 
     if selected_action in action_map:

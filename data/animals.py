@@ -31,7 +31,10 @@ ANIMAL_DEFINITIONS = {
         "can_mate": True,
         "mating_season": "Autumn",
         "gestation_period_days": 7,
-        "predators": ["wolf", "dire_wolf", "bear"]
+        "predators": ["wolf", "dire_wolf", "bear"],
+        "diet_type": "herbivore",
+        "food_sources": ["Tall Grass", "Growing Wheat", "Flower"],
+        "den_structure": "thicket"
     },
     "bear": {
         "name": "Bear",
@@ -46,7 +49,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "2d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [3, 6]
             },
@@ -55,7 +58,10 @@ ANIMAL_DEFINITIONS = {
                 "quantity": [1, 2]
             }
         },
-        "prey": ["deer", "sheep", "wolf"]
+        "prey": ["deer", "sheep", "wolf"],
+        "diet_type": "omnivore",
+        "food_sources": ["raw_meat", "raw_fish", "raw_venison", "raw_mutton", "apple"],
+        "den_structure": "bear_cave"
     },
     "fish": {
         "name": "Fish",
@@ -74,7 +80,9 @@ ANIMAL_DEFINITIONS = {
                 "chance": 1.0,
                 "quantity": 1
             }
-        }
+        },
+        "diet_type": "herbivore",
+        "food_sources": [] # Algae/insects implied
     },
     "wolf": {
         "name": "Wolf",
@@ -92,13 +100,16 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.9,
                 "quantity": 1
             },
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 0.5,
                 "quantity": [1, 2]
             }
         },
-        "prey": ["deer", "sheep"],
-        "pack_animal": True
+        "prey": ["deer", "sheep", "rabbit"],
+        "pack_animal": True,
+        "diet_type": "carnivore",
+        "food_sources": ["raw_meat", "raw_venison", "raw_mutton", "raw_fish"],
+        "den_structure": "wolf_den"
     },
     "dire_wolf": {
         "name": "Dire Wolf",
@@ -111,18 +122,21 @@ ANIMAL_DEFINITIONS = {
         "base_attack_name": "savage bite",
         "base_attack_damage_dice": "1d8",
         "combat_behavior": "aggressive",
-        "prey": ["deer", "sheep", "wolf"],
+        "prey": ["deer", "sheep", "wolf", "boar", "bison"],
         "fearless": True, # Will not flee from the player
         "loot_drops": {
             "animal_pelt": {
                 "chance": 0.9,
                 "quantity": [1, 2]
             },
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 0.7,
                 "quantity": [2, 4]
             }
-        }
+        },
+        "diet_type": "carnivore",
+        "food_sources": ["raw_meat", "raw_venison", "raw_mutton"],
+        "den_structure": "wolf_den"
     },
     "sheep": {
         "name": "Sheep",
@@ -154,7 +168,10 @@ ANIMAL_DEFINITIONS = {
             "quantity": [1, 3],
             "regrowth_days": 7
         },
-        "predators": ["wolf", "dire_wolf", "bear", "fox"]
+        "predators": ["wolf", "dire_wolf", "bear", "fox"],
+        "diet_type": "herbivore",
+        "food_sources": ["Tall Grass", "Growing Wheat", "Flower"],
+        "den_structure": None # Domesticated/Wanders
     },
     "fox": {
         "name": "Fox",
@@ -174,7 +191,10 @@ ANIMAL_DEFINITIONS = {
                 "quantity": 1
             }
         },
-        "prey": ["sheep"]
+        "prey": ["sheep", "rabbit"],
+        "diet_type": "carnivore",
+        "food_sources": ["raw_meat", "raw_mutton", "raw_fish"],
+        "den_structure": "fox_burrow"
     },
     "boar": {
         "name": "Boar",
@@ -189,11 +209,14 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [2, 4]
             }
-        }
+        },
+        "diet_type": "omnivore",
+        "food_sources": ["Tall Grass", "Growing Wheat", "Flower", "apple", "raw_meat"],
+        "den_structure": "thicket"
     },
     "salmon": {
         "name": "Salmon",
@@ -246,12 +269,15 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d1",
         "combat_behavior": "cowardly",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": 1
             }
         },
-        "predators": ["fox", "wolf", "dire_wolf"]
+        "predators": ["fox", "wolf", "dire_wolf"],
+        "diet_type": "herbivore",
+        "food_sources": ["Tall Grass", "Growing Wheat", "Flower"],
+        "den_structure": "rabbit_hole"
     },
     "bison": {
         "name": "Bison",
@@ -266,7 +292,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "2d6",
         "combat_behavior": "herd_defensive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [5, 10]
             },
@@ -274,7 +300,10 @@ ANIMAL_DEFINITIONS = {
                 "chance": 1.0,
                 "quantity": [2, 3]
             }
-        }
+        },
+        "diet_type": "herbivore",
+        "food_sources": ["Tall Grass", "Growing Wheat"],
+        "den_structure": None # Migratory herd
     },
     "badger": {
         "name": "Badger",
@@ -289,7 +318,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d6",
         "combat_behavior": "aggressive",
         "loot_drops": {
-            "raw_meat_scrap": {
+            "raw_meat": {
                 "chance": 1.0,
                 "quantity": [1, 2]
             },
@@ -297,6 +326,9 @@ ANIMAL_DEFINITIONS = {
                 "chance": 0.8,
                 "quantity": 1
             }
-        }
+        },
+        "diet_type": "omnivore",
+        "food_sources": ["raw_meat", "apple", "raw_fish"],
+        "den_structure": "badger_sett"
     }
 }

@@ -66,6 +66,10 @@ ITEM_DEFINITIONS = {
         "weight": 0.5,
         "stackable": True,
         "item_type_tags": ["consumable", "food"],
+        "properties": {
+            "spoilage_chance": 0.02,
+            "rots_into": "rotten_food"
+        },
         "on_use": {
             "reduces_hunger": 50
         }
@@ -334,20 +338,19 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["trash"]
     },
-    "cooked_meat_scrap": {
-        "name": "Cooked Meat Scrap",
-        "description": "A cooked piece of meat. Edible.",
-        "char": "m",
-        "color": COLORS["dark_orange"],
-        "value": 4,
-        "weight": 0.4,
+    "rotten_food": {
+        "name": "Rotten Food",
+        "description": "A foul-smelling mass of decayed food. Do not eat.",
+        "char": "%",
+        "color": (101, 67, 33), # Dark brown
+        "value": 0,
+        "weight": 0.5,
         "stackable": True,
-        "item_type_tags": ["consumable", "food"],
-        "crafting_recipe": {
-            "raw_meat_scrap": 1
-        },
+        "item_type_tags": ["trash", "consumable"],
         "on_use": {
-            "reduces_hunger": 35
+            "reduces_hunger": 5,
+            "inflicts_status": "Sick",
+            "damage": 5
         }
     },
     "water_flask": {
@@ -375,6 +378,10 @@ ITEM_DEFINITIONS = {
         "weight": 0.3,
         "stackable": True,
         "item_type_tags": ["consumable", "food", "fruit"],
+        "properties": {
+            "spoilage_chance": 0.05,
+            "rots_into": "rotten_food"
+        },
         "on_use": {
             "reduces_hunger": 10,
             "reduces_thirst": 5
@@ -389,6 +396,10 @@ ITEM_DEFINITIONS = {
         "weight": 0.3,
         "stackable": True,
         "item_type_tags": ["consumable", "food", "fruit"],
+        "properties": {
+            "spoilage_chance": 0.05,
+            "rots_into": "rotten_food"
+        },
         "on_use": {
             "reduces_hunger": 10,
             "reduces_thirst": 7
@@ -426,6 +437,62 @@ ITEM_DEFINITIONS = {
         "weight": 2,
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"],
+        "properties": {
+            "spoilage_chance": 0.2,
+            "rots_into": "rotten_food"
+        },
+    },
+    "raw_meat": {
+        "name": "Raw Meat",
+        "description": "A chunk of raw meat from an animal.",
+        "char": "m",
+        "color": COLORS["crimson"],
+        "value": 5,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["resource", "food_ingredient_raw"],
+        "properties": {
+            "spoilage_chance": 0.2,
+            "rots_into": "rotten_food"
+        },
+    },
+    "cooked_meat": {
+        "name": "Cooked Meat",
+        "description": "Meat cooked over a fire. Savory and filling.",
+        "char": "m",
+        "color": COLORS["saddlebrown"],
+        "value": 10,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "properties": {
+            "spoilage_chance": 0.05,
+            "rots_into": "rotten_food"
+        },
+        "on_use": {
+            "reduces_hunger": 45
+        },
+        "crafting_recipe": {
+            "raw_meat": 1
+        },
+        "required_workstation": "fire"
+    },
+    "smoked_meat": {
+        "name": "Smoked Meat",
+        "description": "Meat preserved by smoking. Lasts a long time.",
+        "char": "m",
+        "color": (139, 69, 19), # Darker brown
+        "value": 15,
+        "weight": 0.8,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "preserved"],
+        "properties": {
+            "spoilage_chance": 0.005, # Very low chance
+            "rots_into": "rotten_food"
+        },
+        "on_use": {
+            "reduces_hunger": 40
+        }
     },
     "animal_pelt": {
         "name": "Animal Pelt",
@@ -459,6 +526,10 @@ ITEM_DEFINITIONS = {
         "weight": 2,
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"],
+        "properties": {
+            "spoilage_chance": 0.2,
+            "rots_into": "rotten_food"
+        },
     },
     "raw_wool": {
         "name": "Raw Wool",
@@ -469,16 +540,6 @@ ITEM_DEFINITIONS = {
         "weight": 1,
         "stackable": True,
         "item_type_tags": ["resource", "fiber"],
-    },
-     "raw_meat_scrap": {
-        "name": "Raw Meat Scrap",
-        "description": "A piece of raw meat. Needs cooking.",
-        "char": "m",
-        "color": COLORS["crimson"],
-        "value": 1,
-        "weight": 0.5,
-        "stackable": True,
-        "item_type_tags": ["resource", "food_ingredient_raw"]
     },
     "rusty_sword": {
         "name": "Rusty Sword",
@@ -824,6 +885,10 @@ ITEM_DEFINITIONS = {
         "weight": 1,
         "stackable": True,
         "item_type_tags": ["resource", "food_ingredient_raw"],
+        "properties": {
+            "spoilage_chance": 0.25,
+            "rots_into": "rotten_food"
+        },
         "on_use": {
             "reduces_hunger": 15
         }
@@ -837,12 +902,75 @@ ITEM_DEFINITIONS = {
         "weight": 1,
         "stackable": True,
         "item_type_tags": ["consumable", "food"],
+        "properties": {
+            "spoilage_chance": 0.05,
+            "rots_into": "rotten_food"
+        },
         "crafting_recipe": {
             "raw_fish": 1
         },
         "required_workstation": "fire",
         "on_use": {
             "reduces_hunger": 40
+        }
+    },
+    "smoked_fish": {
+        "name": "Smoked Fish",
+        "description": "Fish preserved by smoking.",
+        "char": "f",
+        "color": (139, 69, 19),
+        "value": 12,
+        "weight": 0.8,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "preserved"],
+        "properties": {
+            "spoilage_chance": 0.005,
+            "rots_into": "rotten_food"
+        },
+        "on_use": {
+            "reduces_hunger": 35
+        }
+    },
+    "cooked_venison": {
+        "name": "Cooked Venison",
+        "description": "Delicious roasted deer meat.",
+        "char": "m",
+        "color": COLORS["saddlebrown"],
+        "value": 15,
+        "weight": 2,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "properties": {
+            "spoilage_chance": 0.05,
+            "rots_into": "rotten_food"
+        },
+        "crafting_recipe": {
+            "raw_venison": 1
+        },
+        "required_workstation": "fire",
+        "on_use": {
+            "reduces_hunger": 60
+        }
+    },
+    "cooked_mutton": {
+        "name": "Cooked Mutton",
+        "description": "Hearty roasted sheep meat.",
+        "char": "m",
+        "color": COLORS["saddlebrown"],
+        "value": 12,
+        "weight": 2,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food"],
+        "properties": {
+            "spoilage_chance": 0.05,
+            "rots_into": "rotten_food"
+        },
+        "crafting_recipe": {
+            "raw_mutton": 1
+        },
+        "required_workstation": "fire",
+        "on_use": {
+            "reduces_hunger": 50
         }
     },
     "book_census": {

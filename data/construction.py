@@ -60,5 +60,12 @@ CONSTRUCTION_RECIPES = {
         "source": "decoration",
         "materials": {"stone_chunk": 4},
         "description": "Provides warmth and light."
+    },
+    "smoking_rack": {
+        "name": "Smoking Rack",
+        "tile_def_key": "smoking_rack", # From DECORATION_ITEM_DEFINITIONS
+        "source": "decoration",
+        "materials": {"raw_log": 2, "wooden_plank": 2},
+        "description": "Preserve meat by smoking it."
     }
 }

@@ -184,6 +184,8 @@ class Village:
         self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
         self.supply = {}  # item_key: count
         self.demand = {}  # item_key: count
+        self.local_events = [] # List of Event objects specific to this village location
+        self.known_events = {} # Event ID -> Event object (knowledge spread)
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -468,6 +470,7 @@ class World:
         self.chunks = self._initialize_chunks()
         self.npcs = []
         self.village_npcs = []
+        self.villages = [] # List of all Village objects in the world
         self.buildings_by_id = {}
         self.mouse_x = 0
         self.mouse_y = 0
@@ -819,7 +822,7 @@ class World:
 
         self.player_fov_map = tcod.map.compute_fov(
             self.transparency_map,
-            (self.player.x, self.player.y),
+            (self.player.y, self.player.x),
             radius=effective_player_fov_radius,
             algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
         )
@@ -835,7 +838,7 @@ class World:
         npc_fov_radius = self.current_fov_radius # NPCs use global ambient light for now
         self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
             self.transparency_map,
-            (npc.x, npc.y),
+            (npc.y, npc.x),
             radius=npc_fov_radius,
             algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
         )
@@ -845,7 +848,8 @@ class World:
         fov_map_for_npc = self.npc_fov_maps[npc.id]
         visible_y_coords, visible_x_coords = np.where(fov_map_for_npc)
         for i in range(len(visible_x_coords)):
-            vx, vy = visible_x_coords[i], visible_y_coords[i]
+            vx, vy = visible_x_coords[i], visible_y_coords[i] # numpy where returns (row, col) -> (y, x)
+
             if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
                 npc.knowledge.perceived_item_tiles.append((vx,vy))
 
@@ -1146,41 +1150,54 @@ class World:
                             if key_npcs:
                                 gossip_recipient = random.choice(key_npcs)
                                 events_shared = 0
-                                for event_id, event_obj in npc.known_events.items():
-                                    if event_id not in gossip_recipient.known_events:
-                                        gossip_recipient.known_events[event_id] = event_obj
+                                # Share remote events (distant news)
+                                for event_id, event_obj in npc.knowledge.known_events.items():
+                                    # Only share if event didn't happen in this village
+                                    is_local = False
+                                    if event_obj.location:
+                                        chunk_x = event_obj.location[0] // CHUNK_SIZE
+                                        chunk_y = event_obj.location[1] // CHUNK_SIZE
+                                        current_chunk_x = npc.x // CHUNK_SIZE
+                                        current_chunk_y = npc.y // CHUNK_SIZE
+                                        if chunk_x == current_chunk_x and chunk_y == current_chunk_y:
+                                            is_local = True
+
+                                    if not is_local and event_id not in gossip_recipient.knowledge.known_events:
+                                        gossip_recipient.knowledge.known_events[event_id] = event_obj
                                         events_shared += 1
                                 if events_shared > 0:
-                                    self.add_message_to_chat_log(f"Debug: {npc.name} shared {events_shared} rumors with {gossip_recipient.name}.")
+                                    self.add_message_to_chat_log(f"{npc.name} shared news from afar with {gossip_recipient.name}.")
 
-                        npc.known_events.clear()
+                        # Clear old events but keep some "news" to carry
+                        # Actually, better to clear all and relearn local news to carry to next village
+                        npc.knowledge.known_events.clear()
                         village_center_x = (npc.x // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
                         village_center_y = (npc.y // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
                         for event in self.global_events:
                             if event.location:
                                 dist_sq = (event.location[0] - village_center_x)**2 + (event.location[1] - village_center_y)**2
                                 if dist_sq < (CHUNK_SIZE * 1.5)**2:
-                                    if event.id not in npc.known_events:
-                                        npc.known_events[event.id] = event
-                        if npc.known_events:
-                            self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.known_events)} events in the new village.")
+                                    if event.id not in npc.knowledge.known_events:
+                                        npc.knowledge.known_events[event.id] = event
+                        if npc.knowledge.known_events:
+                            self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.")
 
                     elif npc.schedule.current_task == "socializing" and npc.task_target_entity_id:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
                             # Successfully met up, now exchange gossip
                             # NPC shares one piece of news with partner
-                            if npc.known_events:
-                                event_id_to_share = random.choice(list(npc.known_events.keys()))
-                                if event_id_to_share not in chat_partner.known_events:
-                                    chat_partner.known_events[event_id_to_share] = npc.known_events[event_id_to_share]
+                            if npc.knowledge.known_events:
+                                event_id_to_share = random.choice(list(npc.knowledge.known_events.keys()))
+                                if event_id_to_share not in chat_partner.knowledge.known_events:
+                                    chat_partner.knowledge.known_events[event_id_to_share] = npc.knowledge.known_events[event_id_to_share]
                                     # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about event {event_id_to_share[:8]}.")
 
                             # Partner shares one piece of news back
-                            if chat_partner.known_events:
-                                event_id_to_share_back = random.choice(list(chat_partner.known_events.keys()))
-                                if event_id_to_share_back not in npc.known_events:
-                                    npc.known_events[event_id_to_share_back] = chat_partner.known_events[event_id_to_share_back]
+                            if chat_partner.knowledge.known_events:
+                                event_id_to_share_back = random.choice(list(chat_partner.knowledge.known_events.keys()))
+                                if event_id_to_share_back not in npc.knowledge.known_events:
+                                    npc.knowledge.known_events[event_id_to_share_back] = chat_partner.knowledge.known_events[event_id_to_share_back]
                                     # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about event {event_id_to_share_back[:8]}.")
 
                             # Increase relationship
@@ -1606,24 +1623,75 @@ class World:
             if npc.physical.is_dead:
                 continue
 
+            # --- Real-time Logic (Runs every tick or frequently) ---
+            if npc.combat.is_hostile_to_player:
+                self._handle_npc_combat_turn(npc)
+                # If creature is not actively pathing from combat AI (e.g. holding, or just attacked)
+                # and not investigating a sound, they could wander a bit.
+                if not npc.schedule.current_path and npc.schedule.current_task not in ["investigating_sound", "combat_action_attack_player"]:
+                    if random.random() < 0.1: # Small chance to wander if not actively fighting/pathing
+                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
+                        potential_x, potential_y = npc.x + dx, npc.y + dy
+                        target_tile = self.get_tile_at(potential_x, potential_y)
+                        if target_tile and target_tile.passable:
+                            npc.schedule.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
+                            npc.schedule.current_destination_coords = (potential_x, potential_y)
+                            npc.schedule.current_task = "wandering_hostile"
+
+            # --- Sound Perception (Runs every tick for responsiveness) ---
+            heard_compelling_sound = False
+            if self.sound_events:
+                for sound in self.sound_events:
+                    if sound.get("source_id") and sound["source_id"] == npc.id: continue
+
+                    dist_to_sound = math.sqrt((npc.x - sound["x"])**2 + (npc.y - sound["y"])**2)
+                    if dist_to_sound <= npc.hearing_radius and dist_to_sound <= sound["volume"]:
+                        if npc.schedule.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]:
+                            sound_type = sound["type"]
+                            if sound_type in ["combat_attack", "tree_fall"]: # Hostile creatures also investigate these
+                                npc.schedule.current_task = "investigating_sound"
+                                npc.schedule.current_destination_coords = (sound["x"], sound["y"])
+                                npc.schedule.current_path = []
+                                self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
+                                heard_compelling_sound = True
+                                break
+
+            if heard_compelling_sound:
+                if npc.schedule.current_task == "investigating_sound" and npc.schedule.current_destination_coords and not npc.schedule.current_path:
+                    path = self.calculate_path(npc.x, npc.y, npc.schedule.current_destination_coords[0], npc.schedule.current_destination_coords[1])
+                    if path: npc.schedule.current_path = path
+                    else: npc.schedule.current_task = "idle_confused"; npc.schedule.current_destination_coords = None
+
+            # --- FEAR SYSTEM (Real-time check) ---
+            # Only update fear if not already hostile/combat to avoid overriding combat AI
+            if not npc.combat.is_hostile_to_player:
+                can_be_frightened = (npc.economic.profession != "Creature" and
+                                     npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player"])
+
+                # Optimization: only check fear periodically or if nearby entities moved?
+                # For now, we'll leave it in the main loop but rely on FOV.
+                # Note: We only calculate FOV in the schedule block below, so fear might be slightly delayed or rely on old FOV.
+                # If we want instant fear, we'd need to update FOV every tick for everyone, which is expensive.
+                # Let's assume fear updates on the schedule tick or if forced.
+                pass
+
+
+            # --- SCHEDULED UPDATES (Low Frequency) ---
+            if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
+                continue
+
+            npc.schedule.game_time_last_updated = self.game_time
+            self._update_npc_fov(npc) # Update vision for AI decisions
+
             current_time_in_day = self.game_time % DAY_LENGTH_TICKS
             time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
-            # --- NPC NEEDS AND STATUS UPDATE ---
+            # --- NPC NEEDS AND STATUS UPDATE (Run periodically) ---
             self._update_npc_temperature(npc)
             self._apply_temperature_effects(npc)
             if npc.economic.profession != "Creature":
                 npc.physical.hunger = min(npc.physical.max_hunger, npc.physical.hunger + 2)
                 npc.physical.thirst = min(npc.physical.max_thirst, npc.physical.thirst + 3)
-
-            if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
-                if npc.combat.is_hostile_to_player:
-                    pass
-                else:
-                    continue
-
-            npc.schedule.game_time_last_updated = self.game_time
-            self._update_npc_fov(npc)
 
             # --- Mourning and Investigating Tasks ---
             if npc.schedule.current_task in ["mourning", "investigating"]:
@@ -1634,23 +1702,41 @@ class World:
                     npc.task_target_coords = None
                 continue # Skip normal scheduling
 
-            # --- FEAR SYSTEM (High Priority) ---
+            # --- FEAR SYSTEM (Schedule-based check using updated FOV) ---
             can_be_frightened = (npc.economic.profession != "Creature" and
                                  not npc.combat.is_hostile_to_player and
-                                 npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player"])
+                                 npc.schedule.current_task not in ["fleeing_from_threat", "alerting_guards", "combat_action_flee_from_player", "returning_to_warn"])
 
             if can_be_frightened and npc.id in self.npc_fov_maps:
                 fov_map = self.npc_fov_maps[npc.id]
                 visible_npcs = [
                     other_npc for other_npc in self.npcs + self.village_npcs
-                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.x, other_npc.y]
+                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.y, other_npc.x]
                 ]
-                visible_wolves = [vn for vn in visible_npcs if isinstance(vn, Animal) and vn.animal_type == "wolf"]
-                if len(visible_wolves) >= 2:
+                # Expanded threat detection for Hunters and others
+                visible_threats = [
+                    vn for vn in visible_npcs
+                    if (isinstance(vn, Animal) and vn.animal_type in ["wolf", "dire_wolf"]) or
+                       (isinstance(vn, DireWolf)) or
+                       (vn.economic.profession == "Creature" and vn.combat.is_hostile_to_player)
+                ]
+
+                # Hunter specific logic
+                if npc.economic.profession == "Hunter" and len(visible_threats) >= 1:
+                     if not npc.is_frightened: # Using is_frightened as generic "threat state"
+                        npc.is_frightened = True
+                        npc.threat_source_ids = [threat.id for threat in visible_threats]
+                        self.add_message_to_chat_log(f"Hunter {npc.name} spots a threat and prepares to warn the village!")
+                        # Create event
+                        threat_desc = f"{len(visible_threats)} threats" if len(visible_threats) > 1 else "a threat"
+                        self.log_event("threat_detected", f"Hunter {npc.name} spotted {threat_desc} nearby.", npc.id, location=(npc.x, npc.y))
+                        npc.schedule.current_path = []
+
+                elif len(visible_threats) >= 2:
                     if not npc.is_frightened:
                         npc.is_frightened = True
-                        npc.threat_source_ids = [wolf.id for wolf in visible_wolves]
-                        self.add_message_to_chat_log(f"{npc.name} sees a wolf pack and is terrified!")
+                        npc.threat_source_ids = [threat.id for threat in visible_threats]
+                        self.add_message_to_chat_log(f"{npc.name} sees threats and is terrified!")
                         npc.schedule.current_path = []
 
             if npc.is_frightened:
@@ -1664,11 +1750,36 @@ class World:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
 
 
-                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.x, threat.y]:
+                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.y, threat.x]:
                             threats_still_visible = True
                             break
                 if threats_still_visible:
-                    if npc.economic.profession in ["Guard", "Sheriff"]:
+                    if npc.economic.profession == "Hunter":
+                        # Hunters return to warn instead of just alerting/fleeing
+                        if npc.schedule.current_task != "returning_to_warn":
+                            npc.schedule.current_task = "returning_to_warn"
+                            # Find village center
+                            village = self._get_village_for_npc(npc)
+                            target_coords = None
+                            if village and "town_square_center" in village.interaction_points:
+                                target_coords = village.interaction_points["town_square_center"][0]
+
+                            if target_coords:
+                                path = self.calculate_path(npc.x, npc.y, target_coords[0], target_coords[1])
+                                if path:
+                                    npc.schedule.current_path = path
+                                    npc.schedule.current_destination_coords = target_coords
+                        elif npc.schedule.current_task == "returning_to_warn":
+                            # Check arrival
+                            if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                                # Arrived
+                                threat_event = next((e for e in self.global_events if e.type == "threat_detected" and e.subject_id == npc.id), None)
+                                self.broadcast_news(npc, 20, threat_event)
+                                npc.is_frightened = False # Job done
+                                npc.threat_source_ids = []
+                                npc.schedule.current_task = "idle"
+
+                    elif npc.economic.profession in ["Guard", "Sheriff"]:
                         if npc.schedule.current_task == "alerting_guards" and (not npc.schedule.current_path or len(npc.schedule.current_path) <= 1):
                             self.add_message_to_chat_log(f"{npc.name} raises the alarm about the threat!")
                             npc.combat.is_hostile_to_player = True
@@ -1707,46 +1818,8 @@ class World:
                     self.add_message_to_chat_log(f"{npc.name} calms down as the threat is gone.")
                 continue
 
-            if npc.combat.is_hostile_to_player:
-                self._handle_npc_combat_turn(npc)
-                # If creature is not actively pathing from combat AI (e.g. holding, or just attacked)
-                # and not investigating a sound, they could wander a bit.
-                if not npc.schedule.current_path and npc.schedule.current_task not in ["investigating_sound", "combat_action_attack_player"]:
-                    if random.random() < 0.1: # Small chance to wander if not actively fighting/pathing
-                        dx, dy = random.choice([(0,1), (0,-1), (1,0), (-1,0)])
-                        potential_x, potential_y = npc.x + dx, npc.y + dy
-                        target_tile = self.get_tile_at(potential_x, potential_y)
-                        if target_tile and target_tile.passable:
-                            npc.schedule.current_path = [(npc.x, npc.y), (potential_x, potential_y)]
-                            npc.schedule.current_destination_coords = (potential_x, potential_y)
-                            npc.schedule.current_task = "wandering_hostile" # A specific task if needed
-
-            # --- Sound Perception (runs for all NPCs, might make non-hostile investigate or hostile change target/behavior) ---
-            heard_compelling_sound = False
-            if self.sound_events:
-                for sound in self.sound_events:
-                    if sound.get("source_id") and sound["source_id"] == npc.id: continue
-
-                    dist_to_sound = math.sqrt((npc.x - sound["x"])**2 + (npc.y - sound["y"])**2)
-                    if dist_to_sound <= npc.hearing_radius and dist_to_sound <= sound["volume"]:
-                        if npc.schedule.current_task not in ["combat_action_attack_player", "combat_action_flee_from_player", "combat_action_move_to_attack_player", "investigating_sound"]:
-                            sound_type = sound["type"]
-                            if sound_type in ["combat_attack", "tree_fall"]: # Hostile creatures also investigate these
-                                npc.schedule.current_task = "investigating_sound"
-                                npc.schedule.current_destination_coords = (sound["x"], sound["y"])
-                                npc.schedule.current_path = []
-                                self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
-                                heard_compelling_sound = True
-                                break
-
-            if heard_compelling_sound:
-                if npc.schedule.current_task == "investigating_sound" and npc.schedule.current_destination_coords and not npc.schedule.current_path:
-                    path = self.calculate_path(npc.x, npc.y, npc.schedule.current_destination_coords[0], npc.schedule.current_destination_coords[1])
-                    if path: npc.schedule.current_path = path
-                    else: npc.schedule.current_task = "idle_confused"; npc.schedule.current_destination_coords = None
-
             # --- Animal Behavior (Predator & Prey) ---
-            elif isinstance(npc, Animal):
+            if isinstance(npc, Animal):
                 animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
 
                 # 1. PREDATOR AI (Highest Priority)
@@ -1785,8 +1858,43 @@ class World:
                                         npc.schedule.current_path = path
                                         npc.schedule.current_destination_coords = (prey.x, prey.y)
                         else:
-                            npc.schedule.current_task = "idle"
+                            # Prey is dead or gone. Check if there's a corpse at last known location to eat.
+                            if npc.sub_task_target_coords:
+                                # We might have stored the location if we killed it?
+                                # Actually, handle_npc_death places a corpse.
+                                # Let's search for a corpse nearby to eat.
+                                corpse_x, corpse_y = self._find_nearest_corpse(npc) if hasattr(self, '_find_nearest_corpse') else (None, None)
+                                if corpse_x is not None:
+                                    # Move to eat corpse
+                                    npc.schedule.current_task = "eating_corpse"
+                                    npc.schedule.current_destination_coords = (corpse_x, corpse_y)
+                                    path = self.calculate_path(npc.x, npc.y, corpse_x, corpse_y)
+                                    if path:
+                                        npc.schedule.current_path = path
+                                    else:
+                                         npc.schedule.current_task = "idle"
+                                else:
+                                    npc.schedule.current_task = "idle"
+                            else:
+                                npc.schedule.current_task = "idle"
                             npc.task_target_entity_id = None
+                        continue
+
+                    elif npc.schedule.current_task == "eating_corpse":
+                        if npc.schedule.current_destination_coords and (npc.x, npc.y) == npc.schedule.current_destination_coords:
+                            # Eat corpse
+                            tile = self.get_tile_at(npc.x, npc.y)
+                            if tile and tile.name == "Animal Corpse":
+                                npc.physical.hunger = 0
+                                self.add_message_to_chat_log(f"The {npc.name} devours the carcass.")
+                                # Replace corpse with bones
+                                bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
+                                self._change_map_tile((npc.x, npc.y), bones_def)
+                            npc.schedule.current_task = "idle"
+                            npc.schedule.current_destination_coords = None
+                        elif not npc.schedule.current_path:
+                             # Path failed or interrupted
+                             npc.schedule.current_task = "idle"
                         continue
 
                 # 2. PREY/FLEEING AI (Second Priority)
@@ -1846,6 +1954,52 @@ class World:
                         npc.combat.is_hostile_to_player = True
 
                 # 4. OTHER BEHAVIORS (Lower Priority)
+                # Herbivore Grazing (High priority for survival)
+                if animal_def.get("diet_type") == "herbivore" and npc.physical.hunger >= 30:
+                     if npc.schedule.current_task == "grazing" and npc.schedule.current_destination_coords == (npc.x, npc.y):
+                         # Arrived at grazing spot, eat!
+                         tile = self.get_tile_at(npc.x, npc.y)
+                         food_sources = animal_def.get("food_sources", [])
+                         if tile and tile.name in food_sources:
+                             npc.physical.hunger = max(0, npc.physical.hunger - 50)
+                             self.add_message_to_chat_log(f"The {npc.name} grazes on {tile.name}.")
+                             # Degrade tile
+                             if tile.name == "Tall Grass":
+                                 plains_def = TILE_DEFINITIONS["plains"]
+                                 self._change_map_tile((npc.x, npc.y), plains_def)
+                             elif tile.name == "Growing Wheat":
+                                 tilled_def = TILE_DEFINITIONS["tilled_soil"]
+                                 self._change_map_tile((npc.x, npc.y), tilled_def)
+                             elif tile.name == "Flower":
+                                 plains_def = TILE_DEFINITIONS["plains"]
+                                 self._change_map_tile((npc.x, npc.y), plains_def)
+
+                             npc.schedule.current_task = "idle"
+                         else:
+                             npc.schedule.current_task = "idle"
+                     elif npc.schedule.current_task != "grazing":
+                         # Look for food nearby
+                         search_radius = 10
+                         found_food = False
+                         for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+                             for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                                 if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                                     tile = self.get_tile_at(x, y)
+                                     food_sources = animal_def.get("food_sources", [])
+                                     if tile and tile.name in food_sources:
+                                          path = self.calculate_path(npc.x, npc.y, x, y)
+                                          if path:
+                                              npc.schedule.current_path = path
+                                              npc.schedule.current_destination_coords = (x, y)
+                                              npc.schedule.current_task = "grazing"
+                                              found_food = True
+                                              break
+                             if found_food: break
+
+                     # If found food (task changed to grazing), we are done for this tick logic
+                     if npc.schedule.current_task == "grazing":
+                         continue
+
                 if npc.is_pregnant:
                     npc.pregnancy_timer -= 1
                     if npc.pregnancy_timer <= 0:
@@ -1864,7 +2018,7 @@ class World:
                         else:
                             npc.pregnancy_timer = 1
 
-                if npc.behavior == "Follow-Owner" and npc.owner == self.player:
+                elif npc.behavior == "Follow-Owner" and npc.owner == self.player:
                     distance_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
                     if distance_to_player > 3 and not npc.schedule.current_path:
                         target_x, target_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
@@ -1874,6 +2028,30 @@ class World:
                                 npc.schedule.current_path = path
                                 npc.schedule.current_destination_coords = (target_x, target_y)
                                 npc.schedule.current_task = "following"
+
+                    # Return to Den Logic
+                    elif npc.den_location and (is_night_time or npc.combat.hp < npc.combat.max_hp * 0.3) and npc.schedule.current_task not in ["sleeping", "returning_to_den"]:
+                        # If injured or night, return to den
+                        den_x, den_y = npc.den_location
+                        if (npc.x, npc.y) == (den_x, den_y):
+                            npc.schedule.current_task = "sleeping"
+                            npc.original_char_before_sleep = npc.char
+                            npc.char = ord('z')
+                        else:
+                            npc.schedule.current_task = "returning_to_den"
+                            path = self.calculate_path(npc.x, npc.y, den_x, den_y)
+                            if path:
+                                npc.schedule.current_path = path
+                                npc.schedule.current_destination_coords = (den_x, den_y)
+                            else:
+                                # Can't path to den, maybe blocked or far away. Just wander.
+                                npc.schedule.current_task = "wandering"
+
+                    elif npc.schedule.current_task == "returning_to_den":
+                        if npc.den_location and (npc.x, npc.y) == npc.den_location:
+                             npc.schedule.current_task = "sleeping"
+                             npc.original_char_before_sleep = npc.char
+                             npc.char = ord('z')
 
                 elif animal_def.get("can_mate") and animal_def.get("mating_season") == self.seasons[self.current_season_index] and not npc.is_pregnant:
                     if npc.schedule.current_task not in ["seeking_mate", "mating"]:
@@ -1904,6 +2082,55 @@ class World:
                                     if path:
                                         npc.schedule.current_path = path
                                         npc.schedule.current_destination_coords = (target_x, target_y)
+
+                elif npc.schedule.current_task in ["idle", "wandering", "grazing"] and not npc.schedule.current_path:
+                    # Hunger increases when idle
+                    if npc.physical.hunger < npc.physical.max_hunger:
+                        npc.physical.hunger += 1
+
+                    # Grazing Logic for Herbivores
+                    if animal_def.get("diet_type") == "herbivore" and npc.physical.hunger >= 30: # Start looking for food earlier
+                         if npc.schedule.current_task == "grazing" and npc.schedule.current_destination_coords == (npc.x, npc.y):
+                             # Arrived at grazing spot, eat!
+                             tile = self.get_tile_at(npc.x, npc.y)
+                             food_sources = animal_def.get("food_sources", [])
+                             if tile and tile.name in food_sources:
+                                 npc.physical.hunger = max(0, npc.physical.hunger - 50)
+                                 self.add_message_to_chat_log(f"The {npc.name} grazes on {tile.name}.")
+                                 # Degrade tile (e.g. Tall Grass -> Plains)
+                                 if tile.name == "Tall Grass":
+                                     plains_def = TILE_DEFINITIONS["plains"]
+                                     self._change_map_tile((npc.x, npc.y), plains_def)
+                                 elif tile.name == "Growing Wheat":
+                                     # Revert to tilled soil or plains
+                                     tilled_def = TILE_DEFINITIONS["tilled_soil"]
+                                     self._change_map_tile((npc.x, npc.y), tilled_def)
+                                 elif tile.name == "Flower":
+                                     plains_def = TILE_DEFINITIONS["plains"]
+                                     self._change_map_tile((npc.x, npc.y), plains_def)
+
+                                 npc.schedule.current_task = "idle"
+                             else:
+                                 # Food gone or invalid, stop grazing
+                                 npc.schedule.current_task = "idle"
+                         elif npc.schedule.current_task != "grazing":
+                             # Look for food nearby
+                             search_radius = 10
+                             found_food = False
+                             for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+                                 for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                                     if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                                         tile = self.get_tile_at(x, y)
+                                         food_sources = animal_def.get("food_sources", [])
+                                         if tile and tile.name in food_sources:
+                                              path = self.calculate_path(npc.x, npc.y, x, y)
+                                              if path:
+                                                  npc.schedule.current_path = path
+                                                  npc.schedule.current_destination_coords = (x, y)
+                                                  npc.schedule.current_task = "grazing"
+                                                  found_food = True
+                                                  break
+                                 if found_food: break
 
                 elif npc.schedule.current_task in ["idle", "wandering"] and not npc.schedule.current_path:
                     # Hunger increases when idle
@@ -2304,11 +2531,21 @@ class World:
                             new_task_label = "going home"
                             destination_coords = dest_coords_temp
                     elif llm_chosen_goal == "Wander the village":
-                        # Pick a random passable point in the current chunk or nearby for simplicity
-                        # This needs a robust implementation: find current chunk, pick random point
-                        # For now, let's make them stay put if they choose to wander.
-                        npc.schedule.current_task = "wandering" # No movement, just state change
-                        # self.add_message_to_chat_log(f"{npc.name} is now wandering (staying put).")
+                        # Pick a random spot in the village
+                        village = self._get_village_for_npc(npc)
+                        if village and village.buildings:
+                            # Pick a spot near a random building
+                            target_b = random.choice(village.buildings)
+                            # Random offset
+                            off_x, off_y = random.randint(-5, 5), random.randint(-5, 5)
+                            tx, ty = target_b.global_center_x + off_x, target_b.global_center_y + off_y
+                            # Validate
+                            if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
+                                # Find passable
+                                tx, ty = self._find_best_adjacent_tile(tx, ty, npc) # hacky re-use
+                                if tx:
+                                    new_task_label = "wandering"
+                                    destination_coords = (tx, ty)
                     elif llm_chosen_goal == "Stay put":
                         npc.schedule.current_task = "idle" if npc.schedule.current_task not in ["at home", "at work"] else npc.schedule.current_task
                         # self.add_message_to_chat_log(f"{npc.name} is staying put.")
@@ -2377,6 +2614,34 @@ class World:
                             if tavern:
                                 new_task_label = "going to tavern"
                                 destination_coords = (tavern.global_center_x, tavern.global_center_y)
+                        elif npc.economic.profession == "Town Official" and random.random() < 0.1:
+                            # Town Crier behavior: Go to town square and shout news
+                            village = self._get_village_for_npc(npc)
+                            if village and "town_square_center" in village.interaction_points:
+                                # Check if we have news to shout
+                                if npc.knowledge.known_events:
+                                    # Pick an event we haven't shouted recently (simplified: just pick most recent)
+                                    # Or prefer 'remote' events from other villages
+                                    event_to_shout = None
+                                    # Try to find a remote event first
+                                    for event in reversed(list(npc.knowledge.known_events.values())):
+                                        # Assuming event.location is (x,y), check if it's far
+                                        # or simply check event type
+                                        if event.type in ["trade_deal", "threat_detected", "crime_witnessed"]:
+                                            event_to_shout = event
+                                            break
+
+                                    if not event_to_shout:
+                                        event_to_shout = list(npc.knowledge.known_events.values())[-1]
+
+                                    if event_to_shout:
+                                        new_task_label = "crying_news"
+                                        destination_coords = village.interaction_points["town_square_center"][0] # It's a list of points, take first
+                                        npc.current_sub_task_sequence_index = 0 # repurposed to store event? No, simpler to store in temp
+                                        npc.task_target_entity_id = None # Not targeting entity
+                                        # We need to store the event to shout.
+                                        # Let's attach it to the NPC temporarily or re-find it when task starts.
+                                        # Let's re-find it.
                         elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
                             # Find a nearby NPC to chat with
                             potential_partners = [
@@ -2429,6 +2694,23 @@ class World:
 
                     if npc.schedule.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
                         self.npc_attempt_fish(npc, npc.x, npc.y)
+
+                    elif npc.schedule.current_task == "crying_news" and (npc.x, npc.y) == destination_coords:
+                        # Perform the shout
+                        if npc.knowledge.known_events:
+                             # Re-select best event
+                            event_to_shout = None
+                            for event in reversed(list(npc.knowledge.known_events.values())):
+                                if event.type in ["trade_deal", "threat_detected", "crime_witnessed"]:
+                                    event_to_shout = event
+                                    break
+                            if not event_to_shout:
+                                event_to_shout = list(npc.knowledge.known_events.values())[-1]
+
+                            self.broadcast_news(npc, 15, event_to_shout)
+
+                        npc.schedule.current_task = "idle" # Done shouting
+                        npc.leisure_timer = 50 # Wait a bit before moving
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in ["sleeping", "going home to sleep"]:
@@ -2711,11 +2993,63 @@ class World:
         npc.woodcutter_search_radius += 5
         return None
 
+    def _find_nearest_corpse(self, npc: NPC) -> tuple[int, int] | None:
+        """Finds the nearest animal corpse for the NPC to butcher."""
+        search_radius = 20
+        closest_corpse_coords = None
+        min_dist_sq = float('inf')
+
+        for y in range(npc.y - search_radius, npc.y + search_radius + 1):
+            for x in range(npc.x - search_radius, npc.x + search_radius + 1):
+                if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+                    tile = self.get_tile_at(x, y)
+                    if tile and tile.name == "Animal Corpse":
+                        # Check if another NPC is already targeting this corpse
+                        is_targeted = False
+                        for other_npc in self.village_npcs:
+                             if other_npc.id != npc.id and \
+                                other_npc.current_sub_task == "butcher_carcass" and \
+                                other_npc.sub_task_target_coords == (x, y):
+                                 is_targeted = True
+                                 break
+
+                        if not is_targeted:
+                            dist_sq = (npc.x - x)**2 + (npc.y - y)**2
+                            if dist_sq < min_dist_sq:
+                                min_dist_sq = dist_sq
+                                closest_corpse_coords = (x, y)
+        return closest_corpse_coords
+
     def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
         """Determines the global target coordinates for a given sub-task."""
         target_zone_tag = sub_task_data.get("target_zone_tag")
         if not target_zone_tag:
             # self.add_message_to_chat_log(f"Error: Sub-task {sub_task_data.get('id')} for {npc.name} has no target_zone_tag.")
+            return None
+
+        if target_zone_tag == "corpse":
+            return self._find_nearest_corpse(npc)
+
+        if target_zone_tag == "scout_route":
+            # For scouting, pick a random point in a wider radius around the village/workplace
+            # to simulate patrolling the wilderness.
+            center_x = work_building.global_center_x
+            center_y = work_building.global_center_y
+            scout_radius = 40
+
+            for _ in range(10): # Try a few times to find a valid spot
+                offset_x = random.randint(-scout_radius, scout_radius)
+                offset_y = random.randint(-scout_radius, scout_radius)
+                scout_x = center_x + offset_x
+                scout_y = center_y + offset_y
+
+                # Ensure bounds
+                scout_x = max(0, min(WORLD_WIDTH - 1, scout_x))
+                scout_y = max(0, min(WORLD_HEIGHT - 1, scout_y))
+
+                tile = self.get_tile_at(scout_x, scout_y)
+                if tile and tile.passable:
+                    return (scout_x, scout_y)
             return None
 
         if target_zone_tag == "chopping_area":
@@ -2775,9 +3109,17 @@ class World:
                 # Or compare against the actual name string from TILE_DEFINITIONS
                 expected_tile_name = TILE_DEFINITIONS.get(target_tile_type_key, {}).get("name")
                 if tile and tile.name == expected_tile_name:
-                    # TODO: Add a check here to ensure another NPC isn't already targeting this exact tile for the same sub-task type.
-                    # This is similar to the tree targeting check. For now, proceed without it for simplicity.
-                    return (tx, ty)
+                    # Check if this tile is already targeted by another NPC for the same task
+                    is_already_targeted = False
+                    for other_npc in self.village_npcs:
+                        if other_npc.id != npc.id and \
+                           other_npc.current_sub_task == sub_task_data["id"] and \
+                           other_npc.sub_task_target_coords == (tx, ty):
+                            is_already_targeted = True
+                            break
+
+                    if not is_already_targeted:
+                        return (tx, ty)
             # self.add_message_to_chat_log(f"Debug: {npc.name} could not find suitable '{expected_tile_name}' tile in field_patch for {sub_task_data['id']}.")
             return None
         else:
@@ -2944,6 +3286,29 @@ class World:
                                 npc.add_item("raw_log", logs_collected)
                         # else:
                             # self.add_message_to_chat_log(f"Debug: {npc.name} tried to chop at {npc.sub_task_target_coords}, but it wasn't a choppable tree.")
+                    elif completed_sub_task_id == "butcher_carcass":
+                        target_tile_obj = self.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+                        if target_tile_obj and target_tile_obj.name == "Animal Corpse":
+                            animal_type = target_tile_obj.properties.get("animal_type")
+                            # Loot logic
+                            if animal_type in ANIMAL_DEFINITIONS:
+                                animal_def = ANIMAL_DEFINITIONS[animal_type]
+                                loot_table = animal_def.get("loot_drops", {})
+                                for item_key, loot_info in loot_table.items():
+                                    if random.random() < loot_info.get("chance", 0):
+                                        quantity_info = loot_info["quantity"]
+                                        if isinstance(quantity_info, list) and len(quantity_info) == 2:
+                                            quantity = random.randint(quantity_info[0], quantity_info[1])
+                                        else:
+                                            quantity = int(quantity_info)
+                                        if quantity > 0:
+                                            npc.add_item(item_key, quantity)
+                                            # self.add_message_to_chat_log(f"Debug: {npc.name} butchered {quantity} {item_key}.")
+
+                            # Replace corpse with bones
+                            bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
+                            self._change_map_tile(npc.sub_task_target_coords, bones_def)
+
                     elif completed_sub_task_id == "mine_ore":
                         # Miner is at the mine face, generate ore
                         npc.add_item("iron_ore", 1)
@@ -3844,6 +4209,17 @@ class World:
             animal_def = ANIMAL_DEFINITIONS.get(entity_data.animal_type, {})
             if "shearable" in animal_def:
                 actions.append("Shear")
+
+        if entity_type == "tile" and entity_data.properties.get("workstation_type") == "fire":
+             # Check if player has raw food
+             has_raw_food = False
+             for item in self.player.economic.inventory:
+                 item_def = ITEM_DEFINITIONS.get(item["key"], {})
+                 if "food_ingredient_raw" in item_def.get("item_type_tags", []):
+                     has_raw_food = True
+                     break
+             if has_raw_food:
+                 actions.append("Cook")
 
         actions.append("Examine") # Universal action
         return actions
@@ -5313,7 +5689,7 @@ class World:
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
+                if not chunk.is_terrain_generated or not chunk.tiles:
                     continue
 
                 for y_local in range(CHUNK_SIZE):
@@ -5343,7 +5719,7 @@ class World:
             for y_chunk in range(self.chunk_height):
                 for x_chunk in range(self.chunk_width):
                     chunk = self.chunks[y_chunk][x_chunk]
-                    if not chunk.is_generated:
+                    if not chunk.is_terrain_generated or not chunk.tiles:
                         continue
 
                     for y_local in range(CHUNK_SIZE):
@@ -5363,7 +5739,7 @@ class World:
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
-                if not chunk.is_generated:
+                if not chunk.is_terrain_generated or not chunk.tiles:
                     continue
 
                 for y_local in range(CHUNK_SIZE):
@@ -5997,6 +6373,7 @@ class World:
             chunk.village = Village()
             chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             self._generate_village_structure(chunk, chunk_coord_x, chunk_coord_y)
+            self.villages.append(chunk.village)
         elif chunk.poi_type == "ruin":
             chunk.ruin = Ruin()
             chunk.ruin.lore = "The origins of this place are lost to time."
@@ -6013,6 +6390,9 @@ class World:
         tiles = [[Tile(biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"], properties={}) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
         chunk.tiles = tiles # Assign initially
 
+        # Mark as generated immediately to prevent recursion in get_tile_at calls during decoration
+        chunk.is_terrain_generated = True
+
         # Add biome-specific details
         self._render_biome_details(chunk, chunk_x, chunk_y)
 
@@ -6021,8 +6401,6 @@ class World:
             self._render_village_tiles(chunk)
         elif chunk.ruin:
             self._generate_ruin_layout(chunk) # Renders directly to tiles
-
-        chunk.is_terrain_generated = True
 
     def _render_biome_details(self, chunk, chunk_x, chunk_y):
         """Renders trees, grass, and animals for a chunk."""
@@ -6054,7 +6432,12 @@ class World:
                         elif random.random() < 0.01:
                             tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
 
-                        # Animal Spawning
+                        # Add Dens if missing (fallback logic for existing generation)
+                        # (This section was already added in previous step, ensuring it remains)
+
+                        # Animal Spawning (Legacy / Random Wanderer)
+                        # NOTE: Den-based spawning logic should ideally replace or supplement this.
+                        # For now, we keep this to ensure animals populate even without dens, but reduce chance if den-based.
                         for animal_type, animal_def in ANIMAL_DEFINITIONS.items():
                             if chunk.biome in animal_def["spawn_biomes"] and random.random() < animal_def["spawn_chance"]:
                                 animal_x_world = chunk_x * CHUNK_SIZE + x_local
@@ -6074,6 +6457,59 @@ class World:
                                     if "prey" in animal_def:
                                         new_animal.speed = 2
                                     self.npcs.append(new_animal)
+
+                        # Den Placement Logic
+                        if random.random() < 0.002: # Chance to spawn a den per tile (low chance)
+                            # Determine suitable den for this biome
+                            potential_dens = []
+                            for den_key, item_def in DECORATION_ITEM_DEFINITIONS.items():
+                                if "den" in item_def.get("item_type_tags", []):
+                                    spawn_type = item_def["properties"].get("spawn_type")
+                                    animal_def = ANIMAL_DEFINITIONS.get(spawn_type)
+                                    if animal_def and chunk.biome in animal_def.get("spawn_biomes", []):
+                                        potential_dens.append(den_key)
+
+                            if potential_dens:
+                                den_key = random.choice(potential_dens)
+                                den_def = DECORATION_ITEM_DEFINITIONS[den_key]
+                                world_x = chunk_x * CHUNK_SIZE + x_local
+                                world_y = chunk_y * CHUNK_SIZE + y_local
+
+                                # Place the den
+                                tiles[y_local][x_local] = Tile(
+                                    char=den_def["char"],
+                                    color=den_def["color"],
+                                    passable=den_def["passable"],
+                                    name=den_def["name"],
+                                    properties=den_def.get("properties", {}).copy()
+                                )
+                                if 0 <= world_x < WORLD_WIDTH and 0 <= world_y < WORLD_HEIGHT:
+                                    self.transparency_map[world_y, world_x] = not den_def.get("blocks_fov", False)
+
+                                    # Spawn initial inhabitants for the den
+                                    spawn_type = den_def["properties"].get("spawn_type")
+                                    max_pop = den_def["properties"].get("max_population", 3)
+                                    initial_pop = random.randint(1, max_pop)
+                                    animal_def = ANIMAL_DEFINITIONS.get(spawn_type)
+
+                                    for _ in range(initial_pop):
+                                        spawn_x, spawn_y = self._find_best_adjacent_tile(world_x, world_y, self.player) # Use player dummy or self for now
+                                        if spawn_x is not None:
+                                            new_animal = Animal(spawn_x, spawn_y, name=animal_def["name"], animal_type=spawn_type)
+                                            new_animal.char = ord(animal_def["char"])
+                                            new_animal.color = animal_def["color"]
+                                            new_animal.max_hp = animal_def["max_hp"]
+                                            new_animal.hp = new_animal.max_hp
+                                            new_animal.behavior = animal_def.get("behavior")
+                                            new_animal.is_hostile_to_player = animal_def["hostile"]
+                                            new_animal.base_attack_name = animal_def["base_attack_name"]
+                                            new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                            new_animal.combat_behavior = animal_def["combat_behavior"]
+                                            new_animal.gender = random.choice(["male", "female"])
+                                            new_animal.den_location = (world_x, world_y) # Assign this den as home
+                                            if "prey" in animal_def:
+                                                new_animal.speed = 2
+                                            self.npcs.append(new_animal)
 
     def _generate_village_structure(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""
@@ -6497,6 +6933,35 @@ class World:
         })
         # self.add_message_to_chat_log(f"Debug: Sound '{sound_type}' emitted at ({origin_x},{origin_y}) vol {volume}")
 
+    def broadcast_news(self, speaker_npc: NPC, radius: int, event_to_share: Event):
+        """
+        Broadcasts an event to all entities within a radius.
+        Used for Town Criers, warning shouts, etc.
+        """
+        if not event_to_share:
+            return
+
+        shout_message = f"{speaker_npc.name} shouts: 'Hear ye! {event_to_share.description}'"
+
+        # Log if player is in range
+        dist_to_player = math.sqrt((speaker_npc.x - self.player.x)**2 + (speaker_npc.y - self.player.y)**2)
+        if dist_to_player <= radius:
+            self.add_message_to_chat_log(shout_message)
+
+        # Spread to nearby NPCs
+        count_listeners = 0
+        for npc in self.village_npcs + self.npcs:
+            if npc.id == speaker_npc.id or npc.physical.is_dead:
+                continue
+
+            dist = math.sqrt((speaker_npc.x - npc.x)**2 + (speaker_npc.y - npc.y)**2)
+            if dist <= radius:
+                if event_to_share.id not in npc.knowledge.known_events:
+                    npc.knowledge.known_events[event_to_share.id] = event_to_share
+                    count_listeners += 1
+
+        # self.add_message_to_chat_log(f"Debug: {speaker_npc.name} broadcasted news to {count_listeners} people.")
+
     def update(self):
         """Main update function for the world, called once per game tick."""
         self.game_time += 1
@@ -6623,7 +7088,13 @@ class World:
 
         for npc in self.village_npcs + self.npcs:
             # Check for heroic kills
-            heroic_kills = [e for e in self.global_events if e.subject_id == npc.id and e.type == "entity_death" and e.target_id and isinstance(self.get_entity_by_id(e.target_id), DireWolf)]
+            heroic_kills = []
+            for e in self.global_events:
+                if e.subject_id == npc.id and e.type == "entity_death" and e.target_id:
+                    target = self.get_entity_by_id(e.target_id)
+                    if target and (isinstance(target, DireWolf) or (isinstance(target, Animal) and target.animal_type == "dire_wolf")):
+                        heroic_kills.append(e)
+
             for kill in heroic_kills:
                 npc.fame += 20
                 self.add_message_to_chat_log(f"{npc.name} gains fame for killing a dire wolf!")
@@ -6669,6 +7140,110 @@ class World:
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
             for npc in self.village_npcs + self.npcs:
                 npc.age += 1
+
+    def _update_inventory_spoilage(self):
+        """Checks for food spoilage in all inventories once per day."""
+        # Only run once per day
+        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+            return
+
+        # Helper to process a specific inventory dict
+        def process_inventory(inventory, owner_name="Container"):
+            items_to_remove = []
+            items_to_add = []
+
+            for item_key, quantity in inventory.items():
+                if item_key == "money": continue
+
+                item_def = ITEM_DEFINITIONS.get(item_key)
+                if not item_def: continue
+
+                spoilage_chance = item_def.get("properties", {}).get("spoilage_chance", 0.0)
+
+                if spoilage_chance > 0:
+                    spoiled_count = 0
+                    # For large stacks, use binomial distribution for performance approximation
+                    # For small stacks, iterate
+                    if quantity > 10:
+                        # Expected value approx
+                        spoiled_count = np.random.binomial(quantity, spoilage_chance)
+                    else:
+                        for _ in range(quantity):
+                            if random.random() < spoilage_chance:
+                                spoiled_count += 1
+
+                    if spoiled_count > 0:
+                        items_to_remove.append((item_key, spoiled_count))
+                        rots_into = item_def.get("properties", {}).get("rots_into", "rotten_food")
+                        items_to_add.append((rots_into, spoiled_count))
+
+                        # Optional: Log significant spoilage for player
+                        if owner_name == "Player" and spoiled_count > 0:
+                            self.add_message_to_chat_log(f"{spoiled_count} {item_def['name']} rotted away.")
+
+            # Apply changes
+            for key, count in items_to_remove:
+                inventory[key] -= count
+                if inventory[key] <= 0:
+                    del inventory[key]
+
+            for key, count in items_to_add:
+                inventory[key] = inventory.get(key, 0) + count
+
+        # 1. Player Inventory
+        # Player inventory is a list of dicts, need to handle differently or convert temporarily
+        # The current player structure is list[dict] e.g. [{"key": "apple", "quantity": 5}, ...]
+        # My helper above expects a dict {key: qty}. Let's write a specific one for player list.
+
+        items_to_remove_indices = []
+        items_to_add_player = []
+
+        for i, item_entry in enumerate(self.player.economic.inventory):
+            item_key = item_entry["key"]
+            quantity = item_entry.get("quantity", 1)
+            item_def = ITEM_DEFINITIONS.get(item_key)
+
+            if item_def:
+                spoilage_chance = item_def.get("properties", {}).get("spoilage_chance", 0.0)
+                if spoilage_chance > 0:
+                    spoiled_count = 0
+                    if quantity > 10:
+                        spoiled_count = np.random.binomial(quantity, spoilage_chance)
+                    else:
+                        for _ in range(quantity):
+                            if random.random() < spoilage_chance:
+                                spoiled_count += 1
+
+                    if spoiled_count > 0:
+                        # For stackable items in list
+                        if item_def.get("stackable"):
+                            item_entry["quantity"] -= spoiled_count
+                            if item_entry["quantity"] <= 0:
+                                items_to_remove_indices.append(i)
+                        else:
+                            # Non-stackable (e.g. unique food?), remove instance
+                            items_to_remove_indices.append(i)
+
+                        rots_into = item_def.get("properties", {}).get("rots_into", "rotten_food")
+                        items_to_add_player.append((rots_into, spoiled_count))
+                        self.add_message_to_chat_log(f"One of your {item_def['name']} has rotted.")
+
+        # Remove from end to avoid index shifting issues
+        for i in sorted(items_to_remove_indices, reverse=True):
+            self.player.economic.inventory.pop(i)
+
+        # Add spoiled items
+        for key, count in items_to_add_player:
+            self.player.add_item(key, count)
+
+        # 2. NPC Inventories (dicts)
+        for npc in self.village_npcs + self.npcs:
+            if not npc.physical.is_dead:
+                process_inventory(npc.economic.npc_inventory, owner_name="NPC")
+
+        # 3. Building Inventories (dicts)
+        for building in self.buildings_by_id.values():
+            process_inventory(building.building_inventory, owner_name="Building")
 
     def _find_boss_for_npc(self, npc: NPC, building: Building) -> NPC | None:
         """Finds a supervisor or senior coworker for an NPC at a building."""
@@ -7053,9 +7628,21 @@ class World:
                             continue
 
                         # Simplified production logic
-                        # Hardcode for Farmer since their production is tile-based
+                        # Seasonal Farmer Production
                         if npc.economic.profession == "Farmer":
-                            village.supply["wheat"] = village.supply.get("wheat", 0) + 5 # Produces 5 wheat per day
+                            current_season = self.seasons[self.current_season_index]
+                            production_amount = 0
+                            if current_season == "Spring":
+                                production_amount = 2 # Planting season, low output
+                            elif current_season == "Summer":
+                                production_amount = 5 # Growing/maintenance
+                            elif current_season == "Autumn":
+                                production_amount = 15 # Harvest!
+                            elif current_season == "Winter":
+                                production_amount = 0 # Nothing grows
+
+                            if production_amount > 0:
+                                village.supply["wheat"] = village.supply.get("wheat", 0) + production_amount
 
                         # General production from sub-tasks
                         if profession_data and "default_sub_task_sequence" in profession_data:
@@ -7103,6 +7690,64 @@ class World:
                     if food_shortfall > 0:
                         village.demand["bread"] = village.demand.get("bread", 0) + food_shortfall
 
+                    # --- Abstract Trade Simulation ---
+                    # Find a partner village to trade with
+                    # For simplicity, pick a random other village. In future, use distance.
+                    if len(self.villages) > 1:
+                        partner_village = random.choice([v for v in self.villages if v != village])
+
+                        # Export Surplus Logic
+                        # If we have too much of something (Supply > Demand * 2 or absolute > 50) and they have low supply
+                        for item_key, qty in list(village.supply.items()):
+                            if qty > 50 or qty > village.demand.get(item_key, 0) * 2:
+                                partner_supply = partner_village.supply.get(item_key, 0)
+                                if partner_supply < 10: # They are low
+                                    trade_qty = 10
+                                    village.supply[item_key] -= trade_qty
+                                    partner_village.supply[item_key] = partner_supply + trade_qty
+
+                                    # Log the trade event
+                                    self.log_event(
+                                        event_type="trade_deal",
+                                        description=f"A caravan from this village sold {trade_qty} {item_key} to a neighboring settlement.",
+                                        subject_id=-1, # System event
+                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                    )
+                                    # Record local event for history
+                                    village.local_events.append(self.global_events[-1])
+
+                    # --- Abstract History/Scribing ---
+                    # Check if there is a Scribe in this village
+                    has_scribe = any(n.economic.profession == "Scribe" for n in village_npcs)
+                    if has_scribe and len(village.local_events) >= 3:
+                        if random.random() < 0.1: # 10% chance per day to write a history book if events exist
+                            scribe = next(n for n in village_npcs if n.economic.profession == "Scribe")
+                            recent_events_summary = "\n".join([e.description for e in village.local_events[-5:]])
+
+                            prompt = LLM_PROMPTS["scribe_write_book"].format(
+                                scribe_name=scribe.name,
+                                scribe_personality=scribe.social.personality,
+                                known_events_summary=recent_events_summary,
+                                year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+                            )
+                            llm_response = self._call_ollama(prompt)
+                            try:
+                                book_data = json.loads(llm_response)
+                                new_book = Book(
+                                    title=book_data.get("title", "Local History"),
+                                    author_id=scribe.id,
+                                    author_name=scribe.name,
+                                    year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                                    content=book_data.get("content", "..."),
+                                    book_type="chronicle"
+                                )
+                                self.books.append(new_book)
+                                village.supply[f"book_{new_book.id}"] = village.supply.get(f"book_{new_book.id}", 0) + 1
+                                # Clear events so we don't write the same history forever
+                                village.local_events = []
+                            except json.JSONDecodeError:
+                                pass
+
                     # --- Birth Simulation ---
                     # Find potential couples (for simplicity, any two adults living together)
                     potential_parents = [npc for npc in village_npcs if 18 < npc.age < 50]
@@ -7110,15 +7755,47 @@ class World:
                         parent1 = random.choice(potential_parents)
                         parent2 = random.choice(potential_parents)
                         if parent1.id != parent2.id:
-                            # For now, we don't create a new NPC object as it would be complex to place and manage.
-                            # We just log the historical event.
+                            # Create a new Child NPC
+                            child_name = f"Child of {parent1.name}"
+                            # Inherit home from parent1
+                            home_id = parent1.schedule.home_building_id
+                            home_coords = (parent1.x, parent1.y) # Default to parent's location if home not found
+                            if home_id:
+                                home_building = self.buildings_by_id.get(home_id)
+                                if home_building:
+                                    home_coords = (home_building.global_center_x, home_building.global_center_y)
+
+                            child = NPC(
+                                x=home_coords[0],
+                                y=home_coords[1],
+                                name=child_name,
+                                dialogue=["Goo goo gaga."],
+                                personality="child",
+                                player_id=self.player.id
+                            )
+                            child.age = 0
+                            child.economic.profession = "Child"
+                            child.schedule.home_building_id = home_id
+
+                            # Add to family ties
+                            child.social.family_ties["mother_id"] = parent1.id # Simplified
+                            child.social.family_ties["father_id"] = parent2.id
+
+                            # Add to world
+                            self.village_npcs.append(child)
+                            if home_id:
+                                home_building = self.buildings_by_id.get(home_id)
+                                if home_building:
+                                    home_building.residents.append(child)
+
                             self.log_event(
                                 event_type="npc_birth",
-                                description=f"A child was born to {parent1.name} and {parent2.name}.",
+                                description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
                                 subject_id=parent1.id,
                                 target_id=parent2.id,
                                 location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE)
                             )
+                            # self.add_message_to_chat_log(f"A child was born in a distant village.")
 
                     # --- Death Simulation (Old Age) ---
                     elderly_npcs = [npc for npc in village_npcs if npc.age > 70]
@@ -7185,7 +7862,7 @@ class World:
                 continue
 
             # Select a random event from known events to react to
-            event_to_process = random.choice(list(npc.known_events.values()))
+            event_to_process = random.choice(list(npc.knowledge.known_events.values()))
 
             # Avoid reacting to very old news repeatedly
             time_since_event = time.time() - event_to_process.timestamp
@@ -7835,6 +8512,86 @@ class World:
 
         else:
             self.add_message_to_chat_log("You failed to harvest the crop.")
+
+    def player_attempt_cook(self, x: int, y: int):
+        """Handles the player's attempt to cook food at a fire."""
+        target_tile = self.get_tile_at(x, y)
+        if not (target_tile and target_tile.properties.get("workstation_type") == "fire"):
+            self.add_message_to_chat_log("You need a fire to cook.")
+            return
+
+        # Find cookable items in inventory
+        cookable_items = []
+        for item in self.player.economic.inventory:
+            item_key = item["key"]
+            # Iterate all items to find if they are a product of cooking this ingredient
+            for product_key, product_def in ITEM_DEFINITIONS.items():
+                recipe = product_def.get("crafting_recipe")
+                workstation = product_def.get("required_workstation")
+
+                if recipe and workstation == "fire" and item_key in recipe:
+                     cookable_items.append((item_key, product_key))
+
+        if not cookable_items:
+            self.add_message_to_chat_log("You have nothing to cook.")
+            return
+
+        # For now, just cook the first available item found
+        # Future: Context menu selection
+        ingredient_key, product_key = cookable_items[0]
+
+        if self.player.remove_item(ingredient_key, 1):
+            self.player.add_item(product_key, 1)
+            product_name = ITEM_DEFINITIONS[product_key]["name"]
+            self.add_message_to_chat_log(f"You cook a {product_name}.")
+        else:
+             self.add_message_to_chat_log("Something went wrong with cooking.")
+
+    def player_attempt_smoke(self, x: int, y: int):
+        """Handles the player's attempt to smoke meat at a smoking rack."""
+        target_tile = self.get_tile_at(x, y)
+        if not (target_tile and target_tile.properties.get("workstation_type") == "smoking_rack"):
+            self.add_message_to_chat_log("You need a smoking rack to smoke meat.")
+            return
+
+        # Smoking requires raw meat/fish AND fuel (raw_log)
+        if not self.player.has_item("raw_log", 1):
+            self.add_message_to_chat_log("You need wood to fuel the smoking rack.")
+            return
+
+        # Find smokable items
+        smokable_items = []
+        for item in self.player.economic.inventory:
+            item_key = item["key"]
+
+            # Map raw -> smoked
+            smoked_version = None
+            if item_key == "raw_meat" or item_key == "raw_venison" or item_key == "raw_mutton":
+                smoked_version = "smoked_meat"
+            elif item_key == "raw_fish":
+                smoked_version = "smoked_fish"
+
+            if smoked_version:
+                smokable_items.append((item_key, smoked_version))
+
+        if not smokable_items:
+            self.add_message_to_chat_log("You have no raw meat or fish to smoke.")
+            return
+
+        # Smoke the first available item
+        ingredient_key, product_key = smokable_items[0]
+
+        if self.player.remove_item(ingredient_key, 1):
+            if self.player.remove_item("raw_log", 1):
+                self.player.add_item(product_key, 1)
+                product_name = ITEM_DEFINITIONS[product_key]["name"]
+                self.add_message_to_chat_log(f"You smoke the meat into {product_name}.")
+            else:
+                # Refund meat if wood failed (shouldn't happen due to check, but safety)
+                self.player.add_item(ingredient_key, 1)
+                self.add_message_to_chat_log("Error: Failed to consume wood.")
+        else:
+             self.add_message_to_chat_log("Something went wrong with smoking.")
 
     def player_attempt_build(self, recipe_key: str, x: int, y: int):
         """Handles the player's attempt to build a structure or furniture."""

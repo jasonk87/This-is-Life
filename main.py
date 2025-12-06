@@ -151,7 +151,8 @@ def execute_interaction(world: World, context_handler):
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
         "Claim House": lambda: claim_house(world, entity_data),
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
-        "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y)
+        "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
+        "Read": lambda: world.player_attempt_read_book(entity_data["item_key"])
     }
 
     if selected_action in action_map:
@@ -159,6 +160,15 @@ def execute_interaction(world: World, context_handler):
 
     if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
+
+def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is reading a book."""
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.RETURN):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP:
+        world.book_reading_context["scroll_offset"] = max(0, world.book_reading_context["scroll_offset"] - 1)
+    elif event.sym == tcod.event.KeySym.DOWN:
+        world.book_reading_context["scroll_offset"] += 1
 
 def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handler):
     """Handles input when the player is in the 'DIALOGUE' state."""
@@ -393,6 +403,8 @@ def handle_events(world, context):
                 handle_building_input(event, world)
             elif world.game_state == "DIALOGUE":
                 handle_dialogue_input(event, world, context)
+            elif world.game_state == "BOOK_READING":
+                handle_book_reading_input(event, world)
             elif world.game_state == "PLAYING":
                 handle_playing_input(event, world, context)
 

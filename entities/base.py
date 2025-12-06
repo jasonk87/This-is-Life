@@ -134,6 +134,7 @@ class NPC:
         self.woodcutter_search_radius: int = 15
         self.task_target_entity_id: int | None = None
         self.task_context: str | None = None
+        self.task_context_data: dict | str | None = None # Generic storage for task details
         self.den_location: tuple[int, int] | None = None
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []

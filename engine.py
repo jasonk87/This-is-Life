@@ -72,14 +72,15 @@ class Quest:
 
 class Book:
     """A class to represent a book written by a Scribe."""
-    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle"):
+    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle", referenced_event_ids: list[str] = None):
         self.id = str(uuid.uuid4())
         self.title = title
         self.author_id = author_id
         self.author_name = author_name
         self.year_written = year_written
         self.content = content
-        self.book_type = book_type # e.g., "chronicle", "census"
+        self.book_type = book_type # e.g., "chronicle", "census", "biography"
+        self.referenced_event_ids = referenced_event_ids if referenced_event_ids else []
 
 class Event:
     """A class to represent a significant event that occurs in the world."""
@@ -2631,17 +2632,39 @@ class World:
                                             event_to_shout = event
                                             break
 
-                                    if not event_to_shout:
-                                        event_to_shout = list(npc.knowledge.known_events.values())[-1]
+                                    # Prioritize high-impact events
+                                    scored_events = []
+                                    for event in npc.knowledge.known_events.values():
+                                        score = 0
+                                        # Event Type Score
+                                        if event.type in ["entity_death", "crime_witnessed", "threat_detected"]:
+                                            score += 10
+                                        elif event.type in ["quest_complete", "npc_marriage"]:
+                                            score += 5
+                                        elif event.type in ["npc_fired", "npc_hired"]:
+                                            score += 2
+                                        else:
+                                            score += 1
 
-                                    if event_to_shout:
+                                        # Recency Score (higher if newer)
+                                        age = self.game_time - event.timestamp
+                                        if age < DAY_LENGTH_TICKS:
+                                            score += 5
+                                        elif age > DAY_LENGTH_TICKS * 3:
+                                            score -= 2
+
+                                        scored_events.append((score, event))
+
+                                    scored_events.sort(key=lambda x: x[0], reverse=True)
+
+                                    if scored_events:
+                                        event_to_shout = scored_events[0][1]
                                         new_task_label = "crying_news"
-                                        destination_coords = village.interaction_points["town_square_center"][0] # It's a list of points, take first
-                                        npc.current_sub_task_sequence_index = 0 # repurposed to store event? No, simpler to store in temp
-                                        npc.task_target_entity_id = None # Not targeting entity
-                                        # We need to store the event to shout.
-                                        # Let's attach it to the NPC temporarily or re-find it when task starts.
-                                        # Let's re-find it.
+                                        destination_coords = village.interaction_points["town_square_center"][0]
+                                        npc.current_sub_task_sequence_index = 0
+                                        npc.task_target_entity_id = None
+                                        # Store ID to ensure we shout the same one
+                                        npc.task_context_data = event_to_shout.id
                         elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
                             # Find a nearby NPC to chat with
                             potential_partners = [
@@ -2697,20 +2720,19 @@ class World:
 
                     elif npc.schedule.current_task == "crying_news" and (npc.x, npc.y) == destination_coords:
                         # Perform the shout
-                        if npc.knowledge.known_events:
-                             # Re-select best event
-                            event_to_shout = None
-                            for event in reversed(list(npc.knowledge.known_events.values())):
-                                if event.type in ["trade_deal", "threat_detected", "crime_witnessed"]:
-                                    event_to_shout = event
-                                    break
-                            if not event_to_shout:
-                                event_to_shout = list(npc.knowledge.known_events.values())[-1]
+                        event_id_to_shout = npc.task_context_data
+                        event_to_shout = npc.knowledge.known_events.get(event_id_to_shout)
 
+                        # Fallback if specific event lost (unlikely)
+                        if not event_to_shout and npc.knowledge.known_events:
+                             event_to_shout = list(npc.knowledge.known_events.values())[-1]
+
+                        if event_to_shout:
                             self.broadcast_news(npc, 15, event_to_shout)
 
                         npc.schedule.current_task = "idle" # Done shouting
                         npc.leisure_timer = 50 # Wait a bit before moving
+                        npc.task_context_data = None
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in ["sleeping", "going home to sleep"]:
@@ -3389,13 +3411,61 @@ class World:
                                 author_name=npc.name,
                                 year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
                                 content=book_data.get("content", "..."),
-                                book_type="chronicle"
+                                book_type="chronicle",
+                                referenced_event_ids=list(npc.knowledge.known_events.keys())
                             )
                             self.books.append(new_book)
                             work_building.building_inventory[f"book_{new_book.id}"] = 1
                             self.add_message_to_chat_log(f"{npc.name} has written a new book titled '{new_book.title}'.")
                         except json.JSONDecodeError as e:
                             self.add_message_to_chat_log(f"Error parsing LLM response for book writing: {e}")
+
+                    elif completed_sub_task_id == "write_biography":
+                        # Find a worthy subject (high fame/infamy)
+                        candidates = []
+                        for potential_subject in self.village_npcs + [self.player]:
+                            if potential_subject.id == npc.id: continue
+                            score = potential_subject.social.fame + potential_subject.social.infamy
+                            if score > 10: # Minimum renown threshold
+                                candidates.append((score, potential_subject))
+
+                        candidates.sort(key=lambda x: x[0], reverse=True)
+                        subject = candidates[0][1] if candidates else random.choice(self.village_npcs)
+
+                        # Gather events about this subject
+                        # Search global events for full history
+                        subject_events = [e for e in self.global_events if e.subject_id == subject.id]
+
+                        if len(subject_events) >= 1:
+                            life_events_summary = "\n".join([f"- {e.description}" for e in subject_events])
+                            prompt = LLM_PROMPTS["scribe_write_biography"].format(
+                                scribe_name=npc.name,
+                                scribe_personality=npc.social.personality,
+                                subject_name=subject.name if hasattr(subject, 'name') else "Unknown",
+                                subject_title=subject.social.title,
+                                life_events_summary=life_events_summary
+                            )
+                            llm_response = self._call_ollama(prompt)
+                            try:
+                                book_data = json.loads(llm_response)
+                                new_book = Book(
+                                    title=book_data.get("title", f"Biography of {subject.name}"),
+                                    author_id=npc.id,
+                                    author_name=npc.name,
+                                    year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                                    content=book_data.get("content", "..."),
+                                    book_type="biography",
+                                    referenced_event_ids=[e.id for e in subject_events]
+                                )
+                                self.books.append(new_book)
+                                work_building.building_inventory[f"book_{new_book.id}"] = 1
+                                self.add_message_to_chat_log(f"{npc.name} has written a biography about {subject.name}.")
+                            except json.JSONDecodeError:
+                                pass
+                        else:
+                            # Not enough info, maybe write a regular book instead next time
+                            pass
+
                     elif completed_sub_task_id == "compile_census":
                         birth_events = [e for e in self.global_events if e.type == 'npc_birth']
                         death_events = [e for e in self.global_events if e.type == 'entity_death']
@@ -4364,6 +4434,39 @@ class World:
                 chunk.tiles[local_y][local_x] = new_tile
                 # Update transparency map
                 self.transparency_map[y, x] = not new_tile.blocks_fov
+
+    def player_attempt_read_book(self, book_item_key: str):
+        """Handles the player's attempt to read a book."""
+        if not book_item_key.startswith("book_"):
+            self.add_message_to_chat_log("That is not a book.")
+            return
+
+        book_id = book_item_key.split("_", 1)[1]
+        book = next((b for b in self.books if b.id == book_id), None)
+
+        if not book:
+            self.add_message_to_chat_log("You try to open the book, but the pages are stuck (Book data missing).")
+            return
+
+        # Change state to reading UI
+        self.game_state = "BOOK_READING"
+        self.book_reading_context["book_id"] = book.id
+        self.book_reading_context["scroll_offset"] = 0
+
+        # Knowledge Transfer
+        if hasattr(book, 'referenced_event_ids') and book.referenced_event_ids:
+            learned_count = 0
+            for event_id in book.referenced_event_ids:
+                if event_id not in self.player.knowledge.known_events:
+                    # Find event in global log (O(N) but N is small ~200)
+                    event_obj = next((e for e in self.global_events if e.id == event_id), None)
+                    if event_obj:
+                        self.player.knowledge.known_events[event_id] = event_obj
+                        learned_count += 1
+
+            if learned_count > 0:
+                self.add_message_to_chat_log(f"You learned about {learned_count} historical events from reading this book.")
+            self.player.knowledge.known_books.add(book_item_key)
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""

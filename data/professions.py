@@ -400,9 +400,16 @@ PROFESSIONS = {
                 "action_verb": "writing at",
                 "duration_ticks": 5000,
                 "target_zone_tag": "writing_desk"
+            },
+            {
+                "id": "write_biography",
+                "display_name": "Writing a Biography",
+                "action_verb": "writing at",
+                "duration_ticks": 6000,
+                "target_zone_tag": "writing_desk"
             }
         ],
-        "default_sub_task_sequence": ["write_book"]
+        "default_sub_task_sequence": ["write_book", "write_biography"]
     }
 }
 

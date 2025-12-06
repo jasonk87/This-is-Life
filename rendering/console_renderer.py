@@ -1,6 +1,7 @@
 # rendering/console_renderer.py
 
 import tcod
+import textwrap
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
@@ -450,5 +451,37 @@ def draw_book_reading_ui(console, world):
 
     console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title=f"Reading: {book.title}", clear=True)
 
-    console.print_box(x=x + 2, y=y + 2, width=menu_width - 4, height=menu_height - 4,
-                      string=f"by {book.author_name} ({book.year_written})\n\n{book.content}")
+    # Content preparation
+    header = f"by {book.author_name} ({book.year_written})\n\n"
+    full_text = header + book.content
+
+    # Text wrapping
+    text_width = menu_width - 4
+    wrapped_lines = []
+    for line in full_text.splitlines():
+        if line:
+            wrapped_lines.extend(textwrap.wrap(line, width=text_width))
+        else:
+            wrapped_lines.append("") # Preserve empty lines
+
+    # Scrolling
+    scroll_offset = ctx.get("scroll_offset", 0)
+    display_height = menu_height - 4
+
+    # Bound scrolling (simple method)
+    max_scroll = max(0, len(wrapped_lines) - display_height)
+    if scroll_offset > max_scroll:
+        scroll_offset = max_scroll
+        ctx["scroll_offset"] = scroll_offset # Update context to clamp it
+
+    visible_lines = wrapped_lines[scroll_offset : scroll_offset + display_height]
+
+    for i, line in enumerate(visible_lines):
+        console.print(x=x + 2, y=y + 2 + i, string=line)
+
+    # Scrollbar indicator (optional but helpful)
+    if len(wrapped_lines) > display_height:
+        pct = scroll_offset / max_scroll
+        bar_y = int(y + 2 + (display_height * pct))
+        if bar_y >= y + menu_height - 1: bar_y = y + menu_height - 2
+        console.print(x=x + menu_width - 1, y=bar_y, string="█", fg=(100, 100, 100))

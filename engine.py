@@ -257,6 +257,8 @@ class PlayerSocialState:
     fame: int = 0
     infamy: int = 0
     title: str = ""
+    family_ties: dict = field(default_factory=lambda: {"description": "none"})
+    relationships: dict = field(default_factory=dict)
 
 @dataclass
 class PlayerEconomicState:
@@ -265,6 +267,12 @@ class PlayerEconomicState:
     active_contracts: dict = field(default_factory=dict)
     pending_contract_offer: Any | None = None
     bounty: int = 0
+    profession: str = "Unemployed"
+    job_performance: int = 50
+    job_satisfaction: int = 50
+    work_building_id: str | None = None
+    days_unemployed: int = 0
+    last_career_update_day: int = 0
 
 @dataclass
 class PlayerEquipment:
@@ -604,6 +612,7 @@ class World:
 
         self._spawn_traveling_merchants()
         self._find_starting_position()
+        self._generate_player_family()
 
         # Transparency map is now updated lazily as chunks are generated/visited
         # We might want to ensure the player's starting area is generated immediately
@@ -4273,7 +4282,254 @@ class World:
                  actions.append("Cook")
 
         actions.append("Examine") # Universal action
+
+        # Add "Apply for Job" if targeting an NPC who is a boss and player is unemployed
+        if entity_type == "npc" and self.player.economic.profession == "Unemployed":
+            npc = entity_data
+            if npc.schedule.work_building_id:
+                building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                if building and self._is_boss_of_building(npc, building):
+                     actions.append("Apply for Job")
+
+        # Add "Work" action if player is employed and at their workplace
+        if self.player.economic.profession != "Unemployed" and self.player.economic.work_building_id:
+            work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
+            if work_building and work_building.contains_global_coords(self.player.x, self.player.y):
+                # Only show Work action if targeting something relevant (e.g. self, building floor, or workstation)
+                # Simplified: show it if the player targets the building itself or general tiles in it
+                if entity_type in ["tile", "building"]:
+                     actions.append("Work")
+
         return actions
+
+    def _is_boss_of_building(self, npc: NPC, building: Building) -> bool:
+        """Checks if the NPC is the 'boss' or leader of their workplace."""
+        prof = npc.economic.profession
+        if building.building_type == "sheriff_office" and prof == "Sheriff": return True
+        if building.building_type == "lumber_mill" and prof == "Lumber Mill Foreman": return True
+        if building.building_type == "tavern" and prof == "Tavern Keeper": return True
+        if building.building_type == "general_store" and prof == "Merchant": return True
+        if building.building_type == "capital_hall" and prof == "Town Official": return True
+        if building.building_type == "farm" and prof == "Farmer": return True # Head farmer
+        # Add more logic as needed
+        return False
+
+    def player_attempt_apply_for_job(self, target_npc: NPC):
+        """Handles player applying for a job with a boss NPC."""
+        if not target_npc.schedule.work_building_id:
+            self.add_message_to_chat_log(f"{target_npc.name} doesn't seem to have a workplace.")
+            return
+
+        building = self.buildings_by_id.get(target_npc.schedule.work_building_id)
+        if not building: return
+
+        # Check vacancy
+        current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == building.id and not n.physical.is_dead)
+        # Player counts as a worker if hired
+        if current_workers >= building.max_workers:
+            self.add_message_to_chat_log(f"{target_npc.name}: \"Sorry, we're fully staffed right now.\"")
+            return
+
+        # Hire the player
+        # Determine profession name based on building type (Reuse logic from _assign_job or similar)
+        new_profession = "Worker"
+        if building.building_type == "sheriff_office": new_profession = "Deputy"
+        elif building.building_type == "lumber_mill": new_profession = "Woodcutter"
+        elif building.building_type == "farm": new_profession = "Farmhand"
+        elif building.building_type == "mine": new_profession = "Miner"
+        elif building.building_type == "mill": new_profession = "Miller's Assistant"
+        elif building.building_type == "bakery": new_profession = "Baker's Assistant"
+        elif building.building_type == "tavern": new_profession = "Server"
+        elif building.building_type == "fishing_hut": new_profession = "Fisherman"
+        elif building.building_type == "blacksmith_shop": new_profession = "Apprentice Blacksmith"
+        elif building.building_type == "general_store": new_profession = "Shop Assistant"
+        elif building.building_type == "carpenter_shop": new_profession = "Apprentice Carpenter"
+        elif building.building_type == "library": new_profession = "Assistant Scribe"
+        elif building.building_type == "capital_hall": new_profession = "Clerk"
+
+        self.player.economic.profession = new_profession
+        self.player.economic.work_building_id = building.id
+        self.player.economic.job_performance = 50
+        self.player.economic.job_satisfaction = 100
+        self.player.economic.days_unemployed = 0
+
+        self.add_message_to_chat_log(f"{target_npc.name}: \"You're hired! You start immediately as a {new_profession}.\"")
+        self.add_message_to_chat_log(f"(Work hard to keep your job and get paid daily!)")
+
+    def player_attempt_work(self):
+        """Handles the player performing work at their job."""
+        if self.player.economic.profession == "Unemployed" or not self.player.economic.work_building_id:
+            self.add_message_to_chat_log("You don't have a job to work at.")
+            return
+
+        work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
+        if not work_building or not work_building.contains_global_coords(self.player.x, self.player.y):
+            self.add_message_to_chat_log("You need to be at your workplace to work.")
+            return
+
+        # Perform work
+        # Increase performance
+        performance_gain = random.randint(10, 20)
+        self.player.economic.job_performance = min(100, self.player.economic.job_performance + performance_gain)
+
+        # Advance time (e.g., 2 hours)
+        time_cost = DAY_LENGTH_TICKS // 12
+        self.game_time += time_cost
+
+        # Hunger/Thirst cost
+        self.player.physical.hunger = min(self.player.physical.max_hunger, self.player.physical.hunger + 10)
+        self.player.physical.thirst = min(self.player.physical.max_thirst, self.player.physical.thirst + 15)
+
+        self.add_message_to_chat_log(f"You spend some time working diligently as a {self.player.economic.profession}.")
+        self.add_message_to_chat_log(f"Your job performance improves. (Current: {self.player.economic.job_performance}/100)")
+
+
+    def _update_player_career(self):
+        """Updates the player's career status daily: wages, performance decay, firing."""
+        current_day = self.game_time // DAY_LENGTH_TICKS
+
+        # Ensure we only update once per day, and skipping day 0 if needed (or handle init)
+        if current_day <= self.player.economic.last_career_update_day:
+            return
+
+        # Perform update for the new day
+        self.player.economic.last_career_update_day = current_day
+
+        if self.player.economic.profession != "Unemployed" and self.player.economic.work_building_id:
+            # Pay wages
+            wage = 15 # Base wage for player
+            if "Apprentice" in self.player.economic.profession or "Assistant" in self.player.economic.profession or "Clerk" in self.player.economic.profession:
+                wage = 10
+            elif "Deputy" in self.player.economic.profession:
+                wage = 20
+            elif "Woodcutter" in self.player.economic.profession:
+                wage = 12
+
+            # Performance check for payment
+            if self.player.economic.job_performance > 30:
+                self.player.economic.money += wage
+                self.add_message_to_chat_log(f"You received {wage} coins for your work as a {self.player.economic.profession}.")
+            else:
+                self.add_message_to_chat_log(f"You didn't perform well enough to get paid today.")
+
+            # Decay performance daily (must work to maintain it)
+            self.player.economic.job_performance = max(0, self.player.economic.job_performance - 15)
+
+            # Firing check
+            if self.player.economic.job_performance < 10:
+                self.add_message_to_chat_log(f"You have been fired from your job as a {self.player.economic.profession} due to poor performance!")
+                self.player.economic.profession = "Unemployed"
+                self.player.economic.work_building_id = None
+                self.player.economic.days_unemployed = 0
+        else:
+            self.player.economic.days_unemployed += 1
+
+    def _generate_player_family(self):
+        """Generates a family for the player and places them in the world."""
+        # Find the nearest village to the player's starting position
+        nearest_village = None
+        min_dist = float('inf')
+
+        for village in self.villages:
+            if village.buildings:
+                bx, by = village.buildings[0].global_center_x, village.buildings[0].global_center_y
+                dist = (self.player.x - bx)**2 + (self.player.y - by)**2
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_village = village
+
+        if not nearest_village:
+            self.add_message_to_chat_log("You find yourself alone in the world, with no family nearby.")
+            return
+
+        # Determine family structure
+        family_structure = random.choice([
+            "parents_alive", "single_parent", "orphaned_with_siblings", "parents_and_siblings"
+        ])
+
+        family_members = []
+
+        if "parents" in family_structure or "single_parent" in family_structure:
+            num_parents = 2 if "parents" in family_structure else 1
+            for i in range(num_parents):
+                role = "Father" if i == 0 else "Mother"
+                if num_parents == 1: role = random.choice(["Father", "Mother"])
+
+                parent = self._create_family_member(nearest_village, role)
+                if parent:
+                    family_members.append(parent)
+                    self.player.social.relationships[parent.id] = 80
+                    parent.social.relationships[self.player.id] = 80
+                    parent.social.family_ties["children"] = [self.player.id]
+
+        if "siblings" in family_structure or "orphaned_with_siblings" in family_structure:
+            num_siblings = random.randint(1, 3)
+            for i in range(num_siblings):
+                role = random.choice(["Brother", "Sister"])
+                sibling = self._create_family_member(nearest_village, role)
+                if sibling:
+                    family_members.append(sibling)
+                    self.player.social.relationships[sibling.id] = 75
+                    sibling.social.relationships[self.player.id] = 75
+                    sibling.social.family_ties["sibling"] = self.player.id
+
+        # Construct family description for player
+        desc_parts = []
+        for member in family_members:
+            role = member.social.family_ties.get("role_to_player", "Relative")
+            desc_parts.append(f"{role}: {member.name}")
+
+        if desc_parts:
+            self.player.social.family_ties["description"] = "Family nearby: " + ", ".join(desc_parts)
+            self.add_message_to_chat_log(f"You start your journey near your family in the village: {', '.join(desc_parts)}.")
+        else:
+             self.player.social.family_ties["description"] = "You are an orphan with no known kin."
+             self.add_message_to_chat_log("You are alone in this world.")
+
+    def _create_family_member(self, village: Village, role: str) -> NPC | None:
+        if not village.buildings: return None
+
+        # Pick a home
+        potential_homes = [b for b in village.buildings if b.category == "residential"]
+        home = random.choice(potential_homes) if potential_homes else random.choice(village.buildings)
+
+        x = home.global_center_x
+        y = home.global_center_y
+
+        prompt = LLM_PROMPTS["npc_personality"].format(
+            player_criminal_points=0, player_hero_points=0,
+            name_hint=f"the player's {role.lower()}",
+            personality_hint="caring, family-oriented",
+            family_ties_hint=f"{role} of the player",
+            attitude_to_player_hint="friendly"
+        )
+        llm_response = self._call_ollama(prompt)
+        try:
+            npc_data = json.loads(llm_response)
+            npc = NPC(
+                x=x, y=y,
+                name=npc_data.get("name", f"{role}"),
+                dialogue=npc_data.get("dialogue", ["Hello dear."]),
+                personality=npc_data.get("personality", "family"),
+                player_id=self.player.id
+            )
+            npc.social.family_ties["role_to_player"] = role
+            npc.economic.profession = "Unemployed"
+
+            # Assign a job potentially
+            potential_workplaces = [b for b in village.buildings if "workplace" in b.category]
+            if potential_workplaces and random.random() < 0.7:
+                work = random.choice(potential_workplaces)
+                self._assign_job(npc, work)
+
+            npc.schedule.home_building_id = home.id
+            home.residents.append(npc)
+            npc.knowledge.known_locations[f"my home"] = (home.global_center_x, home.global_center_y)
+
+            self.village_npcs.append(npc)
+            return npc
+        except json.JSONDecodeError:
+            return None
 
     def serve_jail_time(self):
         """Handles the process of putting the player in jail."""
@@ -7229,6 +7485,7 @@ class World:
         self._update_economy()
         self._update_npc_ages()
         self._update_npc_careers()
+        self._update_player_career()
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()

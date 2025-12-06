@@ -7363,7 +7363,7 @@ class World:
                     )
 
                 # Quitting Logic
-                elif npc.economic.job_satisfaction < 10:
+                if npc.economic.profession.lower() != "unemployed" and npc.economic.job_satisfaction < 10:
                     # NPC Quits
                     old_profession = npc.economic.profession
                     npc.economic.profession = "Unemployed"
@@ -7394,7 +7394,8 @@ class World:
                 npc.economic.job_satisfaction = max(0, npc.economic.job_satisfaction - 2)
 
         # --- Hiring Logic ---
-        unemployed_npcs = [n for n in self.village_npcs if n.economic.profession.lower() == "unemployed" and not n.physical.is_dead]
+        # Filter for unemployed NPCs who have been unemployed for at least 1 day (prevents immediate rehiring after quitting)
+        unemployed_npcs = [n for n in self.village_npcs if n.economic.profession.lower() == "unemployed" and not n.physical.is_dead and n.economic.days_unemployed > 0]
         random.shuffle(unemployed_npcs) # Randomize who gets first pick
 
         for npc in unemployed_npcs:

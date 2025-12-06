@@ -17,6 +17,8 @@ class MockWorld(World):
         self.player = MagicMock(spec=Player)
         self.player.id = 1
         self.global_events = [] # Initialize for logging
+        self.chunk_width = 1
+        self.chunk_height = 1
         # We need to mock _get_village_for_npc since it checks chunks
         self._get_village_for_npc = MagicMock()
 

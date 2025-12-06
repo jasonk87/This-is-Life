@@ -998,4 +998,23 @@ Generate a single line of dialogue.
 
 Dialogue:
 """,
+    "npc_summarize_knowledge_about_subject": """\
+You are {npc_name}, an NPC in a fantasy village. The player has asked you about "{subject_name}".
+
+**Your Profile:**
+- Personality: {npc_personality}
+- Relationship with Player: {relationship_score} (0-100)
+
+**What You Know About {subject_name}:**
+{known_events_summary}
+
+**Task:**
+Write a response summarizing what you know about {subject_name} based on the events above.
+- If you know nothing (summary is empty), say you haven't heard of them.
+- If you know bad things (crimes), and you are lawful, sound disapproving.
+- If you know good things (heroism), sound impressed.
+- Keep it conversational and under 3 sentences.
+
+Response:
+""",
 }

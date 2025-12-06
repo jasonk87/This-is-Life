@@ -45,6 +45,8 @@ class TestKnowledgeSystem(unittest.TestCase):
         # Create some events for the subject
         event1 = Event("combat_attack", "Hero fought Wolf", subject.id, 100)
         self.world.global_events.append(event1)
+        # The scribe must know about the event to write about it
+        scribe.knowledge.known_events[event1.id] = event1
 
         # Mock building and inventory
         library = MagicMock()

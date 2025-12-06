@@ -1188,23 +1188,21 @@ class World:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
                             # Successfully met up, now exchange gossip
-                            # NPC shares one piece of news with partner
-                            if npc.knowledge.known_events:
-                                event_id_to_share = random.choice(list(npc.knowledge.known_events.keys()))
-                                if event_id_to_share not in chat_partner.knowledge.known_events:
-                                    chat_partner.knowledge.known_events[event_id_to_share] = npc.knowledge.known_events[event_id_to_share]
-                                    # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about event {event_id_to_share[:8]}.")
+                            # NPC shares most interesting news with partner
+                            event_to_share = self._get_most_interesting_known_event(npc)
+                            if event_to_share and event_to_share.id not in chat_partner.knowledge.known_events:
+                                chat_partner.knowledge.known_events[event_to_share.id] = event_to_share
+                                # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about {event_to_share.type}.")
 
-                            # Partner shares one piece of news back
-                            if chat_partner.knowledge.known_events:
-                                event_id_to_share_back = random.choice(list(chat_partner.knowledge.known_events.keys()))
-                                if event_id_to_share_back not in npc.knowledge.known_events:
-                                    npc.knowledge.known_events[event_id_to_share_back] = chat_partner.knowledge.known_events[event_id_to_share_back]
-                                    # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about event {event_id_to_share_back[:8]}.")
+                            # Partner shares most interesting news back
+                            event_to_share_back = self._get_most_interesting_known_event(chat_partner)
+                            if event_to_share_back and event_to_share_back.id not in npc.knowledge.known_events:
+                                npc.knowledge.known_events[event_to_share_back.id] = event_to_share_back
+                                # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about {event_to_share_back.type}.")
 
                             # Increase relationship
-                            npc.relationships[chat_partner.id] = min(100, npc.relationships.get(chat_partner.id, 50) + 5)
-                            chat_partner.relationships[npc.id] = min(100, chat_partner.relationships.get(npc.id, 50) + 5)
+                            npc.social.relationships[chat_partner.id] = min(100, npc.social.relationships.get(chat_partner.id, 50) + 5)
+                            chat_partner.social.relationships[npc.id] = min(100, chat_partner.social.relationships.get(npc.id, 50) + 5)
 
 
                         npc.schedule.current_task = "idle" # Done socializing for now
@@ -1214,8 +1212,8 @@ class World:
                             friend_home = self.buildings_by_id.get(friend.home_building_id)
                             if friend_home and (npc.x, npc.y) == (friend_home.global_center_x, friend_home.global_center_y):
                                 # Successfully arrived at friend's house
-                                npc.relationships[friend.id] = min(100, npc.relationships.get(friend.id, 50) + 10)
-                                friend.relationships[npc.id] = min(100, friend.relationships.get(npc.id, 50) + 10)
+                                npc.social.relationships[friend.id] = min(100, npc.social.relationships.get(friend.id, 50) + 10)
+                                friend.social.relationships[npc.id] = min(100, friend.social.relationships.get(npc.id, 50) + 10)
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
                         npc.schedule.current_task = "idle" # Done visiting
                     elif npc.schedule.current_task == "applying_for_job":
@@ -2633,33 +2631,9 @@ class World:
                                             event_to_shout = event
                                             break
 
-                                    # Prioritize high-impact events
-                                    scored_events = []
-                                    for event in npc.knowledge.known_events.values():
-                                        score = 0
-                                        # Event Type Score
-                                        if event.type in ["entity_death", "crime_witnessed", "threat_detected"]:
-                                            score += 10
-                                        elif event.type in ["quest_complete", "npc_marriage"]:
-                                            score += 5
-                                        elif event.type in ["npc_fired", "npc_hired"]:
-                                            score += 2
-                                        else:
-                                            score += 1
+                                    event_to_shout = self._get_most_interesting_known_event(npc)
 
-                                        # Recency Score (higher if newer)
-                                        age = self.game_time - event.timestamp
-                                        if age < DAY_LENGTH_TICKS:
-                                            score += 5
-                                        elif age > DAY_LENGTH_TICKS * 3:
-                                            score -= 2
-
-                                        scored_events.append((score, event))
-
-                                    scored_events.sort(key=lambda x: x[0], reverse=True)
-
-                                    if scored_events:
-                                        event_to_shout = scored_events[0][1]
+                                    if event_to_shout:
                                         new_task_label = "crying_news"
                                         destination_coords = village.interaction_points["town_square_center"][0]
                                         npc.current_sub_task_sequence_index = 0
@@ -4161,26 +4135,6 @@ class World:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
 
-    def _get_witnesses_to_action(self, x: int, y: int, action_type: str) -> list['NPC']:
-        """Finds NPCs who can see a location and would consider the action a crime."""
-        witnesses = []
-        for npc in self.village_npcs + self.npcs: # Check all NPCs
-            if npc.is_dead or isinstance(npc, Animal): # Animals can't be witnesses
-                continue
-
-            # Check if the NPC can see the location of the crime
-            if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][x, y]:
-                # Simple logic for now: most villagers will witness most crimes.
-                # Future: More nuanced logic based on NPC personality, relationship to player, etc.
-                if action_type in ["assault", "lockpicking", "theft"]:
-                    # Guards and Sheriffs will always be witnesses
-                    if npc.economic.profession in ["Guard", "Sheriff"]:
-                        witnesses.append(npc)
-                    # For other NPCs, maybe a chance based on personality
-                    elif npc.social.personality not in ["careless", "fearful"]: # Example personalities who might not report
-                        witnesses.append(npc)
-        return witnesses
-
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
         entities = []
@@ -5491,6 +5445,55 @@ class World:
                 npc_target.active_quest = None # NPC gives up offering this quest for now
                 return
 
+        # "Ask About" Logic
+        ask_keywords = ["ask about", "who is", "tell me about", "know about"]
+        if any(keyword in player_input_text.lower() for keyword in ask_keywords):
+            found_subject = None
+            relevant_events = []
+
+            # Identify entity from input string
+            input_lower = player_input_text.lower()
+            # Check all NPCs + Player
+            potential_subjects = self.village_npcs + self.npcs + [self.player]
+
+            # Sort by length descending to match longer names first (e.g. "Dire Wolf" before "Wolf")
+            potential_subjects.sort(key=lambda x: len(x.name), reverse=True)
+
+            for entity in potential_subjects:
+                if entity.name.lower() in input_lower and len(entity.name) > 2:
+                     found_subject = entity
+                     break
+
+            if found_subject:
+                 # Gather known events involving this subject
+                 for event in npc_target.knowledge.known_events.values():
+                     if event.subject_id == found_subject.id or event.target_id == found_subject.id:
+                         relevant_events.append(event)
+
+                 if relevant_events:
+                     summary_lines = []
+                     for e in relevant_events:
+                         subj = self.get_entity_by_id(e.subject_id)
+                         targ = self.get_entity_by_id(e.target_id) if e.target_id else None
+                         s_name = subj.name if subj else "Someone"
+                         t_name = targ.name if targ else "someone"
+                         summary_lines.append(f"- {e.description.format(subject=s_name, target=t_name)}")
+
+                     summary_text = "\n".join(summary_lines)
+
+                     prompt = LLM_PROMPTS["npc_summarize_knowledge_about_subject"].format(
+                         npc_name=npc_target.name,
+                         npc_personality=npc_target.social.personality,
+                         relationship_score=npc_target.social.relationships.get(self.player.id, 50),
+                         subject_name=found_subject.name,
+                         known_events_summary=summary_text
+                     )
+                     response = self._call_ollama(prompt)
+                     if response:
+                         self.chat_ui_history.append((npc_target.name, response.strip()))
+                         return
+            # If no subject found or no events known, fall through to general conversation
+
         share_keywords = ["i know where", "let me tell you about", "have you seen"]
         if any(keyword in player_input_text.lower() for keyword in share_keywords):
             shared = False
@@ -5733,6 +5736,39 @@ class World:
                 npc.knowledge.long_term_memory.pop(0)
 
 
+    def _get_most_interesting_known_event(self, npc: NPC) -> Event | None:
+        """Selects the most 'interesting' event from an NPC's knowledge based on type and recency."""
+        if not npc.knowledge.known_events:
+            return None
+
+        scored_events = []
+        for event in npc.knowledge.known_events.values():
+            score = 0
+            # Event Type Score
+            if event.type in ["entity_death", "crime_witnessed", "threat_detected"]:
+                score += 10
+            elif event.type in ["quest_complete", "npc_marriage"]:
+                score += 5
+            elif event.type in ["npc_fired", "npc_hired"]:
+                score += 2
+            else:
+                score += 1
+
+            # Recency Score
+            age = self.game_time - event.timestamp
+            if age < DAY_LENGTH_TICKS:
+                score += 5
+            elif age > DAY_LENGTH_TICKS * 3:
+                score -= 2
+
+            scored_events.append((score, event))
+
+        if not scored_events:
+             return None
+
+        scored_events.sort(key=lambda x: x[0], reverse=True)
+        return scored_events[0][1]
+
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
         if not ENABLE_OLLAMA_CONNECTION:
@@ -5789,7 +5825,7 @@ class World:
             # Also check if PLAYER witnesses it (if player is not subject)
             player_saw = False
             if subject_id != self.player.id:
-                if self.player_fov_map[location[0], location[1]]:
+                if self.player_fov_map[location[1], location[0]]:
                     player_saw = True
 
             if valid_witnesses or player_saw:
@@ -7176,13 +7212,13 @@ class World:
                         prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
                             npc_name=npc.name,
                             npc_personality=npc.social.personality,
-                            relationship_score=npc.relationships.get(self.player.id, 50),
+                            relationship_score=npc.social.relationships.get(self.player.id, 50),
                             event_type=event_to_discuss.type,
                             event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
                             subject_name=subject_name,
                             target_name=target_name,
-                            relationship_with_subject=npc.relationships.get(event_to_discuss.subject_id, 50),
-                            relationship_with_target=npc.relationships.get(event_to_discuss.target_id, 50)
+                            relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
+                            relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
                         )
 
                         starter_dialogue = self._call_ollama(prompt)
@@ -8102,29 +8138,35 @@ class World:
 
     def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
         """
-        Finds NPCs who witness a criminal act.
+        Finds NPCs who witness an act.
         A witness must have line of sight to the action.
+        For crimes, filters based on profession/personality.
         """
         witnesses = []
-        # Combine all NPCs who could be witnesses
         potential_witnesses = self.village_npcs + self.npcs
 
         for npc in potential_witnesses:
-            if npc.is_dead:
+            if npc.is_dead or isinstance(npc, Animal):
                 continue
 
-            # Check if NPC can see the tile where the action occurred
+            # Check visibility
             can_see_action = False
             if npc.id in self.npc_fov_maps:
                 fov_map = self.npc_fov_maps[npc.id]
                 if 0 <= action_x < WORLD_WIDTH and 0 <= action_y < WORLD_HEIGHT:
-                    if fov_map[action_x, action_y]:
+                    if fov_map[action_y, action_x]: # Note: FOV map is [y, x]
                         can_see_action = True
 
             if can_see_action:
-                # Simple logic for now: if they can see it, they are a witness.
-                # Future: Could add personality checks (e.g., some ignore theft, some are brave/cowardly)
-                witnesses.append(npc)
+                # If it's a crime, apply logic about who cares/reports
+                if action_type in ["assault", "lockpicking", "theft"]:
+                    if npc.economic.profession in ["Guard", "Sheriff"]:
+                        witnesses.append(npc)
+                    elif npc.social.personality not in ["careless", "fearful"]:
+                        witnesses.append(npc)
+                else:
+                    # General event, anyone seeing it is a witness
+                    witnesses.append(npc)
 
         return witnesses
 

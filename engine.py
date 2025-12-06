@@ -276,6 +276,8 @@ class PlayerState:
     last_dx: int = 0
     last_dy: int = -1
     original_char: int = ord('@')
+    current_path: list[tuple[int, int]] = field(default_factory=list)
+    move_cooldown: int = 0
 
 
 class Player:
@@ -542,6 +544,12 @@ class World:
 
         # Knowledge Menu State
         self.knowledge_menu_context = {
+            "scroll_offset": 0
+        }
+
+        # Quest Menu State
+        self.quest_menu_context = {
+            "selected_quest_index": 0,
             "scroll_offset": 0
         }
 
@@ -4206,7 +4214,7 @@ class World:
                 actions.append("Attack")
             else: # It's a humanoid NPC
                 actions.extend(["Talk", "Attack"])
-                if entity_data.profession in ["Merchant", "Miller"]:
+                if entity_data.profession in ["Merchant", "Miller", "Scribe"]:
                     actions.append("Trade")
         elif entity_type == "item":
             actions.append("Pick up")
@@ -7160,6 +7168,34 @@ class World:
 
     def update(self):
         """Main update function for the world, called once per game tick."""
+        # Handle player auto-movement from mouse clicks
+        if self.player.state.current_path:
+            if self.player.state.move_cooldown > 0:
+                self.player.state.move_cooldown -= 1
+            else:
+                next_x, next_y = self.player.state.current_path[0]
+                dx = next_x - self.player.x
+                dy = next_y - self.player.y
+
+                # Remove current step from path
+                self.player.state.current_path.pop(0)
+
+                # Execute movement
+                action_cost = self.handle_player_movement(dx, dy)
+
+                # If movement failed (blocked), clear path
+                if action_cost == 0 and (dx != 0 or dy != 0):
+                     self.player.state.current_path = []
+                else:
+                    # Set cooldown for next move (e.g., 5 ticks for fast movement)
+                    self.player.state.move_cooldown = 5
+                    # Add to game time based on action cost (though update also adds 1)
+                    # If we want consistent time, we should probably just let update add 1
+                    # and assume player moves faster than world ticks?
+                    # Or add the extra cost here. Let's add extra cost.
+                    if action_cost > 1:
+                        self.game_time += (action_cost - 1)
+
         self.game_time += 1
         self._update_season()
         self._update_weather()

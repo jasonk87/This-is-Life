@@ -213,6 +213,14 @@ class Village:
         self.local_events = [] # List of Event objects specific to this village location
         self.known_events = {} # Event ID -> Event object (knowledge spread)
         self.construction_projects = [] # List of active construction projects
+        self.politics = {
+            "mayor_id": None,
+            "treasury": 1000, # Initial village funds
+            "tax_rate": 0.10, # 10% tax rate default
+            "next_election_day": 14, # First election in 2 weeks
+            "election_active": False,
+            "candidates": [] # List of IDs
+        }
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -321,6 +329,7 @@ class Player:
         self.char = ord('@')
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
+        self.name = "Player"
 
         # Components
         self.physical = PlayerPhysicalState()
@@ -4320,6 +4329,22 @@ class World:
                                 pass
                     else:
                         actions.append("Work") # Fallback for undefined jobs
+
+        # Politics Actions at Capital Hall
+        if entity_type == "building" and entity_data.building_type == "capital_hall":
+            village = None
+            # Find village this building belongs to
+            chunk, _, _ = self._get_chunk_from_building(entity_data)
+            if chunk and chunk.village:
+                village = chunk.village
+
+            if village:
+                if village.politics["election_active"] and self.player.id not in village.politics["candidates"]:
+                    if self.player.social.fame >= 20: # Minimum fame requirement
+                        actions.append("Declare Candidacy")
+
+                if village.politics["mayor_id"] == self.player.id:
+                    actions.append("Manage Village")
 
         return actions
 
@@ -8376,6 +8401,139 @@ class World:
             self.log_event("construction_complete", f"The village completed a new {b_type}.", -1, location=(global_x, global_y))
             village.construction_projects.pop(0)
 
+    def _update_village_politics(self, village: Village):
+        """Handles elections and political updates for a village."""
+        current_day = self.game_time // DAY_LENGTH_TICKS
+
+        # Trigger Election Period
+        if not village.politics["election_active"] and current_day >= village.politics["next_election_day"]:
+            village.politics["election_active"] = True
+            village.politics["candidates"] = []
+            self.log_event("election_started", "An election for Mayor has begun!", -1, location=village.interaction_points.get("town_square_center", (0,0)))
+            self.add_message_to_chat_log("An election has started! Visit the Capital Hall to run for Mayor.")
+
+            # Find NPC candidates (Incumbent + 1 Challenger)
+            potential_candidates = []
+            incumbent = None
+            if village.politics["mayor_id"]:
+                incumbent = self.get_entity_by_id(village.politics["mayor_id"])
+                if incumbent and not incumbent.physical.is_dead:
+                    potential_candidates.append(incumbent)
+
+            # Find challenger (High fame or Town Official)
+            challengers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village and not n.physical.is_dead and n.id != village.politics["mayor_id"]]
+            challengers.sort(key=lambda x: x.social.fame, reverse=True)
+
+            if challengers:
+                potential_candidates.append(challengers[0])
+
+            for candidate in potential_candidates:
+                village.politics["candidates"].append(candidate.id)
+                self.add_message_to_chat_log(f"{candidate.name} has declared candidacy for Mayor.")
+
+        # Resolve Election (e.g. 3 days after start)
+        if village.politics["election_active"] and current_day >= village.politics["next_election_day"] + 3:
+            # Tally Votes
+            vote_counts = {cid: 0 for cid in village.politics["candidates"]}
+
+            # Iterate all villagers to cast votes
+            villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village and not n.physical.is_dead]
+            for voter in villagers:
+                best_candidate_id = None
+                best_score = -100
+
+                for cid in village.politics["candidates"]:
+                    candidate = self.get_entity_by_id(cid)
+                    if not candidate: continue
+
+                    # Score based on relationship + fame/10
+                    score = 0
+                    if candidate.id == self.player.id:
+                        score = voter.social.relationships.get(self.player.id, 50) + (self.player.social.fame / 10)
+                    else:
+                        score = voter.social.relationships.get(candidate.id, 50) + (candidate.social.fame / 10)
+
+                    if score > best_score:
+                        best_score = score
+                        best_candidate_id = cid
+
+                if best_candidate_id:
+                    vote_counts[best_candidate_id] += 1
+
+            # Determine Winner
+            winner_id = max(vote_counts, key=vote_counts.get) if vote_counts else None
+
+            if winner_id:
+                winner = self.get_entity_by_id(winner_id)
+                old_mayor_id = village.politics["mayor_id"]
+
+                # Update Politics State
+                village.politics["mayor_id"] = winner_id
+                village.politics["election_active"] = False
+                village.politics["next_election_day"] = current_day + 14 # Next election in 2 weeks
+
+                self.log_event("election_results", f"{winner.name} has won the election for Mayor!", winner_id, location=village.interaction_points.get("town_square_center", (0,0)))
+                self.add_message_to_chat_log(f"Election Results: {winner.name} is the new Mayor!")
+
+                # Apply Winner Effects
+                if isinstance(winner, Player):
+                    winner.economic.profession = "Mayor"
+                    # Find Capital Hall to set as workplace
+                    cap_hall = next((b for b in village.buildings if b.building_type == "capital_hall"), None)
+                    if cap_hall:
+                        winner.economic.work_building_id = cap_hall.id
+                    self.add_message_to_chat_log("Congratulations! You are now the Mayor. Visit the Capital Hall to manage the village.")
+                elif isinstance(winner, NPC):
+                    winner.economic.profession = "Mayor"
+                    cap_hall = next((b for b in village.buildings if b.building_type == "capital_hall"), None)
+                    if cap_hall:
+                        # Kick out old mayor if NPC
+                        if old_mayor_id and old_mayor_id != winner_id:
+                             old_mayor = self.get_entity_by_id(old_mayor_id)
+                             if isinstance(old_mayor, NPC):
+                                 old_mayor.economic.profession = "Town Official" # Demote
+                                 old_mayor.add_grudge(winner_id, "Won the election against me.")
+
+                        winner.schedule.work_building_id = cap_hall.id
+                        self._remove_npc_from_world(winner, reason="became mayor") # Temp remove to re-add? No, just update.
+                        # Actually we don't need to remove/add, just update properties.
+
+    def _collect_village_taxes(self, village: Village):
+        """Collects taxes from villagers and pays the mayor."""
+        if not village.politics["mayor_id"]: return
+
+        tax_rate = village.politics["tax_rate"]
+        collected = 0
+
+        villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village and not n.physical.is_dead]
+        for n in villagers:
+            tax = int(n.economic.money * tax_rate)
+            if tax > 0:
+                n.economic.money -= tax
+                collected += tax
+                # Happiness hit for high taxes
+                if tax_rate > 0.15:
+                     n.economic.job_satisfaction = max(0, n.economic.job_satisfaction - 2)
+                     if village.politics["mayor_id"] == self.player.id:
+                         n.social.relationships[self.player.id] = max(0, n.social.relationships.get(self.player.id, 50) - 1)
+                elif tax_rate < 0.05:
+                     # Happiness boost for low taxes
+                     n.economic.job_satisfaction = min(100, n.economic.job_satisfaction + 1)
+                     if village.politics["mayor_id"] == self.player.id:
+                         n.social.relationships[self.player.id] = min(100, n.social.relationships.get(self.player.id, 50) + 1)
+
+        village.politics["treasury"] += collected
+
+        # Pay Mayor
+        mayor = self.get_entity_by_id(village.politics["mayor_id"])
+        if mayor:
+            salary = 50 # Good salary
+            if village.politics["treasury"] >= salary:
+                village.politics["treasury"] -= salary
+                mayor.economic.money += salary
+                if isinstance(mayor, Player):
+                    self.add_message_to_chat_log(f"You received {salary} coins from the village treasury (Mayor's Salary).")
+
     def _update_abstract_simulation(self):
         """
         Runs a lightweight simulation for off-screen villages to simulate high-level events
@@ -8384,6 +8542,13 @@ class World:
         # This should not run on every single tick. Let's run it once per day.
         if self.game_time % DAY_LENGTH_TICKS != 0:
             return
+
+        # --- Politics Update (Runs for all villages, even onscreen) ---
+        # Note: We iterate chunks to find villages, or use self.villages list.
+        # self.villages is populated in _generate_chunk_macro.
+        for village in self.villages:
+            self._update_village_politics(village)
+            self._collect_village_taxes(village)
 
         player_chunk_x = self.player.x // CHUNK_SIZE
         player_chunk_y = self.player.y // CHUNK_SIZE

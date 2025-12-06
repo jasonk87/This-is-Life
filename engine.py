@@ -51,6 +51,13 @@ from data.quests import QUEST_DEFINITIONS # Import quest definitions
 from data.environment import WEATHER_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 
+# Professions that use the daily task system (Ask for Work / Turn in Work) instead of generic work
+JOBS_WITH_SPECIFIC_TASKS = [
+    "Woodcutter", "Miner", "Farmer", "Farmhand", "Fisherman", "Miller", "Miller's Assistant", "Baker", "Baker's Assistant",
+    "Blacksmith", "Apprentice Blacksmith", "Tavern Keeper", "Server", "Merchant", "Shop Assistant", "Carpenter", "Apprentice Carpenter",
+    "Sheriff", "Deputy", "Guard", "Town Official", "Clerk", "Scribe", "Assistant Scribe"
+]
+
 VILLAGE_BUILDING_PROJECTS = {
     "house": {
         "cost": {"raw_log": 50},
@@ -273,6 +280,7 @@ class PlayerEconomicState:
     work_building_id: str | None = None
     days_unemployed: int = 0
     last_career_update_day: int = 0
+    job_task: dict | None = None # e.g. {"item_key": "raw_log", "quantity": 5, "description": "Gather 5 logs."}
 
 @dataclass
 class PlayerEquipment:
@@ -4295,10 +4303,23 @@ class World:
         if self.player.economic.profession != "Unemployed" and self.player.economic.work_building_id:
             work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
             if work_building and work_building.contains_global_coords(self.player.x, self.player.y):
-                # Only show Work action if targeting something relevant (e.g. self, building floor, or workstation)
-                # Simplified: show it if the player targets the building itself or general tiles in it
+                # Only show Work actions if targeting something relevant (e.g. self, building floor, or workstation)
                 if entity_type in ["tile", "building"]:
-                     actions.append("Work")
+                    prof = self.player.economic.profession
+
+                    if prof in JOBS_WITH_SPECIFIC_TASKS:
+                        if not self.player.economic.job_task:
+                            actions.append("Ask for Work")
+                        else:
+                            # Check if player has requirements to turn in
+                            task = self.player.economic.job_task
+                            if task and task.get("item_key") and self.player.has_item(task["item_key"], task.get("quantity", 0)):
+                                actions.append("Turn in Work")
+                            else:
+                                # Optional: Could add "Check Task Status" here if desired
+                                pass
+                    else:
+                        actions.append("Work") # Fallback for undefined jobs
 
         return actions
 
@@ -4356,8 +4377,129 @@ class World:
         self.add_message_to_chat_log(f"{target_npc.name}: \"You're hired! You start immediately as a {new_profession}.\"")
         self.add_message_to_chat_log(f"(Work hard to keep your job and get paid daily!)")
 
+    def generate_job_task(self):
+        """Generates a daily task for the player based on their profession."""
+        prof = self.player.economic.profession
+        task = None
+
+        # Manual Labor
+        if prof == "Woodcutter":
+            qty = random.randint(5, 10)
+            task = {"item_key": "raw_log", "quantity": qty, "description": f"Gather {qty} logs."}
+        elif prof == "Miner":
+            qty = random.randint(3, 8)
+            task = {"item_key": "iron_ore", "quantity": qty, "description": f"Mine {qty} iron ore."}
+        elif prof == "Farmer" or prof == "Farmhand":
+            qty = random.randint(5, 10)
+            task = {"item_key": "wheat", "quantity": qty, "description": f"Harvest {qty} wheat."}
+        elif prof == "Fisherman":
+            qty = random.randint(3, 6)
+            task = {"item_key": "raw_fish", "quantity": qty, "description": f"Catch {qty} fish."}
+        elif prof == "Miller" or prof == "Miller's Assistant":
+             qty = random.randint(3, 5)
+             task = {"item_key": "flour", "quantity": qty, "description": f"Produce {qty} flour."}
+        elif prof == "Baker" or prof == "Baker's Assistant":
+             qty = random.randint(3, 5)
+             task = {"item_key": "bread", "quantity": qty, "description": f"Bake {qty} bread."}
+
+        # Service & Crafting
+        elif prof in ["Blacksmith", "Apprentice Blacksmith"]:
+            if random.random() < 0.5:
+                qty = random.randint(3, 5)
+                task = {"item_key": "iron_ore", "quantity": qty, "description": f"Stockpile {qty} iron ore for the forge."}
+            else:
+                qty = random.randint(5, 10)
+                task = {"item_key": "raw_log", "quantity": qty, "description": f"Gather {qty} logs for charcoal."}
+        elif prof in ["Tavern Keeper", "Server"]:
+            roll = random.random()
+            if roll < 0.33:
+                qty = random.randint(3, 5)
+                task = {"item_key": "raw_meat", "quantity": qty, "description": f"Bring {qty} raw meat for the kitchen."}
+            elif roll < 0.66:
+                qty = random.randint(3, 5)
+                task = {"item_key": "raw_fish", "quantity": qty, "description": f"Bring {qty} raw fish for the daily special."}
+            else:
+                qty = random.randint(5, 10)
+                task = {"item_key": "raw_log", "quantity": qty, "description": f"Bring {qty} logs for the hearth."}
+        elif prof in ["Merchant", "Shop Assistant"]:
+            # Ask for random stock
+            stock_items = ["wooden_plank", "healing_salve", "stone_hoe", "axe_stone"]
+            item = random.choice(stock_items)
+            qty = random.randint(2, 5)
+            task = {"item_key": item, "quantity": qty, "description": f"We need more stock. Acquire {qty} {item.replace('_', ' ')}s."}
+        elif prof in ["Carpenter", "Apprentice Carpenter"]:
+             qty = random.randint(5, 10)
+             task = {"item_key": "raw_log", "quantity": qty, "description": f"Bring {qty} logs for processing."}
+
+        # Civic & Official
+        elif prof in ["Sheriff", "Deputy", "Guard"]:
+            if random.random() < 0.5:
+                qty = 1
+                task = {"item_key": "rusty_sword", "quantity": qty, "description": f"Confiscate {qty} weapon (rusty sword) for the armory."}
+            else:
+                qty = random.randint(3, 5)
+                task = {"item_key": "raw_meat", "quantity": qty, "description": f"Gather {qty} rations (meat) for the station."}
+        elif prof in ["Town Official", "Clerk", "Scribe", "Assistant Scribe"]:
+             # Abstract: supplying the office
+             qty = random.randint(3, 5)
+             task = {"item_key": "raw_log", "quantity": qty, "description": f"Bring {qty} logs for the fireplace/paper."}
+
+        self.player.economic.job_task = task
+        if task:
+            self.add_message_to_chat_log(f"Boss: \"Your task for today is: {task['description']}\"")
+        else:
+            self.add_message_to_chat_log(f"Boss: \"Just make yourself useful today.\"")
+
+    def player_ask_for_work(self):
+        """Player requests a task from their boss/workplace."""
+        if self.player.economic.profession == "Unemployed":
+            self.add_message_to_chat_log("You don't have a job.")
+            return
+
+        if self.player.economic.job_task:
+            task = self.player.economic.job_task
+            self.add_message_to_chat_log(f"Boss: \"You already have a task: {task['description']}\"")
+            return
+
+        self.generate_job_task()
+
+    def player_turn_in_work(self):
+        """Player attempts to complete their job task."""
+        if not self.player.economic.job_task:
+            self.add_message_to_chat_log("You don't have an active task to turn in.")
+            return
+
+        task = self.player.economic.job_task
+        item_key = task.get("item_key")
+        qty_needed = task.get("quantity", 0)
+
+        if not item_key:
+            # Generic task completion (for non-item tasks if we add them)
+             self.player.economic.job_task = None
+             self.add_message_to_chat_log("Task complete.")
+             return
+
+        if self.player.has_item(item_key, qty_needed):
+            self.player.remove_item(item_key, qty_needed)
+            self.player.economic.job_task = None
+
+            # Boost performance significantly
+            performance_gain = 30
+            self.player.economic.job_performance = min(100, self.player.economic.job_performance + performance_gain)
+
+            # Add items to building inventory (simulate economy)
+            if self.player.economic.work_building_id:
+                work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
+                if work_building:
+                    work_building.building_inventory[item_key] = work_building.building_inventory.get(item_key, 0) + qty_needed
+
+            self.add_message_to_chat_log(f"Boss: \"Good work! That's what I like to see.\"")
+            self.add_message_to_chat_log(f"Your job performance improves significantly. (Current: {self.player.economic.job_performance}/100)")
+        else:
+            self.add_message_to_chat_log(f"You don't have the required items ({qty_needed} {item_key}).")
+
     def player_attempt_work(self):
-        """Handles the player performing work at their job."""
+        """Handles the player performing work at their job (Generic Fallback)."""
         if self.player.economic.profession == "Unemployed" or not self.player.economic.work_building_id:
             self.add_message_to_chat_log("You don't have a job to work at.")
             return
@@ -4367,7 +4509,13 @@ class World:
             self.add_message_to_chat_log("You need to be at your workplace to work.")
             return
 
-        # Perform work
+        # If the profession has specific tasks, redirect or warn
+        prof = self.player.economic.profession
+        if prof in JOBS_WITH_SPECIFIC_TASKS:
+             self.add_message_to_chat_log(f"{prof} jobs require completing specific tasks. Ask for work!")
+             return
+
+        # Perform generic work (for fully undefined jobs)
         # Increase performance
         performance_gain = random.randint(10, 20)
         self.player.economic.job_performance = min(100, self.player.economic.job_performance + performance_gain)

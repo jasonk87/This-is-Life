@@ -11,14 +11,19 @@ class MockWorld(World):
         # Bypass World.__init__ to avoid generation
         self.game_time = 0
         self.village_npcs = []
+        self.npcs = []
         self.buildings_by_id = {}
         self.add_message_to_chat_log = MagicMock()
         self.chunks = [[MagicMock() for _ in range(1)] for _ in range(1)] # Minimal chunk map
         self.player = MagicMock(spec=Player)
         self.player.id = 1
+        self.player.world_ref = self
+        self.player_fov_map = MagicMock()
+        self.player_fov_map.__getitem__ = MagicMock(return_value=False)
         self.global_events = [] # Initialize for logging
         self.chunk_width = 1
         self.chunk_height = 1
+        self.npc_fov_maps = {}
         # We need to mock _get_village_for_npc since it checks chunks
         self._get_village_for_npc = MagicMock()
 

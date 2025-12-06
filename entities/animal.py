@@ -47,7 +47,6 @@ class Animal(NPC):
         self.max_hunger: int = 100
 
         self.pack_id: str | None = None
-        self.is_dead: bool = False
 
         # Task-related attributes
         self.current_task: str | None = "idle"

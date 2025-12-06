@@ -92,6 +92,7 @@ class Event:
         self.target_id = target_id    # The ID of the entity being acted upon (optional)
         self.location = location      # Where the event happened (optional)
         self.timestamp = game_time  # Use game ticks for consistency
+        self.public_knowledge = False # Tracks if this event was witnessed or has become public
 
 
 class WorldGenerator:
@@ -3433,8 +3434,8 @@ class World:
                         subject = candidates[0][1] if candidates else random.choice(self.village_npcs)
 
                         # Gather events about this subject
-                        # Search global events for full history
-                        subject_events = [e for e in self.global_events if e.subject_id == subject.id]
+                        # Only use events known to the Scribe
+                        subject_events = [e for e in npc.knowledge.known_events.values() if e.subject_id == subject.id]
 
                         if len(subject_events) >= 1:
                             life_events_summary = "\n".join([f"- {e.description}" for e in subject_events])
@@ -5029,13 +5030,40 @@ class World:
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
 
-        self.log_event(
+        death_event = self.log_event(
             event_type="entity_death",
             description="{subject} was killed by {target}.",
             subject_id=dead_npc.id,
             target_id=killer_id,
             location=(dead_npc.x, dead_npc.y)
         )
+
+        # Handle Reputation impact if the death was witnessed (public knowledge)
+        if death_event.public_knowledge and killer_id:
+            killer = self.get_entity_by_id(killer_id)
+            if killer:
+                # Fame for killing monsters
+                if isinstance(dead_npc, DireWolf) or (isinstance(dead_npc, Animal) and dead_npc.animal_type == "dire_wolf"):
+                    killer.social.fame += 20
+                    if isinstance(killer, Player):
+                        self.add_message_to_chat_log(f"You gain fame for slaying a dangerous beast!")
+                    else:
+                        self.add_message_to_chat_log(f"{killer.name} gains fame for slaying a beast!")
+
+                # Infamy for murder (killing non-combatants/civilians)
+                # Simplified check: if victim was not a creature/monster and not hostile
+                elif not isinstance(dead_npc, Animal) and dead_npc.economic.profession != "Creature":
+                     # For player killer, check if victim was hostile
+                     is_murder = True
+                     if killer.id == self.player.id and dead_npc.combat.is_hostile_to_player:
+                         is_murder = False # Self defense / combat
+
+                     if is_murder:
+                         killer.social.infamy += 20
+                         if isinstance(killer, Player):
+                             self.add_message_to_chat_log("Your infamy increases for this public act of violence.")
+                         else:
+                             self.add_message_to_chat_log(f"{killer.name}'s infamy increases.")
 
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
@@ -5730,7 +5758,7 @@ class World:
             # print(f"Error communicating with Ollama: {e}")
             return ""
 
-    def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None):
+    def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None) -> Event:
         """Creates an Event object and adds it to the global event log."""
         new_event = Event(
             event_type=event_type,
@@ -5740,10 +5768,39 @@ class World:
             location=location,
             game_time=self.game_time
         )
+
+        # Determine if the event is public knowledge (witnessed)
+        if location:
+            # Check for witnesses at the location
+            # Note: _get_witnesses_to_action filters by FOV.
+            # We pass a generic action type to get all eyes.
+            witnesses = self._get_witnesses_to_action(location[0], location[1], "general_event")
+
+            # If the player is the subject or target, and witnesses exist, it's public.
+            # If an NPC is the subject, and player or other NPCs see it, it's public.
+            # We exclude the subject themselves from the "public" count (conceptually),
+            # though _get_witnesses_to_action might include them if not careful.
+            # _get_witnesses check: "for npc in ... if npc.id in npc_fov_maps ...".
+            # It currently iterates NPCs. If the subject is an NPC, they might see themselves?
+            # Let's assume seeing yourself doesn't make it "public" knowledge if no one else is there.
+
+            valid_witnesses = [w for w in witnesses if w.id != subject_id]
+
+            # Also check if PLAYER witnesses it (if player is not subject)
+            player_saw = False
+            if subject_id != self.player.id:
+                if self.player_fov_map[location[0], location[1]]:
+                    player_saw = True
+
+            if valid_witnesses or player_saw:
+                new_event.public_knowledge = True
+
         self.global_events.append(new_event)
         # Keep the event log from growing indefinitely
         if len(self.global_events) > 200: # Max 200 recent events
             self.global_events.pop(0)
+
+        return new_event
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
         """Finds the nearest lit heat source for an NPC."""
@@ -7184,30 +7241,6 @@ class World:
                 return npc
         return None
 
-    def _update_npc_reputations(self):
-        """Periodically scans the event log for significant NPC actions and awards fame/infamy."""
-        if self.game_time % 100 != 0:  # Check every 100 ticks
-            return
-
-        for npc in self.village_npcs + self.npcs:
-            # Check for heroic kills
-            heroic_kills = []
-            for e in self.global_events:
-                if e.subject_id == npc.id and e.type == "entity_death" and e.target_id:
-                    target = self.get_entity_by_id(e.target_id)
-                    if target and (isinstance(target, DireWolf) or (isinstance(target, Animal) and target.animal_type == "dire_wolf")):
-                        heroic_kills.append(e)
-
-            for kill in heroic_kills:
-                npc.fame += 20
-                self.add_message_to_chat_log(f"{npc.name} gains fame for killing a dire wolf!")
-
-            # Check for murders
-            murders = [e for e in self.global_events if e.subject_id == npc.id and e.type == "entity_death" and e.target_id and isinstance(self.get_entity_by_id(e.target_id), NPC)]
-            for murder in murders:
-                npc.infamy += 20
-                self.add_message_to_chat_log(f"{npc.name} gains infamy for murder!")
-
     def _update_entity_titles(self):
         """Periodically checks and updates titles for all entities based on fame/infamy."""
         if self.game_time % 100 != 0:  # Check every 100 ticks
@@ -7215,13 +7248,14 @@ class World:
 
         entities_to_check = [self.player] + self.village_npcs + self.npcs
         for entity in entities_to_check:
-            if not entity.title and (entity.fame >= 50 or entity.infamy >= 50):
-                recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"]]
-                actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific deeds of note."
+            if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
+                # Only use public knowledge events
+                recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"] and e.public_knowledge]
+                actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific known deeds."
 
                 prompt = LLM_PROMPTS["player_title_generation"].format(
-                    player_fame=entity.fame,
-                    player_infamy=entity.infamy,
+                    player_fame=entity.social.fame,
+                    player_infamy=entity.social.infamy,
                     player_actions_summary=actions_summary
                 )
                 response_str = self._call_ollama(prompt)

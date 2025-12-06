@@ -140,6 +140,10 @@ class NPC:
         self.threat_source_ids: list[str] = []
         self.defense_bonus = 0
 
+    @property
+    def is_dead(self) -> bool:
+        return self.physical.is_dead
+
     def _initialize_relationships(self, attitude, player_id):
         initial_score = 50
         if attitude == "friendly":

@@ -51,6 +51,23 @@ from data.quests import QUEST_DEFINITIONS # Import quest definitions
 from data.environment import WEATHER_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 
+VILLAGE_BUILDING_PROJECTS = {
+    "house": {
+        "cost": {"raw_log": 50},
+        "width": 7,
+        "height": 7,
+        "category": "residential",
+        "description": "A new home for villagers."
+    },
+    "farm": {
+        "cost": {"raw_log": 30, "stone_chunk": 10},
+        "width": 8,
+        "height": 6,
+        "category": "agricultural_workplace",
+        "description": "A farm to produce food."
+    }
+}
+
 import json
 import uuid
 
@@ -188,6 +205,7 @@ class Village:
         self.demand = {}  # item_key: count
         self.local_events = [] # List of Event objects specific to this village location
         self.known_events = {} # Event ID -> Event object (knowledge spread)
+        self.construction_projects = [] # List of active construction projects
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -7803,6 +7821,156 @@ class World:
         except json.JSONDecodeError:
             pass
 
+    def _find_valid_building_spot(self, village: Village, width: int, height: int) -> tuple[int, int] | None:
+        """Finds a valid spot for a new building near the village center."""
+        # Use town square as anchor, or first building
+        anchor_x, anchor_y = 0, 0
+        if "town_square_center" in village.interaction_points:
+            anchor_x, anchor_y = village.interaction_points["town_square_center"][0]
+        elif village.buildings:
+            anchor_x, anchor_y = village.buildings[0].global_center_x, village.buildings[0].global_center_y
+        else:
+            return None # Dead village
+
+        search_radius_min = 10
+        search_radius_max = 60
+
+        for i in range(50): # Try 50 times
+            # Pick a random spot in the ring
+            angle = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(search_radius_min, search_radius_max)
+            x = int(anchor_x + math.cos(angle) * dist)
+            y = int(anchor_y + math.sin(angle) * dist)
+
+            # Check bounds (with margin)
+            if not (5 <= x < WORLD_WIDTH - width - 5 and 5 <= y < WORLD_HEIGHT - height - 5):
+                continue
+
+            # Check collision with existing buildings
+            collision = False
+            for b in village.buildings:
+                # Simple AABB collision
+                if (x < b.global_origin_x + b.width + 2 and x + width + 2 > b.global_origin_x and
+                    y < b.global_origin_y + b.height + 2 and y + height + 2 > b.global_origin_y):
+                    collision = True
+                    break
+
+            if collision:
+                continue
+
+            # Check terrain (all tiles must be passable and not water)
+            terrain_valid = True
+            for ty in range(y, y + height):
+                for tx in range(x, x + width):
+                    tile = self.get_tile_at(tx, ty)
+                    if not tile or not tile.passable or tile.name in ["Water", "Deep Water"]:
+                        terrain_valid = False
+                        break
+                if not terrain_valid: break
+
+            if terrain_valid:
+                return x, y
+
+        return None
+
+    def _plan_village_expansion(self, village: Village):
+        """Decides if the village should build something."""
+        if village.construction_projects:
+            return # Finish current project first
+
+        # Check population vs housing
+        residents = sum(len(b.residents) for b in village.buildings if b.category == "residential")
+        capacity = sum(2 for b in village.buildings if b.category == "residential") # Assuming 2 per house
+
+        # 1. Housing Need
+        if residents >= capacity:
+            project_type = "house"
+            cost = VILLAGE_BUILDING_PROJECTS[project_type]["cost"]
+
+            can_afford = True
+            for res, amt in cost.items():
+                if village.supply.get(res, 0) < amt:
+                    can_afford = False
+                    break
+
+            if can_afford:
+                spot = self._find_valid_building_spot(village, VILLAGE_BUILDING_PROJECTS[project_type]["width"], VILLAGE_BUILDING_PROJECTS[project_type]["height"])
+                if spot:
+                    # Deduct cost
+                    for res, amt in cost.items():
+                        village.supply[res] -= amt
+                        if village.supply[res] <= 0: del village.supply[res]
+
+                    # Start project
+                    village.construction_projects.append({
+                        "type": project_type,
+                        "x": spot[0],
+                        "y": spot[1],
+                        "progress": 0,
+                        "total_effort": 100 # Arbitrary effort units
+                    })
+                    self.log_event("construction_started", f"The village started building a new {project_type}.", -1, location=spot)
+
+    def _advance_village_construction(self, village: Village):
+        """Progresses active construction projects."""
+        if not village.construction_projects:
+            return
+
+        project = village.construction_projects[0]
+        # Progress depends on available labor? For abstract, just fixed rate per day or per update
+        # Let's say it takes 5 updates (days) to build
+        project["progress"] += 20
+
+        if project["progress"] >= project["total_effort"]:
+            # Complete!
+            b_type = project["type"]
+            data = VILLAGE_BUILDING_PROJECTS[b_type]
+
+            # Create Building object
+            # Need to determine chunk relative coords.
+            # Building stores local x,y but global_origin is usually calculated from it.
+            # Here we have global x,y.
+            # Let's verify Building constructor.
+            # __init__(self, x, y, width, height, ... global_chunk_x_start=0 ...)
+            # x, y are local.
+
+            global_x, global_y = project["x"], project["y"]
+            chunk_x = global_x // CHUNK_SIZE
+            chunk_y = global_y // CHUNK_SIZE
+            local_x = global_x % CHUNK_SIZE
+            local_y = global_y % CHUNK_SIZE
+
+            chunk_global_start_x = chunk_x * CHUNK_SIZE
+            chunk_global_start_y = chunk_y * CHUNK_SIZE
+
+            new_building = Building(
+                local_x, local_y, data["width"], data["height"],
+                building_type=b_type, category=data["category"],
+                global_chunk_x_start=chunk_global_start_x,
+                global_chunk_y_start=chunk_global_start_y
+            )
+
+            village.add_building(new_building)
+            self.buildings_by_id[new_building.id] = new_building
+
+            # Decorate/Tile update
+            # We need to find the chunk object
+            if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+                chunk = self.chunks[chunk_y][chunk_x]
+
+                # Determine wall type
+                wall_type = "wood_wall" # Default
+                # Reuse logic from _render_village_tiles or just default
+
+                # Render tiles
+                self._draw_building(chunk.tiles, new_building, wall_type)
+
+                # Decorate interior
+                self.decorate_building_interior(new_building, chunk)
+
+            self.log_event("construction_complete", f"The village completed a new {b_type}.", -1, location=(global_x, global_y))
+            village.construction_projects.pop(0)
+
     def _update_abstract_simulation(self):
         """
         Runs a lightweight simulation for off-screen villages to simulate high-level events
@@ -7899,6 +8067,10 @@ class World:
                     food_shortfall = food_needed - consumed_food
                     if food_shortfall > 0:
                         village.demand["bread"] = village.demand.get("bread", 0) + food_shortfall
+
+                    # --- Construction & Expansion ---
+                    self._plan_village_expansion(village)
+                    self._advance_village_construction(village)
 
                     # --- Abstract Trade Simulation ---
                     # Find a partner village to trade with

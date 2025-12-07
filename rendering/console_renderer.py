@@ -261,6 +261,9 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
 
+    if world.game_state == "POLITICS_MENU":
+        draw_politics_menu(console, world)
+
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
     console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
@@ -691,3 +694,87 @@ def draw_book_reading_ui(console, world):
         bar_y = int(y + 2 + (display_height * pct))
         if bar_y >= y + menu_height - 1: bar_y = y + menu_height - 2
         console.print(x=x + menu_width - 1, y=bar_y, string="█", fg=(100, 100, 100))
+
+def draw_politics_menu(console, world):
+    """Draws the Politics Menu for the Mayor."""
+    menu_width = 70
+    menu_height = 40
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Village Politics", clear=True)
+
+    # Find the village the player is managing (assuming player is mayor of their current location or home)
+    village = None
+    for v in world.villages:
+        if v.politics["mayor_id"] == world.player.id:
+            village = v
+            break
+
+    if not village:
+        console.print(x=x+2, y=y+2, string="You are not the Mayor of any village.", fg=(255,0,0))
+        return
+
+    # --- Overview ---
+    row = y + 2
+    console.print(x=x+2, y=row, string=f"Village Tier: {village.tier}", fg=(0,255,255))
+    console.print(x=x+30, y=row, string=f"Population: {village.population}", fg=(200,200,200))
+    row += 2
+
+    console.print(x=x+2, y=row, string=f"Treasury: {village.politics['treasury']} coins", fg=(255,215,0))
+    row += 1
+    console.print(x=x+2, y=row, string=f"Tax Rate: {int(village.politics['tax_rate']*100)}%", fg=(255,255,255))
+    row += 2
+
+    # --- Hierarchy ---
+    console.print(x=x+2, y=row, string="Village Hierarchy:", fg=(100,100,255))
+    row += 1
+
+    # Define display order
+    role_order = ["sheriff", "deputy", "magistrate", "clerk"]
+
+    for role in role_order:
+        official_id = village.politics["roles"].get(role)
+        official_name = "Vacant"
+        color = (100, 100, 100)
+        status = ""
+
+        if official_id:
+            official = world.get_entity_by_id(official_id)
+            if official:
+                official_name = official.name
+                rel = official.social.relationships.get(world.player.id, 50)
+                status = f" [{rel}]" # Show relationship score
+                color = (0,255,0) if rel > 70 else ((255,0,0) if rel < 30 else (200,200,200))
+
+        indent = "  "
+        if role in ["deputy", "clerk"]: indent = "    "
+
+        console.print(x=x+2, y=row, string=f"{indent}{role.title()}: {official_name}{status}", fg=color)
+        row += 1
+
+    row += 1
+
+    # --- Active Policies ---
+    console.print(x=x+2, y=row, string="Active Policies:", fg=(255,0,255))
+    row += 1
+    if not village.politics["active_policies"]:
+        console.print(x=x+4, y=row, string="- None", fg=(100,100,100))
+        row += 1
+    else:
+        for policy in village.politics["active_policies"]:
+            console.print(x=x+4, y=row, string=f"- {policy.title()}", fg=(200,200,255))
+            row += 1
+
+    row += 2
+    console.print(x=x+2, y=row, string="Actions (Press Key):", fg=(255,255,0))
+    row += 1
+    console.print(x=x+4, y=row, string="[1] Raise Taxes (+5%)", fg=(255,255,255))
+    row += 1
+    console.print(x=x+4, y=row, string="[2] Lower Taxes (-5%)", fg=(255,255,255))
+    row += 1
+    console.print(x=x+4, y=row, string="[3] Enact 'Festival' (Cost: 20)", fg=(255,255,255))
+    row += 1
+    console.print(x=x+4, y=row, string="[4] Enact 'Subsidies' (Cost: 30/day)", fg=(255,255,255))
+    row += 1
+    console.print(x=x+4, y=row, string="[5] Enact 'Conscription' (Cost: Happiness)", fg=(255,255,255))

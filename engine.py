@@ -55,8 +55,16 @@ from data.construction import CONSTRUCTION_RECIPES
 JOBS_WITH_SPECIFIC_TASKS = [
     "Woodcutter", "Miner", "Farmer", "Farmhand", "Fisherman", "Miller", "Miller's Assistant", "Baker", "Baker's Assistant",
     "Blacksmith", "Apprentice Blacksmith", "Tavern Keeper", "Server", "Merchant", "Shop Assistant", "Carpenter", "Apprentice Carpenter",
-    "Sheriff", "Deputy", "Guard", "Town Official", "Clerk", "Scribe", "Assistant Scribe"
+    "Sheriff", "Deputy", "Guard", "Town Official", "Clerk", "Scribe", "Assistant Scribe", "Magistrate"
 ]
+
+POLITICAL_HIERARCHY = {
+    "mayor": {"reports_to": None, "subordinates": ["sheriff", "magistrate"]},
+    "sheriff": {"reports_to": "mayor", "subordinates": ["deputy"]},
+    "deputy": {"reports_to": "sheriff", "subordinates": []},
+    "magistrate": {"reports_to": "mayor", "subordinates": ["clerk"]},
+    "clerk": {"reports_to": "magistrate", "subordinates": []}
+}
 
 VILLAGE_BUILDING_PROJECTS = {
     "house": {
@@ -219,8 +227,27 @@ class Village:
             "tax_rate": 0.10, # 10% tax rate default
             "next_election_day": 14, # First election in 2 weeks
             "election_active": False,
-            "candidates": [] # List of IDs
+            "candidates": [], # List of IDs
+            "roles": {
+                "sheriff": None,
+                "deputy": None,
+                "magistrate": None,
+                "clerk": None
+            },
+            "active_policies": set() # Set of active policy strings
         }
+
+    @property
+    def population(self):
+        # Count residents in buildings
+        return sum(len(b.residents) for b in self.buildings if b.category == "residential")
+
+    @property
+    def tier(self):
+        pop = self.population
+        if pop < 10: return "Hamlet"
+        if pop < 30: return "Village"
+        return "Town"
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -4359,6 +4386,29 @@ class World:
         if building.building_type == "farm" and prof == "Farmer": return True # Head farmer
         # Add more logic as needed
         return False
+
+    def player_attempt_declare_candidacy(self, building: Building):
+        """Handles the player declaring candidacy for Mayor at the Capital Hall."""
+        chunk, _, _ = self._get_chunk_from_building(building)
+        if not chunk or not chunk.village:
+            return
+
+        village = chunk.village
+        if not village.politics["election_active"]:
+            self.add_message_to_chat_log("There is no active election.")
+            return
+
+        if self.player.id in village.politics["candidates"]:
+            self.add_message_to_chat_log("You are already a candidate.")
+            return
+
+        if self.player.social.fame < 20:
+            self.add_message_to_chat_log("You are not famous enough to run for Mayor (Need 20 Fame).")
+            return
+
+        village.politics["candidates"].append(self.player.id)
+        self.add_message_to_chat_log("You have officially declared your candidacy for Mayor!")
+        self.log_event("candidacy_declared", "{subject} has declared candidacy for Mayor.", self.player.id, location=(building.global_center_x, building.global_center_y))
 
     def player_attempt_apply_for_job(self, target_npc: NPC):
         """Handles player applying for a job with a boss NPC."""
@@ -8534,6 +8584,131 @@ class World:
                 if isinstance(mayor, Player):
                     self.add_message_to_chat_log(f"You received {salary} coins from the village treasury (Mayor's Salary).")
 
+    def _update_political_appointments(self, village: Village):
+        """Fills vacant roles in the hierarchy."""
+        # Process roles in order of rank to ensure best candidates get top jobs
+        role_priority = ["sheriff", "magistrate", "deputy", "clerk"]
+
+        for role_name in role_priority:
+            current_id = village.politics["roles"].get(role_name)
+
+            # If filled, check if they are dead or fired (job logic handles firing, we just check consistency)
+            if current_id:
+                official = self.get_entity_by_id(current_id)
+                if not official or official.physical.is_dead or official.economic.profession.lower() != role_name:
+                    village.politics["roles"][role_name] = None
+                    current_id = None
+
+            # If vacant, try to fill it
+            if not current_id:
+                # Find best candidate
+                # Promotion from subordinate?
+                # Hiring from general pool?
+
+                # Simplified: Hire best fit from village
+                candidates = []
+                for n in self.village_npcs:
+                    if self._get_village_for_npc(n) == village and not n.physical.is_dead and n.economic.profession == "Unemployed":
+                        # Basic score based on stats (implied)
+                        score = n.social.fame
+                        if role_name in ["sheriff", "deputy"]:
+                            score += n.combat.max_hp
+                        elif role_name in ["magistrate", "clerk"]:
+                            score += n.age # Experience
+                        candidates.append((score, n))
+
+                candidates.sort(key=lambda x: x[0], reverse=True)
+
+                if candidates:
+                    new_official = candidates[0][1]
+                    new_official.economic.profession = role_name.title()
+                    new_official.economic.job_satisfaction = 100
+                    village.politics["roles"][role_name] = new_official.id
+
+                    # Assign workplace based on role
+                    workplace_type = "capital_hall"
+                    if role_name in ["sheriff", "deputy"]: workplace_type = "sheriff_office"
+                    elif role_name in ["magistrate", "clerk"]: workplace_type = "capital_hall"
+
+                    work_building = next((b for b in village.buildings if b.building_type == workplace_type), None)
+                    if work_building:
+                        new_official.schedule.work_building_id = work_building.id
+
+                    self.add_message_to_chat_log(f"{new_official.name} has been appointed as {role_name.title()}.")
+
+    def _consult_officials(self, village: Village, proposal_type: str, value: Any) -> bool:
+        """
+        Consults relevant officials for a policy decision.
+        Returns True if approved (or no relevant official exists to block it).
+        """
+        blocking_official_id = None
+
+        if proposal_type == "change_tax_rate":
+            blocking_official_id = village.politics["roles"].get("magistrate")
+        elif proposal_type == "enact_policy":
+            if value == "conscription":
+                blocking_official_id = village.politics["roles"].get("sheriff")
+            elif value == "subsidies":
+                blocking_official_id = village.politics["roles"].get("magistrate")
+
+        if not blocking_official_id:
+            return True # No one to block it (Autocracy/Vacancy)
+
+        official = self.get_entity_by_id(blocking_official_id)
+        if not official: return True
+
+        # Check relationship
+        mayor_id = village.politics["mayor_id"]
+        rel = 50
+        if mayor_id == self.player.id:
+            rel = official.social.relationships.get(self.player.id, 50)
+
+        if rel < 40: # Dislikes Mayor
+            if mayor_id == self.player.id:
+                self.add_message_to_chat_log(f"{official.name} ({official.economic.profession}) opposes this decision.")
+            return False
+
+        return True
+
+    def _apply_policy_effects(self, village: Village):
+        """Applies daily effects of active policies."""
+        if "festival" in village.politics["active_policies"]:
+            # Festival: Costs money, boosts happiness
+            cost = 20
+            if village.politics["treasury"] >= cost:
+                village.politics["treasury"] -= cost
+                # Boost happiness for random villagers
+                villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village]
+                for n in villagers:
+                    if random.random() < 0.1:
+                        n.economic.job_satisfaction = min(100, n.economic.job_satisfaction + 5)
+            else:
+                village.politics["active_policies"].remove("festival")
+                if village.politics["mayor_id"] == self.player.id:
+                    self.add_message_to_chat_log("Festival policy cancelled due to lack of funds.")
+
+        if "subsidies" in village.politics["active_policies"]:
+            # Subsidies: Costs money, increases supply
+            cost = 30
+            if village.politics["treasury"] >= cost:
+                village.politics["treasury"] -= cost
+                # Increase supply of goods
+                for item in list(village.supply.keys()):
+                    if random.random() < 0.2:
+                        village.supply[item] += 1
+            else:
+                village.politics["active_policies"].remove("subsidies")
+                if village.politics["mayor_id"] == self.player.id:
+                    self.add_message_to_chat_log("Subsidies policy cancelled due to lack of funds.")
+
+        if "conscription" in village.politics["active_policies"]:
+            # Conscription: Costs happiness, maintains guards
+            # (Simplified: just happiness hit for now)
+            villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village]
+            for n in villagers:
+                if random.random() < 0.05:
+                    n.economic.job_satisfaction = max(0, n.economic.job_satisfaction - 2)
+
     def _update_abstract_simulation(self):
         """
         Runs a lightweight simulation for off-screen villages to simulate high-level events
@@ -8549,6 +8724,13 @@ class World:
         for village in self.villages:
             self._update_village_politics(village)
             self._collect_village_taxes(village)
+
+            # Weekly Political Appointments Update
+            if self.game_time % (DAY_LENGTH_TICKS * 7) == 0:
+                self._update_political_appointments(village)
+
+            # Daily Policy Effects
+            self._apply_policy_effects(village)
 
         player_chunk_x = self.player.x // CHUNK_SIZE
         player_chunk_y = self.player.y // CHUNK_SIZE

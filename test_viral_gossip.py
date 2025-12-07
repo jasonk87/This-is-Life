@@ -19,7 +19,7 @@ class MockWorld(World):
         self.chunk_height = 1
         # Mock methods
         self._get_village_for_npc = MagicMock(return_value=None)
-        self._call_ollama = MagicMock(return_value='"He is a great hero."') # Return JSON string usually, but prompt dependent. Prompt output is raw string.
+        self._call_llm = MagicMock(return_value='"He is a great hero."') # Return JSON string usually, but prompt dependent. Prompt output is raw string.
         # Chat UI
         self.chat_ui_history = []
         self.player_fov_map = MagicMock()
@@ -104,8 +104,8 @@ class TestViralGossip(unittest.TestCase):
         self.world.continue_npc_dialogue(npc, "Who is Hero?")
 
         # Verify response
-        # Note: _call_ollama mock returns "He is a great hero." (JSON encoded string if json.loads used, raw string otherwise?)
-        # continue_npc_dialogue uses _call_ollama(prompt) which returns string.
+        # Note: _call_llm mock returns "He is a great hero." (JSON encoded string if json.loads used, raw string otherwise?)
+        # continue_npc_dialogue uses _call_llm(prompt) which returns string.
         # It does NOT json.loads the "Ask About" response.
         # So mock should return just the text.
 

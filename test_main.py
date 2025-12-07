@@ -19,8 +19,8 @@ import json
 
 class TestGame(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
         # Canned response for NPC generation
         mock_npc_data = {
             "name": "Test NPC",
@@ -32,7 +32,7 @@ class TestGame(unittest.TestCase):
             "combat_behavior": "defensive",
             "base_attack_name": "fists"
         }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -47,10 +47,10 @@ class TestGame(unittest.TestCase):
 
 class TestTemperatureSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
         self.world = World()
 
     def tearDown(self):
@@ -178,10 +178,10 @@ class TestTemperatureSystem(unittest.TestCase):
 
 class TestAgriculturalSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
         self.world = World()
 
     def tearDown(self):
@@ -228,11 +228,11 @@ class TestAgriculturalSystem(unittest.TestCase):
 
 class TestNPCBehaviorSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
 
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
         self.world = World(seed=0)
 
@@ -300,11 +300,11 @@ class TestNPCBehaviorSystem(unittest.TestCase):
 
 class TestClothProductionSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
 
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
         self.world = World(seed=1) # Use a fixed seed
 
@@ -382,11 +382,11 @@ class TestClothProductionSystem(unittest.TestCase):
 
 class TestPredatorPreyAI(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
 
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
         # Use a fixed seed for deterministic world generation
         self.world = World(seed=42)
@@ -479,14 +479,14 @@ class TestPredatorPreyAI(unittest.TestCase):
 
 class TestFearSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
 
         mock_npc_data = {
             "name": "Generic Villager", "personality": "neutral", "dialogue": ["..."],
             "wealth_level": "average", "combat_behavior": "defensive", "base_attack_name": "fists"
         }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
         # Use a fixed seed for any remaining randomness
         self.world = World(seed=1337)
@@ -698,10 +698,10 @@ class TestFearSystem(unittest.TestCase):
 
 class TestPlayerFarming(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
         self.world = World(seed=123) # Use a consistent seed for placement
 
     def tearDown(self):
@@ -786,14 +786,14 @@ class TestPlayerFarming(unittest.TestCase):
 
 class TestQuestSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
         # Default mock for NPC generation
         self.mock_npc_data = {
             "name": "Quest Giver", "personality": "desperate", "dialogue": ["Help me!"],
             "wealth_level": "poor", "combat_behavior": "cowardly", "base_attack_name": "pleading"
         }
-        self.mock_call_ollama.return_value = json.dumps(self.mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(self.mock_npc_data)
         self.world = World(seed=101)
 
     def tearDown(self):
@@ -830,7 +830,7 @@ class TestQuestSystem(unittest.TestCase):
                 # Mock a response for when player accepts
                 return json.dumps({"response": "Thank you, thank you! Please hurry!", "goal": "continue_conversation"})
             return json.dumps(self.mock_npc_data)
-        self.mock_call_ollama.side_effect = dialogue_side_effect
+        self.mock_call_llm.side_effect = dialogue_side_effect
 
         self.world.start_npc_dialogue(npc)
         # The offer text is hardcoded, so it should be in the history
@@ -905,10 +905,10 @@ class TestQuestSystem(unittest.TestCase):
 
 class TestSaveLoadSystem(unittest.TestCase):
     def setUp(self):
-        self.mock_ollama_patcher = patch('engine.World._call_ollama')
-        self.mock_call_ollama = self.mock_ollama_patcher.start()
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
-        self.mock_call_ollama.return_value = json.dumps(mock_npc_data)
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
         self.world = World(seed=999)
         self.test_save_file = "test_save.sav"
 

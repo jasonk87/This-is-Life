@@ -142,7 +142,18 @@ TIME_OF_DAY_TEMPERATURE_MODIFIERS = {
 }
 
 # LLM settings
+import json
 ENABLE_LLM_CONNECTION = True # Master switch to enable/disable LLM connection
 ENABLE_OLLAMA_CONNECTION = ENABLE_LLM_CONNECTION # Legacy support
 LLM_BACKEND = "gemini" # Options: "ollama", "gemini"
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "") # Get from environment or set here
+
+GOOGLE_API_KEY = ""
+try:
+    with open("keys.json", "r") as f:
+        keys = json.load(f)
+        GOOGLE_API_KEY = keys.get("GOOGLE_API_KEY", "")
+except FileNotFoundError:
+    pass
+
+if not GOOGLE_API_KEY:
+    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")

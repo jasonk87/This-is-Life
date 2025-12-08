@@ -7612,6 +7612,34 @@ class World:
                     except json.JSONDecodeError:
                         pass
 
+    def _update_npc_reputations(self):
+        """
+        Periodically updates reputation of NPCs and players based on recent global events
+        and natural decay.
+        """
+        # Run periodically (e.g., once a day)
+        if self.game_time % DAY_LENGTH_TICKS != 0:
+            return
+
+        # 1. Decay fame/infamy for all entities
+        all_entities = [self.player] + self.village_npcs + self.npcs
+        for entity in all_entities:
+            # Fame decay: -1 per day if > 0
+            if entity.social.fame > 0:
+                entity.social.fame -= 1
+            # Infamy decay: -1 per day if > 0
+            if entity.social.infamy > 0:
+                entity.social.infamy -= 1
+
+        # 2. Check for recent events that might affect reputation
+        # (Note: Most immediate reputation effects are handled by event creation hooks
+        # like handle_npc_death and _handle_witness_reaction. This is a cleanup/catch-all pass)
+        recent_events = [e for e in self.global_events if self.game_time - e.timestamp <= DAY_LENGTH_TICKS]
+        for event in recent_events:
+            # Example: If a "heroic_act" event type existed, we could process it here.
+            # Currently "entity_death" (monsters/murder) handles reputation directly.
+            pass
+
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:

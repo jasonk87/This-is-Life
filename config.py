@@ -1,4 +1,5 @@
 # config.py
+import os
 
 # Screen dimensions
 SCREEN_WIDTH = 160
@@ -140,5 +141,31 @@ TIME_OF_DAY_TEMPERATURE_MODIFIERS = {
     "PITCH BLACK": -10, "DAWN": -5, "DAY": 0, "DUSK": -5, "NIGHT": -8, "DEEP_NIGHT": -10
 }
 
-# Ollama settings
-ENABLE_OLLAMA_CONNECTION = True # Master switch to enable/disable Ollama connection
+# LLM settings
+import json
+ENABLE_LLM_CONNECTION = True # Master switch to enable/disable LLM connection
+ENABLE_OLLAMA_CONNECTION = ENABLE_LLM_CONNECTION # Legacy support
+LLM_BACKEND = "gemini" # Options: "ollama", "gemini"
+
+GOOGLE_API_KEY = ""
+
+# Try loading from python config file first (preferred)
+try:
+    from llm_config import GOOGLE_API_KEY as FILE_KEY
+    if FILE_KEY and "PASTE_YOUR" not in FILE_KEY:
+        GOOGLE_API_KEY = FILE_KEY
+except ImportError:
+    pass
+
+# Fallback to keys.json (legacy)
+if not GOOGLE_API_KEY:
+    try:
+        with open("keys.json", "r") as f:
+            keys = json.load(f)
+            GOOGLE_API_KEY = keys.get("GOOGLE_API_KEY", "")
+    except FileNotFoundError:
+        pass
+
+# Fallback to environment variable
+if not GOOGLE_API_KEY:
+    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")

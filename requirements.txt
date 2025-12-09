@@ -1,3 +1,4 @@
 tcod
 requests
 numpy
+google-generativeai

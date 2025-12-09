@@ -36,7 +36,9 @@ from config import (
     BIOME_TEMPERATURE_MODIFIERS,
     TIME_OF_DAY_TEMPERATURE_MODIFIERS,
     ENABLE_OLLAMA_CONNECTION,
+    LLM_BACKEND, ENABLE_LLM_CONNECTION, GOOGLE_API_KEY
 )
+import google.generativeai as genai
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
 from entities.tree import Tree # For isinstance check
@@ -70,6 +72,9 @@ VILLAGE_BUILDING_PROJECTS = {
 
 import json
 import uuid
+
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 class Quest:
     """A class to represent an active quest."""
@@ -2472,7 +2477,7 @@ class World:
                             npc_equipped_armor_name=ITEM_DEFINITIONS.get(npc.equipment.body, {}).get("name", "None") if npc.equipment.body else "None",
                             perceived_items_list_str=json.dumps(perceived_items_list, indent=2) # Pretty print for LLM
                         )
-                        pickup_response_str = self._call_ollama(pickup_prompt)
+                        pickup_response_str = self._call_llm(pickup_prompt)
                         if pickup_response_str:
                             try:
                                 pickup_decision = json.loads(pickup_response_str)
@@ -2539,7 +2544,7 @@ class World:
                         time_of_day_str=time_of_day_str,
                         current_light_level_name=self.current_light_level_name # Pass light level
                     )
-                    response_str = self._call_ollama(prompt)
+                    response_str = self._call_llm(prompt)
                     if response_str:
                         try:
                             response_json = json.loads(response_str)
@@ -3410,7 +3415,7 @@ class World:
                             known_events_summary=known_events_summary,
                             year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
                         )
-                        llm_response = self._call_ollama(prompt)
+                        llm_response = self._call_llm(prompt)
                         try:
                             book_data = json.loads(llm_response)
                             new_book = Book(
@@ -3453,7 +3458,7 @@ class World:
                                 subject_title=subject.social.title,
                                 life_events_summary=life_events_summary
                             )
-                            llm_response = self._call_ollama(prompt)
+                            llm_response = self._call_llm(prompt)
                             try:
                                 book_data = json.loads(llm_response)
                                 new_book = Book(
@@ -3488,7 +3493,7 @@ class World:
                             birth_events_summary=birth_events_summary,
                             death_events_summary=death_events_summary
                         )
-                        llm_response = self._call_ollama(prompt)
+                        llm_response = self._call_llm(prompt)
                         try:
                             book_data = json.loads(llm_response)
                             new_book = Book(
@@ -3721,7 +3726,7 @@ class World:
             pack_members_nearby=pack_members_nearby,
         )
 
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
         if not response_str:
             # Fallback: if LLM fails, NPC might just try to attack if player is close, or do nothing
             if player_in_attack_range:
@@ -3864,7 +3869,7 @@ class World:
             player_toughness_desc=player_toughness_desc
         )
 
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
         if not response_str:
             self.add_message_to_chat_log(f"{npc.name} swings wildly but misses! (LLM Comms Error)")
             return
@@ -4790,7 +4795,7 @@ class World:
             player_persuasion_goal_text=player_goal_text
         )
 
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
         if not response_str:
             self.add_message_to_chat_log(f"{npc_target.name} doesn't seem to react to your attempt.")
             return
@@ -4865,7 +4870,7 @@ class World:
             event_summary=event_summary,
             conversation_history=history
         )
-        dialogue = self._call_ollama(prompt)
+        dialogue = self._call_llm(prompt)
         if dialogue:
             self.add_message_to_chat_log(f"{speaker.name} to {listener.name}: {dialogue}")
             speaker.current_conversation.append(f"{speaker.name}: {dialogue}")
@@ -4932,7 +4937,7 @@ class World:
             npc_toughness=npc_toughness_desc
         )
 
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
 
         if not response_str:
             self.add_message_to_chat_log("Your attack seems to have no effect (LLM Comms Error).")
@@ -5143,7 +5148,7 @@ class World:
             player_lockpicking_skill=self.player.knowledge.lockpicking_skill,
             lock_difficulty=lock_difficulty
         )
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
 
         if not response_str:
             self.add_message_to_chat_log("You try the lock, but nothing happens. (LLM Error)")
@@ -5427,7 +5432,7 @@ class World:
             long_term_memory=long_term_memory_summary,
             npc_help_needed=npc_target.knowledge.help_needed
         )
-        greeting = self._call_ollama(prompt)
+        greeting = self._call_llm(prompt)
         if not greeting:
             greeting = f"Hello. (LLM failed to provide greeting)"
 
@@ -5521,7 +5526,7 @@ class World:
                          subject_name=found_subject.name,
                          known_events_summary=summary_text
                      )
-                     response = self._call_ollama(prompt)
+                     response = self._call_llm(prompt)
                      if response:
                          self.chat_ui_history.append((npc_target.name, response.strip()))
                          return
@@ -5643,7 +5648,7 @@ class World:
                     subject_title=subject_title,
                     target_title=target_title
                 )
-                gossip_dialogue = self._call_ollama(gossip_prompt)
+                gossip_dialogue = self._call_llm(gossip_prompt)
                 if not gossip_dialogue:
                     gossip_dialogue = "I... uh... forget what I was going to say."
 
@@ -5691,7 +5696,7 @@ class World:
             long_term_memory=long_term_memory_summary
         )
 
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
         if not response_str:
             self.chat_ui_history.append((npc_target.name, "... (LLM failed to respond)"))
             return
@@ -5734,7 +5739,7 @@ class World:
                 item_name_plural=item_name_plural,
                 reward_amount=reward_amount
             )
-            job_offer_dialogue = self._call_ollama(offer_prompt)
+            job_offer_dialogue = self._call_llm(offer_prompt)
             if not job_offer_dialogue:
                 job_offer_dialogue = f"I might have some work for you... if you're interested. Need {quantity_needed} {item_name_plural} for {reward_amount} coins."
 
@@ -5805,7 +5810,7 @@ class World:
             npc_personality=npc.social.personality,
             conversation_history=history_str
         )
-        summary = self._call_ollama(prompt)
+        summary = self._call_llm(prompt)
 
         if summary and len(summary) > 10: # Avoid storing short errors or empty strings
             npc.knowledge.long_term_memory.append(summary)
@@ -5847,10 +5852,29 @@ class World:
         scored_events.sort(key=lambda x: x[0], reverse=True)
         return scored_events[0][1]
 
-    def _call_ollama(self, prompt: str) -> str:
-        """Makes a request to the Ollama API and returns the response."""
-        if not ENABLE_OLLAMA_CONNECTION:
+    def _call_llm(self, prompt: str) -> str:
+        """Makes a request to the configured LLM backend and returns the response."""
+        if not ENABLE_LLM_CONNECTION:
             return "{}"
+
+        if LLM_BACKEND == "gemini":
+            return self._call_gemini(prompt)
+        else:
+            return self._call_ollama_backend(prompt)
+
+    def _call_gemini(self, prompt: str) -> str:
+        if not GOOGLE_API_KEY:
+            return "{}"
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            # print(f"Error communicating with Gemini: {e}")
+            return ""
+
+    def _call_ollama_backend(self, prompt: str) -> str:
+        """Makes a request to the Ollama API and returns the response."""
         try:
             response = requests.post(
                 OLLAMA_ENDPOINT + "/api/generate",
@@ -5863,13 +5887,8 @@ class World:
             )
             response.raise_for_status()
             full_response = response.json()["response"]
-            # This logic to extract JSON is good, but let's assume for now the model might not always return valid JSON.
-            # We will just return the raw response if it's not JSON, and let the calling function handle it.
             return full_response.strip()
         except requests.exceptions.RequestException as e:
-            # Don't print to the console during gameplay, as it can be disruptive.
-            # A proper logging system would be better for production. For now, we'll just return "".
-            # print(f"Error communicating with Ollama: {e}")
             return ""
 
     def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None) -> Event:
@@ -6145,7 +6164,7 @@ class World:
                 family_ties_hint="",
                 attitude_to_player_hint=""
             )
-            llm_response = self._call_ollama(llm_prompt)
+            llm_response = self._call_llm(llm_prompt)
             try:
                 npc_data = json.loads(llm_response)
                 # Assign home
@@ -6344,7 +6363,7 @@ class World:
                     f"or a comment related to the player if their reputation is particularly high or low and the player is assumed to be generally known or nearby. "
                     f"Keep it concise."
                 )
-                llm_dialogue = self._call_ollama(prompt)
+                llm_dialogue = self._call_llm(prompt)
                 if llm_dialogue:
                     # Check if player can hear this NPC
                     distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y) # Manhattan distance
@@ -6417,7 +6436,7 @@ class World:
 
         # self.add_message_to_chat_log(f"Decorating prompt for {building.id[:6]}:\n{prompt}") # For debugging the full prompt
 
-        llm_response = self._call_ollama(prompt)
+        llm_response = self._call_llm(prompt)
         try:
             # If the response is a valid JSON, use it. Otherwise, fallback to placeholder.
             decoration_data = json.loads(llm_response)
@@ -6502,7 +6521,7 @@ class World:
                 family_ties_hint="none",
                 attitude_to_player_hint="neutral"
             )
-            llm_response = self._call_ollama(prompt)
+            llm_response = self._call_llm(prompt)
             try:
                 npc_data = json.loads(llm_response)
 
@@ -6553,7 +6572,7 @@ class World:
                 f"Generate a short, in-character dialogue response from {closest_npc.name} to the player. "
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
             )
-            llm_dialogue = self._call_ollama(prompt)
+            llm_dialogue = self._call_llm(prompt)
             # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
             print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
             self.last_talked_to_npc = closest_npc # Store for potential follow-up actions like persuasion
@@ -6707,7 +6726,7 @@ class World:
         )
 
         npc_data = {}
-        llm_response = self._call_ollama(prompt)
+        llm_response = self._call_llm(prompt)
         try:
             npc_data = json.loads(llm_response)
         except:
@@ -6967,7 +6986,7 @@ class World:
         """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""
 
         llm_prompt = LLM_PROMPTS["village_lore"].format(biome=chunk.biome)
-        llm_response = self._call_ollama(llm_prompt)
+        llm_response = self._call_llm(llm_prompt)
         try:
             lore_data = json.loads(llm_response)
             chunk.village.lore = lore_data.get("village_lore", "The mists of time have obscured this village's history.")
@@ -7506,7 +7525,7 @@ class World:
                             relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
                         )
 
-                        starter_dialogue = self._call_ollama(prompt)
+                        starter_dialogue = self._call_llm(prompt)
                         if starter_dialogue:
                             self.add_message_to_chat_log(f"{npc.name} approaches you.")
                             self.start_npc_dialogue(npc) # This clears history and sets up the UI state
@@ -7579,7 +7598,7 @@ class World:
                     player_infamy=entity.social.infamy,
                     player_actions_summary=actions_summary
                 )
-                response_str = self._call_ollama(prompt)
+                response_str = self._call_llm(prompt)
                 if response_str:
                     try:
                         response_json = json.loads(response_str)
@@ -7592,6 +7611,34 @@ class World:
                                 self.add_message_to_chat_log(f"{entity.name} is now known as {new_title}.")
                     except json.JSONDecodeError:
                         pass
+
+    def _update_npc_reputations(self):
+        """
+        Periodically updates reputation of NPCs and players based on recent global events
+        and natural decay.
+        """
+        # Run periodically (e.g., once a day)
+        if self.game_time % DAY_LENGTH_TICKS != 0:
+            return
+
+        # 1. Decay fame/infamy for all entities
+        all_entities = [self.player] + self.village_npcs + self.npcs
+        for entity in all_entities:
+            # Fame decay: -1 per day if > 0
+            if entity.social.fame > 0:
+                entity.social.fame -= 1
+            # Infamy decay: -1 per day if > 0
+            if entity.social.infamy > 0:
+                entity.social.infamy -= 1
+
+        # 2. Check for recent events that might affect reputation
+        # (Note: Most immediate reputation effects are handled by event creation hooks
+        # like handle_npc_death and _handle_witness_reaction. This is a cleanup/catch-all pass)
+        recent_events = [e for e in self.global_events if self.game_time - e.timestamp <= DAY_LENGTH_TICKS]
+        for event in recent_events:
+            # Example: If a "heroic_act" event type existed, we could process it here.
+            # Currently "entity_death" (monsters/murder) handles reputation directly.
+            pass
 
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""
@@ -8025,7 +8072,7 @@ class World:
             family_ties_hint="none",
             attitude_to_player_hint="neutral"
         )
-        llm_response = self._call_ollama(prompt)
+        llm_response = self._call_llm(prompt)
         try:
             npc_data = json.loads(llm_response)
             npc = NPC(
@@ -8387,7 +8434,7 @@ class World:
                                 known_events_summary=recent_events_summary,
                                 year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
                             )
-                            llm_response = self._call_ollama(prompt)
+                            llm_response = self._call_llm(prompt)
                             try:
                                 book_data = json.loads(llm_response)
                                 new_book = Book(
@@ -8554,7 +8601,7 @@ class World:
                 event_type=event_to_process.type
             )
 
-            response_str = self._call_ollama(prompt)
+            response_str = self._call_llm(prompt)
             if not response_str:
                 continue
 
@@ -8694,7 +8741,7 @@ class World:
             victim_name=victim_name
         )
 
-        response_str = self._call_ollama(prompt)
+        response_str = self._call_llm(prompt)
         if not response_str:
             self.add_message_to_chat_log(f"{witness.name} seems confused by what they saw. (LLM Error)")
             return

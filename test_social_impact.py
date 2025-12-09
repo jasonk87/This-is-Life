@@ -23,7 +23,7 @@ class TestSocialImpact(unittest.TestCase):
             self.world = World(seed=42)
 
         # Mock Ollama to avoid network calls
-        self.world._call_ollama = MagicMock(return_value="{}")
+        self.world._call_llm = MagicMock(return_value="{}")
         self.world.add_message_to_chat_log = MagicMock()
 
         # Create a workplace

@@ -25,7 +25,7 @@ class MockWorld(World):
         self.chunk_height = 1
         self._get_village_for_npc = MagicMock()
         # Mock LLM
-        self._call_ollama = MagicMock(return_value='{"title": "Life of Hero", "content": "A great story."}')
+        self._call_llm = MagicMock(return_value='{"title": "Life of Hero", "content": "A great story."}')
         self.book_reading_context = {}
 
 class TestKnowledgeSystem(unittest.TestCase):

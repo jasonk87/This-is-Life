@@ -51,6 +51,21 @@ from data.quests import QUEST_DEFINITIONS # Import quest definitions
 from data.environment import WEATHER_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 
+# Professions that use the daily task system (Ask for Work / Turn in Work) instead of generic work
+JOBS_WITH_SPECIFIC_TASKS = [
+    "Woodcutter", "Miner", "Farmer", "Farmhand", "Fisherman", "Miller", "Miller's Assistant", "Baker", "Baker's Assistant",
+    "Blacksmith", "Apprentice Blacksmith", "Tavern Keeper", "Server", "Merchant", "Shop Assistant", "Carpenter", "Apprentice Carpenter",
+    "Sheriff", "Deputy", "Guard", "Town Official", "Clerk", "Scribe", "Assistant Scribe", "Magistrate"
+]
+
+POLITICAL_HIERARCHY = {
+    "mayor": {"reports_to": None, "subordinates": ["sheriff", "magistrate"]},
+    "sheriff": {"reports_to": "mayor", "subordinates": ["deputy"]},
+    "deputy": {"reports_to": "sheriff", "subordinates": []},
+    "magistrate": {"reports_to": "mayor", "subordinates": ["clerk"]},
+    "clerk": {"reports_to": "magistrate", "subordinates": []}
+}
+
 VILLAGE_BUILDING_PROJECTS = {
     "house": {
         "cost": {"raw_log": 50},
@@ -206,6 +221,33 @@ class Village:
         self.local_events = [] # List of Event objects specific to this village location
         self.known_events = {} # Event ID -> Event object (knowledge spread)
         self.construction_projects = [] # List of active construction projects
+        self.politics = {
+            "mayor_id": None,
+            "treasury": 1000, # Initial village funds
+            "tax_rate": 0.10, # 10% tax rate default
+            "next_election_day": 14, # First election in 2 weeks
+            "election_active": False,
+            "candidates": [], # List of IDs
+            "roles": {
+                "sheriff": None,
+                "deputy": None,
+                "magistrate": None,
+                "clerk": None
+            },
+            "active_policies": set() # Set of active policy strings
+        }
+
+    @property
+    def population(self):
+        # Count residents in buildings
+        return sum(len(b.residents) for b in self.buildings if b.category == "residential")
+
+    @property
+    def tier(self):
+        pop = self.population
+        if pop < 10: return "Hamlet"
+        if pop < 30: return "Village"
+        return "Town"
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -257,6 +299,8 @@ class PlayerSocialState:
     fame: int = 0
     infamy: int = 0
     title: str = ""
+    family_ties: dict = field(default_factory=lambda: {"description": "none"})
+    relationships: dict = field(default_factory=dict)
 
 @dataclass
 class PlayerEconomicState:
@@ -265,6 +309,13 @@ class PlayerEconomicState:
     active_contracts: dict = field(default_factory=dict)
     pending_contract_offer: Any | None = None
     bounty: int = 0
+    profession: str = "Unemployed"
+    job_performance: int = 50
+    job_satisfaction: int = 50
+    work_building_id: str | None = None
+    days_unemployed: int = 0
+    last_career_update_day: int = 0
+    job_task: dict | None = None # e.g. {"item_key": "raw_log", "quantity": 5, "description": "Gather 5 logs."}
 
 @dataclass
 class PlayerEquipment:
@@ -305,6 +356,7 @@ class Player:
         self.char = ord('@')
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
+        self.name = "Player"
 
         # Components
         self.physical = PlayerPhysicalState()
@@ -604,6 +656,7 @@ class World:
 
         self._spawn_traveling_merchants()
         self._find_starting_position()
+        self._generate_player_family()
 
         # Transparency map is now updated lazily as chunks are generated/visited
         # We might want to ensure the player's starting area is generated immediately
@@ -4273,7 +4326,433 @@ class World:
                  actions.append("Cook")
 
         actions.append("Examine") # Universal action
+
+        # Add "Apply for Job" if targeting an NPC who is a boss and player is unemployed
+        if entity_type == "npc" and self.player.economic.profession == "Unemployed":
+            npc = entity_data
+            if npc.schedule.work_building_id:
+                building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                if building and self._is_boss_of_building(npc, building):
+                     actions.append("Apply for Job")
+
+        # Add "Work" action if player is employed and at their workplace
+        if self.player.economic.profession != "Unemployed" and self.player.economic.work_building_id:
+            work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
+            if work_building and work_building.contains_global_coords(self.player.x, self.player.y):
+                # Only show Work actions if targeting something relevant (e.g. self, building floor, or workstation)
+                if entity_type in ["tile", "building"]:
+                    prof = self.player.economic.profession
+
+                    if prof in JOBS_WITH_SPECIFIC_TASKS:
+                        if not self.player.economic.job_task:
+                            actions.append("Ask for Work")
+                        else:
+                            # Check if player has requirements to turn in
+                            task = self.player.economic.job_task
+                            if task and task.get("item_key") and self.player.has_item(task["item_key"], task.get("quantity", 0)):
+                                actions.append("Turn in Work")
+                            else:
+                                # Optional: Could add "Check Task Status" here if desired
+                                pass
+                    else:
+                        actions.append("Work") # Fallback for undefined jobs
+
+        # Politics Actions at Capital Hall
+        if entity_type == "building" and entity_data.building_type == "capital_hall":
+            village = None
+            # Find village this building belongs to
+            chunk, _, _ = self._get_chunk_from_building(entity_data)
+            if chunk and chunk.village:
+                village = chunk.village
+
+            if village:
+                if village.politics["election_active"] and self.player.id not in village.politics["candidates"]:
+                    if self.player.social.fame >= 20: # Minimum fame requirement
+                        actions.append("Declare Candidacy")
+
+                if village.politics["mayor_id"] == self.player.id:
+                    actions.append("Manage Village")
+
         return actions
+
+    def _is_boss_of_building(self, npc: NPC, building: Building) -> bool:
+        """Checks if the NPC is the 'boss' or leader of their workplace."""
+        prof = npc.economic.profession
+        if building.building_type == "sheriff_office" and prof == "Sheriff": return True
+        if building.building_type == "lumber_mill" and prof == "Lumber Mill Foreman": return True
+        if building.building_type == "tavern" and prof == "Tavern Keeper": return True
+        if building.building_type == "general_store" and prof == "Merchant": return True
+        if building.building_type == "capital_hall" and prof == "Town Official": return True
+        if building.building_type == "farm" and prof == "Farmer": return True # Head farmer
+        # Add more logic as needed
+        return False
+
+    def player_attempt_declare_candidacy(self, building: Building):
+        """Handles the player declaring candidacy for Mayor at the Capital Hall."""
+        chunk, _, _ = self._get_chunk_from_building(building)
+        if not chunk or not chunk.village:
+            return
+
+        village = chunk.village
+        if not village.politics["election_active"]:
+            self.add_message_to_chat_log("There is no active election.")
+            return
+
+        if self.player.id in village.politics["candidates"]:
+            self.add_message_to_chat_log("You are already a candidate.")
+            return
+
+        if self.player.social.fame < 20:
+            self.add_message_to_chat_log("You are not famous enough to run for Mayor (Need 20 Fame).")
+            return
+
+        village.politics["candidates"].append(self.player.id)
+        self.add_message_to_chat_log("You have officially declared your candidacy for Mayor!")
+        self.log_event("candidacy_declared", "{subject} has declared candidacy for Mayor.", self.player.id, location=(building.global_center_x, building.global_center_y))
+
+    def player_attempt_apply_for_job(self, target_npc: NPC):
+        """Handles player applying for a job with a boss NPC."""
+        if not target_npc.schedule.work_building_id:
+            self.add_message_to_chat_log(f"{target_npc.name} doesn't seem to have a workplace.")
+            return
+
+        building = self.buildings_by_id.get(target_npc.schedule.work_building_id)
+        if not building: return
+
+        # Check vacancy
+        current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == building.id and not n.physical.is_dead)
+        # Player counts as a worker if hired
+        if current_workers >= building.max_workers:
+            self.add_message_to_chat_log(f"{target_npc.name}: \"Sorry, we're fully staffed right now.\"")
+            return
+
+        # Hire the player
+        # Determine profession name based on building type (Reuse logic from _assign_job or similar)
+        new_profession = "Worker"
+        if building.building_type == "sheriff_office": new_profession = "Deputy"
+        elif building.building_type == "lumber_mill": new_profession = "Woodcutter"
+        elif building.building_type == "farm": new_profession = "Farmhand"
+        elif building.building_type == "mine": new_profession = "Miner"
+        elif building.building_type == "mill": new_profession = "Miller's Assistant"
+        elif building.building_type == "bakery": new_profession = "Baker's Assistant"
+        elif building.building_type == "tavern": new_profession = "Server"
+        elif building.building_type == "fishing_hut": new_profession = "Fisherman"
+        elif building.building_type == "blacksmith_shop": new_profession = "Apprentice Blacksmith"
+        elif building.building_type == "general_store": new_profession = "Shop Assistant"
+        elif building.building_type == "carpenter_shop": new_profession = "Apprentice Carpenter"
+        elif building.building_type == "library": new_profession = "Assistant Scribe"
+        elif building.building_type == "capital_hall": new_profession = "Clerk"
+
+        self.player.economic.profession = new_profession
+        self.player.economic.work_building_id = building.id
+        self.player.economic.job_performance = 50
+        self.player.economic.job_satisfaction = 100
+        self.player.economic.days_unemployed = 0
+
+        self.add_message_to_chat_log(f"{target_npc.name}: \"You're hired! You start immediately as a {new_profession}.\"")
+        self.add_message_to_chat_log(f"(Work hard to keep your job and get paid daily!)")
+
+    def generate_job_task(self):
+        """Generates a daily task for the player based on their profession."""
+        prof = self.player.economic.profession
+        task = None
+
+        # Manual Labor
+        if prof == "Woodcutter":
+            qty = random.randint(5, 10)
+            task = {"item_key": "raw_log", "quantity": qty, "description": f"Gather {qty} logs."}
+        elif prof == "Miner":
+            qty = random.randint(3, 8)
+            task = {"item_key": "iron_ore", "quantity": qty, "description": f"Mine {qty} iron ore."}
+        elif prof == "Farmer" or prof == "Farmhand":
+            qty = random.randint(5, 10)
+            task = {"item_key": "wheat", "quantity": qty, "description": f"Harvest {qty} wheat."}
+        elif prof == "Fisherman":
+            qty = random.randint(3, 6)
+            task = {"item_key": "raw_fish", "quantity": qty, "description": f"Catch {qty} fish."}
+        elif prof == "Miller" or prof == "Miller's Assistant":
+             qty = random.randint(3, 5)
+             task = {"item_key": "flour", "quantity": qty, "description": f"Produce {qty} flour."}
+        elif prof == "Baker" or prof == "Baker's Assistant":
+             qty = random.randint(3, 5)
+             task = {"item_key": "bread", "quantity": qty, "description": f"Bake {qty} bread."}
+
+        # Service & Crafting
+        elif prof in ["Blacksmith", "Apprentice Blacksmith"]:
+            if random.random() < 0.5:
+                qty = random.randint(3, 5)
+                task = {"item_key": "iron_ore", "quantity": qty, "description": f"Stockpile {qty} iron ore for the forge."}
+            else:
+                qty = random.randint(5, 10)
+                task = {"item_key": "raw_log", "quantity": qty, "description": f"Gather {qty} logs for charcoal."}
+        elif prof in ["Tavern Keeper", "Server"]:
+            roll = random.random()
+            if roll < 0.33:
+                qty = random.randint(3, 5)
+                task = {"item_key": "raw_meat", "quantity": qty, "description": f"Bring {qty} raw meat for the kitchen."}
+            elif roll < 0.66:
+                qty = random.randint(3, 5)
+                task = {"item_key": "raw_fish", "quantity": qty, "description": f"Bring {qty} raw fish for the daily special."}
+            else:
+                qty = random.randint(5, 10)
+                task = {"item_key": "raw_log", "quantity": qty, "description": f"Bring {qty} logs for the hearth."}
+        elif prof in ["Merchant", "Shop Assistant"]:
+            # Ask for random stock
+            stock_items = ["wooden_plank", "healing_salve", "stone_hoe", "axe_stone"]
+            item = random.choice(stock_items)
+            qty = random.randint(2, 5)
+            task = {"item_key": item, "quantity": qty, "description": f"We need more stock. Acquire {qty} {item.replace('_', ' ')}s."}
+        elif prof in ["Carpenter", "Apprentice Carpenter"]:
+             qty = random.randint(5, 10)
+             task = {"item_key": "raw_log", "quantity": qty, "description": f"Bring {qty} logs for processing."}
+
+        # Civic & Official
+        elif prof in ["Sheriff", "Deputy", "Guard"]:
+            if random.random() < 0.5:
+                qty = 1
+                task = {"item_key": "rusty_sword", "quantity": qty, "description": f"Confiscate {qty} weapon (rusty sword) for the armory."}
+            else:
+                qty = random.randint(3, 5)
+                task = {"item_key": "raw_meat", "quantity": qty, "description": f"Gather {qty} rations (meat) for the station."}
+        elif prof in ["Town Official", "Clerk", "Scribe", "Assistant Scribe"]:
+             # Abstract: supplying the office
+             qty = random.randint(3, 5)
+             task = {"item_key": "raw_log", "quantity": qty, "description": f"Bring {qty} logs for the fireplace/paper."}
+
+        self.player.economic.job_task = task
+        if task:
+            self.add_message_to_chat_log(f"Boss: \"Your task for today is: {task['description']}\"")
+        else:
+            self.add_message_to_chat_log(f"Boss: \"Just make yourself useful today.\"")
+
+    def player_ask_for_work(self):
+        """Player requests a task from their boss/workplace."""
+        if self.player.economic.profession == "Unemployed":
+            self.add_message_to_chat_log("You don't have a job.")
+            return
+
+        if self.player.economic.job_task:
+            task = self.player.economic.job_task
+            self.add_message_to_chat_log(f"Boss: \"You already have a task: {task['description']}\"")
+            return
+
+        self.generate_job_task()
+
+    def player_turn_in_work(self):
+        """Player attempts to complete their job task."""
+        if not self.player.economic.job_task:
+            self.add_message_to_chat_log("You don't have an active task to turn in.")
+            return
+
+        task = self.player.economic.job_task
+        item_key = task.get("item_key")
+        qty_needed = task.get("quantity", 0)
+
+        if not item_key:
+            # Generic task completion (for non-item tasks if we add them)
+             self.player.economic.job_task = None
+             self.add_message_to_chat_log("Task complete.")
+             return
+
+        if self.player.has_item(item_key, qty_needed):
+            self.player.remove_item(item_key, qty_needed)
+            self.player.economic.job_task = None
+
+            # Boost performance significantly
+            performance_gain = 30
+            self.player.economic.job_performance = min(100, self.player.economic.job_performance + performance_gain)
+
+            # Add items to building inventory (simulate economy)
+            if self.player.economic.work_building_id:
+                work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
+                if work_building:
+                    work_building.building_inventory[item_key] = work_building.building_inventory.get(item_key, 0) + qty_needed
+
+            self.add_message_to_chat_log(f"Boss: \"Good work! That's what I like to see.\"")
+            self.add_message_to_chat_log(f"Your job performance improves significantly. (Current: {self.player.economic.job_performance}/100)")
+        else:
+            self.add_message_to_chat_log(f"You don't have the required items ({qty_needed} {item_key}).")
+
+    def player_attempt_work(self):
+        """Handles the player performing work at their job (Generic Fallback)."""
+        if self.player.economic.profession == "Unemployed" or not self.player.economic.work_building_id:
+            self.add_message_to_chat_log("You don't have a job to work at.")
+            return
+
+        work_building = self.buildings_by_id.get(self.player.economic.work_building_id)
+        if not work_building or not work_building.contains_global_coords(self.player.x, self.player.y):
+            self.add_message_to_chat_log("You need to be at your workplace to work.")
+            return
+
+        # If the profession has specific tasks, redirect or warn
+        prof = self.player.economic.profession
+        if prof in JOBS_WITH_SPECIFIC_TASKS:
+             self.add_message_to_chat_log(f"{prof} jobs require completing specific tasks. Ask for work!")
+             return
+
+        # Perform generic work (for fully undefined jobs)
+        # Increase performance
+        performance_gain = random.randint(10, 20)
+        self.player.economic.job_performance = min(100, self.player.economic.job_performance + performance_gain)
+
+        # Advance time (e.g., 2 hours)
+        time_cost = DAY_LENGTH_TICKS // 12
+        self.game_time += time_cost
+
+        # Hunger/Thirst cost
+        self.player.physical.hunger = min(self.player.physical.max_hunger, self.player.physical.hunger + 10)
+        self.player.physical.thirst = min(self.player.physical.max_thirst, self.player.physical.thirst + 15)
+
+        self.add_message_to_chat_log(f"You spend some time working diligently as a {self.player.economic.profession}.")
+        self.add_message_to_chat_log(f"Your job performance improves. (Current: {self.player.economic.job_performance}/100)")
+
+
+    def _update_player_career(self):
+        """Updates the player's career status daily: wages, performance decay, firing."""
+        current_day = self.game_time // DAY_LENGTH_TICKS
+
+        # Ensure we only update once per day, and skipping day 0 if needed (or handle init)
+        if current_day <= self.player.economic.last_career_update_day:
+            return
+
+        # Perform update for the new day
+        self.player.economic.last_career_update_day = current_day
+
+        if self.player.economic.profession != "Unemployed" and self.player.economic.work_building_id:
+            # Pay wages
+            wage = 15 # Base wage for player
+            if "Apprentice" in self.player.economic.profession or "Assistant" in self.player.economic.profession or "Clerk" in self.player.economic.profession:
+                wage = 10
+            elif "Deputy" in self.player.economic.profession:
+                wage = 20
+            elif "Woodcutter" in self.player.economic.profession:
+                wage = 12
+
+            # Performance check for payment
+            if self.player.economic.job_performance > 30:
+                self.player.economic.money += wage
+                self.add_message_to_chat_log(f"You received {wage} coins for your work as a {self.player.economic.profession}.")
+            else:
+                self.add_message_to_chat_log(f"You didn't perform well enough to get paid today.")
+
+            # Decay performance daily (must work to maintain it)
+            self.player.economic.job_performance = max(0, self.player.economic.job_performance - 15)
+
+            # Firing check
+            if self.player.economic.job_performance < 10:
+                self.add_message_to_chat_log(f"You have been fired from your job as a {self.player.economic.profession} due to poor performance!")
+                self.player.economic.profession = "Unemployed"
+                self.player.economic.work_building_id = None
+                self.player.economic.days_unemployed = 0
+        else:
+            self.player.economic.days_unemployed += 1
+
+    def _generate_player_family(self):
+        """Generates a family for the player and places them in the world."""
+        # Find the nearest village to the player's starting position
+        nearest_village = None
+        min_dist = float('inf')
+
+        for village in self.villages:
+            if village.buildings:
+                bx, by = village.buildings[0].global_center_x, village.buildings[0].global_center_y
+                dist = (self.player.x - bx)**2 + (self.player.y - by)**2
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_village = village
+
+        if not nearest_village:
+            self.add_message_to_chat_log("You find yourself alone in the world, with no family nearby.")
+            return
+
+        # Determine family structure
+        family_structure = random.choice([
+            "parents_alive", "single_parent", "orphaned_with_siblings", "parents_and_siblings"
+        ])
+
+        family_members = []
+
+        if "parents" in family_structure or "single_parent" in family_structure:
+            num_parents = 2 if "parents" in family_structure else 1
+            for i in range(num_parents):
+                role = "Father" if i == 0 else "Mother"
+                if num_parents == 1: role = random.choice(["Father", "Mother"])
+
+                parent = self._create_family_member(nearest_village, role)
+                if parent:
+                    family_members.append(parent)
+                    self.player.social.relationships[parent.id] = 80
+                    parent.social.relationships[self.player.id] = 80
+                    parent.social.family_ties["children"] = [self.player.id]
+
+        if "siblings" in family_structure or "orphaned_with_siblings" in family_structure:
+            num_siblings = random.randint(1, 3)
+            for i in range(num_siblings):
+                role = random.choice(["Brother", "Sister"])
+                sibling = self._create_family_member(nearest_village, role)
+                if sibling:
+                    family_members.append(sibling)
+                    self.player.social.relationships[sibling.id] = 75
+                    sibling.social.relationships[self.player.id] = 75
+                    sibling.social.family_ties["sibling"] = self.player.id
+
+        # Construct family description for player
+        desc_parts = []
+        for member in family_members:
+            role = member.social.family_ties.get("role_to_player", "Relative")
+            desc_parts.append(f"{role}: {member.name}")
+
+        if desc_parts:
+            self.player.social.family_ties["description"] = "Family nearby: " + ", ".join(desc_parts)
+            self.add_message_to_chat_log(f"You start your journey near your family in the village: {', '.join(desc_parts)}.")
+        else:
+             self.player.social.family_ties["description"] = "You are an orphan with no known kin."
+             self.add_message_to_chat_log("You are alone in this world.")
+
+    def _create_family_member(self, village: Village, role: str) -> NPC | None:
+        if not village.buildings: return None
+
+        # Pick a home
+        potential_homes = [b for b in village.buildings if b.category == "residential"]
+        home = random.choice(potential_homes) if potential_homes else random.choice(village.buildings)
+
+        x = home.global_center_x
+        y = home.global_center_y
+
+        prompt = LLM_PROMPTS["npc_personality"].format(
+            player_criminal_points=0, player_hero_points=0,
+            name_hint=f"the player's {role.lower()}",
+            personality_hint="caring, family-oriented",
+            family_ties_hint=f"{role} of the player",
+            attitude_to_player_hint="friendly"
+        )
+        llm_response = self._call_ollama(prompt)
+        try:
+            npc_data = json.loads(llm_response)
+            npc = NPC(
+                x=x, y=y,
+                name=npc_data.get("name", f"{role}"),
+                dialogue=npc_data.get("dialogue", ["Hello dear."]),
+                personality=npc_data.get("personality", "family"),
+                player_id=self.player.id
+            )
+            npc.social.family_ties["role_to_player"] = role
+            npc.economic.profession = "Unemployed"
+
+            # Assign a job potentially
+            potential_workplaces = [b for b in village.buildings if "workplace" in b.category]
+            if potential_workplaces and random.random() < 0.7:
+                work = random.choice(potential_workplaces)
+                self._assign_job(npc, work)
+
+            npc.schedule.home_building_id = home.id
+            home.residents.append(npc)
+            npc.knowledge.known_locations[f"my home"] = (home.global_center_x, home.global_center_y)
+
+            self.village_npcs.append(npc)
+            return npc
+        except json.JSONDecodeError:
+            return None
 
     def serve_jail_time(self):
         """Handles the process of putting the player in jail."""
@@ -7229,6 +7708,7 @@ class World:
         self._update_economy()
         self._update_npc_ages()
         self._update_npc_careers()
+        self._update_player_career()
         self._update_abstract_simulation()
         self._process_npc_witness_events()
         self._process_npc_gossip_reaction()
@@ -7971,6 +8451,264 @@ class World:
             self.log_event("construction_complete", f"The village completed a new {b_type}.", -1, location=(global_x, global_y))
             village.construction_projects.pop(0)
 
+    def _update_village_politics(self, village: Village):
+        """Handles elections and political updates for a village."""
+        current_day = self.game_time // DAY_LENGTH_TICKS
+
+        # Trigger Election Period
+        if not village.politics["election_active"] and current_day >= village.politics["next_election_day"]:
+            village.politics["election_active"] = True
+            village.politics["candidates"] = []
+            self.log_event("election_started", "An election for Mayor has begun!", -1, location=village.interaction_points.get("town_square_center", (0,0)))
+            self.add_message_to_chat_log("An election has started! Visit the Capital Hall to run for Mayor.")
+
+            # Find NPC candidates (Incumbent + 1 Challenger)
+            potential_candidates = []
+            incumbent = None
+            if village.politics["mayor_id"]:
+                incumbent = self.get_entity_by_id(village.politics["mayor_id"])
+                if incumbent and not incumbent.physical.is_dead:
+                    potential_candidates.append(incumbent)
+
+            # Find challenger (High fame or Town Official)
+            challengers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village and not n.physical.is_dead and n.id != village.politics["mayor_id"]]
+            challengers.sort(key=lambda x: x.social.fame, reverse=True)
+
+            if challengers:
+                potential_candidates.append(challengers[0])
+
+            for candidate in potential_candidates:
+                village.politics["candidates"].append(candidate.id)
+                self.add_message_to_chat_log(f"{candidate.name} has declared candidacy for Mayor.")
+
+        # Resolve Election (e.g. 3 days after start)
+        if village.politics["election_active"] and current_day >= village.politics["next_election_day"] + 3:
+            # Tally Votes
+            vote_counts = {cid: 0 for cid in village.politics["candidates"]}
+
+            # Iterate all villagers to cast votes
+            villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village and not n.physical.is_dead]
+            for voter in villagers:
+                best_candidate_id = None
+                best_score = -100
+
+                for cid in village.politics["candidates"]:
+                    candidate = self.get_entity_by_id(cid)
+                    if not candidate: continue
+
+                    # Score based on relationship + fame/10
+                    score = 0
+                    if candidate.id == self.player.id:
+                        score = voter.social.relationships.get(self.player.id, 50) + (self.player.social.fame / 10)
+                    else:
+                        score = voter.social.relationships.get(candidate.id, 50) + (candidate.social.fame / 10)
+
+                    if score > best_score:
+                        best_score = score
+                        best_candidate_id = cid
+
+                if best_candidate_id:
+                    vote_counts[best_candidate_id] += 1
+
+            # Determine Winner
+            winner_id = max(vote_counts, key=vote_counts.get) if vote_counts else None
+
+            if winner_id:
+                winner = self.get_entity_by_id(winner_id)
+                old_mayor_id = village.politics["mayor_id"]
+
+                # Update Politics State
+                village.politics["mayor_id"] = winner_id
+                village.politics["election_active"] = False
+                village.politics["next_election_day"] = current_day + 14 # Next election in 2 weeks
+
+                self.log_event("election_results", f"{winner.name} has won the election for Mayor!", winner_id, location=village.interaction_points.get("town_square_center", (0,0)))
+                self.add_message_to_chat_log(f"Election Results: {winner.name} is the new Mayor!")
+
+                # Apply Winner Effects
+                if isinstance(winner, Player):
+                    winner.economic.profession = "Mayor"
+                    # Find Capital Hall to set as workplace
+                    cap_hall = next((b for b in village.buildings if b.building_type == "capital_hall"), None)
+                    if cap_hall:
+                        winner.economic.work_building_id = cap_hall.id
+                    self.add_message_to_chat_log("Congratulations! You are now the Mayor. Visit the Capital Hall to manage the village.")
+                elif isinstance(winner, NPC):
+                    winner.economic.profession = "Mayor"
+                    cap_hall = next((b for b in village.buildings if b.building_type == "capital_hall"), None)
+                    if cap_hall:
+                        # Kick out old mayor if NPC
+                        if old_mayor_id and old_mayor_id != winner_id:
+                             old_mayor = self.get_entity_by_id(old_mayor_id)
+                             if isinstance(old_mayor, NPC):
+                                 old_mayor.economic.profession = "Town Official" # Demote
+                                 old_mayor.add_grudge(winner_id, "Won the election against me.")
+
+                        winner.schedule.work_building_id = cap_hall.id
+                        self._remove_npc_from_world(winner, reason="became mayor") # Temp remove to re-add? No, just update.
+                        # Actually we don't need to remove/add, just update properties.
+
+    def _collect_village_taxes(self, village: Village):
+        """Collects taxes from villagers and pays the mayor."""
+        if not village.politics["mayor_id"]: return
+
+        tax_rate = village.politics["tax_rate"]
+        collected = 0
+
+        villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village and not n.physical.is_dead]
+        for n in villagers:
+            tax = int(n.economic.money * tax_rate)
+            if tax > 0:
+                n.economic.money -= tax
+                collected += tax
+                # Happiness hit for high taxes
+                if tax_rate > 0.15:
+                     n.economic.job_satisfaction = max(0, n.economic.job_satisfaction - 2)
+                     if village.politics["mayor_id"] == self.player.id:
+                         n.social.relationships[self.player.id] = max(0, n.social.relationships.get(self.player.id, 50) - 1)
+                elif tax_rate < 0.05:
+                     # Happiness boost for low taxes
+                     n.economic.job_satisfaction = min(100, n.economic.job_satisfaction + 1)
+                     if village.politics["mayor_id"] == self.player.id:
+                         n.social.relationships[self.player.id] = min(100, n.social.relationships.get(self.player.id, 50) + 1)
+
+        village.politics["treasury"] += collected
+
+        # Pay Mayor
+        mayor = self.get_entity_by_id(village.politics["mayor_id"])
+        if mayor:
+            salary = 50 # Good salary
+            if village.politics["treasury"] >= salary:
+                village.politics["treasury"] -= salary
+                mayor.economic.money += salary
+                if isinstance(mayor, Player):
+                    self.add_message_to_chat_log(f"You received {salary} coins from the village treasury (Mayor's Salary).")
+
+    def _update_political_appointments(self, village: Village):
+        """Fills vacant roles in the hierarchy."""
+        # Process roles in order of rank to ensure best candidates get top jobs
+        role_priority = ["sheriff", "magistrate", "deputy", "clerk"]
+
+        for role_name in role_priority:
+            current_id = village.politics["roles"].get(role_name)
+
+            # If filled, check if they are dead or fired (job logic handles firing, we just check consistency)
+            if current_id:
+                official = self.get_entity_by_id(current_id)
+                if not official or official.physical.is_dead or official.economic.profession.lower() != role_name:
+                    village.politics["roles"][role_name] = None
+                    current_id = None
+
+            # If vacant, try to fill it
+            if not current_id:
+                # Find best candidate
+                # Promotion from subordinate?
+                # Hiring from general pool?
+
+                # Simplified: Hire best fit from village
+                candidates = []
+                for n in self.village_npcs:
+                    if self._get_village_for_npc(n) == village and not n.physical.is_dead and n.economic.profession == "Unemployed":
+                        # Basic score based on stats (implied)
+                        score = n.social.fame
+                        if role_name in ["sheriff", "deputy"]:
+                            score += n.combat.max_hp
+                        elif role_name in ["magistrate", "clerk"]:
+                            score += n.age # Experience
+                        candidates.append((score, n))
+
+                candidates.sort(key=lambda x: x[0], reverse=True)
+
+                if candidates:
+                    new_official = candidates[0][1]
+                    new_official.economic.profession = role_name.title()
+                    new_official.economic.job_satisfaction = 100
+                    village.politics["roles"][role_name] = new_official.id
+
+                    # Assign workplace based on role
+                    workplace_type = "capital_hall"
+                    if role_name in ["sheriff", "deputy"]: workplace_type = "sheriff_office"
+                    elif role_name in ["magistrate", "clerk"]: workplace_type = "capital_hall"
+
+                    work_building = next((b for b in village.buildings if b.building_type == workplace_type), None)
+                    if work_building:
+                        new_official.schedule.work_building_id = work_building.id
+
+                    self.add_message_to_chat_log(f"{new_official.name} has been appointed as {role_name.title()}.")
+
+    def _consult_officials(self, village: Village, proposal_type: str, value: Any) -> bool:
+        """
+        Consults relevant officials for a policy decision.
+        Returns True if approved (or no relevant official exists to block it).
+        """
+        blocking_official_id = None
+
+        if proposal_type == "change_tax_rate":
+            blocking_official_id = village.politics["roles"].get("magistrate")
+        elif proposal_type == "enact_policy":
+            if value == "conscription":
+                blocking_official_id = village.politics["roles"].get("sheriff")
+            elif value == "subsidies":
+                blocking_official_id = village.politics["roles"].get("magistrate")
+
+        if not blocking_official_id:
+            return True # No one to block it (Autocracy/Vacancy)
+
+        official = self.get_entity_by_id(blocking_official_id)
+        if not official: return True
+
+        # Check relationship
+        mayor_id = village.politics["mayor_id"]
+        rel = 50
+        if mayor_id == self.player.id:
+            rel = official.social.relationships.get(self.player.id, 50)
+
+        if rel < 40: # Dislikes Mayor
+            if mayor_id == self.player.id:
+                self.add_message_to_chat_log(f"{official.name} ({official.economic.profession}) opposes this decision.")
+            return False
+
+        return True
+
+    def _apply_policy_effects(self, village: Village):
+        """Applies daily effects of active policies."""
+        if "festival" in village.politics["active_policies"]:
+            # Festival: Costs money, boosts happiness
+            cost = 20
+            if village.politics["treasury"] >= cost:
+                village.politics["treasury"] -= cost
+                # Boost happiness for random villagers
+                villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village]
+                for n in villagers:
+                    if random.random() < 0.1:
+                        n.economic.job_satisfaction = min(100, n.economic.job_satisfaction + 5)
+            else:
+                village.politics["active_policies"].remove("festival")
+                if village.politics["mayor_id"] == self.player.id:
+                    self.add_message_to_chat_log("Festival policy cancelled due to lack of funds.")
+
+        if "subsidies" in village.politics["active_policies"]:
+            # Subsidies: Costs money, increases supply
+            cost = 30
+            if village.politics["treasury"] >= cost:
+                village.politics["treasury"] -= cost
+                # Increase supply of goods
+                for item in list(village.supply.keys()):
+                    if random.random() < 0.2:
+                        village.supply[item] += 1
+            else:
+                village.politics["active_policies"].remove("subsidies")
+                if village.politics["mayor_id"] == self.player.id:
+                    self.add_message_to_chat_log("Subsidies policy cancelled due to lack of funds.")
+
+        if "conscription" in village.politics["active_policies"]:
+            # Conscription: Costs happiness, maintains guards
+            # (Simplified: just happiness hit for now)
+            villagers = [n for n in self.village_npcs if self._get_village_for_npc(n) == village]
+            for n in villagers:
+                if random.random() < 0.05:
+                    n.economic.job_satisfaction = max(0, n.economic.job_satisfaction - 2)
+
     def _update_abstract_simulation(self):
         """
         Runs a lightweight simulation for off-screen villages to simulate high-level events
@@ -7979,6 +8717,20 @@ class World:
         # This should not run on every single tick. Let's run it once per day.
         if self.game_time % DAY_LENGTH_TICKS != 0:
             return
+
+        # --- Politics Update (Runs for all villages, even onscreen) ---
+        # Note: We iterate chunks to find villages, or use self.villages list.
+        # self.villages is populated in _generate_chunk_macro.
+        for village in self.villages:
+            self._update_village_politics(village)
+            self._collect_village_taxes(village)
+
+            # Weekly Political Appointments Update
+            if self.game_time % (DAY_LENGTH_TICKS * 7) == 0:
+                self._update_political_appointments(village)
+
+            # Daily Policy Effects
+            self._apply_policy_effects(village)
 
         player_chunk_x = self.player.x // CHUNK_SIZE
         player_chunk_y = self.player.y // CHUNK_SIZE

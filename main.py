@@ -157,7 +157,13 @@ def execute_interaction(world: World, context_handler):
         "Claim House": lambda: claim_house(world, entity_data),
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
-        "Read": lambda: world.player_attempt_read_book(entity_data["item_key"])
+        "Read": lambda: world.player_attempt_read_book(entity_data["item_key"]),
+        "Apply for Job": lambda: world.player_attempt_apply_for_job(entity_data),
+        "Ask for Work": lambda: world.player_ask_for_work(),
+        "Turn in Work": lambda: world.player_turn_in_work(),
+        "Work": lambda: world.player_attempt_work(),
+        "Declare Candidacy": lambda: world.player_attempt_declare_candidacy(entity_data),
+        "Manage Village": lambda: open_politics_menu(world)
     }
 
     if selected_action in action_map:
@@ -170,6 +176,56 @@ def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'HELP_MENU' state."""
     if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.QUESTION, tcod.event.KeySym.SLASH):
         world.game_state = "PLAYING"
+
+def handle_politics_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the 'POLITICS_MENU' state."""
+    if event.sym == tcod.event.KeySym.ESCAPE:
+        world.game_state = "PLAYING"
+        return
+
+    # Find the village the player is managing
+    village = None
+    for v in world.villages:
+        if v.politics["mayor_id"] == world.player.id:
+            village = v
+            break
+
+    if not village:
+        return
+
+    proposal_type = None
+    value = None
+
+    if event.sym == tcod.event.KeySym.N1: # Raise Taxes
+        proposal_type = "change_tax_rate"
+        value = min(0.5, village.politics["tax_rate"] + 0.05)
+    elif event.sym == tcod.event.KeySym.N2: # Lower Taxes
+        proposal_type = "change_tax_rate"
+        value = max(0.0, village.politics["tax_rate"] - 0.05)
+    elif event.sym == tcod.event.KeySym.N3: # Festival
+        proposal_type = "enact_policy"
+        value = "festival"
+    elif event.sym == tcod.event.KeySym.N4: # Subsidies
+        proposal_type = "enact_policy"
+        value = "subsidies"
+    elif event.sym == tcod.event.KeySym.N5: # Conscription
+        proposal_type = "enact_policy"
+        value = "conscription"
+
+    if proposal_type:
+        passed = world._consult_officials(village, proposal_type, value)
+        if passed:
+            if proposal_type == "change_tax_rate":
+                village.politics["tax_rate"] = value
+                world.add_message_to_chat_log(f"Tax rate changed to {int(value*100)}%.")
+            elif proposal_type == "enact_policy":
+                if value not in village.politics["active_policies"]:
+                    village.politics["active_policies"].add(value)
+                    world.add_message_to_chat_log(f"Policy '{value.title()}' enacted.")
+                else:
+                    world.add_message_to_chat_log(f"Policy '{value.title()}' is already active.")
+        else:
+            world.add_message_to_chat_log("A key official opposed your proposal.")
 
 def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is reading a book."""
@@ -402,6 +458,10 @@ def render_game_over(console, context):
         if isinstance(event, (tcod.event.Quit, tcod.event.KeyDown)):
             return
 
+def open_politics_menu(world: World):
+    """Opens the politics menu."""
+    world.game_state = "POLITICS_MENU"
+
 def handle_events(world, context):
     """Handles all player input and game events."""
     for event in tcod.event.get():
@@ -446,6 +506,8 @@ def handle_events(world, context):
                 handle_quest_menu_input(event, world)
             elif world.game_state == "HELP_MENU":
                 handle_help_menu_input(event, world)
+            elif world.game_state == "POLITICS_MENU":
+                handle_politics_menu_input(event, world)
             elif world.game_state == "PLAYING":
                 handle_playing_input(event, world, context)
 

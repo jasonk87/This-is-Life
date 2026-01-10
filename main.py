@@ -3,6 +3,7 @@ This module contains the main game loop and handles player input.
 """
 import argparse
 import tcod
+from tcod import libtcodpy
 import tcod.console
 import tcod.event
 import tcod.tileset
@@ -276,11 +277,11 @@ def main_menu_loop(console, tileset):
 
             # Draw Menu
             title = "THIS IS LIFE"
-            console.print(console.width // 2, console.height // 3, title, alignment=tcod.CENTER, fg=(255, 255, 0))
+            console.print(console.width // 2, console.height // 3, title, alignment=libtcodpy.CENTER, fg=(255, 255, 0))
 
             for i, option in enumerate(options):
                 color = (255, 255, 255) if i == selected_index else (100, 100, 100)
-                console.print(console.width // 2, console.height // 2 + i * 2, option, alignment=tcod.CENTER, fg=color)
+                console.print(console.width // 2, console.height // 2 + i * 2, option, alignment=libtcodpy.CENTER, fg=color)
 
             context.present(console)
 
@@ -314,13 +315,13 @@ def load_game_menu(console, context):
     selected_index = 0
     while True:
         console.clear()
-        console.print(console.width // 2, 5, "LOAD GAME", alignment=tcod.CENTER)
+        console.print(console.width // 2, 5, "LOAD GAME", alignment=libtcodpy.CENTER)
 
         for i, save in enumerate(saves):
             color = (255, 255, 255) if i == selected_index else (100, 100, 100)
-            console.print(console.width // 2, 10 + i, save, alignment=tcod.CENTER, fg=color)
+            console.print(console.width // 2, 10 + i, save, alignment=libtcodpy.CENTER, fg=color)
 
-        console.print(console.width // 2, console.height - 5, "Press ESC to cancel", alignment=tcod.CENTER)
+        console.print(console.width // 2, console.height - 5, "Press ESC to cancel", alignment=libtcodpy.CENTER)
 
         context.present(console)
 
@@ -342,8 +343,8 @@ def start_game(context, console, world_state=None):
         # Check if the player in the loaded world is dead
         if world.player.combat.hp <= 0: # Assuming HP <= 0 means dead
             console.clear()
-            console.print(console.width // 2, console.height // 2, "Previous character is dead.", alignment=tcod.CENTER)
-            console.print(console.width // 2, console.height // 2 + 2, "Starting as a new character in this world...", alignment=tcod.CENTER)
+            console.print(console.width // 2, console.height // 2, "Previous character is dead.", alignment=libtcodpy.CENTER)
+            console.print(console.width // 2, console.height // 2 + 2, "Starting as a new character in this world...", alignment=libtcodpy.CENTER)
             context.present(console)
             tcod.event.wait(1.0) # Pause briefly
 
@@ -360,7 +361,7 @@ def start_game(context, console, world_state=None):
     else:
         # Show loading message
         console.clear()
-        console.print(console.width // 2, console.height // 2, "Generating World...", alignment=tcod.CENTER)
+        console.print(console.width // 2, console.height // 2, "Generating World...", alignment=libtcodpy.CENTER)
         context.present(console)
         world = World()
 
@@ -394,8 +395,8 @@ def render_game_over(console, context):
     """Renders the game over screen."""
     console.clear()
     console.print_box(x=console.width // 2 - 10, y=console.height // 2 - 2,
-                      width=20, height=4, string="GAME OVER", alignment=tcod.CENTER)
-    console.print(console.width // 2, console.height // 2 + 3, "Press any key...", alignment=tcod.CENTER)
+                      width=20, height=4, string="GAME OVER", alignment=libtcodpy.CENTER)
+    console.print(console.width // 2, console.height // 2 + 3, "Press any key...", alignment=libtcodpy.CENTER)
     context.present(console)
     for event in tcod.event.wait():
         context.convert_event(event)

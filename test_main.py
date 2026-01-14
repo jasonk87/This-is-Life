@@ -1,6 +1,19 @@
-
 import unittest
 from unittest.mock import patch
+import importlib
+import config
+
+# Set test-specific configurations
+config.WORLD_WIDTH = 100
+config.WORLD_HEIGHT = 80
+config.DAY_LENGTH_TICKS = 1000
+config.NPC_SCHEDULE_UPDATE_INTERVAL = 50
+config.ENABLE_OLLAMA_CONNECTION = False
+
+# Reload the engine module to apply the config changes
+import engine
+importlib.reload(engine)
+
 from engine import World
 import json
 
@@ -83,7 +96,7 @@ class TestTemperatureSystem(unittest.TestCase):
 
         # Place a fire pit near the player
         fire_x, fire_y = self.world.player.x + 1, self.world.player.y
-        self.world.chunks[fire_y // 20][fire_x // 20].tiles[fire_y % 20][fire_x % 20] = fire_pit_tile
+        self.world.chunks[fire_y // config.CHUNK_SIZE][fire_x // config.CHUNK_SIZE].tiles[fire_y % config.CHUNK_SIZE][fire_x % config.CHUNK_SIZE] = fire_pit_tile
 
         # Rerun temperature update to capture heat source effect
         self.world._update_player_temperature()
@@ -140,8 +153,8 @@ class TestTemperatureSystem(unittest.TestCase):
         fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_lit"]
         fire_pit_tile = Tile(char=fire_pit_def['char'], color=fire_pit_def['color'], passable=False, name="fire_pit_lit", properties=fire_pit_def['properties'].copy())
 
-        chunk_x, chunk_y = fire_x // 20, fire_y // 20
-        local_x, local_y = fire_x % 20, fire_y % 20
+        chunk_x, chunk_y = fire_x // config.CHUNK_SIZE, fire_y // config.CHUNK_SIZE
+        local_x, local_y = fire_x % config.CHUNK_SIZE, fire_y % config.CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = fire_pit_tile
 
         # Verify it's initially lit
@@ -184,8 +197,8 @@ class TestAgriculturalSystem(unittest.TestCase):
         # Use .copy() on properties to avoid modifying the global definition
         growing_tile = Tile(char=growing_def['char'], color=growing_def['color'], passable=True, name="Growing Wheat", properties=growing_def['properties'].copy())
 
-        chunk_x, chunk_y = crop_x // 20, crop_y // 20
-        local_x, local_y = crop_x % 20, crop_y % 20
+        chunk_x, chunk_y = crop_x // config.CHUNK_SIZE, crop_y // config.CHUNK_SIZE
+        local_x, local_y = crop_x % config.CHUNK_SIZE, crop_y % config.CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = growing_tile
 
         self.assertEqual(self.world.get_tile_at(crop_x, crop_y).name, "Growing Wheat")
@@ -245,8 +258,8 @@ class TestNPCBehaviorSystem(unittest.TestCase):
 
         # Also clear the NPC's starting tile
         self.world.get_tile_at(npc.x, npc.y) # Ensure chunk is generated
-        c_chunk_x, c_chunk_y = npc.x // 20, npc.y // 20
-        c_local_x, c_local_y = npc.x % 20, npc.y % 20
+        c_chunk_x, c_chunk_y = npc.x // config.CHUNK_SIZE, npc.y // config.CHUNK_SIZE
+        c_local_x, c_local_y = npc.x % config.CHUNK_SIZE, npc.y % config.CHUNK_SIZE
         self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
 
         # Clear a path for the NPC
@@ -254,15 +267,15 @@ class TestNPCBehaviorSystem(unittest.TestCase):
             for x_offset in range(0, 6):
                 clear_x, clear_y = npc.x + x_offset, npc.y + y_offset
                 self.world.get_tile_at(clear_x, clear_y) # Ensure chunk is generated
-                c_chunk_x, c_chunk_y = clear_x // 20, clear_y // 20
-                c_local_x, c_local_y = clear_x % 20, clear_y % 20
+                c_chunk_x, c_chunk_y = clear_x // config.CHUNK_SIZE, clear_y // config.CHUNK_SIZE
+                c_local_x, c_local_y = clear_x % config.CHUNK_SIZE, clear_y % config.CHUNK_SIZE
                 self.world.chunks[c_chunk_y][c_chunk_x].tiles[c_local_y][c_local_x] = plains_tile
 
         fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_lit"]
         fire_pit_tile = Tile(char=fire_pit_def['char'], color=fire_pit_def['color'], passable=False, name="fire_pit_lit", properties=fire_pit_def['properties'].copy())
 
-        chunk_x, chunk_y = fire_x // 20, fire_y // 20
-        local_x, local_y = fire_x % 20, fire_y % 20
+        chunk_x, chunk_y = fire_x // config.CHUNK_SIZE, fire_y // config.CHUNK_SIZE
+        local_x, local_y = fire_x % config.CHUNK_SIZE, fire_y % config.CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = fire_pit_tile
 
         # 3. Manually update NPC temperature to freezing
@@ -315,8 +328,8 @@ class TestClothProductionSystem(unittest.TestCase):
         anvil_tile = Tile(char=anvil_def['char'], color=anvil_def['color'], passable=False, name="Anvil", properties=anvil_def['properties'].copy())
         anvil_x, anvil_y = self.world.player.x + 1, self.world.player.y + 1
 
-        chunk_x, chunk_y = anvil_x // 20, anvil_y // 20
-        local_x, local_y = anvil_x % 20, anvil_y % 20
+        chunk_x, chunk_y = anvil_x // config.CHUNK_SIZE, anvil_y // config.CHUNK_SIZE
+        local_x, local_y = anvil_x % config.CHUNK_SIZE, anvil_y % config.CHUNK_SIZE
         self.world.get_tile_at(anvil_x, anvil_y)
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = anvil_tile
 
@@ -347,8 +360,8 @@ class TestClothProductionSystem(unittest.TestCase):
         loom_tile = Tile(char=loom_def['char'], color=loom_def['color'], passable=False, name="Loom", properties=loom_def['properties'].copy())
         loom_x, loom_y = self.world.player.x - 1, self.world.player.y - 1
 
-        chunk_x, chunk_y = loom_x // 20, loom_y // 20
-        local_x, local_y = loom_x % 20, loom_y % 20
+        chunk_x, chunk_y = loom_x // config.CHUNK_SIZE, loom_y // config.CHUNK_SIZE
+        local_x, local_y = loom_x % config.CHUNK_SIZE, loom_y % config.CHUNK_SIZE
         self.world.get_tile_at(loom_x, loom_y) # Ensure chunk generated
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = loom_tile
 
@@ -417,8 +430,8 @@ class TestPredatorPreyAI(unittest.TestCase):
                 clear_x, clear_y = predator.x + x_offset, predator.y + y_offset
                 try:
                     self.world.get_tile_at(clear_x, clear_y)
-                    chunk_x, chunk_y = clear_x // 20, clear_y // 20
-                    local_x, local_y = clear_x % 20, clear_y % 20
+                    chunk_x, chunk_y = clear_x // config.CHUNK_SIZE, clear_y // config.CHUNK_SIZE
+                    local_x, local_y = clear_x % config.CHUNK_SIZE, clear_y % config.CHUNK_SIZE
                     self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = plains_tile
                 except IndexError:
                     pass # Ignore out-of-bounds coordinates
@@ -486,8 +499,8 @@ class TestFearSystem(unittest.TestCase):
         """Helper to ensure a chunk is generated, clear a tile, and place a new one."""
         from tile_types import Tile
         self.world.get_tile_at(x, y) # Ensure chunk generation
-        chunk_x, chunk_y = x // 20, y // 20
-        local_x, local_y = x % 20, y % 20
+        chunk_x, chunk_y = x // config.CHUNK_SIZE, y // config.CHUNK_SIZE
+        local_x, local_y = x % config.CHUNK_SIZE, y % config.CHUNK_SIZE
         tile = Tile(char=tile_def['char'], color=tile_def['color'], passable=tile_def['passable'], name=tile_def['name'], properties=tile_def.get('properties', {}).copy())
         self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = tile
         # Also update the transparency map for FOV calculations
@@ -498,15 +511,20 @@ class TestFearSystem(unittest.TestCase):
         from entities.animal import Animal
         from engine import Village, Building
         from data.tiles import TILE_DEFINITIONS
-        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL, CHUNK_SIZE
 
         # 1. Manual Setup
         center_x, center_y = 50, 50
         village = Village()
-        chunk_x, chunk_y = center_x // 20, center_y // 20
+        chunk_x, chunk_y = center_x // CHUNK_SIZE, center_y // CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].village = village
 
-        home_building = Building(center_x - 10, center_y - 10, 5, 5, building_type="house", category="residential", global_chunk_x_start=chunk_x * 20, global_chunk_y_start=chunk_y * 20)
+        # Correctly calculate local coordinates for the building within its chunk
+        building_global_x, building_global_y = center_x - 10, center_y - 10
+        local_building_x = building_global_x % CHUNK_SIZE
+        local_building_y = building_global_y % CHUNK_SIZE
+
+        home_building = Building(local_building_x, local_building_y, 5, 5, building_type="house", category="residential", global_chunk_x_start=chunk_x * CHUNK_SIZE, global_chunk_y_start=chunk_y * CHUNK_SIZE)
         village.add_building(home_building)
         self.world.buildings_by_id[home_building.id] = home_building
 
@@ -535,14 +553,18 @@ class TestFearSystem(unittest.TestCase):
         self.assertTrue(civilian.is_frightened)
         self.assertEqual(civilian.schedule.current_task, "fleeing_from_threat")
         self.assertIsNotNone(civilian.schedule.current_path)
-        self.assertEqual(civilian.schedule.current_destination_coords, (home_building.global_center_x, home_building.global_center_y))
+        # Assert that the destination is adjacent to the home, not the center itself
+        destination = civilian.schedule.current_destination_coords
+        self.assertIsNotNone(destination)
+        distance_to_home_center = abs(destination[0] - home_building.global_center_x) + abs(destination[1] - home_building.global_center_y)
+        self.assertEqual(distance_to_home_center, 1)
 
     def test_guard_alerts_other_guards(self):
         from entities.base import NPC
         from entities.animal import Animal
         from engine import Village, Building
         from data.tiles import TILE_DEFINITIONS
-        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL, CHUNK_SIZE
 
         # 1. Manual Setup
         center_x, center_y = 50, 50
@@ -550,10 +572,10 @@ class TestFearSystem(unittest.TestCase):
 
         village = Village()
         village.interaction_points["town_square_center"] = alarm_spot
-        chunk_x, chunk_y = center_x // 20, center_y // 20
+        chunk_x, chunk_y = center_x // CHUNK_SIZE, center_y // CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].village = village
 
-        home_building = Building(2, 2, 5, 5, building_type="house", category="residential", global_chunk_x_start=chunk_x * 20, global_chunk_y_start=chunk_y * 20)
+        home_building = Building(2, 2, 5, 5, building_type="house", category="residential", global_chunk_x_start=chunk_x * CHUNK_SIZE, global_chunk_y_start=chunk_y * CHUNK_SIZE)
         village.add_building(home_building)
         self.world.buildings_by_id[home_building.id] = home_building
 

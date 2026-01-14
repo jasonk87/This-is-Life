@@ -81,6 +81,7 @@ class Knowledge:
     help_needed: str | None = None
     long_term_memory: list[str] = field(default_factory=list)
     known_locations: dict[str, tuple[int, int]] = field(default_factory=dict)
+    perceived_item_tiles: list[tuple[int, int]] = field(default_factory=list)
 
 class NPC:
     """
@@ -118,7 +119,6 @@ class NPC:
         if self.player_id:
             self._initialize_relationships(attitude_to_player, self.player_id)
 
-        self.perceived_item_tiles: list[tuple[int,int]] = []
         self.task_target_item_details: dict | None = None
         self.current_sub_task: str | None = None
         self.sub_task_target_coords: tuple[int, int] | None = None

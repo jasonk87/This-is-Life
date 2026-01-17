@@ -427,7 +427,7 @@ class Player:
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None):
         item_def = ITEM_DEFINITIONS.get(item_key_to_add)
         if not item_def:
-            print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
+            # print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
             return
 
         is_stackable = item_def.get("stackable", False)
@@ -450,7 +450,7 @@ class Player:
     def remove_item(self, item_key_to_remove: str, quantity: int = 1, specific_instance_index: int | None = None) -> bool:
         item_def = ITEM_DEFINITIONS.get(item_key_to_remove)
         if not item_def:
-            # print(f"Warning: Tried to remove unknown item key '{item_key_to_remove}'")
+            # # print(f"Warning: Tried to remove unknown item key '{item_key_to_remove}'")
             return False
 
         is_stackable = item_def.get("stackable", False)
@@ -527,7 +527,7 @@ class Player:
             if hasattr(self, 'world_ref') and self.world_ref: # Access world_ref if it exists
                 self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.social.reputation[rep_type]})")
         else:
-            # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+            # # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
             if hasattr(self, 'world_ref') and self.world_ref:
                  self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
 
@@ -682,7 +682,7 @@ class World:
         # Movement speed in tiles per second for animation
         ANIMATION_SPEED = 20.0
 
-        for entity in [self.player] + self.npcs + self.village_npcs:
+        for entity in itertools.chain([self.player], self.all_npcs):
             if hasattr(entity, 'render_x'):
                 target_x = entity.x
                 target_y = entity.y
@@ -1978,7 +1978,7 @@ class World:
                                         char='*', color=(255, 0, 0)
                                     ))
 
-                                print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
+#                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
                                 self.npc_attempt_attack_npc(npc, prey)
                                 npc.schedule.current_path = []
                                 npc.schedule.current_destination_coords = None
@@ -5972,7 +5972,7 @@ class World:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            # print(f"Error communicating with Gemini: {e}")
+            # # print(f"Error communicating with Gemini: {e}")
             return ""
 
     def _call_ollama_backend(self, prompt: str) -> str:
@@ -7902,7 +7902,7 @@ class World:
         """
         # Logic runs if it's exactly the start of a day (after day 0)
         # Or if force-called in tests where game_time is set manually to a multiple.
-        # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
+#         # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
         if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
              # print("DEBUG: Skipping career update (wrong time).")
              return
@@ -7910,7 +7910,7 @@ class World:
         # --- Job Satisfaction Update & Quitting ---
         # Iterate over a copy to allow modification of lists if needed (though we modify npc attributes)
         for npc in list(self.village_npcs):
-            # print(f"DEBUG: Processing {npc.name}. Profession: {npc.economic.profession}, Satisfaction: {npc.economic.job_satisfaction}")
+#             # print(f"DEBUG: Processing {npc.name}. Profession: {npc.economic.profession}, Satisfaction: {npc.economic.job_satisfaction}")
             if npc.physical.is_dead:
                 continue
 
@@ -7933,7 +7933,7 @@ class World:
 
                 npc.economic.job_satisfaction = max(0, min(100, npc.economic.job_satisfaction + satisfaction_change))
 
-                # print(f"DEBUG: {npc.name} new satisfaction: {npc.economic.job_satisfaction} (change: {satisfaction_change})")
+#                 # print(f"DEBUG: {npc.name} new satisfaction: {npc.economic.job_satisfaction} (change: {satisfaction_change})")
 
                 # Firing Logic (Performance check)
                 if npc.economic.work_performance < 20 and random.random() < 0.1: # 10% chance to be fired if performance is very low

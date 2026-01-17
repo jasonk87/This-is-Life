@@ -5594,7 +5594,7 @@ class World:
             # Identify entity from input string
             input_lower = player_input_text.lower()
             # Check all NPCs + Player
-            potential_subjects = self.all_npcs + [self.player]
+            potential_subjects = list(self.all_npcs) + [self.player]
 
             # Sort by length descending to match longer names first (e.g. "Dire Wolf" before "Wolf")
             potential_subjects.sort(key=lambda x: len(x.name), reverse=True)
@@ -7688,7 +7688,7 @@ class World:
         if self.game_time % 100 != 0:  # Check every 100 ticks
             return
 
-        entities_to_check = [self.player] + self.all_npcs
+        entities_to_check = itertools.chain([self.player], self.all_npcs)
         for entity in entities_to_check:
             if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
                 # Only use public knowledge events
@@ -7724,7 +7724,7 @@ class World:
             return
 
         # 1. Decay fame/infamy for all entities
-        all_entities = [self.player] + self.all_npcs
+        all_entities = itertools.chain([self.player], self.all_npcs)
         for entity in all_entities:
             # Fame decay: -1 per day if > 0
             if entity.social.fame > 0:
@@ -8633,7 +8633,7 @@ class World:
         if not recent_events:
             return
 
-        potential_witnesses = self.all_npcs
+        potential_witnesses = list(self.all_npcs)
         for event in recent_events:
             if not event.location:
                 continue

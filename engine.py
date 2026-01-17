@@ -1,6 +1,7 @@
 # engine.py
 import math
 import random
+import itertools
 import numpy as np
 import tcod
 from tcod import libtcodpy
@@ -532,6 +533,11 @@ class Player:
 
 
 class World:
+    @property
+    def all_npcs(self):
+        """Returns an iterator over all NPCs (village + world)."""
+        return itertools.chain(self.village_npcs, self.npcs)
+
     """World class now uses a generator for a more complex map."""
     def __init__(self, seed=None):
         if seed is not None:
@@ -1099,7 +1105,7 @@ class World:
     def _update_npc_movement(self):
         """Updates NPC positions based on their current path."""
         # This combines both lists for iteration
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.physical.is_dead:
                 continue
 
@@ -1235,7 +1241,7 @@ class World:
 
                     is_occupied = False
                     is_hunting_prey = self._is_predator(npc) and npc.schedule.current_task == "hunting"
-                    for other_npc in self.village_npcs + self.npcs:
+                    for other_npc in self.all_npcs:
                         if other_npc.id != npc.id and other_npc.x == next_x and other_npc.y == next_y and not other_npc.physical.is_dead:
                             if is_hunting_prey and other_npc.id == npc.task_target_entity_id:
                                 continue # Predator can move onto prey's tile
@@ -1485,7 +1491,7 @@ class World:
 
             # Check for occupancy
             occupied = False
-            for npc in self.village_npcs + self.npcs:
+            for npc in self.all_npcs:
                 if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.physical.is_dead:
                     occupied = True
                     break
@@ -1736,7 +1742,7 @@ class World:
         """
         self._update_npc_relationships_dynamic()
 
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.physical.is_dead:
                 continue
 
@@ -4289,7 +4295,7 @@ class World:
                 })
 
         # 3. Add NPCs
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.x == x and npc.y == y and not npc.is_dead:
                 entities.append({"type": "npc", "data": npc, "name": npc.name})
 
@@ -5588,7 +5594,7 @@ class World:
             # Identify entity from input string
             input_lower = player_input_text.lower()
             # Check all NPCs + Player
-            potential_subjects = self.village_npcs + self.npcs + [self.player]
+            potential_subjects = self.all_npcs + [self.player]
 
             # Sort by length descending to match longer names first (e.g. "Dire Wolf" before "Wolf")
             potential_subjects.sort(key=lambda x: len(x.name), reverse=True)
@@ -5723,8 +5729,8 @@ class World:
                 event_to_share = random.choice(list(npc_target.known_events.values()))
 
                 # Get names and relationships for the prompt
-                subject = next((n for n in self.village_npcs + self.npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
-                target = next((n for n in self.village_npcs + self.npcs if n.id == event_to_share.target_id), self.player if event_to_share.target_id == self.player.id else None) if event_to_share.target_id else None
+                subject = next((n for n in self.all_npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
+                target = next((n for n in self.all_npcs if n.id == event_to_share.target_id), self.player if event_to_share.target_id == self.player.id else None) if event_to_share.target_id else None
 
                 subject_name = getattr(subject, 'name', 'Someone') if subject else 'Someone'
                 target_name = getattr(target, 'name', 'someone') if target else 'someone'
@@ -6343,7 +6349,7 @@ class World:
                     elif work_building.building_type == "lumber_mill":
                         is_foreman_assigned_to_mill = any(
                             other_npc.economic.profession == "Lumber Mill Foreman" and other_npc.schedule.work_building_id == work_building.id
-                            for other_npc in self.village_npcs + self.npcs
+                            for other_npc in self.all_npcs
                         )
                         if not is_foreman_assigned_to_mill:
                             npc.economic.profession = "Lumber Mill Foreman"
@@ -7517,7 +7523,7 @@ class World:
 
         # Spread to nearby NPCs
         count_listeners = 0
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.id == speaker_npc.id or npc.physical.is_dead:
                 continue
 
@@ -7590,7 +7596,7 @@ class World:
         if self.game_state != "PLAYING":
             return
 
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.physical.is_dead or npc.combat.is_hostile_to_player or self.chat_ui_active:
                 continue
 
@@ -7638,7 +7644,7 @@ class World:
         if self.game_time % 10 != 0:  # Check every 10 ticks for performance
             return
 
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             # Skip NPCs who are dead, already reacting, in combat, or creatures
             if npc.physical.is_dead or npc.schedule.current_task in ["fleeing_from_player", "greeting_player"] or npc.combat.is_hostile_to_player or npc.economic.profession == "Creature":
                 continue
@@ -7672,7 +7678,7 @@ class World:
         """Finds an entity (player or NPC) by its ID."""
         if entity_id == self.player.id:
             return self.player
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.id == entity_id:
                 return npc
         return None
@@ -7682,7 +7688,7 @@ class World:
         if self.game_time % 100 != 0:  # Check every 100 ticks
             return
 
-        entities_to_check = [self.player] + self.village_npcs + self.npcs
+        entities_to_check = [self.player] + self.all_npcs
         for entity in entities_to_check:
             if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
                 # Only use public knowledge events
@@ -7718,7 +7724,7 @@ class World:
             return
 
         # 1. Decay fame/infamy for all entities
-        all_entities = [self.player] + self.village_npcs + self.npcs
+        all_entities = [self.player] + self.all_npcs
         for entity in all_entities:
             # Fame decay: -1 per day if > 0
             if entity.social.fame > 0:
@@ -7739,7 +7745,7 @@ class World:
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
-            for npc in self.village_npcs + self.npcs:
+            for npc in self.all_npcs:
                 npc.age += 1
 
     def _update_inventory_spoilage(self):
@@ -7838,7 +7844,7 @@ class World:
             self.player.add_item(key, count)
 
         # 2. NPC Inventories (dicts)
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if not npc.physical.is_dead:
                 process_inventory(npc.economic.npc_inventory, owner_name="NPC")
 
@@ -8627,7 +8633,7 @@ class World:
         if not recent_events:
             return
 
-        potential_witnesses = self.village_npcs + self.npcs
+        potential_witnesses = self.all_npcs
         for event in recent_events:
             if not event.location:
                 continue
@@ -8650,7 +8656,7 @@ class World:
         """
         Periodically processes an NPC's known events to see if they react.
         """
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if isinstance(npc, Animal):
                 continue
 
@@ -8679,8 +8685,8 @@ class World:
                 continue
 
             # Get names for the prompt
-            subject_entity = next((n for n in self.village_npcs + self.npcs if n.id == event_to_process.subject_id), self.player if event_to_process.subject_id == self.player.id else None)
-            target_entity = next((n for n in self.village_npcs + self.npcs if n.id == event_to_process.target_id), self.player if event_to_process.target_id == self.player.id else None) if event_to_process.target_id else None
+            subject_entity = next((n for n in self.all_npcs if n.id == event_to_process.subject_id), self.player if event_to_process.subject_id == self.player.id else None)
+            target_entity = next((n for n in self.all_npcs if n.id == event_to_process.target_id), self.player if event_to_process.target_id == self.player.id else None) if event_to_process.target_id else None
 
             subject_name = getattr(subject_entity, 'name', 'Someone') if subject_entity else 'Someone'
             target_name = getattr(target_entity, 'name', 'someone') if target_entity else 'someone'
@@ -8769,7 +8775,7 @@ class World:
         For crimes, filters based on profession/personality.
         """
         witnesses = []
-        potential_witnesses = self.village_npcs + self.npcs
+        potential_witnesses = self.all_npcs
 
         for npc in potential_witnesses:
             if npc.is_dead or isinstance(npc, Animal):

@@ -2,6 +2,7 @@
 
 import tcod
 import textwrap
+import itertools
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
@@ -228,7 +229,7 @@ def draw(console, world, camera_x, camera_y):
         effect.draw(console, camera_x, camera_y)
 
     # Draw entities
-    all_entities = world.npcs + world.village_npcs + [world.player]
+    all_entities = itertools.chain(world.npcs, world.village_npcs, [world.player])
     for entity in sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, 'render_order') else 0):
         if isinstance(entity, Player) and entity.state.is_riding:
             continue

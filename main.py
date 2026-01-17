@@ -421,7 +421,7 @@ def render_game_over(console, context):
     # Simple wait loop for game over
     while True:
         for event in tcod.event.wait():
-            context.convert_event(event)
+            # context.convert_event(event) # Fixes TypeError crash
             if isinstance(event, (tcod.event.Quit, tcod.event.KeyDown)):
                 return
 

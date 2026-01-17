@@ -223,14 +223,30 @@ def draw(console, world, camera_x, camera_y):
                 if is_visible(world, px, py):
                     console.print(x=screen_x, y=screen_y, string="•", fg=(0, 255, 0))
 
+    # Draw Visual Effects
+    for effect in world.visual_effects:
+        effect.draw(console, camera_x, camera_y)
+
     # Draw entities
     all_entities = world.npcs + world.village_npcs + [world.player]
     for entity in sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, 'render_order') else 0):
         if isinstance(entity, Player) and entity.state.is_riding:
             continue
-        if is_visible(world, entity.x, entity.y):
-            console.print(x=entity.x - camera_x, y=entity.y - camera_y,
-                          string=chr(entity.char), fg=entity.color)
+
+        # Use render coordinates if available (for smooth movement), else fall back to logic coordinates
+        r_x = getattr(entity, 'render_x', entity.x)
+        r_y = getattr(entity, 'render_y', entity.y)
+
+        # Cast to int for grid rendering
+        draw_x = int(round(r_x))
+        draw_y = int(round(r_y))
+
+        # Check visibility based on the *logical* position (so they don't disappear while moving into FOV)
+        # Or check draw_x/y? Checking logical x/y is safer for consistency with FOV map.
+        if is_visible(world, entity.x, entity.y) or is_visible(world, draw_x, draw_y):
+            if 0 <= draw_x - camera_x < MAP_WIDTH and 0 <= draw_y - camera_y < MAP_HEIGHT:
+                console.print(x=draw_x - camera_x, y=draw_y - camera_y,
+                              string=chr(entity.char), fg=entity.color)
 
     draw_status_panel(console, world)
     # draw_minimap(console, world)

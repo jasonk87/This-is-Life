@@ -116,6 +116,46 @@ class Event:
         self.timestamp = game_time  # Use game ticks for consistency
         self.public_knowledge = False # Tracks if this event was witnessed or has become public
 
+class VisualEffect:
+    """Base class for visual effects."""
+    def update(self, dt: float) -> bool:
+        """Updates the effect. Returns True if the effect is finished."""
+        return True
+
+    def draw(self, console, camera_x, camera_y):
+        pass
+
+class ProjectileEffect(VisualEffect):
+    """A simple projectile animation."""
+    def __init__(self, start_x, start_y, end_x, end_y, char='*', color=(255, 255, 0), speed=15.0):
+        self.x = float(start_x)
+        self.y = float(start_y)
+        self.start_x = float(start_x)
+        self.start_y = float(start_y)
+        self.end_x = float(end_x)
+        self.end_y = float(end_y)
+        self.char = char
+        self.color = color
+        self.speed = speed
+        self.total_dist = math.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+        if self.total_dist == 0: self.total_dist = 0.001
+        self.dx = (end_x - start_x) / self.total_dist
+        self.dy = (end_y - start_y) / self.total_dist
+        self.traveled = 0.0
+
+    def update(self, dt: float) -> bool:
+        dist_step = self.speed * dt
+        self.x += self.dx * dist_step
+        self.y += self.dy * dist_step
+        self.traveled += dist_step
+        return self.traveled >= self.total_dist
+
+    def draw(self, console, camera_x, camera_y):
+        draw_x = int(round(self.x)) - camera_x
+        draw_y = int(round(self.y)) - camera_y
+        if 0 <= draw_x < console.width and 0 <= draw_y < console.height:
+             console.print(x=draw_x, y=draw_y, string=self.char, fg=self.color)
+
 
 class WorldGenerator:
     """Handles the procedural generation of the world's macro-structure."""
@@ -313,6 +353,8 @@ class Player:
     def __init__(self, x, y):
         self.x = x
         self.y = y
+        self.render_x = float(x)
+        self.render_y = float(y)
         self.char = ord('@')
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
@@ -608,6 +650,9 @@ class World:
         self.global_events: list[Event] = []
         self.books: list[Book] = []
 
+        # Visual Effects
+        self.visual_effects: list[VisualEffect] = []
+
         # Generate macro structure for all chunks (villages, NPCs) but defer tile generation
         for y in range(self.chunk_height):
             for x in range(self.chunk_width):
@@ -624,6 +669,40 @@ class World:
         self._update_light_level_and_fov() # Initialize based on game time 0
         self._update_player_fov() # Initial FOV calculation for player
         self._update_player_hunger_thirst(initial_setup=True) # Initial status update
+
+    def update_animations(self, dt: float):
+        """Updates animation states for all entities and visual effects."""
+        # Update Entity Interpolation
+        # Movement speed in tiles per second for animation
+        ANIMATION_SPEED = 20.0
+
+        for entity in [self.player] + self.npcs + self.village_npcs:
+            if hasattr(entity, 'render_x'):
+                target_x = entity.x
+                target_y = entity.y
+
+                dx = target_x - entity.render_x
+                dy = target_y - entity.render_y
+                dist = math.sqrt(dx*dx + dy*dy)
+
+                if dist > 0.01:
+                    move_dist = ANIMATION_SPEED * dt
+                    if move_dist >= dist:
+                        entity.render_x = float(target_x)
+                        entity.render_y = float(target_y)
+                    else:
+                        entity.render_x += (dx / dist) * move_dist
+                        entity.render_y += (dy / dist) * move_dist
+                else:
+                    entity.render_x = float(target_x)
+                    entity.render_y = float(target_y)
+
+        # Update Visual Effects
+        active_effects = []
+        for effect in self.visual_effects:
+            if not effect.update(dt):
+                active_effects.append(effect)
+        self.visual_effects = active_effects
 
     def _update_entity_temperature(self, entity):
         """Calculates ambient temperature at entity's location and updates their body temperature."""
@@ -1885,6 +1964,14 @@ class World:
                             distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
+                                # Add Visual Effect for Ranged Attack
+                                if attack_range > 1:
+                                    self.visual_effects.append(ProjectileEffect(
+                                        start_x=npc.x, start_y=npc.y,
+                                        end_x=prey.x, end_y=prey.y,
+                                        char='*', color=(255, 0, 0)
+                                    ))
+
                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
                                 self.npc_attempt_attack_npc(npc, prey)
                                 npc.schedule.current_path = []
@@ -3813,8 +3900,17 @@ class World:
 
     def npc_attempt_attack_player(self, npc: NPC, player: Player):
         """Handles an NPC's attempt to attack the player."""
-        if npc.is_dead or player.hp <= 0:
+        if npc.is_dead or player.combat.hp <= 0:
             return
+
+        # Add Visual Effect for Ranged Attack
+        attack_range = getattr(npc, 'attack_range', 1)
+        if attack_range > 1:
+            self.visual_effects.append(ProjectileEffect(
+                start_x=npc.x, start_y=npc.y,
+                end_x=player.x, end_y=player.y,
+                char='*', color=(255, 0, 0)
+            ))
 
         # --- ARREST LOGIC ---
         if npc.economic.profession in ["Sheriff", "Guard"] and self.player.economic.bounty >= 100 and not self.player.state.is_jailed:

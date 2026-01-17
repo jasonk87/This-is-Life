@@ -95,6 +95,7 @@ class NPC:
                  attitude_to_player="indifferent", player_id=None,
                  wealth_level="average"):
         self.x, self.y, self.name = x, y, name
+        self.render_x, self.render_y = float(x), float(y) # For smooth animation
         self.char, self.color, self.speed, self.id = ord('N'), (0, 255, 0), 1, id(self)
 
         self.dialogue = dialogue if dialogue is not None else ["Hello!"]

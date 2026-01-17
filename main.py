@@ -16,8 +16,8 @@ from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
 from save_manager import save_game, load_game
 
-def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler):
-    """Handles input when the player is in the 'PLAYING' state."""
+def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
+    """Handles input when the player is in the 'PLAYING' state. Returns True if turn taken."""
     move_keys = {
         tcod.event.KeySym.UP: (0, -1), tcod.event.KeySym.DOWN: (0, 1),
         tcod.event.KeySym.LEFT: (-1, 0), tcod.event.KeySym.RIGHT: (1, 0),
@@ -28,6 +28,7 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
         action_cost = world.handle_player_movement(dx, dy)
         if action_cost > 0:
             world.game_time += action_cost - 1
+            return True
     elif event.sym == tcod.event.KeySym.C:
         world.game_state = "CRAFTING_MENU"
         world.crafting_menu_context["all_recipes"] = [
@@ -97,8 +98,8 @@ def handle_building_input(event: tcod.event.KeyDown, world: World):
         # Optionally close menu after build? Or keep open for multiple builds?
         # Let's keep it open for now, maybe they want to build a wall.
 
-def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler):
-    """Handles input when the interaction menu is active."""
+def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
+    """Handles input when the interaction menu is active. Returns True if action taken."""
     ctx = world.interaction_context
     if event.sym == tcod.event.KeySym.UP:
         ctx["selected_action_index"] = (ctx["selected_action_index"] - 1) % len(ctx["available_actions"])
@@ -110,9 +111,10 @@ def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_ha
         ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
         ctx["selected_action_index"] = 0
     elif event.sym in (tcod.event.KeySym.RETURN, tcod.event.KeySym.E):
-        execute_interaction(world, context_handler)
+        return execute_interaction(world, context_handler)
     elif event.sym == tcod.event.KeySym.ESCAPE:
         ctx["active"] = False
+    return False
 
 def open_interaction_menu(world: World, x: int, y: int):
     """Opens the interaction menu for a specific tile."""
@@ -128,11 +130,11 @@ def open_interaction_menu(world: World, x: int, y: int):
     world.interaction_context["available_actions"] = world._get_actions_for_entity(entities[0])
     world.interaction_context["selected_action_index"] = 0
 
-def execute_interaction(world: World, context_handler):
-    """Executes the selected action from the interaction context."""
+def execute_interaction(world: World, context_handler) -> bool:
+    """Executes the selected action from the interaction context. Returns True if turn taken."""
     ctx = world.interaction_context
     if not ctx["active"]:
-        return
+        return False
 
     selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
     selected_action = ctx["available_actions"][ctx["selected_action_index"]]
@@ -166,6 +168,9 @@ def execute_interaction(world: World, context_handler):
 
     if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
+
+    # Return True for actions that consume time
+    return selected_action not in ["Examine", "Talk", "Trade", "Read"]
 
 def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'HELP_MENU' state."""
@@ -338,6 +343,7 @@ def load_game_menu(console, context):
 
 def start_game(context, console, world_state=None):
     """Starts the actual gameplay loop."""
+    import time
     if world_state:
         world = world_state
         # Check if the player in the loaded world is dead
@@ -365,22 +371,36 @@ def start_game(context, console, world_state=None):
         context.present(console)
         world = World()
 
-    while True:
-        world.update()
+    last_time = time.perf_counter()
 
-        if world.needs_text_input:
-            context.start_text_input()
-            world.needs_text_input = False
+    while True:
+        # Calculate Delta Time
+        current_time = time.perf_counter()
+        dt = current_time - last_time
+        last_time = current_time
+
+        # Update Animations
+        world.update_animations(dt)
 
         if world.game_state == "PLAYER_DEAD":
             render_game_over(console, context)
-            break # Break to return to main menu? Or just exit?
-                  # Currently breaks the loop, which falls out of start_game back to main_menu_loop
+            break # Break to return to main menu
 
         camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
         draw(console, world, camera_x, camera_y)
         context.present(console)
-        handle_events(world, context)
+
+        # Handle Input
+        player_acted = handle_events(world, context)
+
+        # Handle turn updates
+        # Update if player performed an action OR if auto-moving along a path
+        if player_acted or (world.player.state.current_path and world.game_state == "PLAYING"):
+            world.update()
+
+        if world.needs_text_input:
+            context.start_text_input()
+            world.needs_text_input = False
 
 def run_headless(world, num_ticks):
     """Runs the game for a fixed number of ticks in headless mode."""
@@ -398,13 +418,16 @@ def render_game_over(console, context):
                       width=20, height=4, string="GAME OVER", alignment=libtcodpy.CENTER)
     console.print(console.width // 2, console.height // 2 + 3, "Press any key...", alignment=libtcodpy.CENTER)
     context.present(console)
-    for event in tcod.event.wait():
-        context.convert_event(event)
-        if isinstance(event, (tcod.event.Quit, tcod.event.KeyDown)):
-            return
+    # Simple wait loop for game over
+    while True:
+        for event in tcod.event.wait():
+            context.convert_event(event)
+            if isinstance(event, (tcod.event.Quit, tcod.event.KeyDown)):
+                return
 
-def handle_events(world, context):
-    """Handles all player input and game events."""
+def handle_events(world, context) -> bool:
+    """Handles all player input and game events. Returns True if a turn was taken."""
+    turn_taken = False
     for event in tcod.event.get():
         if isinstance(event, tcod.event.Quit):
             raise SystemExit()
@@ -434,7 +457,7 @@ def handle_events(world, context):
                 world.player.state.current_path = []
 
             if world.interaction_context["active"]:
-                handle_interaction_input(event, world, context)
+                if handle_interaction_input(event, world, context): turn_taken = True
             elif world.game_state == "CRAFTING_MENU":
                 handle_crafting_input(event, world)
             elif world.game_state == "BUILDING_MENU":
@@ -448,7 +471,9 @@ def handle_events(world, context):
             elif world.game_state == "HELP_MENU":
                 handle_help_menu_input(event, world)
             elif world.game_state == "PLAYING":
-                handle_playing_input(event, world, context)
+                if handle_playing_input(event, world, context): turn_taken = True
+
+    return turn_taken
 
 if __name__ == "__main__":
     main()

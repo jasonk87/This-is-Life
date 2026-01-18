@@ -46,7 +46,7 @@ QUEST_DEFINITIONS = {
         "item_fetch_count": 5,
         "quest_giver_id_or_role": "Healer",
         "reward_money": 30,
-        "reward_items": {"cooked_meat_scrap": 1},
+        "reward_items": {"cooked_meat": 1},
         "dialogue_offer": "I'm running low on Common Herbs for my poultices. Could you "
                         "gather 5 for me? I can offer 30 coins and a bit of food for "
                         "your trouble.",

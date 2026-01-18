@@ -37,6 +37,9 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
         world.game_state = "BUILDING_MENU"
         world.building_menu_context["all_recipes"] = list(CONSTRUCTION_RECIPES.keys())
         world.building_menu_context["all_recipes"].sort(key=lambda k: CONSTRUCTION_RECIPES[k].get("name", k))
+    elif event.sym == tcod.event.KeySym.q:
+        world.game_state = "QUEST_MENU"
+        world.quest_menu_context["selected_quest_index"] = 0
     elif event.sym == tcod.event.KeySym.E:
         target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
         open_interaction_menu(world, target_x, target_y)
@@ -56,6 +59,8 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
             start_dialogue(world, closest_npc, context_handler)
         else:
             world.add_message_to_chat_log("There's no one nearby to talk to.")
+    elif event.sym in (tcod.event.KeySym.QUESTION, tcod.event.KeySym.SLASH):
+        world.game_state = "HELP_MENU"
     elif event.sym == tcod.event.KeySym.ESCAPE:
         # Show in-game menu or save prompt
         save_game(world)
@@ -151,7 +156,8 @@ def execute_interaction(world: World, context_handler):
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
         "Claim House": lambda: claim_house(world, entity_data),
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
-        "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y)
+        "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
+        "Read": lambda: world.player_attempt_read_book(entity_data["item_key"])
     }
 
     if selected_action in action_map:
@@ -159,6 +165,31 @@ def execute_interaction(world: World, context_handler):
 
     if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
+
+def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the 'HELP_MENU' state."""
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.QUESTION, tcod.event.KeySym.SLASH):
+        world.game_state = "PLAYING"
+
+def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is reading a book."""
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.RETURN):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP:
+        world.book_reading_context["scroll_offset"] = max(0, world.book_reading_context["scroll_offset"] - 1)
+    elif event.sym == tcod.event.KeySym.DOWN:
+        world.book_reading_context["scroll_offset"] += 1
+
+def handle_quest_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the 'QUEST_MENU' state."""
+    ctx = world.quest_menu_context
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.q):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP:
+        ctx["selected_quest_index"] = max(0, ctx.get("selected_quest_index", 0) - 1)
+    elif event.sym == tcod.event.KeySym.DOWN:
+        num_quests = len(world.player.knowledge.active_quests)
+        ctx["selected_quest_index"] = min(num_quests - 1, ctx.get("selected_quest_index", 0) + 1)
 
 def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handler):
     """Handles input when the player is in the 'DIALOGUE' state."""
@@ -378,13 +409,29 @@ def handle_events(world, context):
             raise SystemExit()
         if isinstance(event, tcod.event.MouseMotion):
             world.mouse_x, world.mouse_y = event.tile
-        if isinstance(event, tcod.event.MouseButtonDown) and event.button == tcod.event.MouseButton.RIGHT:
+        if isinstance(event, tcod.event.MouseButtonDown):
             camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
             mouse_world_x, mouse_world_y = camera_x + world.mouse_x, camera_y + world.mouse_y
-            open_interaction_menu(world, mouse_world_x, mouse_world_y)
+
+            if event.button == tcod.event.MouseButton.RIGHT:
+                world.player.state.current_path = [] # Stop moving if interaction menu opens
+                open_interaction_menu(world, mouse_world_x, mouse_world_y)
+            elif event.button == tcod.event.MouseButton.LEFT and world.game_state == "PLAYING":
+                 # Calculate path for left click movement
+                 path = world.calculate_path(world.player.x, world.player.y, mouse_world_x, mouse_world_y)
+                 if path:
+                     # The path includes start position, so pop it if it's where we are
+                     if path and path[0] == (world.player.x, world.player.y):
+                         path.pop(0)
+                     world.player.state.current_path = path
+
         if isinstance(event, tcod.event.TextInput) and world.chat_ui_active:
             world.chat_ui_input_line += event.text
         elif isinstance(event, tcod.event.KeyDown):
+            # Stop auto-movement on manual input
+            if event.sym in [tcod.event.KeySym.UP, tcod.event.KeySym.DOWN, tcod.event.KeySym.LEFT, tcod.event.KeySym.RIGHT]:
+                world.player.state.current_path = []
+
             if world.interaction_context["active"]:
                 handle_interaction_input(event, world, context)
             elif world.game_state == "CRAFTING_MENU":
@@ -393,6 +440,12 @@ def handle_events(world, context):
                 handle_building_input(event, world)
             elif world.game_state == "DIALOGUE":
                 handle_dialogue_input(event, world, context)
+            elif world.game_state == "BOOK_READING":
+                handle_book_reading_input(event, world)
+            elif world.game_state == "QUEST_MENU":
+                handle_quest_menu_input(event, world)
+            elif world.game_state == "HELP_MENU":
+                handle_help_menu_input(event, world)
             elif world.game_state == "PLAYING":
                 handle_playing_input(event, world, context)
 

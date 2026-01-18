@@ -851,6 +851,37 @@ Example 2 (A cynical scribe writing a philosophical text):
 JSON Output:
 """
 ,
+    "scribe_write_biography": """\
+You are an AI roleplaying as a Scribe in a fantasy world, tasked with writing a biography.
+
+**Scribe's Profile:**
+- Name: {scribe_name}
+- Personality: {scribe_personality}
+
+**Subject of Biography:**
+- Name: {subject_name}
+- Title (if any): {subject_title}
+
+**Recorded Life Events:**
+{life_events_summary}
+
+**Task:**
+Write a short biographical text about the subject based **strictly** on the recorded events above. Do not invent major events, but you can add narrative flair and commentary based on the scribe's personality. If the events are sparse, the biography should reflect that mystery or simplicity.
+
+**Output Format (JSON):**
+Return a JSON object with the following fields:
+- "title": string (e.g., "The Life of {subject_name}", "The Ballad of...", etc.)
+- "content": string (The content of the biography. Should be a few paragraphs long.)
+
+Example:
+{{
+  "title": "The Life of Gorn",
+  "content": "Gorn began his life as a humble miner. In the year 10, he was witnessed fighting off a wolf pack..."
+}}
+
+JSON Output:
+"""
+,
     "town_official_compile_census": """
 You are a Town Official named {official_name} with a {official_personality} personality in a medieval fantasy world.
 You are compiling a census for the village for the year {year}.
@@ -966,5 +997,24 @@ Generate a short, in-character opening line to start a conversation with the pla
 Generate a single line of dialogue.
 
 Dialogue:
+""",
+    "npc_summarize_knowledge_about_subject": """\
+You are {npc_name}, an NPC in a fantasy village. The player has asked you about "{subject_name}".
+
+**Your Profile:**
+- Personality: {npc_personality}
+- Relationship with Player: {relationship_score} (0-100)
+
+**What You Know About {subject_name}:**
+{known_events_summary}
+
+**Task:**
+Write a response summarizing what you know about {subject_name} based on the events above.
+- If you know nothing (summary is empty), say you haven't heard of them.
+- If you know bad things (crimes), and you are lawful, sound disapproving.
+- If you know good things (heroism), sound impressed.
+- Keep it conversational and under 3 sentences.
+
+Response:
 """,
 }

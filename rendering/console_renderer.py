@@ -1,6 +1,7 @@
 # rendering/console_renderer.py
 
 import tcod
+import textwrap
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
@@ -18,51 +19,115 @@ def draw_status_panel(console, world):
                        title="Status", clear=True, fg=(255, 255, 255), bg=(0, 0, 0))
 
     y = 2
-    # Player HP
-    hp_str = f"HP: {world.player.combat.hp} / {world.player.combat.max_hp}"
-    console.print(x=panel_x + 1, y=y, string=hp_str)
-    y += 2
 
-    # Player Hunger and Thirst
-    if world.player.physical.hunger_level_msg:
-        console.print(x=panel_x + 1, y=y, string=world.player.physical.hunger_level_msg)
-        y += 1
-    if world.player.physical.thirst_level_msg:
-        console.print(x=panel_x + 1, y=y, string=world.player.physical.thirst_level_msg)
-        y += 1
-    y += 1 # Spacer
-
-    # Faction Reputations
-    console.print(x=panel_x + 1, y=y, string="Reputation:")
-    y += 1
-    for faction, rep in world.player.social.reputation.items():
-        console.print(x=panel_x + 2, y=y, string=f"- {faction.replace('_', ' ').title()}: {rep}")
-        y += 1
-    y += 1 # Spacer
-
-
-    # Time and Season
+    # --- Time & Season ---
     day = world.game_time // (24 * 60)
     hour = (world.game_time // 60) % 24
     minute = world.game_time % 60
     time_str = f"Day {day}, {hour:02d}:{minute:02d}"
     season = world.seasons[world.current_season_index]
-    console.print(x=panel_x + 1, y=y, string=time_str)
+    weather = world.weather.replace('_', ' ').title()
+
+    console.print(x=panel_x + 1, y=y, string=time_str, fg=(200, 200, 200))
     y += 1
-    console.print(x=panel_x + 1, y=y, string=f"Season: {season}")
-    y+= 2
+    console.print(x=panel_x + 1, y=y, string=f"{season} - {weather}", fg=(150, 150, 255))
+    y += 2
+
+    # --- Vitals ---
+    # HP Bar
+    hp_pct = world.player.combat.hp / world.player.combat.max_hp
+    bar_width = STATUS_PANEL_WIDTH - 4
+    filled_width = int(bar_width * hp_pct)
+
+    console.print(x=panel_x + 1, y=y, string="Health:", fg=(255, 100, 100))
+    y += 1
+    console.draw_rect(x=panel_x + 1, y=y, width=bar_width, height=1, ch=ord('░'), fg=(100, 0, 0)) # Empty
+    if filled_width > 0:
+        console.draw_rect(x=panel_x + 1, y=y, width=filled_width, height=1, ch=ord('█'), fg=(255, 0, 0)) # Filled
+    console.print(x=panel_x + 2, y=y, string=f"{world.player.combat.hp}/{world.player.combat.max_hp}", fg=(255, 255, 255))
+    y += 2
+
+    # Hunger
+    hunger_pct = min(1.0, world.player.physical.hunger / world.player.physical.max_hunger)
+    filled_hunger = int(bar_width * hunger_pct)
+    hunger_color = (0, 255, 0)
+    if hunger_pct > 0.5: hunger_color = (255, 255, 0)
+    if hunger_pct > 0.8: hunger_color = (255, 0, 0)
+
+    console.print(x=panel_x + 1, y=y, string="Hunger:", fg=(255, 255, 0))
+    y += 1
+    console.draw_rect(x=panel_x + 1, y=y, width=bar_width, height=1, ch=ord('░'), fg=(50, 50, 0))
+    if filled_hunger > 0:
+        console.draw_rect(x=panel_x + 1, y=y, width=filled_hunger, height=1, ch=ord('█'), fg=hunger_color)
+    y += 2
+
+    # Thirst
+    thirst_pct = min(1.0, world.player.physical.thirst / world.player.physical.max_thirst)
+    filled_thirst = int(bar_width * thirst_pct)
+    thirst_color = (0, 255, 255)
+    if thirst_pct > 0.5: thirst_color = (0, 150, 255)
+    if thirst_pct > 0.8: thirst_color = (0, 0, 255)
+
+    console.print(x=panel_x + 1, y=y, string="Thirst:", fg=(0, 200, 255))
+    y += 1
+    console.draw_rect(x=panel_x + 1, y=y, width=bar_width, height=1, ch=ord('░'), fg=(0, 0, 50))
+    if filled_thirst > 0:
+        console.draw_rect(x=panel_x + 1, y=y, width=filled_thirst, height=1, ch=ord('█'), fg=thirst_color)
+    y += 2
 
     # Status Effects
     if world.player.physical.status_effects:
-        console.print(x=panel_x + 1, y=y, string="Status:")
+        console.print(x=panel_x + 1, y=y, string="Conditions:", fg=(200, 200, 200))
         y += 1
         for effect in world.player.physical.status_effects:
-            color = (255, 255, 255) # Default white
-            if effect == "Wet":
-                color = COLOR_PLAYER_STATUS_WET
-            elif effect == "Freezing":
-                color = COLOR_PLAYER_STATUS_FREEZING
-            console.print(x=panel_x + 2, y=y, string=f"- {effect}", fg=color)
+            color = (255, 255, 255)
+            if effect == "Wet": color = COLOR_PLAYER_STATUS_WET
+            elif effect == "Freezing": color = COLOR_PLAYER_STATUS_FREEZING
+            elif effect == "Overheating": color = (255, 100, 0)
+            console.print(x=panel_x + 2, y=y, string=f"! {effect}", fg=color)
+            y += 1
+        y += 1
+
+    # Active Quest (Top Priority)
+    active_quests = list(world.player.knowledge.active_quests.values())
+    if active_quests:
+        console.print(x=panel_x + 1, y=y, string="Current Objective:", fg=(255, 215, 0))
+        y += 1
+        quest = active_quests[0]
+        # Wrap title if too long
+        title_lines = textwrap.wrap(quest["title"], width=STATUS_PANEL_WIDTH - 2)
+        for line in title_lines:
+            console.print(x=panel_x + 1, y=y, string=line, fg=(255, 255, 255))
+            y += 1
+
+        # Simple progress
+        if quest["type"] == "fetch":
+            item_key = quest["item_to_fetch_key"]
+            req = quest["item_fetch_count"]
+            curr = 0
+            for item in world.player.economic.inventory:
+                if item["key"] == item_key:
+                    curr += item.get("quantity", 1)
+            console.print(x=panel_x + 2, y=y, string=f"({curr}/{req})", fg=(200, 200, 200))
+            y += 1
+        elif quest["type"] == "kill":
+            req = quest.get("target_count", 1)
+            curr = quest.get("progress", 0)
+            console.print(x=panel_x + 2, y=y, string=f"({curr}/{req})", fg=(200, 200, 200))
+            y += 1
+
+        if len(active_quests) > 1:
+            console.print(x=panel_x + 1, y=y, string=f"+ {len(active_quests)-1} more (Press Q)", fg=(100, 100, 100))
+            y += 1
+
+    y += 1
+
+    # Faction Reputations (Condensed)
+    console.print(x=panel_x + 1, y=y, string="Reputation:", fg=(150, 150, 150))
+    y += 1
+    for faction, rep in world.player.social.reputation.items():
+        if rep != 0:
+            console.print(x=panel_x + 2, y=y, string=f"{faction[:3].upper()}: {rep}", fg=(200, 200, 200))
             y += 1
 
 def draw_minimap(console, world):
@@ -147,6 +212,17 @@ def draw(console, world, camera_x, camera_y):
                 elif world.explored_map[map_y, map_x]:
                     console.print(x=x, y=y, string=chr(tile.char), fg=(100, 100, 100)) # Explored but not visible
 
+    # Draw path visualizer
+    if hasattr(world.player.state, 'current_path') and world.player.state.current_path:
+        for px, py in world.player.state.current_path:
+            screen_x = px - camera_x
+            screen_y = py - camera_y
+            if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+                # Draw path markers (e.g., small dots)
+                # Only if visible in player FOV
+                if is_visible(world, px, py):
+                    console.print(x=screen_x, y=screen_y, string="•", fg=(0, 255, 0))
+
     # Draw entities
     all_entities = world.npcs + world.village_npcs + [world.player]
     for entity in sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, 'render_order') else 0):
@@ -176,8 +252,14 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "KNOWLEDGE_MENU":
         draw_knowledge_menu(console, world)
 
+    if world.game_state == "QUEST_MENU":
+        draw_quest_menu(console, world)
+
     if world.game_state == "BOOK_READING":
         draw_book_reading_ui(console, world)
+
+    if world.game_state == "HELP_MENU":
+        draw_help_menu(console)
 
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
@@ -432,6 +514,131 @@ def draw_knowledge_menu(console, world):
                 console.print(x=x + 3, y=line, string=f"- {book.title}")
                 line += 1
 
+def draw_quest_menu(console, world):
+    """Draws the quest log menu."""
+    menu_width = 70
+    menu_height = 40
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Quest Log", clear=True)
+
+    # List width
+    list_width = 25
+    details_x = x + list_width + 1
+
+    # Draw separator line
+    console.draw_rect(x=x+list_width, y=y+1, width=1, height=menu_height-2, ch=ord('|'), fg=(100, 100, 100))
+
+    active_quests = list(world.player.knowledge.active_quests.values())
+    num_quests = len(active_quests)
+
+    if not active_quests:
+        console.print(x=x + 2, y=y + 2, string="No active quests.", fg=(150, 150, 150))
+        return
+
+    ctx = world.quest_menu_context
+    selected_index = ctx.get("selected_quest_index", 0)
+    scroll_offset = ctx.get("scroll_offset", 0)
+    list_height = menu_height - 4
+
+    # Scrolling logic
+    if selected_index < 0: selected_index = 0
+    if selected_index >= num_quests: selected_index = num_quests - 1
+    ctx["selected_quest_index"] = selected_index
+
+    if selected_index < scroll_offset:
+        scroll_offset = selected_index
+    elif selected_index >= scroll_offset + list_height:
+        scroll_offset = selected_index - list_height + 1
+    ctx["scroll_offset"] = scroll_offset
+
+    # Draw List
+    for i in range(list_height):
+        idx = scroll_offset + i
+        if idx < num_quests:
+            quest = active_quests[idx]
+            title = quest["title"]
+            if len(title) > list_width - 3:
+                title = title[:list_width - 6] + "..."
+
+            color = (255, 255, 255)
+            if idx == selected_index:
+                color = (0, 255, 255)
+                console.print(x=x + 1, y=y + 2 + i, string=">", fg=color)
+
+            console.print(x=x + 3, y=y + 2 + i, string=title, fg=color)
+
+    # Draw Details
+    if 0 <= selected_index < num_quests:
+        selected_quest = active_quests[selected_index]
+
+        detail_y = y + 2
+        # Title
+        console.print_box(x=details_x + 1, y=detail_y, width=menu_width - list_width - 3, height=2, string=selected_quest["title"], fg=(255, 255, 0))
+        detail_y += 2
+
+        # Description
+        desc = selected_quest["description"]
+        desc_height = console.get_height_rect(x=details_x + 1, y=detail_y, width=menu_width - list_width - 3, height=10, string=desc)
+        console.print_box(x=details_x + 1, y=detail_y, width=menu_width - list_width - 3, height=desc_height, string=desc)
+        detail_y += desc_height + 1
+
+        # Objectives
+        console.print(x=details_x + 1, y=detail_y, string="Objectives:", fg=(200, 200, 200))
+        detail_y += 1
+
+        if selected_quest["type"] == "fetch":
+            item_name = selected_quest["item_to_fetch_key"].replace("_", " ").title()
+            count = selected_quest["item_fetch_count"]
+
+            # Check player inventory for progress display
+            current_count = 0
+            for item in world.player.economic.inventory:
+                if item["key"] == selected_quest["item_to_fetch_key"]:
+                    current_count += item.get("quantity", 1)
+
+            progress_str = f"- Fetch {item_name}: {current_count}/{count}"
+            color = (0, 255, 0) if current_count >= count else (255, 255, 255)
+            console.print(x=details_x + 2, y=detail_y, string=progress_str, fg=color)
+
+        elif selected_quest["type"] == "kill":
+            target_count = selected_quest.get("target_count", 1)
+            progress = selected_quest.get("progress", 0)
+            progress_str = f"- Defeat targets: {progress}/{target_count}"
+            color = (0, 255, 0) if progress >= target_count else (255, 255, 255)
+            console.print(x=details_x + 2, y=detail_y, string=progress_str, fg=color)
+
+def draw_help_menu(console):
+    """Draws the help menu with controls."""
+    menu_width = 50
+    menu_height = 30
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Help / Controls", clear=True)
+
+    controls = [
+        ("Movement", "Arrows / Left Click"),
+        ("Interact", "E / Right Click"),
+        ("Wait", "."),
+        ("Talk", "T"),
+        ("Character Info", "I"),
+        ("Crafting", "C"),
+        ("Building", "B"),
+        ("Quests", "Q (Planned)"),
+        ("Help", "?"),
+        ("Save & Menu", "ESC"),
+    ]
+
+    y_offset = y + 3
+    for action, key in controls:
+        console.print(x=x + 4, y=y_offset, string=f"{action:<20} : {key}")
+        y_offset += 2
+
+    console.print(x=x + menu_width // 2, y=y + menu_height - 3, string="Press ESC to close", alignment=tcod.CENTER)
+
+
 def draw_book_reading_ui(console, world):
     """Draws the UI for reading a book."""
     ctx = world.book_reading_context
@@ -450,5 +657,37 @@ def draw_book_reading_ui(console, world):
 
     console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title=f"Reading: {book.title}", clear=True)
 
-    console.print_box(x=x + 2, y=y + 2, width=menu_width - 4, height=menu_height - 4,
-                      string=f"by {book.author_name} ({book.year_written})\n\n{book.content}")
+    # Content preparation
+    header = f"by {book.author_name} ({book.year_written})\n\n"
+    full_text = header + book.content
+
+    # Text wrapping
+    text_width = menu_width - 4
+    wrapped_lines = []
+    for line in full_text.splitlines():
+        if line:
+            wrapped_lines.extend(textwrap.wrap(line, width=text_width))
+        else:
+            wrapped_lines.append("") # Preserve empty lines
+
+    # Scrolling
+    scroll_offset = ctx.get("scroll_offset", 0)
+    display_height = menu_height - 4
+
+    # Bound scrolling (simple method)
+    max_scroll = max(0, len(wrapped_lines) - display_height)
+    if scroll_offset > max_scroll:
+        scroll_offset = max_scroll
+        ctx["scroll_offset"] = scroll_offset # Update context to clamp it
+
+    visible_lines = wrapped_lines[scroll_offset : scroll_offset + display_height]
+
+    for i, line in enumerate(visible_lines):
+        console.print(x=x + 2, y=y + 2 + i, string=line)
+
+    # Scrollbar indicator (optional but helpful)
+    if len(wrapped_lines) > display_height:
+        pct = scroll_offset / max_scroll
+        bar_y = int(y + 2 + (display_height * pct))
+        if bar_y >= y + menu_height - 1: bar_y = y + menu_height - 2
+        console.print(x=x + menu_width - 1, y=bar_y, string="█", fg=(100, 100, 100))

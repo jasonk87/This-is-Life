@@ -51,6 +51,23 @@ from data.quests import QUEST_DEFINITIONS # Import quest definitions
 from data.environment import WEATHER_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 
+VILLAGE_BUILDING_PROJECTS = {
+    "house": {
+        "cost": {"raw_log": 50},
+        "width": 7,
+        "height": 7,
+        "category": "residential",
+        "description": "A new home for villagers."
+    },
+    "farm": {
+        "cost": {"raw_log": 30, "stone_chunk": 10},
+        "width": 8,
+        "height": 6,
+        "category": "agricultural_workplace",
+        "description": "A farm to produce food."
+    }
+}
+
 import json
 import uuid
 
@@ -72,14 +89,15 @@ class Quest:
 
 class Book:
     """A class to represent a book written by a Scribe."""
-    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle"):
+    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle", referenced_event_ids: list[str] = None):
         self.id = str(uuid.uuid4())
         self.title = title
         self.author_id = author_id
         self.author_name = author_name
         self.year_written = year_written
         self.content = content
-        self.book_type = book_type # e.g., "chronicle", "census"
+        self.book_type = book_type # e.g., "chronicle", "census", "biography"
+        self.referenced_event_ids = referenced_event_ids if referenced_event_ids else []
 
 class Event:
     """A class to represent a significant event that occurs in the world."""
@@ -91,6 +109,7 @@ class Event:
         self.target_id = target_id    # The ID of the entity being acted upon (optional)
         self.location = location      # Where the event happened (optional)
         self.timestamp = game_time  # Use game ticks for consistency
+        self.public_knowledge = False # Tracks if this event was witnessed or has become public
 
 
 class WorldGenerator:
@@ -186,6 +205,7 @@ class Village:
         self.demand = {}  # item_key: count
         self.local_events = [] # List of Event objects specific to this village location
         self.known_events = {} # Event ID -> Event object (knowledge spread)
+        self.construction_projects = [] # List of active construction projects
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -274,6 +294,8 @@ class PlayerState:
     last_dx: int = 0
     last_dy: int = -1
     original_char: int = ord('@')
+    current_path: list[tuple[int, int]] = field(default_factory=list)
+    move_cooldown: int = 0
 
 
 class Player:
@@ -540,6 +562,12 @@ class World:
 
         # Knowledge Menu State
         self.knowledge_menu_context = {
+            "scroll_offset": 0
+        }
+
+        # Quest Menu State
+        self.quest_menu_context = {
+            "selected_quest_index": 0,
             "scroll_offset": 0
         }
 
@@ -1186,23 +1214,21 @@ class World:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
                             # Successfully met up, now exchange gossip
-                            # NPC shares one piece of news with partner
-                            if npc.knowledge.known_events:
-                                event_id_to_share = random.choice(list(npc.knowledge.known_events.keys()))
-                                if event_id_to_share not in chat_partner.knowledge.known_events:
-                                    chat_partner.knowledge.known_events[event_id_to_share] = npc.knowledge.known_events[event_id_to_share]
-                                    # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about event {event_id_to_share[:8]}.")
+                            # NPC shares most interesting news with partner
+                            event_to_share = self._get_most_interesting_known_event(npc)
+                            if event_to_share and event_to_share.id not in chat_partner.knowledge.known_events:
+                                chat_partner.knowledge.known_events[event_to_share.id] = event_to_share
+                                # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about {event_to_share.type}.")
 
-                            # Partner shares one piece of news back
-                            if chat_partner.knowledge.known_events:
-                                event_id_to_share_back = random.choice(list(chat_partner.knowledge.known_events.keys()))
-                                if event_id_to_share_back not in npc.knowledge.known_events:
-                                    npc.knowledge.known_events[event_id_to_share_back] = chat_partner.knowledge.known_events[event_id_to_share_back]
-                                    # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about event {event_id_to_share_back[:8]}.")
+                            # Partner shares most interesting news back
+                            event_to_share_back = self._get_most_interesting_known_event(chat_partner)
+                            if event_to_share_back and event_to_share_back.id not in npc.knowledge.known_events:
+                                npc.knowledge.known_events[event_to_share_back.id] = event_to_share_back
+                                # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about {event_to_share_back.type}.")
 
                             # Increase relationship
-                            npc.relationships[chat_partner.id] = min(100, npc.relationships.get(chat_partner.id, 50) + 5)
-                            chat_partner.relationships[npc.id] = min(100, chat_partner.relationships.get(npc.id, 50) + 5)
+                            npc.social.relationships[chat_partner.id] = min(100, npc.social.relationships.get(chat_partner.id, 50) + 5)
+                            chat_partner.social.relationships[npc.id] = min(100, chat_partner.social.relationships.get(npc.id, 50) + 5)
 
 
                         npc.schedule.current_task = "idle" # Done socializing for now
@@ -1212,8 +1238,8 @@ class World:
                             friend_home = self.buildings_by_id.get(friend.home_building_id)
                             if friend_home and (npc.x, npc.y) == (friend_home.global_center_x, friend_home.global_center_y):
                                 # Successfully arrived at friend's house
-                                npc.relationships[friend.id] = min(100, npc.relationships.get(friend.id, 50) + 10)
-                                friend.relationships[npc.id] = min(100, friend.relationships.get(npc.id, 50) + 10)
+                                npc.social.relationships[friend.id] = min(100, npc.social.relationships.get(friend.id, 50) + 10)
+                                friend.social.relationships[npc.id] = min(100, friend.social.relationships.get(npc.id, 50) + 10)
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
                         npc.schedule.current_task = "idle" # Done visiting
                     elif npc.schedule.current_task == "applying_for_job":
@@ -2631,17 +2657,15 @@ class World:
                                             event_to_shout = event
                                             break
 
-                                    if not event_to_shout:
-                                        event_to_shout = list(npc.knowledge.known_events.values())[-1]
+                                    event_to_shout = self._get_most_interesting_known_event(npc)
 
                                     if event_to_shout:
                                         new_task_label = "crying_news"
-                                        destination_coords = village.interaction_points["town_square_center"][0] # It's a list of points, take first
-                                        npc.current_sub_task_sequence_index = 0 # repurposed to store event? No, simpler to store in temp
-                                        npc.task_target_entity_id = None # Not targeting entity
-                                        # We need to store the event to shout.
-                                        # Let's attach it to the NPC temporarily or re-find it when task starts.
-                                        # Let's re-find it.
+                                        destination_coords = village.interaction_points["town_square_center"][0]
+                                        npc.current_sub_task_sequence_index = 0
+                                        npc.task_target_entity_id = None
+                                        # Store ID to ensure we shout the same one
+                                        npc.task_context_data = event_to_shout.id
                         elif random.random() < 0.1: # 10% chance to just socialize with a nearby NPC
                             # Find a nearby NPC to chat with
                             potential_partners = [
@@ -2697,20 +2721,19 @@ class World:
 
                     elif npc.schedule.current_task == "crying_news" and (npc.x, npc.y) == destination_coords:
                         # Perform the shout
-                        if npc.knowledge.known_events:
-                             # Re-select best event
-                            event_to_shout = None
-                            for event in reversed(list(npc.knowledge.known_events.values())):
-                                if event.type in ["trade_deal", "threat_detected", "crime_witnessed"]:
-                                    event_to_shout = event
-                                    break
-                            if not event_to_shout:
-                                event_to_shout = list(npc.knowledge.known_events.values())[-1]
+                        event_id_to_shout = npc.task_context_data
+                        event_to_shout = npc.knowledge.known_events.get(event_id_to_shout)
 
+                        # Fallback if specific event lost (unlikely)
+                        if not event_to_shout and npc.knowledge.known_events:
+                             event_to_shout = list(npc.knowledge.known_events.values())[-1]
+
+                        if event_to_shout:
                             self.broadcast_news(npc, 15, event_to_shout)
 
                         npc.schedule.current_task = "idle" # Done shouting
                         npc.leisure_timer = 50 # Wait a bit before moving
+                        npc.task_context_data = None
 
                     # Else, if it's night and they have a home
                     elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in ["sleeping", "going home to sleep"]:
@@ -3389,13 +3412,61 @@ class World:
                                 author_name=npc.name,
                                 year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
                                 content=book_data.get("content", "..."),
-                                book_type="chronicle"
+                                book_type="chronicle",
+                                referenced_event_ids=list(npc.knowledge.known_events.keys())
                             )
                             self.books.append(new_book)
                             work_building.building_inventory[f"book_{new_book.id}"] = 1
                             self.add_message_to_chat_log(f"{npc.name} has written a new book titled '{new_book.title}'.")
                         except json.JSONDecodeError as e:
                             self.add_message_to_chat_log(f"Error parsing LLM response for book writing: {e}")
+
+                    elif completed_sub_task_id == "write_biography":
+                        # Find a worthy subject (high fame/infamy)
+                        candidates = []
+                        for potential_subject in self.village_npcs + [self.player]:
+                            if potential_subject.id == npc.id: continue
+                            score = potential_subject.social.fame + potential_subject.social.infamy
+                            if score > 10: # Minimum renown threshold
+                                candidates.append((score, potential_subject))
+
+                        candidates.sort(key=lambda x: x[0], reverse=True)
+                        subject = candidates[0][1] if candidates else random.choice(self.village_npcs)
+
+                        # Gather events about this subject
+                        # Only use events known to the Scribe
+                        subject_events = [e for e in npc.knowledge.known_events.values() if e.subject_id == subject.id]
+
+                        if len(subject_events) >= 1:
+                            life_events_summary = "\n".join([f"- {e.description}" for e in subject_events])
+                            prompt = LLM_PROMPTS["scribe_write_biography"].format(
+                                scribe_name=npc.name,
+                                scribe_personality=npc.social.personality,
+                                subject_name=subject.name if hasattr(subject, 'name') else "Unknown",
+                                subject_title=subject.social.title,
+                                life_events_summary=life_events_summary
+                            )
+                            llm_response = self._call_ollama(prompt)
+                            try:
+                                book_data = json.loads(llm_response)
+                                new_book = Book(
+                                    title=book_data.get("title", f"Biography of {subject.name}"),
+                                    author_id=npc.id,
+                                    author_name=npc.name,
+                                    year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                                    content=book_data.get("content", "..."),
+                                    book_type="biography",
+                                    referenced_event_ids=[e.id for e in subject_events]
+                                )
+                                self.books.append(new_book)
+                                work_building.building_inventory[f"book_{new_book.id}"] = 1
+                                self.add_message_to_chat_log(f"{npc.name} has written a biography about {subject.name}.")
+                            except json.JSONDecodeError:
+                                pass
+                        else:
+                            # Not enough info, maybe write a regular book instead next time
+                            pass
+
                     elif completed_sub_task_id == "compile_census":
                         birth_events = [e for e in self.global_events if e.type == 'npc_birth']
                         death_events = [e for e in self.global_events if e.type == 'entity_death']
@@ -4090,26 +4161,6 @@ class World:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
 
-    def _get_witnesses_to_action(self, x: int, y: int, action_type: str) -> list['NPC']:
-        """Finds NPCs who can see a location and would consider the action a crime."""
-        witnesses = []
-        for npc in self.village_npcs + self.npcs: # Check all NPCs
-            if npc.is_dead or isinstance(npc, Animal): # Animals can't be witnesses
-                continue
-
-            # Check if the NPC can see the location of the crime
-            if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][x, y]:
-                # Simple logic for now: most villagers will witness most crimes.
-                # Future: More nuanced logic based on NPC personality, relationship to player, etc.
-                if action_type in ["assault", "lockpicking", "theft"]:
-                    # Guards and Sheriffs will always be witnesses
-                    if npc.economic.profession in ["Guard", "Sheriff"]:
-                        witnesses.append(npc)
-                    # For other NPCs, maybe a chance based on personality
-                    elif npc.social.personality not in ["careless", "fearful"]: # Example personalities who might not report
-                        witnesses.append(npc)
-        return witnesses
-
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
         entities = []
@@ -4181,7 +4232,7 @@ class World:
                 actions.append("Attack")
             else: # It's a humanoid NPC
                 actions.extend(["Talk", "Attack"])
-                if entity_data.profession in ["Merchant", "Miller"]:
+                if entity_data.profession in ["Merchant", "Miller", "Scribe"]:
                     actions.append("Trade")
         elif entity_type == "item":
             actions.append("Pick up")
@@ -4364,6 +4415,39 @@ class World:
                 chunk.tiles[local_y][local_x] = new_tile
                 # Update transparency map
                 self.transparency_map[y, x] = not new_tile.blocks_fov
+
+    def player_attempt_read_book(self, book_item_key: str):
+        """Handles the player's attempt to read a book."""
+        if not book_item_key.startswith("book_"):
+            self.add_message_to_chat_log("That is not a book.")
+            return
+
+        book_id = book_item_key.split("_", 1)[1]
+        book = next((b for b in self.books if b.id == book_id), None)
+
+        if not book:
+            self.add_message_to_chat_log("You try to open the book, but the pages are stuck (Book data missing).")
+            return
+
+        # Change state to reading UI
+        self.game_state = "BOOK_READING"
+        self.book_reading_context["book_id"] = book.id
+        self.book_reading_context["scroll_offset"] = 0
+
+        # Knowledge Transfer
+        if hasattr(book, 'referenced_event_ids') and book.referenced_event_ids:
+            learned_count = 0
+            for event_id in book.referenced_event_ids:
+                if event_id not in self.player.knowledge.known_events:
+                    # Find event in global log (O(N) but N is small ~200)
+                    event_obj = next((e for e in self.global_events if e.id == event_id), None)
+                    if event_obj:
+                        self.player.knowledge.known_events[event_id] = event_obj
+                        learned_count += 1
+
+            if learned_count > 0:
+                self.add_message_to_chat_log(f"You learned about {learned_count} historical events from reading this book.")
+            self.player.knowledge.known_books.add(book_item_key)
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
@@ -4926,13 +5010,40 @@ class World:
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
 
-        self.log_event(
+        death_event = self.log_event(
             event_type="entity_death",
             description="{subject} was killed by {target}.",
             subject_id=dead_npc.id,
             target_id=killer_id,
             location=(dead_npc.x, dead_npc.y)
         )
+
+        # Handle Reputation impact if the death was witnessed (public knowledge)
+        if death_event.public_knowledge and killer_id:
+            killer = self.get_entity_by_id(killer_id)
+            if killer:
+                # Fame for killing monsters
+                if isinstance(dead_npc, DireWolf) or (isinstance(dead_npc, Animal) and dead_npc.animal_type == "dire_wolf"):
+                    killer.social.fame += 20
+                    if isinstance(killer, Player):
+                        self.add_message_to_chat_log(f"You gain fame for slaying a dangerous beast!")
+                    else:
+                        self.add_message_to_chat_log(f"{killer.name} gains fame for slaying a beast!")
+
+                # Infamy for murder (killing non-combatants/civilians)
+                # Simplified check: if victim was not a creature/monster and not hostile
+                elif not isinstance(dead_npc, Animal) and dead_npc.economic.profession != "Creature":
+                     # For player killer, check if victim was hostile
+                     is_murder = True
+                     if killer.id == self.player.id and dead_npc.combat.is_hostile_to_player:
+                         is_murder = False # Self defense / combat
+
+                     if is_murder:
+                         killer.social.infamy += 20
+                         if isinstance(killer, Player):
+                             self.add_message_to_chat_log("Your infamy increases for this public act of violence.")
+                         else:
+                             self.add_message_to_chat_log(f"{killer.name}'s infamy increases.")
 
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
@@ -5360,6 +5471,55 @@ class World:
                 npc_target.active_quest = None # NPC gives up offering this quest for now
                 return
 
+        # "Ask About" Logic
+        ask_keywords = ["ask about", "who is", "tell me about", "know about"]
+        if any(keyword in player_input_text.lower() for keyword in ask_keywords):
+            found_subject = None
+            relevant_events = []
+
+            # Identify entity from input string
+            input_lower = player_input_text.lower()
+            # Check all NPCs + Player
+            potential_subjects = self.village_npcs + self.npcs + [self.player]
+
+            # Sort by length descending to match longer names first (e.g. "Dire Wolf" before "Wolf")
+            potential_subjects.sort(key=lambda x: len(x.name), reverse=True)
+
+            for entity in potential_subjects:
+                if entity.name.lower() in input_lower and len(entity.name) > 2:
+                     found_subject = entity
+                     break
+
+            if found_subject:
+                 # Gather known events involving this subject
+                 for event in npc_target.knowledge.known_events.values():
+                     if event.subject_id == found_subject.id or event.target_id == found_subject.id:
+                         relevant_events.append(event)
+
+                 if relevant_events:
+                     summary_lines = []
+                     for e in relevant_events:
+                         subj = self.get_entity_by_id(e.subject_id)
+                         targ = self.get_entity_by_id(e.target_id) if e.target_id else None
+                         s_name = subj.name if subj else "Someone"
+                         t_name = targ.name if targ else "someone"
+                         summary_lines.append(f"- {e.description.format(subject=s_name, target=t_name)}")
+
+                     summary_text = "\n".join(summary_lines)
+
+                     prompt = LLM_PROMPTS["npc_summarize_knowledge_about_subject"].format(
+                         npc_name=npc_target.name,
+                         npc_personality=npc_target.social.personality,
+                         relationship_score=npc_target.social.relationships.get(self.player.id, 50),
+                         subject_name=found_subject.name,
+                         known_events_summary=summary_text
+                     )
+                     response = self._call_ollama(prompt)
+                     if response:
+                         self.chat_ui_history.append((npc_target.name, response.strip()))
+                         return
+            # If no subject found or no events known, fall through to general conversation
+
         share_keywords = ["i know where", "let me tell you about", "have you seen"]
         if any(keyword in player_input_text.lower() for keyword in share_keywords):
             shared = False
@@ -5602,6 +5762,39 @@ class World:
                 npc.knowledge.long_term_memory.pop(0)
 
 
+    def _get_most_interesting_known_event(self, npc: NPC) -> Event | None:
+        """Selects the most 'interesting' event from an NPC's knowledge based on type and recency."""
+        if not npc.knowledge.known_events:
+            return None
+
+        scored_events = []
+        for event in npc.knowledge.known_events.values():
+            score = 0
+            # Event Type Score
+            if event.type in ["entity_death", "crime_witnessed", "threat_detected"]:
+                score += 10
+            elif event.type in ["quest_complete", "npc_marriage"]:
+                score += 5
+            elif event.type in ["npc_fired", "npc_hired"]:
+                score += 2
+            else:
+                score += 1
+
+            # Recency Score
+            age = self.game_time - event.timestamp
+            if age < DAY_LENGTH_TICKS:
+                score += 5
+            elif age > DAY_LENGTH_TICKS * 3:
+                score -= 2
+
+            scored_events.append((score, event))
+
+        if not scored_events:
+             return None
+
+        scored_events.sort(key=lambda x: x[0], reverse=True)
+        return scored_events[0][1]
+
     def _call_ollama(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
         if not ENABLE_OLLAMA_CONNECTION:
@@ -5627,7 +5820,7 @@ class World:
             # print(f"Error communicating with Ollama: {e}")
             return ""
 
-    def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None):
+    def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None) -> Event:
         """Creates an Event object and adds it to the global event log."""
         new_event = Event(
             event_type=event_type,
@@ -5637,10 +5830,39 @@ class World:
             location=location,
             game_time=self.game_time
         )
+
+        # Determine if the event is public knowledge (witnessed)
+        if location:
+            # Check for witnesses at the location
+            # Note: _get_witnesses_to_action filters by FOV.
+            # We pass a generic action type to get all eyes.
+            witnesses = self._get_witnesses_to_action(location[0], location[1], "general_event")
+
+            # If the player is the subject or target, and witnesses exist, it's public.
+            # If an NPC is the subject, and player or other NPCs see it, it's public.
+            # We exclude the subject themselves from the "public" count (conceptually),
+            # though _get_witnesses_to_action might include them if not careful.
+            # _get_witnesses check: "for npc in ... if npc.id in npc_fov_maps ...".
+            # It currently iterates NPCs. If the subject is an NPC, they might see themselves?
+            # Let's assume seeing yourself doesn't make it "public" knowledge if no one else is there.
+
+            valid_witnesses = [w for w in witnesses if w.id != subject_id]
+
+            # Also check if PLAYER witnesses it (if player is not subject)
+            player_saw = False
+            if subject_id != self.player.id:
+                if self.player_fov_map[location[1], location[0]]:
+                    player_saw = True
+
+            if valid_witnesses or player_saw:
+                new_event.public_knowledge = True
+
         self.global_events.append(new_event)
         # Keep the event log from growing indefinitely
         if len(self.global_events) > 200: # Max 200 recent events
             self.global_events.pop(0)
+
+        return new_event
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
         """Finds the nearest lit heat source for an NPC."""
@@ -6964,6 +7186,34 @@ class World:
 
     def update(self):
         """Main update function for the world, called once per game tick."""
+        # Handle player auto-movement from mouse clicks
+        if self.player.state.current_path:
+            if self.player.state.move_cooldown > 0:
+                self.player.state.move_cooldown -= 1
+            else:
+                next_x, next_y = self.player.state.current_path[0]
+                dx = next_x - self.player.x
+                dy = next_y - self.player.y
+
+                # Remove current step from path
+                self.player.state.current_path.pop(0)
+
+                # Execute movement
+                action_cost = self.handle_player_movement(dx, dy)
+
+                # If movement failed (blocked), clear path
+                if action_cost == 0 and (dx != 0 or dy != 0):
+                     self.player.state.current_path = []
+                else:
+                    # Set cooldown for next move (e.g., 5 ticks for fast movement)
+                    self.player.state.move_cooldown = 5
+                    # Add to game time based on action cost (though update also adds 1)
+                    # If we want consistent time, we should probably just let update add 1
+                    # and assume player moves faster than world ticks?
+                    # Or add the extra cost here. Let's add extra cost.
+                    if action_cost > 1:
+                        self.game_time += (action_cost - 1)
+
         self.game_time += 1
         self._update_season()
         self._update_weather()
@@ -7016,13 +7266,13 @@ class World:
                         prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
                             npc_name=npc.name,
                             npc_personality=npc.social.personality,
-                            relationship_score=npc.relationships.get(self.player.id, 50),
+                            relationship_score=npc.social.relationships.get(self.player.id, 50),
                             event_type=event_to_discuss.type,
                             event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
                             subject_name=subject_name,
                             target_name=target_name,
-                            relationship_with_subject=npc.relationships.get(event_to_discuss.subject_id, 50),
-                            relationship_with_target=npc.relationships.get(event_to_discuss.target_id, 50)
+                            relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
+                            relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
                         )
 
                         starter_dialogue = self._call_ollama(prompt)
@@ -7081,30 +7331,6 @@ class World:
                 return npc
         return None
 
-    def _update_npc_reputations(self):
-        """Periodically scans the event log for significant NPC actions and awards fame/infamy."""
-        if self.game_time % 100 != 0:  # Check every 100 ticks
-            return
-
-        for npc in self.village_npcs + self.npcs:
-            # Check for heroic kills
-            heroic_kills = []
-            for e in self.global_events:
-                if e.subject_id == npc.id and e.type == "entity_death" and e.target_id:
-                    target = self.get_entity_by_id(e.target_id)
-                    if target and (isinstance(target, DireWolf) or (isinstance(target, Animal) and target.animal_type == "dire_wolf")):
-                        heroic_kills.append(e)
-
-            for kill in heroic_kills:
-                npc.fame += 20
-                self.add_message_to_chat_log(f"{npc.name} gains fame for killing a dire wolf!")
-
-            # Check for murders
-            murders = [e for e in self.global_events if e.subject_id == npc.id and e.type == "entity_death" and e.target_id and isinstance(self.get_entity_by_id(e.target_id), NPC)]
-            for murder in murders:
-                npc.infamy += 20
-                self.add_message_to_chat_log(f"{npc.name} gains infamy for murder!")
-
     def _update_entity_titles(self):
         """Periodically checks and updates titles for all entities based on fame/infamy."""
         if self.game_time % 100 != 0:  # Check every 100 ticks
@@ -7112,13 +7338,14 @@ class World:
 
         entities_to_check = [self.player] + self.village_npcs + self.npcs
         for entity in entities_to_check:
-            if not entity.title and (entity.fame >= 50 or entity.infamy >= 50):
-                recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"]]
-                actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific deeds of note."
+            if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
+                # Only use public knowledge events
+                recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"] and e.public_knowledge]
+                actions_summary = "\n".join([e.description for e in recent_events[-5:]]) or "No specific known deeds."
 
                 prompt = LLM_PROMPTS["player_title_generation"].format(
-                    player_fame=entity.fame,
-                    player_infamy=entity.infamy,
+                    player_fame=entity.social.fame,
+                    player_infamy=entity.social.infamy,
                     player_actions_summary=actions_summary
                 )
                 response_str = self._call_ollama(prompt)
@@ -7363,7 +7590,7 @@ class World:
                     )
 
                 # Quitting Logic
-                elif npc.economic.job_satisfaction < 10:
+                if npc.economic.profession.lower() != "unemployed" and npc.economic.job_satisfaction < 10:
                     # NPC Quits
                     old_profession = npc.economic.profession
                     npc.economic.profession = "Unemployed"
@@ -7394,7 +7621,8 @@ class World:
                 npc.economic.job_satisfaction = max(0, npc.economic.job_satisfaction - 2)
 
         # --- Hiring Logic ---
-        unemployed_npcs = [n for n in self.village_npcs if n.economic.profession.lower() == "unemployed" and not n.physical.is_dead]
+        # Filter for unemployed NPCs who have been unemployed for at least 1 day (prevents immediate rehiring after quitting)
+        unemployed_npcs = [n for n in self.village_npcs if n.economic.profession.lower() == "unemployed" and not n.physical.is_dead and n.economic.days_unemployed > 0]
         random.shuffle(unemployed_npcs) # Randomize who gets first pick
 
         for npc in unemployed_npcs:
@@ -7593,6 +7821,156 @@ class World:
         except json.JSONDecodeError:
             pass
 
+    def _find_valid_building_spot(self, village: Village, width: int, height: int) -> tuple[int, int] | None:
+        """Finds a valid spot for a new building near the village center."""
+        # Use town square as anchor, or first building
+        anchor_x, anchor_y = 0, 0
+        if "town_square_center" in village.interaction_points:
+            anchor_x, anchor_y = village.interaction_points["town_square_center"][0]
+        elif village.buildings:
+            anchor_x, anchor_y = village.buildings[0].global_center_x, village.buildings[0].global_center_y
+        else:
+            return None # Dead village
+
+        search_radius_min = 10
+        search_radius_max = 60
+
+        for i in range(50): # Try 50 times
+            # Pick a random spot in the ring
+            angle = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(search_radius_min, search_radius_max)
+            x = int(anchor_x + math.cos(angle) * dist)
+            y = int(anchor_y + math.sin(angle) * dist)
+
+            # Check bounds (with margin)
+            if not (5 <= x < WORLD_WIDTH - width - 5 and 5 <= y < WORLD_HEIGHT - height - 5):
+                continue
+
+            # Check collision with existing buildings
+            collision = False
+            for b in village.buildings:
+                # Simple AABB collision
+                if (x < b.global_origin_x + b.width + 2 and x + width + 2 > b.global_origin_x and
+                    y < b.global_origin_y + b.height + 2 and y + height + 2 > b.global_origin_y):
+                    collision = True
+                    break
+
+            if collision:
+                continue
+
+            # Check terrain (all tiles must be passable and not water)
+            terrain_valid = True
+            for ty in range(y, y + height):
+                for tx in range(x, x + width):
+                    tile = self.get_tile_at(tx, ty)
+                    if not tile or not tile.passable or tile.name in ["Water", "Deep Water"]:
+                        terrain_valid = False
+                        break
+                if not terrain_valid: break
+
+            if terrain_valid:
+                return x, y
+
+        return None
+
+    def _plan_village_expansion(self, village: Village):
+        """Decides if the village should build something."""
+        if village.construction_projects:
+            return # Finish current project first
+
+        # Check population vs housing
+        residents = sum(len(b.residents) for b in village.buildings if b.category == "residential")
+        capacity = sum(2 for b in village.buildings if b.category == "residential") # Assuming 2 per house
+
+        # 1. Housing Need
+        if residents >= capacity:
+            project_type = "house"
+            cost = VILLAGE_BUILDING_PROJECTS[project_type]["cost"]
+
+            can_afford = True
+            for res, amt in cost.items():
+                if village.supply.get(res, 0) < amt:
+                    can_afford = False
+                    break
+
+            if can_afford:
+                spot = self._find_valid_building_spot(village, VILLAGE_BUILDING_PROJECTS[project_type]["width"], VILLAGE_BUILDING_PROJECTS[project_type]["height"])
+                if spot:
+                    # Deduct cost
+                    for res, amt in cost.items():
+                        village.supply[res] -= amt
+                        if village.supply[res] <= 0: del village.supply[res]
+
+                    # Start project
+                    village.construction_projects.append({
+                        "type": project_type,
+                        "x": spot[0],
+                        "y": spot[1],
+                        "progress": 0,
+                        "total_effort": 100 # Arbitrary effort units
+                    })
+                    self.log_event("construction_started", f"The village started building a new {project_type}.", -1, location=spot)
+
+    def _advance_village_construction(self, village: Village):
+        """Progresses active construction projects."""
+        if not village.construction_projects:
+            return
+
+        project = village.construction_projects[0]
+        # Progress depends on available labor? For abstract, just fixed rate per day or per update
+        # Let's say it takes 5 updates (days) to build
+        project["progress"] += 20
+
+        if project["progress"] >= project["total_effort"]:
+            # Complete!
+            b_type = project["type"]
+            data = VILLAGE_BUILDING_PROJECTS[b_type]
+
+            # Create Building object
+            # Need to determine chunk relative coords.
+            # Building stores local x,y but global_origin is usually calculated from it.
+            # Here we have global x,y.
+            # Let's verify Building constructor.
+            # __init__(self, x, y, width, height, ... global_chunk_x_start=0 ...)
+            # x, y are local.
+
+            global_x, global_y = project["x"], project["y"]
+            chunk_x = global_x // CHUNK_SIZE
+            chunk_y = global_y // CHUNK_SIZE
+            local_x = global_x % CHUNK_SIZE
+            local_y = global_y % CHUNK_SIZE
+
+            chunk_global_start_x = chunk_x * CHUNK_SIZE
+            chunk_global_start_y = chunk_y * CHUNK_SIZE
+
+            new_building = Building(
+                local_x, local_y, data["width"], data["height"],
+                building_type=b_type, category=data["category"],
+                global_chunk_x_start=chunk_global_start_x,
+                global_chunk_y_start=chunk_global_start_y
+            )
+
+            village.add_building(new_building)
+            self.buildings_by_id[new_building.id] = new_building
+
+            # Decorate/Tile update
+            # We need to find the chunk object
+            if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+                chunk = self.chunks[chunk_y][chunk_x]
+
+                # Determine wall type
+                wall_type = "wood_wall" # Default
+                # Reuse logic from _render_village_tiles or just default
+
+                # Render tiles
+                self._draw_building(chunk.tiles, new_building, wall_type)
+
+                # Decorate interior
+                self.decorate_building_interior(new_building, chunk)
+
+            self.log_event("construction_complete", f"The village completed a new {b_type}.", -1, location=(global_x, global_y))
+            village.construction_projects.pop(0)
+
     def _update_abstract_simulation(self):
         """
         Runs a lightweight simulation for off-screen villages to simulate high-level events
@@ -7689,6 +8067,10 @@ class World:
                     food_shortfall = food_needed - consumed_food
                     if food_shortfall > 0:
                         village.demand["bread"] = village.demand.get("bread", 0) + food_shortfall
+
+                    # --- Construction & Expansion ---
+                    self._plan_village_expansion(village)
+                    self._advance_village_construction(village)
 
                     # --- Abstract Trade Simulation ---
                     # Find a partner village to trade with
@@ -7964,29 +8346,35 @@ class World:
 
     def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
         """
-        Finds NPCs who witness a criminal act.
+        Finds NPCs who witness an act.
         A witness must have line of sight to the action.
+        For crimes, filters based on profession/personality.
         """
         witnesses = []
-        # Combine all NPCs who could be witnesses
         potential_witnesses = self.village_npcs + self.npcs
 
         for npc in potential_witnesses:
-            if npc.is_dead:
+            if npc.is_dead or isinstance(npc, Animal):
                 continue
 
-            # Check if NPC can see the tile where the action occurred
+            # Check visibility
             can_see_action = False
             if npc.id in self.npc_fov_maps:
                 fov_map = self.npc_fov_maps[npc.id]
                 if 0 <= action_x < WORLD_WIDTH and 0 <= action_y < WORLD_HEIGHT:
-                    if fov_map[action_x, action_y]:
+                    if fov_map[action_y, action_x]: # Note: FOV map is [y, x]
                         can_see_action = True
 
             if can_see_action:
-                # Simple logic for now: if they can see it, they are a witness.
-                # Future: Could add personality checks (e.g., some ignore theft, some are brave/cowardly)
-                witnesses.append(npc)
+                # If it's a crime, apply logic about who cares/reports
+                if action_type in ["assault", "lockpicking", "theft"]:
+                    if npc.economic.profession in ["Guard", "Sheriff"]:
+                        witnesses.append(npc)
+                    elif npc.social.personality not in ["careless", "fearful"]:
+                        witnesses.append(npc)
+                else:
+                    # General event, anyone seeing it is a witness
+                    witnesses.append(npc)
 
         return witnesses
 

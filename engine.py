@@ -2528,75 +2528,66 @@ class World:
                     needs_based_action_taken = True
 
 
-                # --- NPC Item Pickup Decision ---
-                # This decision should happen before regular scheduling if items are perceived.
+                # --- NPC Item Pickup Decision (Utility Based) ---
                 made_item_decision = False
-                if npc.knowledge.perceived_item_tiles and npc.schedule.current_task in ["idle", "wandering", "at home", "at work"]: # Can decide to pickup even at work/home if item is compelling
-                    perceived_items_list = []
+                if npc.knowledge.perceived_item_tiles and npc.schedule.current_task in ["idle", "wandering", "at home", "at work"]:
+                    best_item_score = 0
+                    best_item_action = None
+
                     for item_x, item_y in npc.knowledge.perceived_item_tiles:
                         if (item_x, item_y) in self.items_on_map and self.items_on_map[(item_x, item_y)]:
-                            # For simplicity, consider the first item on the tile for the prompt
-                            # A more complex NPC might evaluate all items on a tile.
                             item_on_tile = self.items_on_map[(item_x, item_y)][0]
-                            item_def = ITEM_DEFINITIONS.get(item_on_tile["item_key"])
-                            if item_def:
-                                perceived_items_list.append({
-                                    "item_key": item_on_tile["item_key"],
-                                    "name": item_def.get("name", item_on_tile["item_key"]),
-                                    "quantity": item_on_tile["quantity"],
-                                    "distance": abs(npc.x - item_x) + abs(npc.y - item_y), # Manhattan
-                                    "coords": [item_x, item_y]
-                                })
+                            item_key = item_on_tile["item_key"]
+                            item_def = ITEM_DEFINITIONS.get(item_key, {})
 
-                    if perceived_items_list:
-                        # Summarize inventory for the prompt (e.g., first 3-5 item names)
-                        inventory_summary_parts = []
-                        count = 0
-                        for key, quant in npc.economic.npc_inventory.items():
-                            if count < 5:
-                                inventory_summary_parts.append(f"{quant}x {ITEM_DEFINITIONS.get(key, {}).get('name', key)}")
-                                count +=1
-                            else:
-                                inventory_summary_parts.append("...")
-                                break
-                        inventory_summary = ", ".join(inventory_summary_parts) if inventory_summary_parts else "empty"
+                            # Calculate Utility Score
+                            score = 0
 
-                        pickup_prompt = LLM_PROMPTS["npc_item_pickup_decision"].format(
-                            npc_name=npc.name,
-                            npc_personality=npc.social.personality,
-                            npc_current_task=npc.schedule.current_task,
-                            npc_inventory_summary=inventory_summary,
-                            npc_equipped_weapon_name=ITEM_DEFINITIONS.get(npc.equipment.weapon, {}).get("name", "None") if npc.equipment.weapon else "None",
-                            npc_equipped_armor_name=ITEM_DEFINITIONS.get(npc.equipment.body, {}).get("name", "None") if npc.equipment.body else "None",
-                            perceived_items_list_str=json.dumps(perceived_items_list, indent=2) # Pretty print for LLM
-                        )
-                        pickup_response_str = self._call_llm(pickup_prompt)
-                        if pickup_response_str:
-                            try:
-                                pickup_decision = json.loads(pickup_response_str)
-                                action = pickup_decision.get("action")
-                                reasoning = pickup_decision.get("reasoning", f"{npc.name} considers the items.")
+                            # Factor 1: Value/Greed
+                            value = item_def.get("value", 1)
+                            greed_factor = 1.0
+                            if npc.social.personality == "Greedy": greed_factor = 2.0
+                            elif npc.social.personality == "Generous": greed_factor = 0.5
+                            score += value * greed_factor
 
-                                # Log reasoning if player can hear/see (simplified check)
-                                dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
-                                if dist_to_player <= self.player.physical.hearing_radius and dist_to_player <= npc.speech_volume and \
-                                   (npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]): # visible
-                                    self.add_message_to_chat_log(f"({reasoning})")
+                            # Factor 2: Needs (Hunger)
+                            if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
+                                hunger_percent = npc.physical.hunger
+                                if hunger_percent > 50: # Only care if somewhat hungry
+                                    score += (hunger_percent - 50) * 0.5 # Boost if hungry
 
+                            # Factor 3: Profession Relevance
+                            profession = npc.economic.profession.lower()
+                            item_name_lower = item_key.lower()
+                            if profession == "blacksmith" and ("ore" in item_name_lower or "ingot" in item_name_lower): score += 20
+                            if profession == "carpenter" and ("wood" in item_name_lower or "log" in item_name_lower): score += 20
+                            if profession == "fletcher" and ("feather" in item_name_lower or "arrow" in item_name_lower): score += 20
+                            if profession == "miller" and "wheat" in item_name_lower: score += 20
+                            if profession == "baker" and "flour" in item_name_lower: score += 20
 
-                                if action == "pickup_item":
-                                    target_coords_list = pickup_decision.get("target_coords")
-                                    item_key_to_pickup = pickup_decision.get("item_key_to_pickup")
-                                    if target_coords_list and item_key_to_pickup:
-                                        npc.schedule.current_task = "task_going_to_pickup_item"
-                                        npc.task_target_coords = tuple(target_coords_list)
-                                        npc.task_target_item_details = {"item_key": item_key_to_pickup}
-                                        npc.schedule.current_path = [] # Clear path for new task
-                                        made_item_decision = True
-                                        # self.add_message_to_chat_log(f"Debug: {npc.name} decided to pick up {item_key_to_pickup} at {target_coords_list}.")
-                            except json.JSONDecodeError:
-                                # self.add_message_to_chat_log(f"Error decoding item pickup decision for {npc.name}: {pickup_response_str}")
-                                pass # Fall through to regular scheduling
+                            # Factor 4: Distance Cost
+                            dist = abs(npc.x - item_x) + abs(npc.y - item_y)
+                            score -= dist * 0.2 
+
+                            # Threshold
+                            if score > 5: # Minimum interest threshold
+                                if score > best_item_score:
+                                    best_item_score = score
+                                    best_item_action = {
+                                        "action": "pickup_item",
+                                        "target_coords": (item_x, item_y),
+                                        "item_key": item_key
+                                    }
+
+                    if best_item_action:
+                        npc.schedule.current_task = "task_going_to_pickup_item"
+                        npc.task_target_coords = best_item_action["target_coords"]
+                        npc.task_target_item_details = {"item_key": best_item_action["item_key"]}
+                        npc.schedule.current_path = []
+                        made_item_decision = True
+                        if random.random() < 0.1: # Occasional log
+                            self.add_message_to_chat_log(f"({npc.name} spots {best_item_action['item_key']} and decides to take it.)")
+
 
                 # Original scheduling logic starts here, only if no item pickup decision was made
                 if not made_item_decision and not needs_based_action_taken and npc.schedule.current_task in ["idle", "at home", "at work", "idle_confused", "wandering"] and not npc.schedule.current_path:
@@ -2624,66 +2615,9 @@ class World:
                         if work_coords and (npc.x, npc.y) == work_coords:
                             is_at_work = True
 
-                # --- LLM-driven Goal Selection ---
-                if USE_LLM_FOR_SCHEDULES:
-                    prompt = LLM_PROMPTS["npc_daily_goal"].format(
-                        npc_name=npc.name,
-                        npc_personality=npc.social.personality,
-                        npc_current_task=npc.schedule.current_task,
-                        is_at_home=is_at_home,
-                        is_at_work=is_at_work,
-                        has_job=bool(npc.schedule.work_building_id),
-                        job_type=job_type,
-                        time_of_day_str=time_of_day_str,
-                        current_light_level_name=self.current_light_level_name # Pass light level
-                    )
-                    response_str = self._call_llm(prompt)
-                    if response_str:
-                        try:
-                            response_json = json.loads(response_str)
-                            llm_chosen_goal = response_json.get("goal")
-                            # self.add_message_to_chat_log(f"LLM choice for {npc.name}: {llm_chosen_goal}")
-                        except json.JSONDecodeError:
-                            # self.add_message_to_chat_log(f"LLM schedule for {npc.name} - JSON decode error: {response_str}")
-                            llm_chosen_goal = "Stay put" # Fallback
-                    else:
-                        # self.add_message_to_chat_log(f"LLM schedule for {npc.name} - No response, defaulting to Stay put.")
-                        llm_chosen_goal = "Stay put" # Fallback if LLM fails
+                # --- Rule-based Goal Selection (Primary Decision Logic) ---
+                if True: # Indentation preservation wrapper
 
-                    # Map LLM goal to tasks and destinations
-                    if llm_chosen_goal == "Go to work" and npc.schedule.work_building_id and not is_at_work:
-                        dest_coords_temp = self._get_building_global_center_coords(npc.schedule.work_building_id)
-                        if dest_coords_temp:
-                            new_task_label = "going to work"
-                            destination_coords = dest_coords_temp
-                    elif llm_chosen_goal == "Go home" and npc.schedule.home_building_id and not is_at_home:
-                        dest_coords_temp = self._get_building_global_center_coords(npc.schedule.home_building_id)
-                        if dest_coords_temp:
-                            new_task_label = "going home"
-                            destination_coords = dest_coords_temp
-                    elif llm_chosen_goal == "Wander the village":
-                        # Pick a random spot in the village
-                        village = self._get_village_for_npc(npc)
-                        if village and village.buildings:
-                            # Pick a spot near a random building
-                            target_b = random.choice(village.buildings)
-                            # Random offset
-                            off_x, off_y = random.randint(-5, 5), random.randint(-5, 5)
-                            tx, ty = target_b.global_center_x + off_x, target_b.global_center_y + off_y
-                            # Validate
-                            if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
-                                # Find passable
-                                tx, ty = self._find_best_adjacent_tile(tx, ty, npc) # hacky re-use
-                                if tx:
-                                    new_task_label = "wandering"
-                                    destination_coords = (tx, ty)
-                    elif llm_chosen_goal == "Stay put":
-                        npc.schedule.current_task = "idle" if npc.schedule.current_task not in ["at home", "at work"] else npc.schedule.current_task
-                        # self.add_message_to_chat_log(f"{npc.name} is staying put.")
-                    # Add other goals like Socialize, Seek food later
-
-                # --- Rule-based Goal Selection (Fallback or if USE_LLM_FOR_SCHEDULES is False) ---
-                else:
                     work_start_tick = DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
                     work_end_tick = DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
 
@@ -3500,31 +3434,39 @@ class World:
                                 npc.economic.money -= flour_price * flour_to_buy
                                 work_building.building_inventory["flour"] = work_building.building_inventory.get("flour", 0) + flour_to_buy
                     elif completed_sub_task_id == "write_book":
-                        # Scribe is at their desk, generate a book
-                        known_events_summary = " ".join([event.description for event in npc.knowledge.known_events.values()])
-                        prompt = LLM_PROMPTS["scribe_write_book"].format(
-                            scribe_name=npc.name,
-                            scribe_personality=npc.social.personality,
-                            known_events_summary=known_events_summary,
-                            year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+                        # Scribe generates a data-driven chronicle
+                        
+                        # Filter for major events
+                        events = list(npc.knowledge.known_events.values())
+                        deaths = [e.description for e in events if e.type == 'entity_death']
+                        births = [e.description for e in events if e.type == 'npc_birth']
+                        crimes = [e.description for e in events if e.type == 'crime_witnessed']
+                        
+                        year = self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+                        book_content = f"The Chronicle of Year {year}\nRequired Reading for Citizens.\n\n"
+                        
+                        if births:
+                            book_content += "Births:\n" + "\n".join([f"- {d}" for d in births]) + "\n\n"
+                        if deaths:
+                            book_content += "Deaths:\n" + "\n".join([f"- {d}" for d in deaths]) + "\n\n"
+                        if crimes:
+                            book_content += "Criminal Activity:\n" + "\n".join([f"- {d}" for d in crimes]) + "\n\n"
+                            
+                        if not any([births, deaths, crimes]):
+                            book_content += "A year of tranquility and little note."
+
+                        new_book = Book(
+                            title=f"Year {year} Chronicle",
+                            author_id=npc.id,
+                            author_name=npc.name,
+                            year_written=year,
+                            content=book_content,
+                            book_type="chronicle",
+                            referenced_event_ids=list(npc.knowledge.known_events.keys())
                         )
-                        llm_response = self._call_llm(prompt)
-                        try:
-                            book_data = json.loads(llm_response)
-                            new_book = Book(
-                                title=book_data.get("title", "Untitled"),
-                                author_id=npc.id,
-                                author_name=npc.name,
-                                year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-                                content=book_data.get("content", "..."),
-                                book_type="chronicle",
-                                referenced_event_ids=list(npc.knowledge.known_events.keys())
-                            )
-                            self.books.append(new_book)
-                            work_building.building_inventory[f"book_{new_book.id}"] = 1
-                            self.add_message_to_chat_log(f"{npc.name} has written a new book titled '{new_book.title}'.")
-                        except json.JSONDecodeError as e:
-                            self.add_message_to_chat_log(f"Error parsing LLM response for book writing: {e}")
+                        self.books.append(new_book)
+                        work_building.building_inventory[f"book_{new_book.id}"] = 1
+                        self.add_message_to_chat_log(f"{npc.name} has written a new historical chronicle.")
 
                     elif completed_sub_task_id == "write_biography":
                         # Find a worthy subject (high fame/infamy)
@@ -3532,76 +3474,92 @@ class World:
                         for potential_subject in self.village_npcs + [self.player]:
                             if potential_subject.id == npc.id: continue
                             score = potential_subject.social.fame + potential_subject.social.infamy
-                            if score > 10: # Minimum renown threshold
+                            if score > 0: # Check anyone with reputation
                                 candidates.append((score, potential_subject))
 
                         candidates.sort(key=lambda x: x[0], reverse=True)
                         subject = candidates[0][1] if candidates else random.choice(self.village_npcs)
-
-                        # Gather events about this subject
-                        # Only use events known to the Scribe
+                        
+                        # Gather events
                         subject_events = [e for e in npc.knowledge.known_events.values() if e.subject_id == subject.id]
-
+                        
                         if len(subject_events) >= 1:
-                            life_events_summary = "\n".join([f"- {e.description}" for e in subject_events])
-                            prompt = LLM_PROMPTS["scribe_write_biography"].format(
-                                scribe_name=npc.name,
-                                scribe_personality=npc.social.personality,
-                                subject_name=subject.name if hasattr(subject, 'name') else "Unknown",
-                                subject_title=subject.social.title,
-                                life_events_summary=life_events_summary
-                            )
-                            llm_response = self._call_llm(prompt)
-                            try:
-                                book_data = json.loads(llm_response)
-                                new_book = Book(
-                                    title=book_data.get("title", f"Biography of {subject.name}"),
-                                    author_id=npc.id,
-                                    author_name=npc.name,
-                                    year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-                                    content=book_data.get("content", "..."),
-                                    book_type="biography",
-                                    referenced_event_ids=[e.id for e in subject_events]
-                                )
-                                self.books.append(new_book)
-                                work_building.building_inventory[f"book_{new_book.id}"] = 1
-                                self.add_message_to_chat_log(f"{npc.name} has written a biography about {subject.name}.")
-                            except json.JSONDecodeError:
-                                pass
-                        else:
-                            # Not enough info, maybe write a regular book instead next time
-                            pass
-
-                    elif completed_sub_task_id == "compile_census":
-                        birth_events = [e for e in self.global_events if e.type == 'npc_birth']
-                        death_events = [e for e in self.global_events if e.type == 'entity_death']
-
-                        birth_events_summary = "\n".join([e.description for e in birth_events]) or "None recorded."
-                        death_events_summary = "\n".join([e.description for e in death_events]) or "None recorded."
-
-                        prompt = LLM_PROMPTS["town_official_compile_census"].format(
-                            official_name=npc.name,
-                            official_personality=npc.social.personality,
-                            year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-                            birth_events_summary=birth_events_summary,
-                            death_events_summary=death_events_summary
-                        )
-                        llm_response = self._call_llm(prompt)
-                        try:
-                            book_data = json.loads(llm_response)
+                            book_content = f"The Life of {subject.name}\n"
+                            book_content += f"Title: {subject.social.title}\n\n"
+                            book_content += "Known Deeds:\n"
+                            
+                            # Sort events by time if possible, or just list them
+                            for event in subject_events:
+                                book_content += f"- {event.description}\n"
+                                
                             new_book = Book(
-                                title=book_data.get("title", f"Census - Year {self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)}"),
+                                title=f"Biography: {subject.name}",
                                 author_id=npc.id,
                                 author_name=npc.name,
                                 year_written=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-                                content=book_data.get("content", "..."),
-                                book_type="census"
+                                content=book_content,
+                                book_type="biography",
+                                referenced_event_ids=[e.id for e in subject_events]
                             )
                             self.books.append(new_book)
                             work_building.building_inventory[f"book_{new_book.id}"] = 1
-                            self.add_message_to_chat_log(f"{npc.name} has compiled the village census.")
-                        except json.JSONDecodeError as e:
-                            self.add_message_to_chat_log(f"Error parsing LLM response for census compilation: {e}")
+                            self.add_message_to_chat_log(f"{npc.name} has written a biography of {subject.name}.")
+                        else:
+                            # Not enough info, do nothing this time or write a generic one
+                            pass
+
+                    elif completed_sub_task_id == "compile_census":
+                        # Town Official compiles a data-driven census
+                        
+                        village = self._get_village_for_npc(npc)
+                        
+                        # Identify citizens of this village
+                        if village:
+                            citizens = [n for n in self.village_npcs if self._get_village_for_npc(n) == village]
+                        else:
+                            citizens = self.village_npcs # Fallback to everyone
+                            
+                        if not citizens: citizens = [npc]
+
+                        population = len(citizens)
+                        
+                        # Wealth Calculation
+                        wealth_values = [n.economic.money for n in citizens]
+                        total_wealth = sum(wealth_values)
+                        avg_wealth = total_wealth / max(1, len(wealth_values))
+                        richest = max(citizens, key=lambda n: n.economic.money)
+                        poorest = min(citizens, key=lambda n: n.economic.money)
+                        
+                        # Profession Breakdown
+                        professions = {}
+                        for n in citizens:
+                            prof = n.economic.profession
+                            professions[prof] = professions.get(prof, 0) + 1
+                            
+                        # Format Report
+                        year = self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+                        report_content = f"Official Census Report - Year {year}\n\n"
+                        report_content += f"Jurisdiction: {village.name if village and hasattr(village, 'name') else 'Unknown'}\n"
+                        report_content += f"Total Population: {population}\n"
+                        report_content += f"Total Village Wealth: {total_wealth} coins\n"
+                        report_content += f"Average Income: {int(avg_wealth)} coins\n\n"
+                        report_content += f"Economic Status:\n- Richest Citizen: {richest.name} ({richest.economic.money} coins)\n"
+                        report_content += f"- Poorest Citizen: {poorest.name} ({poorest.economic.money} coins)\n\n"
+                        report_content += "Employment Statistics:\n"
+                        for p, count in professions.items():
+                            report_content += f"- {p}: {count}\n"
+
+                        new_book = Book(
+                            title=f"Census Report {year}",
+                            author_id=npc.id,
+                            author_name=npc.name,
+                            year_written=year,
+                            content=report_content,
+                            book_type="census"
+                        )
+                        self.books.append(new_book)
+                        work_building.building_inventory[f"book_{new_book.id}"] = 1
+                        self.add_message_to_chat_log(f"{npc.name} has filed the official census.")
 
                     elif completed_sub_task_id == "mill_flour":
                         # Miller is at their grinding stone, try to mill flour
@@ -3754,158 +3712,128 @@ class World:
         return False # No current sub-task or target to act upon
 
     def _handle_npc_combat_turn(self, npc: NPC):
-        """Handles an NPC's decision-making process during their combat turn."""
+        """
+        Handles an NPC's decision-making process during their combat turn using rule-based AI.
+        Replaces the previous LLM-based system to prevent lockups.
+        """
         if not npc.combat.is_hostile_to_player or npc.physical.is_dead:
             return
 
-        # Gather context for LLM
+        # 1. Gather Context
         player = self.player
         distance_x = abs(npc.x - player.x)
         distance_y = abs(npc.y - player.y)
-        manhattan_distance = distance_x + distance_y # Simple distance metric
+        manhattan_distance = distance_x + distance_y
 
-        # Check if player is in attack range (Manhattan distance for melee)
-        # Determine effective attack range and name based on equipped weapon
-        effective_attack_range = npc.combat.attack_range # Default to base
-        effective_attack_name = npc.combat.base_attack_name # Default to base
-
+        # Determine effective attack range
+        effective_attack_range = npc.combat.attack_range
         if npc.equipment.weapon and npc.equipment.weapon in ITEM_DEFINITIONS:
             weapon_def = ITEM_DEFINITIONS[npc.equipment.weapon]
             effective_attack_range = weapon_def.get("properties", {}).get("attack_range", npc.combat.attack_range)
-            effective_attack_name = weapon_def.get("name", npc.combat.base_attack_name)
 
         player_in_attack_range = (manhattan_distance <= effective_attack_range)
 
-        # Placeholder for player's last action description
-        player_last_action_desc = "player is nearby"
-
-        # Determine if NPC can see the player
+        # Determine visibility
         can_see_player = False
         if npc.id in self.npc_fov_maps and \
            0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT:
             can_see_player = self.npc_fov_maps[npc.id][player.x, player.y]
 
-        if not can_see_player:
-            player_last_action_desc = "player disappeared from sight"
+        # 2. Key Status Checks
+        hp_percent = npc.combat.hp / npc.combat.max_hp
+        is_low_health = hp_percent < 0.3
+        is_critical_health = hp_percent < 0.15
+        has_healing = npc.economic.npc_inventory.get("healing_salve", 0) > 0
 
-        has_healing_item = npc.economic.npc_inventory.get("healing_salve", 0) > 0
+        # 3. Decision Tree
+        chosen_action = "hold_position" # Default
+        narrative_thought = ""
 
-        # Pack behavior logic
-        pack_members_nearby = 0
-        if isinstance(npc, Animal) and npc.pack_id:
-            for other_npc in self.npcs: # Check against all non-village NPCs
-                if isinstance(other_npc, Animal) and other_npc.id != npc.id and other_npc.pack_id == npc.pack_id:
-                    if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) < 10: # Within 10 tiles
-                        pack_members_nearby += 1
+        # A. Self-Preservation (High Priority)
+        should_flee = False
+        if is_low_health:
+            if npc.combat.combat_behavior == "cowardly":
+                should_flee = True
+                narrative_thought = f"{npc.name} panics and looks for an escape!"
+            elif npc.combat.combat_behavior == "defensive" and not has_healing:
+                # Defensive NPCs flee if they can't heal
+                should_flee = True
+                narrative_thought = f"{npc.name} realizes they cannot win and retreats."
+            elif is_critical_health and npc.combat.combat_behavior == "aggressive":
+                 # Even aggressive NPCs might flee at death's door, but less likely
+                 if random.random() < 0.3:
+                     should_flee = True
+                     narrative_thought = f"{npc.name} is broken and flees!"
+        
+        if should_flee:
+             chosen_action = "flee_from_player"
 
-        prompt = LLM_PROMPTS["npc_combat_decision"].format(
-            npc_name=npc.name,
-            npc_personality=npc.social.personality,
-            can_see_player=can_see_player,
-            npc_combat_behavior=npc.combat.combat_behavior,
-            npc_hp=npc.combat.hp,
-            npc_max_hp=npc.combat.max_hp,
-            npc_current_task=npc.schedule.current_task,
-            npc_attack_name=effective_attack_name,
-            npc_attack_range=effective_attack_range,
-            has_healing_item=has_healing_item,
-            player_x=player.x,
-            player_y=player.y,
-            npc_x=npc.x,
-            npc_y=npc.y,
-            distance_to_player=manhattan_distance,
-            player_in_attack_range=player_in_attack_range,
-            player_last_action_desc=player_last_action_desc,
-            pack_members_nearby=pack_members_nearby,
-        )
+        # B. Healing (if hurt but not fleeing)
+        if not should_flee and is_low_health and has_healing:
+            chosen_action = "use_healing_item"
+            narrative_thought = f"{npc.name} grabs a healing salve."
 
-        response_str = self._call_llm(prompt)
-        if not response_str:
-            # Fallback: if LLM fails, NPC might just try to attack if player is close, or do nothing
-            if player_in_attack_range:
-                npc.current_task = "combat_action_attack_player"
-                self.add_message_to_chat_log(f"{npc.name} hesitates then glares menacingly (LLM Error).")
+        # C. Aggression (if stable)
+        if chosen_action == "hold_position": # If no higher priority action taken
+            if not can_see_player:
+                # Lost sight? investigate or search
+                chosen_action = "move_to_attack_player" # Will path to last known location (player pos)
+                narrative_thought = f"{npc.name} searches for you."
             else:
-                npc.current_task = "combat_action_hold_position" # Or move towards if aggressive
-                self.add_message_to_chat_log(f"{npc.name} seems confused by the situation (LLM Error).")
-            npc.target_entity_id = player.id
-            return
-
-        try:
-            response_json = json.loads(response_str)
-            chosen_action = response_json.get("action")
-            narrative = response_json.get("narrative", f"{npc.name} considers what to do...")
-
-            self.add_message_to_chat_log(narrative) # Log NPC's thought/intent
-
-            # Update NPC task based on LLM decision
-            # The actual execution of these tasks (attack, pathfinding) will be handled
-            # by other systems checking current_task.
-            if chosen_action == "attack_player":
                 if player_in_attack_range:
-                    npc.current_task = "combat_action_attack_player"
-                    # Sound emitted by npc_attempt_attack_player
+                    chosen_action = "attack_player"
+                    # narrative_thought = f"{npc.name} attacks!" # Too spammy if logged every hit
                 else:
-                    # LLM chose attack but player not in range, so move to attack
-                    npc.current_task = "combat_action_move_to_attack_player"
-                    # self.add_message_to_chat_log(f"({npc.name} wants to attack but needs to get closer.)")
-            elif chosen_action == "move_to_attack_player":
-                if not player_in_attack_range:
-                    npc.current_task = "combat_action_move_to_attack_player"
-                else:
-                    # LLM chose move but player is already in range, so attack
-                    npc.current_task = "combat_action_attack_player"
-                    # Sound emitted by npc_attempt_attack_player
-                    # self.add_message_to_chat_log(f"({npc.name} decides to attack immediately as player is in range.)")
-            elif chosen_action == "flee_from_player":
-                npc.current_task = "combat_action_flee_from_player"
-                npc.add_grudge(player.id, "Forced me to flee for my life.")
-            elif chosen_action == "move_to_cover":
-                cover_spot_x, cover_spot_y = self._find_best_cover_spot(npc, player.x, player.y)
-                if cover_spot_x is not None:
-                    npc.current_task = "combat_action_move_to_cover"
-                    npc.task_target_coords = (cover_spot_x, cover_spot_y) # Store the specific cover spot
-                    # self.add_message_to_chat_log(f"({npc.name} is heading to cover at ({cover_spot_x},{cover_spot_y}))")
-                else:
-                    # No cover found, default to holding position or another fallback
-                    # self.add_message_to_chat_log(f"({npc.name} looked for cover but found none.)")
-                    if npc.combat.hp < npc.combat.max_hp * 0.3 and npc.combat.combat_behavior == "cowardly": # If low health and cowardly, flee instead
-                        npc.current_task = "combat_action_flee_from_player"
-                        # self.add_message_to_chat_log(f"({npc.name} couldn't find cover and decides to flee instead!)")
-                    else:
-                        npc.current_task = "combat_action_hold_position"
-            elif chosen_action == "use_healing_item":
-                if npc.economic.npc_inventory.get("healing_salve", 0) > 0:
-                    npc.current_task = "combat_action_use_healing_item"
-                else:
-                    # LLM hallucinated or NPC used its last salve since context was gathered. Fallback.
-                    self.add_message_to_chat_log(f"({npc.name} wanted to heal but has no salve. Holding position.)")
-                    npc.current_task = "combat_action_hold_position"
-            elif chosen_action == "hold_position":
-                npc.current_task = "combat_action_hold_position"
-            else: # Unknown action or "use_ability" for now defaults to hold
-                npc.current_task = "combat_action_hold_position"
-                self.add_message_to_chat_log(f"({npc.name} considers an unknown action: {chosen_action}, defaults to holding position.)")
+                    # Closing the gap
+                    if npc.combat.combat_behavior == "defensive":
+                         # Defensive NPCs might wait for player to come to them if in cover, 
+                         # but for now let's have them engage if hostile.
+                         pass
+                    
+                    chosen_action = "move_to_attack_player"
+                    # narrative_thought = f"{npc.name} closes in."
 
-            npc.target_entity_id = player.id # All combat actions currently target the player
+        # 4. Execute Action Logic
+        npc.target_entity_id = player.id
 
-            # Clear path for any new movement decision, except if just attacking or holding or using item
-            if chosen_action not in ["attack_player", "hold_position", "use_healing_item"]:
-                npc.current_path = []
+        if len(narrative_thought) > 0:
+             # Only log significant behavior changes or thoughts to avoid combat spam
+             if random.random() < 0.3: # Reduce log spam further
+                self.add_message_to_chat_log(f"({narrative_thought})")
 
-            # Clear specific task target coords if not moving to cover
-            if chosen_action != "move_to_cover":
-                npc.task_target_coords = None
-
-
-        except json.JSONDecodeError:
-            self.add_message_to_chat_log(f"{npc.name} seems indecisive. (LLM Format Error: {response_str})")
-            # Fallback on format error
+        if chosen_action == "attack_player":
+            npc.current_task = "combat_action_attack_player"
+            # Sound emitted by npc_attempt_attack_player
+        elif chosen_action == "move_to_attack_player":
+            npc.current_task = "combat_action_move_to_attack_player"
+        elif chosen_action == "flee_from_player":
+            npc.current_task = "combat_action_flee_from_player"
+            npc.add_grudge(player.id, "Forced me to flee.")
+        elif chosen_action == "use_healing_item":
+             npc.current_task = "combat_action_use_healing_item"
+        elif chosen_action == "move_to_cover": # Not currently used in simple tree above, but supported
+             cover_spot_x, cover_spot_y = self._find_best_cover_spot(npc, player.x, player.y)
+             if cover_spot_x:
+                 npc.current_task = "combat_action_move_to_cover"
+                 npc.task_target_coords = (cover_spot_x, cover_spot_y)
+             else:
+                 npc.current_task = "combat_action_hold_position"
+        else:
             npc.current_task = "combat_action_hold_position"
-            npc.target_entity_id = player.id
+
+        # Clear path if switching to a non-movement action
+        if chosen_action in ["attack_player", "hold_position", "use_healing_item"]:
+            npc.current_path = []
+            
+        # Clear cover target if not moving to cover
+        if chosen_action != "move_to_cover":
+            npc.task_target_coords = None
+
 
     def npc_attempt_attack_player(self, npc: NPC, player: Player):
-        """Handles an NPC's attempt to attack the player."""
+        """
+        Handles an NPC's attempt to attack the player using rule-based dice mechanics.
+        """
         if npc.is_dead or player.combat.hp <= 0:
             return
 
@@ -3922,103 +3850,82 @@ class World:
         if npc.economic.profession in ["Sheriff", "Guard"] and self.player.economic.bounty >= 100 and not self.player.state.is_jailed:
             self.add_message_to_chat_log(f"{npc.name} apprehends you! You are under arrest.")
             self.serve_jail_time()
-            # Stop the NPC's hostile actions after arrest
             npc.combat.is_hostile_to_player = False
             npc.current_task = "idle"
             npc.schedule.current_path = []
             return
 
-
-        # Determine weapon details for the attack
+        # 1. Determine Stats
+        
+        # Attacker Skill
+        npc_melee_skill = 5 # Base
+        if npc.combat.combat_behavior == "aggressive": npc_melee_skill += 2
+        if npc.economic.profession in ["Guard", "Sheriff"]: npc_melee_skill += 3
+        
+        # Weapon Damage
+        damage_dice_str = npc.combat.base_attack_damage_dice
+        damage_bonus = 0
         weapon_name = npc.combat.base_attack_name
-        weapon_damage_description = npc.combat.base_attack_damage_dice
 
         if npc.equipment.weapon and npc.equipment.weapon in ITEM_DEFINITIONS:
             weapon_def = ITEM_DEFINITIONS[npc.equipment.weapon]
-            weapon_name = weapon_def.get("name", npc.combat.base_attack_name)
-            dice = weapon_def.get("properties", {}).get("damage_dice", npc.combat.base_attack_damage_dice)
-            bonus = weapon_def.get("properties", {}).get("damage_bonus", 0)
-            weapon_damage_description = f"{dice}"
-            if bonus > 0:
-                weapon_damage_description += f"+{bonus}"
-            elif bonus < 0:
-                weapon_damage_description += f"{bonus}"
+            weapon_name = weapon_def.get("name", weapon_name)
+            damage_dice_str = weapon_def.get("properties", {}).get("damage_dice", damage_dice_str)
+            damage_bonus = weapon_def.get("properties", {}).get("damage_bonus", 0)
 
+        # Player Defense
+        player_ac = 10 + player.defense_bonus # Base 10 + armor
 
-        # Conceptual NPC melee skill
-        npc_melee_skill = 5
-        if npc.combat.combat_behavior == "aggressive": npc_melee_skill += 2
-        if npc.economic.profession in ["Guard", "Sheriff"]: npc_melee_skill += 2
-        npc_melee_skill = max(1, min(10, npc_melee_skill))
+        # 2. The Attack Roll
+        d20_roll = random.randint(1, 20)
+        attack_total = d20_roll + npc_melee_skill
 
-        # Updated player toughness description using the recalculated defense_bonus
-        player_toughness_desc = "unarmored"
-        if player.defense_bonus > 8:
-            player_toughness_desc = "heavily armored"
-        elif player.defense_bonus > 4:
-            player_toughness_desc = "armored"
-        elif player.defense_bonus > 0:
-            player_toughness_desc = "lightly armored"
+        self.emit_sound(npc.x, npc.y, "combat_attack", volume=10, source_entity_id=npc.id)
 
+        # 3. Resolve Hit
+        if d20_roll == 20 or attack_total >= player_ac:
+             # Hit!
+             # Parse Dice (e.g. "1d6")
+             try:
+                 num_dice, die_type = map(int, damage_dice_str.lower().split('d'))
+                 base_damage = sum(random.randint(1, die_type) for _ in range(num_dice))
+             except ValueError:
+                 base_damage = 1 # Fallback
+             
+             total_damage = max(1, base_damage + damage_bonus)
+             
+             # Crit check (Natural 20)
+             if d20_roll == 20: 
+                 total_damage *= 2
+                 self.add_message_to_chat_log(f"CRITICAL HIT! {npc.name} strikes you perfectly with their {weapon_name}!")
+             
+             actual_damage = player.take_damage(total_damage, world=self)
+             
+             self.log_event(
+                event_type="combat_attack",
+                description="{subject} attacked {target}.",
+                subject_id=npc.id,
+                target_id=player.id,
+                location=(npc.x, npc.y)
+             )
+             
+             self.add_message_to_chat_log(f"{npc.name} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.hp}/{player.max_hp})")
 
-        prompt = LLM_PROMPTS["adjudicate_npc_attack"].format(
-            npc_name=npc.name,
-            weapon_name=weapon_name, # Use determined weapon name
-            weapon_damage_description=weapon_damage_description, # Use determined damage description
-            npc_melee_skill=npc_melee_skill,
-            player_hp=player.hp,
-            player_max_hp=player.max_hp,
-            player_toughness_desc=player_toughness_desc
-        )
-
-        response_str = self._call_llm(prompt)
-        if not response_str:
-            self.add_message_to_chat_log(f"{npc.name} swings wildly but misses! (LLM Comms Error)")
-            return
-
-        try:
-            response_json = json.loads(response_str)
-            hit = response_json.get("hit", False)
-            damage_dealt = int(response_json.get("damage_dealt", 0))
-            narrative = response_json.get("narrative_feedback", f"{npc.name} attacks!")
-            # attacker_status_change = response_json.get("attacker_status_change", "none") # For future use
-
-            self.add_message_to_chat_log(narrative)
-            self.emit_sound(npc.x, npc.y, "combat_attack", volume=10, source_entity_id=npc.id) # Emit attack sound
-
-            if hit and damage_dealt > 0:
+             if player.hp <= 0:
+                self.add_message_to_chat_log("You have been defeated!")
+                self.game_state = "PLAYER_DEAD"
                 self.log_event(
-                    event_type="combat_attack",
-                    description="{subject} attacked {target}.",
-                    subject_id=npc.id,
-                    target_id=player.id,
-                    location=(npc.x, npc.y)
+                    event_type="entity_death",
+                    description="{subject} was killed by {target}.",
+                    subject_id=player.id,
+                    target_id=npc.id,
+                    location=(player.x, player.y)
                 )
-                actual_damage = player.take_damage(damage_dealt, world=self)
-                if actual_damage > 0:
-                    self.add_message_to_chat_log(f"You take {actual_damage} damage! Your HP is now {player.hp}/{player.max_hp}.")
-                else:
-                    self.add_message_to_chat_log(f"Your armor absorbs the blow!")
 
-                if player.hp <= 0:
-                    self.add_message_to_chat_log("You have been defeated!")
-                    self.game_state = "PLAYER_DEAD"
-                    self.log_event(
-                        event_type="entity_death",
-                        description="{subject} was killed by {target}.",
-                        subject_id=player.id,
-                        target_id=npc.id,
-                        location=(player.x, player.y)
-                    )
-            elif hit and damage_dealt <= 0:
-                self.add_message_to_chat_log(f"{npc.name}'s attack hits you but deals no damage.")
-
-        except json.JSONDecodeError:
-            self.add_message_to_chat_log(f"{npc.name}'s attack is confusing. (LLM Format Error: {response_str})")
-            self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id) # Still emit sound on error
-        except ValueError: # For int(damage_dealt)
-             self.add_message_to_chat_log(f"The LLM provided an invalid damage amount for {npc.name}'s attack: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
-             self.emit_sound(npc.x, npc.y, "combat_attack", volume=8, source_entity_id=npc.id)
+        else:
+            # Miss
+            miss_desc = "dodged" if d20_roll > 10 else "blocked"
+            self.add_message_to_chat_log(f"{npc.name} swings their {weapon_name} but you {miss_desc} it!")
 
     def npc_attempt_attack_npc(self, attacker: NPC, target: NPC):
         """Handles an NPC's attempt to attack another NPC."""

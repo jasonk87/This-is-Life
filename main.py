@@ -39,7 +39,7 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
         world.game_state = "BUILDING_MENU"
         world.building_menu_context["all_recipes"] = list(CONSTRUCTION_RECIPES.keys())
         world.building_menu_context["all_recipes"].sort(key=lambda k: CONSTRUCTION_RECIPES[k].get("name", k))
-    elif event.sym == tcod.event.KeySym.q:
+    elif event.sym == tcod.event.KeySym.Q:
         world.game_state = "QUEST_MENU"
         world.quest_menu_context["selected_quest_index"] = 0
     elif event.sym == tcod.event.KeySym.E:
@@ -189,7 +189,7 @@ def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
 def handle_quest_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'QUEST_MENU' state."""
     ctx = world.quest_menu_context
-    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.q):
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.Q):
         world.game_state = "PLAYING"
     elif event.sym == tcod.event.KeySym.UP:
         ctx["selected_quest_index"] = max(0, ctx.get("selected_quest_index", 0) - 1)
@@ -291,6 +291,7 @@ def main_menu_loop(console, tileset):
             context.present(console)
 
             for event in tcod.event.wait():
+                context.convert_event(event)
                 if isinstance(event, tcod.event.Quit):
                     raise SystemExit()
                 elif isinstance(event, tcod.event.KeyDown):
@@ -331,6 +332,7 @@ def load_game_menu(console, context):
         context.present(console)
 
         for event in tcod.event.wait():
+            context.convert_event(event)
             if isinstance(event, tcod.event.KeyDown):
                 if event.sym == tcod.event.KeySym.UP:
                     selected_index = (selected_index - 1) % len(saves)
@@ -421,7 +423,7 @@ def render_game_over(console, context):
     # Simple wait loop for game over
     while True:
         for event in tcod.event.wait():
-            # context.convert_event(event) # Fixes TypeError crash
+            context.convert_event(event)
             if isinstance(event, (tcod.event.Quit, tcod.event.KeyDown)):
                 return
 
@@ -429,10 +431,11 @@ def handle_events(world, context) -> bool:
     """Handles all player input and game events. Returns True if a turn was taken."""
     turn_taken = False
     for event in tcod.event.get():
+        context.convert_event(event)
         if isinstance(event, tcod.event.Quit):
             raise SystemExit()
         if isinstance(event, tcod.event.MouseMotion):
-            world.mouse_x, world.mouse_y = event.tile
+            world.mouse_x, world.mouse_y = event.position
         if isinstance(event, tcod.event.MouseButtonDown):
             camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
             mouse_world_x, mouse_world_y = camera_x + world.mouse_x, camera_y + world.mouse_y

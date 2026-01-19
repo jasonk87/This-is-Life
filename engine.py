@@ -1,6 +1,7 @@
 # engine.py
 import math
 import random
+import itertools
 import numpy as np
 import tcod
 from tcod import libtcodpy
@@ -115,6 +116,46 @@ class Event:
         self.location = location      # Where the event happened (optional)
         self.timestamp = game_time  # Use game ticks for consistency
         self.public_knowledge = False # Tracks if this event was witnessed or has become public
+
+class VisualEffect:
+    """Base class for visual effects."""
+    def update(self, dt: float) -> bool:
+        """Updates the effect. Returns True if the effect is finished."""
+        return True
+
+    def draw(self, console, camera_x, camera_y):
+        pass
+
+class ProjectileEffect(VisualEffect):
+    """A simple projectile animation."""
+    def __init__(self, start_x, start_y, end_x, end_y, char='*', color=(255, 255, 0), speed=15.0):
+        self.x = float(start_x)
+        self.y = float(start_y)
+        self.start_x = float(start_x)
+        self.start_y = float(start_y)
+        self.end_x = float(end_x)
+        self.end_y = float(end_y)
+        self.char = char
+        self.color = color
+        self.speed = speed
+        self.total_dist = math.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+        if self.total_dist == 0: self.total_dist = 0.001
+        self.dx = (end_x - start_x) / self.total_dist
+        self.dy = (end_y - start_y) / self.total_dist
+        self.traveled = 0.0
+
+    def update(self, dt: float) -> bool:
+        dist_step = self.speed * dt
+        self.x += self.dx * dist_step
+        self.y += self.dy * dist_step
+        self.traveled += dist_step
+        return self.traveled >= self.total_dist
+
+    def draw(self, console, camera_x, camera_y):
+        draw_x = int(round(self.x)) - camera_x
+        draw_y = int(round(self.y)) - camera_y
+        if 0 <= draw_x < console.width and 0 <= draw_y < console.height:
+             console.print(x=draw_x, y=draw_y, string=self.char, fg=self.color)
 
 
 class WorldGenerator:
@@ -313,6 +354,8 @@ class Player:
     def __init__(self, x, y):
         self.x = x
         self.y = y
+        self.render_x = float(x)
+        self.render_y = float(y)
         self.char = ord('@')
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
@@ -384,7 +427,7 @@ class Player:
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None):
         item_def = ITEM_DEFINITIONS.get(item_key_to_add)
         if not item_def:
-            print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
+            # print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
             return
 
         is_stackable = item_def.get("stackable", False)
@@ -407,7 +450,7 @@ class Player:
     def remove_item(self, item_key_to_remove: str, quantity: int = 1, specific_instance_index: int | None = None) -> bool:
         item_def = ITEM_DEFINITIONS.get(item_key_to_remove)
         if not item_def:
-            # print(f"Warning: Tried to remove unknown item key '{item_key_to_remove}'")
+            # # print(f"Warning: Tried to remove unknown item key '{item_key_to_remove}'")
             return False
 
         is_stackable = item_def.get("stackable", False)
@@ -484,12 +527,17 @@ class Player:
             if hasattr(self, 'world_ref') and self.world_ref: # Access world_ref if it exists
                 self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.social.reputation[rep_type]})")
         else:
-            # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
+            # # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
             if hasattr(self, 'world_ref') and self.world_ref:
                  self.world_ref.add_message_to_chat_log(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
 
 
 class World:
+    @property
+    def all_npcs(self):
+        """Returns an iterator over all NPCs (village + world)."""
+        return itertools.chain(self.village_npcs, self.npcs)
+
     """World class now uses a generator for a more complex map."""
     def __init__(self, seed=None):
         if seed is not None:
@@ -608,6 +656,9 @@ class World:
         self.global_events: list[Event] = []
         self.books: list[Book] = []
 
+        # Visual Effects
+        self.visual_effects: list[VisualEffect] = []
+
         # Generate macro structure for all chunks (villages, NPCs) but defer tile generation
         for y in range(self.chunk_height):
             for x in range(self.chunk_width):
@@ -624,6 +675,40 @@ class World:
         self._update_light_level_and_fov() # Initialize based on game time 0
         self._update_player_fov() # Initial FOV calculation for player
         self._update_player_hunger_thirst(initial_setup=True) # Initial status update
+
+    def update_animations(self, dt: float):
+        """Updates animation states for all entities and visual effects."""
+        # Update Entity Interpolation
+        # Movement speed in tiles per second for animation
+        ANIMATION_SPEED = 20.0
+
+        for entity in itertools.chain([self.player], self.all_npcs):
+            if hasattr(entity, 'render_x'):
+                target_x = entity.x
+                target_y = entity.y
+
+                dx = target_x - entity.render_x
+                dy = target_y - entity.render_y
+                dist = math.sqrt(dx*dx + dy*dy)
+
+                if dist > 0.01:
+                    move_dist = ANIMATION_SPEED * dt
+                    if move_dist >= dist:
+                        entity.render_x = float(target_x)
+                        entity.render_y = float(target_y)
+                    else:
+                        entity.render_x += (dx / dist) * move_dist
+                        entity.render_y += (dy / dist) * move_dist
+                else:
+                    entity.render_x = float(target_x)
+                    entity.render_y = float(target_y)
+
+        # Update Visual Effects
+        active_effects = []
+        for effect in self.visual_effects:
+            if not effect.update(dt):
+                active_effects.append(effect)
+        self.visual_effects = active_effects
 
     def _update_entity_temperature(self, entity):
         """Calculates ambient temperature at entity's location and updates their body temperature."""
@@ -1020,7 +1105,7 @@ class World:
     def _update_npc_movement(self):
         """Updates NPC positions based on their current path."""
         # This combines both lists for iteration
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.physical.is_dead:
                 continue
 
@@ -1156,7 +1241,7 @@ class World:
 
                     is_occupied = False
                     is_hunting_prey = self._is_predator(npc) and npc.schedule.current_task == "hunting"
-                    for other_npc in self.village_npcs + self.npcs:
+                    for other_npc in self.all_npcs:
                         if other_npc.id != npc.id and other_npc.x == next_x and other_npc.y == next_y and not other_npc.physical.is_dead:
                             if is_hunting_prey and other_npc.id == npc.task_target_entity_id:
                                 continue # Predator can move onto prey's tile
@@ -1406,7 +1491,7 @@ class World:
 
             # Check for occupancy
             occupied = False
-            for npc in self.village_npcs + self.npcs:
+            for npc in self.all_npcs:
                 if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.physical.is_dead:
                     occupied = True
                     break
@@ -1657,7 +1742,7 @@ class World:
         """
         self._update_npc_relationships_dynamic()
 
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.physical.is_dead:
                 continue
 
@@ -1885,7 +1970,15 @@ class World:
                             distance_to_prey = abs(npc.x - prey.x) + abs(npc.y - prey.y)
                             attack_range = getattr(npc, 'attack_range', 1)
                             if distance_to_prey <= attack_range:
-                                print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
+                                # Add Visual Effect for Ranged Attack
+                                if attack_range > 1:
+                                    self.visual_effects.append(ProjectileEffect(
+                                        start_x=npc.x, start_y=npc.y,
+                                        end_x=prey.x, end_y=prey.y,
+                                        char='*', color=(255, 0, 0)
+                                    ))
+
+#                                 print(f"DEBUG: {npc.name} attacking {prey.name} at tick {self.game_time}")
                                 self.npc_attempt_attack_npc(npc, prey)
                                 npc.schedule.current_path = []
                                 npc.schedule.current_destination_coords = None
@@ -3813,8 +3906,17 @@ class World:
 
     def npc_attempt_attack_player(self, npc: NPC, player: Player):
         """Handles an NPC's attempt to attack the player."""
-        if npc.is_dead or player.hp <= 0:
+        if npc.is_dead or player.combat.hp <= 0:
             return
+
+        # Add Visual Effect for Ranged Attack
+        attack_range = getattr(npc, 'attack_range', 1)
+        if attack_range > 1:
+            self.visual_effects.append(ProjectileEffect(
+                start_x=npc.x, start_y=npc.y,
+                end_x=player.x, end_y=player.y,
+                char='*', color=(255, 0, 0)
+            ))
 
         # --- ARREST LOGIC ---
         if npc.economic.profession in ["Sheriff", "Guard"] and self.player.economic.bounty >= 100 and not self.player.state.is_jailed:
@@ -4193,7 +4295,7 @@ class World:
                 })
 
         # 3. Add NPCs
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.x == x and npc.y == y and not npc.is_dead:
                 entities.append({"type": "npc", "data": npc, "name": npc.name})
 
@@ -5492,7 +5594,7 @@ class World:
             # Identify entity from input string
             input_lower = player_input_text.lower()
             # Check all NPCs + Player
-            potential_subjects = self.village_npcs + self.npcs + [self.player]
+            potential_subjects = list(self.all_npcs) + [self.player]
 
             # Sort by length descending to match longer names first (e.g. "Dire Wolf" before "Wolf")
             potential_subjects.sort(key=lambda x: len(x.name), reverse=True)
@@ -5627,8 +5729,8 @@ class World:
                 event_to_share = random.choice(list(npc_target.known_events.values()))
 
                 # Get names and relationships for the prompt
-                subject = next((n for n in self.village_npcs + self.npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
-                target = next((n for n in self.village_npcs + self.npcs if n.id == event_to_share.target_id), self.player if event_to_share.target_id == self.player.id else None) if event_to_share.target_id else None
+                subject = next((n for n in self.all_npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
+                target = next((n for n in self.all_npcs if n.id == event_to_share.target_id), self.player if event_to_share.target_id == self.player.id else None) if event_to_share.target_id else None
 
                 subject_name = getattr(subject, 'name', 'Someone') if subject else 'Someone'
                 target_name = getattr(target, 'name', 'someone') if target else 'someone'
@@ -5870,7 +5972,7 @@ class World:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            # print(f"Error communicating with Gemini: {e}")
+            # # print(f"Error communicating with Gemini: {e}")
             return ""
 
     def _call_ollama_backend(self, prompt: str) -> str:
@@ -6247,7 +6349,7 @@ class World:
                     elif work_building.building_type == "lumber_mill":
                         is_foreman_assigned_to_mill = any(
                             other_npc.economic.profession == "Lumber Mill Foreman" and other_npc.schedule.work_building_id == work_building.id
-                            for other_npc in self.village_npcs + self.npcs
+                            for other_npc in self.all_npcs
                         )
                         if not is_foreman_assigned_to_mill:
                             npc.economic.profession = "Lumber Mill Foreman"
@@ -7421,7 +7523,7 @@ class World:
 
         # Spread to nearby NPCs
         count_listeners = 0
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.id == speaker_npc.id or npc.physical.is_dead:
                 continue
 
@@ -7494,7 +7596,7 @@ class World:
         if self.game_state != "PLAYING":
             return
 
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.physical.is_dead or npc.combat.is_hostile_to_player or self.chat_ui_active:
                 continue
 
@@ -7542,7 +7644,7 @@ class World:
         if self.game_time % 10 != 0:  # Check every 10 ticks for performance
             return
 
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             # Skip NPCs who are dead, already reacting, in combat, or creatures
             if npc.physical.is_dead or npc.schedule.current_task in ["fleeing_from_player", "greeting_player"] or npc.combat.is_hostile_to_player or npc.economic.profession == "Creature":
                 continue
@@ -7576,7 +7678,7 @@ class World:
         """Finds an entity (player or NPC) by its ID."""
         if entity_id == self.player.id:
             return self.player
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if npc.id == entity_id:
                 return npc
         return None
@@ -7586,7 +7688,7 @@ class World:
         if self.game_time % 100 != 0:  # Check every 100 ticks
             return
 
-        entities_to_check = [self.player] + self.village_npcs + self.npcs
+        entities_to_check = itertools.chain([self.player], self.all_npcs)
         for entity in entities_to_check:
             if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
                 # Only use public knowledge events
@@ -7622,7 +7724,7 @@ class World:
             return
 
         # 1. Decay fame/infamy for all entities
-        all_entities = [self.player] + self.village_npcs + self.npcs
+        all_entities = itertools.chain([self.player], self.all_npcs)
         for entity in all_entities:
             # Fame decay: -1 per day if > 0
             if entity.social.fame > 0:
@@ -7643,7 +7745,7 @@ class World:
     def _update_npc_ages(self):
         """Increments the age of all NPCs once per game day."""
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
-            for npc in self.village_npcs + self.npcs:
+            for npc in self.all_npcs:
                 npc.age += 1
 
     def _update_inventory_spoilage(self):
@@ -7742,7 +7844,7 @@ class World:
             self.player.add_item(key, count)
 
         # 2. NPC Inventories (dicts)
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if not npc.physical.is_dead:
                 process_inventory(npc.economic.npc_inventory, owner_name="NPC")
 
@@ -7800,7 +7902,7 @@ class World:
         """
         # Logic runs if it's exactly the start of a day (after day 0)
         # Or if force-called in tests where game_time is set manually to a multiple.
-        # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
+#         # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
         if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
              # print("DEBUG: Skipping career update (wrong time).")
              return
@@ -7808,7 +7910,7 @@ class World:
         # --- Job Satisfaction Update & Quitting ---
         # Iterate over a copy to allow modification of lists if needed (though we modify npc attributes)
         for npc in list(self.village_npcs):
-            # print(f"DEBUG: Processing {npc.name}. Profession: {npc.economic.profession}, Satisfaction: {npc.economic.job_satisfaction}")
+#             # print(f"DEBUG: Processing {npc.name}. Profession: {npc.economic.profession}, Satisfaction: {npc.economic.job_satisfaction}")
             if npc.physical.is_dead:
                 continue
 
@@ -7831,7 +7933,7 @@ class World:
 
                 npc.economic.job_satisfaction = max(0, min(100, npc.economic.job_satisfaction + satisfaction_change))
 
-                # print(f"DEBUG: {npc.name} new satisfaction: {npc.economic.job_satisfaction} (change: {satisfaction_change})")
+#                 # print(f"DEBUG: {npc.name} new satisfaction: {npc.economic.job_satisfaction} (change: {satisfaction_change})")
 
                 # Firing Logic (Performance check)
                 if npc.economic.work_performance < 20 and random.random() < 0.1: # 10% chance to be fired if performance is very low
@@ -8531,7 +8633,7 @@ class World:
         if not recent_events:
             return
 
-        potential_witnesses = self.village_npcs + self.npcs
+        potential_witnesses = list(self.all_npcs)
         for event in recent_events:
             if not event.location:
                 continue
@@ -8554,7 +8656,7 @@ class World:
         """
         Periodically processes an NPC's known events to see if they react.
         """
-        for npc in self.village_npcs + self.npcs:
+        for npc in self.all_npcs:
             if isinstance(npc, Animal):
                 continue
 
@@ -8583,8 +8685,8 @@ class World:
                 continue
 
             # Get names for the prompt
-            subject_entity = next((n for n in self.village_npcs + self.npcs if n.id == event_to_process.subject_id), self.player if event_to_process.subject_id == self.player.id else None)
-            target_entity = next((n for n in self.village_npcs + self.npcs if n.id == event_to_process.target_id), self.player if event_to_process.target_id == self.player.id else None) if event_to_process.target_id else None
+            subject_entity = next((n for n in self.all_npcs if n.id == event_to_process.subject_id), self.player if event_to_process.subject_id == self.player.id else None)
+            target_entity = next((n for n in self.all_npcs if n.id == event_to_process.target_id), self.player if event_to_process.target_id == self.player.id else None) if event_to_process.target_id else None
 
             subject_name = getattr(subject_entity, 'name', 'Someone') if subject_entity else 'Someone'
             target_name = getattr(target_entity, 'name', 'someone') if target_entity else 'someone'
@@ -8673,7 +8775,7 @@ class World:
         For crimes, filters based on profession/personality.
         """
         witnesses = []
-        potential_witnesses = self.village_npcs + self.npcs
+        potential_witnesses = self.all_npcs
 
         for npc in potential_witnesses:
             if npc.is_dead or isinstance(npc, Animal):

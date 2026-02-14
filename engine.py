@@ -188,12 +188,15 @@ class World:
     def _handle_npc_speech(self):
         current_time = time.time()
         for npc in self.npcs + self.village_npcs:
-            if current_time - npc.last_speech_time > random.randint(10, 30): # NPCs speak every 10-30 seconds
+            if current_time - npc.last_speech_time > npc.speech_cooldown: # NPCs speak every 10-30 seconds
                 prompt = f"Generate a short, in-character dialogue response from {npc.name} to the player. {npc.name} is {npc.personality} and has {npc.attitude_to_player} attitude towards the player. Their family ties are {npc.family_ties}. Keep it concise and relevant to their personality and attitude."
                 llm_dialogue = self._call_ollama(prompt)
                 if llm_dialogue:
                     self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue}")
-                    npc.last_speech_time = current_time
+
+                # Update last speech time and cooldown regardless of LLM success to avoid spamming on failure
+                npc.last_speech_time = current_time
+                npc.speech_cooldown = random.randint(10, 30)
 
     def decorate_building_interior(self, building):
         print(f"Decorating building at {building.x}, {building.y}")

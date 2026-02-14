@@ -1,3 +1,5 @@
+import random
+
 class NPC:
     def __init__(self, x, y, name="NPC", dialogue=None, personality="normal", family_ties="none", attitude_to_player="indifferent"):
         self.x = x
@@ -10,6 +12,7 @@ class NPC:
         self.family_ties = family_ties
         self.attitude_to_player = attitude_to_player
         self.last_speech_time = 0 # Timestamp of last speech
+        self.speech_cooldown = random.randint(10, 30) # Random interval for next speech
 
     def get_dialogue(self):
         return self.dialogue

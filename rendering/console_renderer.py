@@ -1,3 +1,4 @@
+import itertools
 import tcod
 from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
@@ -27,7 +28,7 @@ def draw(console: tcod.console.Console, world) -> None:
             console.rgb[player_screen_x, player_screen_y] = (world.player.char, world.player.color, (0, 0, 0))
 
         # --- NPC DRAWING ---
-        for npc in world.npcs + world.village_npcs:
+        for npc in itertools.chain(world.npcs, world.village_npcs):
             npc_screen_x = npc.x - start_x
             npc_screen_y = npc.y - start_y
             if 0 <= npc_screen_x < console.width and 0 <= npc_screen_y < console.height:

@@ -1,4 +1,5 @@
 # engine.py
+import itertools
 import math
 import random
 import numpy as np
@@ -187,13 +188,16 @@ class World:
 
     def _handle_npc_speech(self):
         current_time = time.time()
-        for npc in self.npcs + self.village_npcs:
-            if current_time - npc.last_speech_time > random.randint(10, 30): # NPCs speak every 10-30 seconds
+        for npc in itertools.chain(self.npcs, self.village_npcs):
+            if current_time - npc.last_speech_time > npc.speech_cooldown: # NPCs speak every 10-30 seconds
                 prompt = f"Generate a short, in-character dialogue response from {npc.name} to the player. {npc.name} is {npc.personality} and has {npc.attitude_to_player} attitude towards the player. Their family ties are {npc.family_ties}. Keep it concise and relevant to their personality and attitude."
                 llm_dialogue = self._call_ollama(prompt)
                 if llm_dialogue:
                     self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue}")
-                    npc.last_speech_time = current_time
+
+                # Update last speech time and cooldown regardless of LLM success to avoid spamming on failure
+                npc.last_speech_time = current_time
+                npc.speech_cooldown = random.randint(10, 30)
 
     def decorate_building_interior(self, building):
         print(f"Decorating building at {building.x}, {building.y}")
@@ -253,7 +257,7 @@ class World:
         # Find the closest NPC and interact with them
         closest_npc = None
         min_dist = float('inf')
-        for npc in self.npcs + self.village_npcs:
+        for npc in itertools.chain(self.npcs, self.village_npcs):
             dist = math.sqrt((self.player.x - npc.x)**2 + (self.player.y - npc.y)**2)
             if dist < min_dist:
                 min_dist = dist
@@ -346,25 +350,36 @@ class World:
             tiles = self._generate_village_layout(chunk)
         else:
             # Generate the base biome tiles
-            tiles = [[Tile(TILE_DEFINITIONS[chunk.biome]["char"], TILE_DEFINITIONS[chunk.biome]["color"], TILE_DEFINITIONS[chunk.biome]["passable"], TILE_DEFINITIONS[chunk.biome]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+            biome_def = TILE_DEFINITIONS[chunk.biome]
+            b_char, b_color, b_passable, b_name = biome_def["char"], biome_def["color"], biome_def["passable"], biome_def["name"]
+            tiles = [[Tile(b_char, b_color, b_passable, b_name) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
             # If the biome is plains, add some detail
             if chunk.biome == "plains":
+                grass_def = TILE_DEFINITIONS["tall_grass"]
+                g_char, g_color, g_passable, g_name = grass_def["char"], grass_def["color"], grass_def["passable"], grass_def["name"]
+                flower_def = TILE_DEFINITIONS["flower"]
+                f_char, f_color, f_passable, f_name = flower_def["char"], flower_def["color"], flower_def["passable"], flower_def["name"]
+
+                # Use NumPy to pre-generate random values for all tiles in the chunk
+                random_values = np.random.rand(CHUNK_SIZE, CHUNK_SIZE)
                 for y_local in range(CHUNK_SIZE):
                     for x_local in range(CHUNK_SIZE):
                         # Add patches of tall grass
-                        if random.random() < 0.15: # 15% chance
-                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"])
+                        rv = random_values[y_local, x_local]
+                        if rv < 0.15: # 15% chance
+                            tiles[y_local][x_local] = Tile(g_char, g_color, g_passable, g_name)
                         # Add sparse flowers
-                        elif random.random() < 0.01: # 1% chance
-                            tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"])
+                        elif rv < 0.16: # ~1% additional chance
+                            tiles[y_local][x_local] = Tile(f_char, f_color, f_passable, f_name)
         chunk.tiles = tiles
         chunk.is_generated = True
 
     def _generate_trees(self, tiles):
+        random_values = np.random.rand(CHUNK_SIZE, CHUNK_SIZE)
         for y_local in range(CHUNK_SIZE):
             for x_local in range(CHUNK_SIZE):
-                if random.random() < 0.02: # 2% chance for a tree
+                if random_values[y_local, x_local] < 0.02: # 2% chance for a tree
                     tree_type = random.choice(["oak", "apple", "pear"])
                     if tree_type == "oak":
                         tree = OakTree(x_local, y_local)

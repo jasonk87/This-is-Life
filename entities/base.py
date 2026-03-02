@@ -237,6 +237,11 @@ class NPC:
         effective_damage = max(0, amount - total_defense_bonus)
         self.combat.hp -= effective_damage
 
+        # Add visual effect if world is passed
+        if world:
+            from engine import FloatingTextEffect
+            world.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 50, 50)))
+
         if self.combat.hp <= 0:
             self.combat.hp = 0
             self.physical.is_dead = True

@@ -278,6 +278,9 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
 
+    if world.game_state == "INFO_MENU":
+        draw_info_menu(console, world)
+
     # Draw weather overlay
     draw_weather_overlay(console, world, camera_x, camera_y)
 
@@ -544,6 +547,31 @@ def draw_info_menu(console, world):
         console.print(x=x + 2, y=stat_y, string=f"Title: {world.player.social.title}", fg=(0, 255, 255))
     stat_y += 2
 
+    # Equipment section
+    stat_y += 1
+    console.print(x=x + 2, y=stat_y, string="Equipment:", fg=(255, 255, 0))
+    stat_y += 1
+
+    # Show active light source
+    light_str = "None"
+    if world.player.equipment.equipped_light_item_key:
+        light_def = TILE_DEFINITIONS.get(world.player.equipment.equipped_light_item_key) or ITEM_DEFINITIONS.get(world.player.equipment.equipped_light_item_key, {})
+        light_str = light_def.get("name", world.player.equipment.equipped_light_item_key)
+    console.print(x=x + 3, y=stat_y, string=f"- Light Source: {light_str}")
+    stat_y += 1
+
+    # Show armor slots
+    for slot in ["head", "body", "hands", "feet"]:
+        item_key = world.player.equipment.equipped_armor.get(slot)
+        item_str = "None"
+        if item_key:
+            item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
+            item_str = item_def.get("name", item_key)
+        console.print(x=x + 3, y=stat_y, string=f"- {slot.capitalize()}: {item_str}")
+        stat_y += 1
+
+    stat_y += 1
+
     # Inventory section
     inv_y = stat_y
     console.print(x=x + 2, y=inv_y, string=f"Inventory ({len(world.player.economic.inventory)} items):", fg=(255, 255, 0))
@@ -556,8 +584,9 @@ def draw_info_menu(console, world):
         qty = item.get("quantity", 1)
         display_inventory[key] = display_inventory.get(key, 0) + qty
 
+    from data.items import ITEM_DEFINITIONS # Ensure we can fetch real item names
     for item_key, quantity in sorted(display_inventory.items()):
-        item_def = TILE_DEFINITIONS.get(item_key, {}) # Using TILE_DEFINITIONS.
+        item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
         item_name = item_def.get("name", item_key)
         console.print(x=x + 3, y=inv_y, string=f"- {item_name}: {quantity}")
         inv_y += 1

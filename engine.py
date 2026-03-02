@@ -130,6 +130,28 @@ class VisualEffect:
     def draw(self, console, camera_x, camera_y):
         pass
 
+class FloatingTextEffect(VisualEffect):
+    """Floating text animation for damage, healing, etc."""
+    def __init__(self, x, y, text, color=(255, 255, 255), duration=1.0, speed=2.0):
+        self.x = float(x)
+        self.y = float(y)
+        self.text = text
+        self.color = color
+        self.duration = duration
+        self.speed = speed
+        self.elapsed = 0.0
+
+    def update(self, dt: float) -> bool:
+        self.y -= self.speed * dt
+        self.elapsed += dt
+        return self.elapsed >= self.duration
+
+    def draw(self, console, camera_x, camera_y):
+        draw_x = int(round(self.x)) - camera_x
+        draw_y = int(round(self.y)) - camera_y
+        if 0 <= draw_x < console.width and 0 <= draw_y < console.height:
+             console.print(x=draw_x, y=draw_y, string=self.text, fg=self.color)
+
 class ProjectileEffect(VisualEffect):
     """A simple projectile animation."""
     def __init__(self, start_x, start_y, end_x, end_y, char='*', color=(255, 255, 0), speed=15.0):
@@ -389,6 +411,10 @@ class Player:
             self.combat.hp = 0
 
         world_ref = world if world else getattr(self, 'world_ref', None)
+
+        if world_ref:
+            world_ref.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 0, 0)))
+
         if self.combat.hp <= 0 and world_ref:
             world_ref.game_state = "PLAYER_DEAD"
 
@@ -7663,43 +7689,46 @@ class World:
                 continue
 
             # Check if player is visible and close
-            if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
-                if abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 3:
-                    # Find an event the NPC knows about but hasn't discussed with the player yet
-                    undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
-                    if undiscussed_events:
-                        event_to_discuss = random.choice(undiscussed_events)
+            if npc.id in self.npc_fov_maps:
+                # Need to bound check since map is [WORLD_HEIGHT, WORLD_WIDTH] which is [y, x]
+                px, py = self.player.x, self.player.y
+                if 0 <= px < WORLD_WIDTH and 0 <= py < WORLD_HEIGHT and self.npc_fov_maps[npc.id][py, px]:
+                    if abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 3:
+                        # Find an event the NPC knows about but hasn't discussed with the player yet
+                        undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
+                        if undiscussed_events:
+                            event_to_discuss = random.choice(undiscussed_events)
 
-                        # Gather context for the prompt
-                        subject = self.get_entity_by_id(event_to_discuss.subject_id)
-                        target = self.get_entity_by_id(event_to_discuss.target_id) if event_to_discuss.target_id else None
+                            # Gather context for the prompt
+                            subject = self.get_entity_by_id(event_to_discuss.subject_id)
+                            target = self.get_entity_by_id(event_to_discuss.target_id) if event_to_discuss.target_id else None
 
-                        subject_name = getattr(subject, 'name', 'Someone')
-                        target_name = getattr(target, 'name', 'someone')
+                            subject_name = getattr(subject, 'name', 'Someone')
+                            target_name = getattr(target, 'name', 'someone')
 
-                        prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
-                            npc_name=npc.name,
-                            npc_personality=npc.social.personality,
-                            relationship_score=npc.social.relationships.get(self.player.id, 50),
-                            event_type=event_to_discuss.type,
-                            event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
-                            subject_name=subject_name,
-                            target_name=target_name,
-                            relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
-                            relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
-                        )
+                            prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
+                                npc_name=npc.name,
+                                npc_personality=npc.social.personality,
+                                relationship_score=npc.social.relationships.get(self.player.id, 50),
+                                event_type=event_to_discuss.type,
+                                event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
+                                subject_name=subject_name,
+                                target_name=target_name,
+                                relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
+                                relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
+                            )
 
-                        starter_dialogue = self._call_llm(prompt)
-                        if starter_dialogue:
-                            self.add_message_to_chat_log(f"{npc.name} approaches you.")
-                            self.start_npc_dialogue(npc) # This clears history and sets up the UI state
-                            self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
-                            self.game_state = "DIALOGUE"
-                            self.chat_ui_target_npc = npc
-                            self.chat_ui_active = True
-                            self.needs_text_input = True
-                            npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
-                            break # Only one NPC starts a conversation per tick
+                            starter_dialogue = self._call_llm(prompt)
+                            if starter_dialogue:
+                                self.add_message_to_chat_log(f"{npc.name} approaches you.")
+                                self.start_npc_dialogue(npc) # This clears history and sets up the UI state
+                                self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
+                                self.game_state = "DIALOGUE"
+                                self.chat_ui_target_npc = npc
+                                self.chat_ui_active = True
+                                self.needs_text_input = True
+                                npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
+                                break # Only one NPC starts a conversation per tick
 
     def _handle_reputation_based_reactions(self):
         """Makes NPCs react to famous or infamous characters they see."""
@@ -7714,7 +7743,7 @@ class World:
             if npc.id in self.npc_fov_maps:
                 fov_map = self.npc_fov_maps[npc.id]
                 # Check if the player is visible to the NPC
-                if 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT and fov_map[self.player.x, self.player.y]:
+                if 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT and fov_map[self.player.y, self.player.x]:
 
                     # Reaction to Infamy
                     if self.player.social.infamy >= 50:
@@ -9153,6 +9182,7 @@ class World:
                     self.player.economic.inventory[item_key] -= 1
                     if self.player.economic.inventory[item_key] <= 0: del self.player.economic.inventory[item_key]
                     self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP.")
+                    self.visual_effects.append(FloatingTextEffect(self.player.x, self.player.y, f"+{heal_amount}", color=(0, 255, 0)))
                     consumed = True
 
             reduces_hunger_amount = on_use_dict.get("reduces_hunger")

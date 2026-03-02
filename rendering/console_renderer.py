@@ -278,12 +278,76 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
 
+    # Draw weather overlay
+    draw_weather_overlay(console, world, camera_x, camera_y)
+
+    # Draw Mouse Tooltip/Examine
+    if 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT:
+        mouse_world_x = camera_x + world.mouse_x
+        mouse_world_y = camera_y + world.mouse_y
+
+        # Check if visible
+        if is_visible(world, mouse_world_x, mouse_world_y):
+            tile = world.get_tile_at(mouse_world_x, mouse_world_y)
+            if tile:
+                info_text = tile.name
+
+                # Check for entities
+                entities_here = []
+                for entity in itertools.chain([world.player], world.all_npcs):
+                    if entity.x == mouse_world_x and entity.y == mouse_world_y:
+                        if hasattr(entity, "physical") and entity.physical.is_dead:
+                            entities_here.append(f"Dead {entity.name}")
+                        else:
+                            entities_here.append(entity.name)
+
+                if (mouse_world_x, mouse_world_y) in world.items_on_map:
+                    items = world.items_on_map[(mouse_world_x, mouse_world_y)]
+                    if items:
+                        entities_here.append(f"Items ({len(items)})")
+
+                if entities_here:
+                    info_text += f" | {', '.join(entities_here)}"
+
+                # Draw tooltip string near bottom right of map
+                console.print(x=1, y=MAP_HEIGHT - 1, string=info_text, fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
+
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
     console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
                        clear=True, fg=(255, 255, 255), bg=(0, 0, 0))
     for i, message in enumerate(world.chat_log[-4:]):
         console.print(x=1, y=y + 1 + i, string=message)
+
+def draw_weather_overlay(console, world, camera_x, camera_y):
+    """Draws a simple screen overlay based on the current weather."""
+    if world.weather in ["clear", "heatwave"]:
+        return
+
+    import random
+
+    # Simple stateless particle effect using map coordinates hash
+    if world.weather == "rain" or world.weather == "storm":
+        char = "'"
+        color = (100, 150, 255) if world.weather == "rain" else (150, 150, 200)
+        density = 0.1 if world.weather == "rain" else 0.3
+    elif world.weather == "snow":
+        char = "*"
+        color = (255, 255, 255)
+        density = 0.05
+    else:
+        return
+
+    # Offset by time to create movement
+    time_offset = world.game_time % 100
+
+    for y in range(MAP_HEIGHT):
+        for x in range(MAP_WIDTH):
+            # Using coordinate hash to generate deterministic pseudo-random layout that changes with time
+            h = hash((x + camera_x + time_offset, y + camera_y + time_offset)) % 1000
+            if h < density * 1000:
+                if is_visible(world, camera_x + x, camera_y + y):
+                    console.print(x=x, y=y, string=char, fg=color)
 
 def draw_interaction_menu(console, world):
     """Draws the context-sensitive interaction menu."""

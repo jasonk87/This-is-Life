@@ -39,7 +39,11 @@ from config import (
     ENABLE_OLLAMA_CONNECTION,
     LLM_BACKEND, ENABLE_LLM_CONNECTION, GOOGLE_API_KEY
 )
-import google.generativeai as genai
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=FutureWarning)
+    import google.generativeai as genai
+
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
 from entities.tree import Tree # For isinstance check
@@ -6924,7 +6928,7 @@ class World:
                                 animal_y_world = chunk_y * CHUNK_SIZE + y_local
                                 if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
                                     new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
-                                    new_animal.char = ord(animal_def["char"])
+                                    new_animal.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
                                     new_animal.color = animal_def["color"]
                                     new_animal.max_hp = animal_def["max_hp"]
                                     new_animal.hp = new_animal.max_hp
@@ -6976,7 +6980,7 @@ class World:
                                         spawn_x, spawn_y = self._find_best_adjacent_tile(world_x, world_y, self.player) # Use player dummy or self for now
                                         if spawn_x is not None:
                                             new_animal = Animal(spawn_x, spawn_y, name=animal_def["name"], animal_type=spawn_type)
-                                            new_animal.char = ord(animal_def["char"])
+                                            new_animal.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
                                             new_animal.color = animal_def["color"]
                                             new_animal.max_hp = animal_def["max_hp"]
                                             new_animal.hp = new_animal.max_hp

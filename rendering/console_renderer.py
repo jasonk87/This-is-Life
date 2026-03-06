@@ -278,12 +278,79 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
 
+    if world.game_state == "INFO_MENU":
+        draw_info_menu(console, world)
+
+    # Draw weather overlay
+    draw_weather_overlay(console, world, camera_x, camera_y)
+
+    # Draw Mouse Tooltip/Examine
+    if 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT:
+        mouse_world_x = camera_x + world.mouse_x
+        mouse_world_y = camera_y + world.mouse_y
+
+        # Check if visible
+        if is_visible(world, mouse_world_x, mouse_world_y):
+            tile = world.get_tile_at(mouse_world_x, mouse_world_y)
+            if tile:
+                info_text = tile.name
+
+                # Check for entities
+                entities_here = []
+                for entity in itertools.chain([world.player], world.all_npcs):
+                    if entity.x == mouse_world_x and entity.y == mouse_world_y:
+                        if hasattr(entity, "physical") and entity.physical.is_dead:
+                            entities_here.append(f"Dead {entity.name}")
+                        else:
+                            entities_here.append(entity.name)
+
+                if (mouse_world_x, mouse_world_y) in world.items_on_map:
+                    items = world.items_on_map[(mouse_world_x, mouse_world_y)]
+                    if items:
+                        entities_here.append(f"Items ({len(items)})")
+
+                if entities_here:
+                    info_text += f" | {', '.join(entities_here)}"
+
+                # Draw tooltip string near bottom right of map
+                console.print(x=1, y=MAP_HEIGHT - 1, string=info_text, fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
+
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
     console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
                        clear=True, fg=(255, 255, 255), bg=(0, 0, 0))
     for i, message in enumerate(world.chat_log[-4:]):
         console.print(x=1, y=y + 1 + i, string=message)
+
+def draw_weather_overlay(console, world, camera_x, camera_y):
+    """Draws a simple screen overlay based on the current weather."""
+    if world.weather in ["clear", "heatwave"]:
+        return
+
+    import random
+
+    # Simple stateless particle effect using map coordinates hash
+    if world.weather == "rain" or world.weather == "storm":
+        char = "'"
+        color = (100, 150, 255) if world.weather == "rain" else (150, 150, 200)
+        density = 0.1 if world.weather == "rain" else 0.3
+    elif world.weather == "snow":
+        char = "*"
+        color = (255, 255, 255)
+        density = 0.05
+    else:
+        return
+
+    # Offset by time to create movement
+    time_offset = world.game_time % 100
+
+    for y in range(MAP_HEIGHT):
+        for x in range(MAP_WIDTH):
+            # Using coordinate hash to generate deterministic pseudo-random layout that changes with time
+            h = hash((x + camera_x + time_offset, y + camera_y + time_offset)) % 1000
+            if h < density * 1000:
+                if is_visible(world, camera_x + x, camera_y + y):
+                    console.print(x=x, y=y, string=char, fg=color)
 
 def draw_interaction_menu(console, world):
     """Draws the context-sensitive interaction menu."""
@@ -480,6 +547,31 @@ def draw_info_menu(console, world):
         console.print(x=x + 2, y=stat_y, string=f"Title: {world.player.social.title}", fg=(0, 255, 255))
     stat_y += 2
 
+    # Equipment section
+    stat_y += 1
+    console.print(x=x + 2, y=stat_y, string="Equipment:", fg=(255, 255, 0))
+    stat_y += 1
+
+    # Show active light source
+    light_str = "None"
+    if world.player.equipment.equipped_light_item_key:
+        light_def = TILE_DEFINITIONS.get(world.player.equipment.equipped_light_item_key) or ITEM_DEFINITIONS.get(world.player.equipment.equipped_light_item_key, {})
+        light_str = light_def.get("name", world.player.equipment.equipped_light_item_key)
+    console.print(x=x + 3, y=stat_y, string=f"- Light Source: {light_str}")
+    stat_y += 1
+
+    # Show armor slots
+    for slot in ["head", "body", "hands", "feet"]:
+        item_key = world.player.equipment.equipped_armor.get(slot)
+        item_str = "None"
+        if item_key:
+            item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
+            item_str = item_def.get("name", item_key)
+        console.print(x=x + 3, y=stat_y, string=f"- {slot.capitalize()}: {item_str}")
+        stat_y += 1
+
+    stat_y += 1
+
     # Inventory section
     inv_y = stat_y
     console.print(x=x + 2, y=inv_y, string=f"Inventory ({len(world.player.economic.inventory)} items):", fg=(255, 255, 0))
@@ -492,8 +584,9 @@ def draw_info_menu(console, world):
         qty = item.get("quantity", 1)
         display_inventory[key] = display_inventory.get(key, 0) + qty
 
+    from data.items import ITEM_DEFINITIONS # Ensure we can fetch real item names
     for item_key, quantity in sorted(display_inventory.items()):
-        item_def = TILE_DEFINITIONS.get(item_key, {}) # Using TILE_DEFINITIONS.
+        item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
         item_name = item_def.get("name", item_key)
         console.print(x=x + 3, y=inv_y, string=f"- {item_name}: {quantity}")
         inv_y += 1

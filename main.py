@@ -39,6 +39,8 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
         world.game_state = "BUILDING_MENU"
         world.building_menu_context["all_recipes"] = list(CONSTRUCTION_RECIPES.keys())
         world.building_menu_context["all_recipes"].sort(key=lambda k: CONSTRUCTION_RECIPES[k].get("name", k))
+    elif event.sym == tcod.event.KeySym.I:
+        world.game_state = "INFO_MENU"
     elif event.sym == tcod.event.KeySym.Q:
         world.game_state = "QUEST_MENU"
         world.quest_menu_context["selected_quest_index"] = 0
@@ -175,6 +177,11 @@ def execute_interaction(world: World, context_handler) -> bool:
 def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'HELP_MENU' state."""
     if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.QUESTION, tcod.event.KeySym.SLASH):
+        world.game_state = "PLAYING"
+
+def handle_info_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input for the info/inventory menu."""
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.I):
         world.game_state = "PLAYING"
 
 def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
@@ -473,6 +480,8 @@ def handle_events(world, context) -> bool:
                 handle_quest_menu_input(event, world)
             elif world.game_state == "HELP_MENU":
                 handle_help_menu_input(event, world)
+            elif world.game_state == "INFO_MENU":
+                handle_info_menu_input(event, world)
             elif world.game_state == "PLAYING":
                 if handle_playing_input(event, world, context): turn_taken = True
 

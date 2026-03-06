@@ -39,7 +39,11 @@ from config import (
     ENABLE_OLLAMA_CONNECTION,
     LLM_BACKEND, ENABLE_LLM_CONNECTION, GOOGLE_API_KEY
 )
-import google.generativeai as genai
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=FutureWarning)
+    import google.generativeai as genai
+
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
 from entities.tree import Tree # For isinstance check
@@ -125,6 +129,28 @@ class VisualEffect:
 
     def draw(self, console, camera_x, camera_y):
         pass
+
+class FloatingTextEffect(VisualEffect):
+    """Floating text animation for damage, healing, etc."""
+    def __init__(self, x, y, text, color=(255, 255, 255), duration=1.0, speed=2.0):
+        self.x = float(x)
+        self.y = float(y)
+        self.text = text
+        self.color = color
+        self.duration = duration
+        self.speed = speed
+        self.elapsed = 0.0
+
+    def update(self, dt: float) -> bool:
+        self.y -= self.speed * dt
+        self.elapsed += dt
+        return self.elapsed >= self.duration
+
+    def draw(self, console, camera_x, camera_y):
+        draw_x = int(round(self.x)) - camera_x
+        draw_y = int(round(self.y)) - camera_y
+        if 0 <= draw_x < console.width and 0 <= draw_y < console.height:
+             console.print(x=draw_x, y=draw_y, string=self.text, fg=self.color)
 
 class ProjectileEffect(VisualEffect):
     """A simple projectile animation."""
@@ -244,6 +270,7 @@ class Building:
 
 class Village:
     def __init__(self):
+        self.id = str(uuid.uuid4())
         self.buildings = []
         self.lore = "No lore generated yet."
         self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
@@ -252,6 +279,9 @@ class Village:
         self.local_events = [] # List of Event objects specific to this village location
         self.known_events = {} # Event ID -> Event object (knowledge spread)
         self.construction_projects = [] # List of active construction projects
+        self.village_relationships = {} # other_village_id: score (-100 to 100)
+        self.at_war_with = set() # Set of other_village_id
+        self.population_cache = 0
 
     def add_building(self, building: Building):
         self.buildings.append(building)
@@ -381,6 +411,10 @@ class Player:
             self.combat.hp = 0
 
         world_ref = world if world else getattr(self, 'world_ref', None)
+
+        if world_ref:
+            world_ref.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 0, 0)))
+
         if self.combat.hp <= 0 and world_ref:
             world_ref.game_state = "PLAYER_DEAD"
 
@@ -556,6 +590,7 @@ class World:
         self.mouse_x = 0
         self.mouse_y = 0
         self.game_state = "PLAYING"
+        self.entities_by_chunk = {} # Map (chunk_x, chunk_y) -> set(npc_id)
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
         self.needs_text_input = False
@@ -956,17 +991,47 @@ class World:
     def _update_npc_fov(self, npc: NPC) -> None:
         """
         Updates the field of view for a single NPC.
+        Optimized to skip expensive calculation if NPC is idle/far away and doesn't need strict FOV.
         """
         if npc.physical.is_dead:
             return
 
+        # Optimization: Only calculate accurate FOV if NPC is in an active state,
+        # near the player, or has specific professions that require it.
+        needs_strict_fov = False
+
+        # Is the NPC in combat, hunting, frightened, or investigating?
+        if getattr(npc, 'is_frightened', False) or getattr(npc.combat, 'is_hostile_to_player', False):
+            needs_strict_fov = True
+        elif npc.schedule.current_task in ["hunting", "investigating_sound", "fleeing_from_threat", "alerting_guards"]:
+            needs_strict_fov = True
+
+        # Is the player nearby? (e.g. to react to player crimes/actions)
+        if not needs_strict_fov and abs(npc.x - self.player.x) <= self.current_fov_radius and abs(npc.y - self.player.y) <= self.current_fov_radius:
+            needs_strict_fov = True
+
+        # Do they need to look for items on the ground frequently?
+        if not needs_strict_fov and npc.economic.profession in ["Guard", "Sheriff"]:
+            needs_strict_fov = True
+
+        # During tests, or if we force it for fear checks
+        if getattr(self, '_testing_mode', False) or getattr(npc, '_force_fov_update', False):
+            needs_strict_fov = True
+
         npc_fov_radius = self.current_fov_radius # NPCs use global ambient light for now
-        self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
-            self.transparency_map,
-            (npc.y, npc.x),
-            radius=npc_fov_radius,
-            algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
-        )
+
+        if needs_strict_fov:
+            self.npc_fov_maps[npc.id] = tcod.map.compute_fov(
+                self.transparency_map,
+                (npc.y, npc.x),
+                radius=npc_fov_radius,
+                algorithm=libtcodpy.FOV_SYMMETRIC_SHADOWCAST
+            )
+        else:
+            # Skip calculation and clear their FOV map to save memory/processing
+            if npc.id in self.npc_fov_maps:
+                del self.npc_fov_maps[npc.id]
+            return
 
         # NPC Item Perception within their FOV
         npc.knowledge.perceived_item_tiles.clear()
@@ -1104,6 +1169,13 @@ class World:
 
     def _update_npc_movement(self):
         """Updates NPC positions based on their current path."""
+        # Pre-compute occupied positions for faster collision detection
+        # Create a dictionary mapping (x, y) -> npc.id to allow easy lookups
+        occupied_positions = {}
+        for other_npc in self.all_npcs:
+            if not other_npc.physical.is_dead:
+                occupied_positions[(other_npc.x, other_npc.y)] = other_npc.id
+
         # This combines both lists for iteration
         for npc in self.all_npcs:
             if npc.physical.is_dead:
@@ -1241,19 +1313,22 @@ class World:
 
                     is_occupied = False
                     is_hunting_prey = self._is_predator(npc) and npc.schedule.current_task == "hunting"
-                    for other_npc in self.all_npcs:
-                        if other_npc.id != npc.id and other_npc.x == next_x and other_npc.y == next_y and not other_npc.physical.is_dead:
-                            if is_hunting_prey and other_npc.id == npc.task_target_entity_id:
-                                continue # Predator can move onto prey's tile
+
+                    occupant_id = occupied_positions.get((next_x, next_y))
+                    if occupant_id is not None and occupant_id != npc.id:
+                        if not (is_hunting_prey and occupant_id == npc.task_target_entity_id):
                             is_occupied = True
-                            break
 
                     if is_occupied:
                         npc.schedule.current_path = []
                         npc.schedule.current_destination_coords = None
                         break
 
+                    # Update occupation tracker
+                    if (npc.x, npc.y) in occupied_positions and occupied_positions[(npc.x, npc.y)] == npc.id:
+                        del occupied_positions[(npc.x, npc.y)]
                     npc.x, npc.y = next_x, next_y
+                    occupied_positions[(next_x, next_y)] = npc.id
                     npc.schedule.current_path.pop(0)
                     moves_made += 1
 
@@ -1944,6 +2019,36 @@ class World:
             # --- Animal Behavior (Predator & Prey) ---
             if isinstance(npc, Animal):
                 animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
+
+                # 0. Starvation Logic
+                if npc.physical.hunger >= npc.physical.max_hunger * 0.95:
+                    if random.random() < 0.1: # Chance to take damage from starvation
+                        npc.combat.hp -= 1
+                        if npc.combat.hp <= 0:
+                            self.log_event("entity_death", f"A {npc.name} died of starvation.", npc.id, location=(npc.x, npc.y))
+                            self.handle_npc_death(npc)
+                            continue
+
+                # Herd logic for certain herbivores
+                if npc.combat_behavior == "herd_defensive" and npc.schedule.current_task in ["idle", "wandering"]:
+                    # Try to stay near other herd members
+                    herd_members = [o for o in self.get_entities_in_radius(npc.x, npc.y, 15)
+                                    if isinstance(o, Animal) and o.animal_type == npc.animal_type and o.id != npc.id]
+                    if herd_members:
+                        # Find center of herd
+                        cx = sum(m.x for m in herd_members) // len(herd_members)
+                        cy = sum(m.y for m in herd_members) // len(herd_members)
+
+                        # Move towards center if too far
+                        if math.sqrt((npc.x - cx)**2 + (npc.y - cy)**2) > 5:
+                            # Add a bit of randomness to avoid stacking
+                            cx += random.randint(-2, 2)
+                            cy += random.randint(-2, 2)
+                            path = self.calculate_path(npc.x, npc.y, cx, cy)
+                            if path:
+                                npc.schedule.current_path = path
+                                npc.schedule.current_destination_coords = (cx, cy)
+                                npc.schedule.current_task = "migrating_with_herd"
 
                 # 1. PREDATOR AI (Highest Priority)
                 is_predator = "prey" in animal_def
@@ -3957,6 +4062,7 @@ class World:
             self.handle_npc_death(target, killer_id=attacker.id)
             if self._is_predator(attacker):
                 attacker.physical.hunger = 0
+                if hasattr(attacker, 'hunger'): attacker.hunger = 0 # Keep backward compatibility
                 attacker.schedule.current_task = "idle"
                 attacker.task_target_entity_id = None
 
@@ -6016,8 +6122,12 @@ class World:
 
             self.weather_change_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS * 2)
 
-        if self.weather == "rain":
-            self._water_crops()
+        # Process weather effects periodically, not every tick
+        if self.game_time % (DAY_LENGTH_TICKS // 24) == 0:
+            if self.weather == "rain":
+                self._water_crops()
+
+            # Iterate through loaded chunks for environment effects
             for y_chunk in range(self.chunk_height):
                 for x_chunk in range(self.chunk_width):
                     chunk = self.chunks[y_chunk][x_chunk]
@@ -6027,14 +6137,38 @@ class World:
                     for y_local in range(CHUNK_SIZE):
                         for x_local in range(CHUNK_SIZE):
                             tile = chunk.tiles[y_local][x_local]
-                            if tile and hasattr(tile, 'properties') and "extinguishes_to" in tile.properties:
-                                world_x = x_chunk * CHUNK_SIZE + x_local
-                                world_y = y_chunk * CHUNK_SIZE + y_local
-                                if not self._check_for_shelter(world_x, world_y):
-                                    extinguishes_to_key = tile.properties["extinguishes_to"]
-                                    new_tile_def = TILE_DEFINITIONS.get(extinguishes_to_key) or DECORATION_ITEM_DEFINITIONS.get(extinguishes_to_key)
-                                    if new_tile_def:
-                                        self._change_map_tile((world_x, world_y), new_tile_def)
+                            if not tile: continue
+
+                            world_x = x_chunk * CHUNK_SIZE + x_local
+                            world_y = y_chunk * CHUNK_SIZE + y_local
+
+                            # Rain extinguishes fires
+                            if self.weather == "rain":
+                                if hasattr(tile, 'properties') and "extinguishes_to" in tile.properties:
+                                    if not self._check_for_shelter(world_x, world_y):
+                                        extinguishes_to_key = tile.properties["extinguishes_to"]
+                                        new_tile_def = TILE_DEFINITIONS.get(extinguishes_to_key) or DECORATION_ITEM_DEFINITIONS.get(extinguishes_to_key)
+                                        if new_tile_def:
+                                            self._change_map_tile((world_x, world_y), new_tile_def)
+
+                            # Flooding during storms
+                            if self.weather == "storm" and random.random() < 0.001:
+                                if tile.name == "Plains":
+                                    # Check if near water to flood
+                                    is_near_water = False
+                                    for dx in [-1, 0, 1]:
+                                        for dy in [-1, 0, 1]:
+                                            adj = self.get_tile_at(world_x + dx, world_y + dy)
+                                            if adj and "water" in adj.name.lower():
+                                                is_near_water = True
+                                                break
+                                    if is_near_water:
+                                        self._change_map_tile((world_x, world_y), TILE_DEFINITIONS["water"])
+
+                            # Drying up during heatwave
+                            if self.weather == "heatwave" and random.random() < 0.001:
+                                if tile.name == "Water": # Dry up shallow water
+                                    self._change_map_tile((world_x, world_y), TILE_DEFINITIONS["plains"])
 
     def _update_world_environment(self):
         """Handles time-based environmental changes like tree regrowth."""
@@ -6924,7 +7058,7 @@ class World:
                                 animal_y_world = chunk_y * CHUNK_SIZE + y_local
                                 if not (abs(animal_x_world - self.player.x) < 10 and abs(animal_y_world - self.player.y) < 10):
                                     new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
-                                    new_animal.char = ord(animal_def["char"])
+                                    new_animal.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
                                     new_animal.color = animal_def["color"]
                                     new_animal.max_hp = animal_def["max_hp"]
                                     new_animal.hp = new_animal.max_hp
@@ -6976,7 +7110,7 @@ class World:
                                         spawn_x, spawn_y = self._find_best_adjacent_tile(world_x, world_y, self.player) # Use player dummy or self for now
                                         if spawn_x is not None:
                                             new_animal = Animal(spawn_x, spawn_y, name=animal_def["name"], animal_type=spawn_type)
-                                            new_animal.char = ord(animal_def["char"])
+                                            new_animal.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
                                             new_animal.color = animal_def["color"]
                                             new_animal.max_hp = animal_def["max_hp"]
                                             new_animal.hp = new_animal.max_hp
@@ -7444,6 +7578,8 @@ class World:
 
     def update(self):
         """Main update function for the world, called once per game tick."""
+        self._update_spatial_partitioning()
+
         # Handle player auto-movement from mouse clicks
         if self.player.state.current_path:
             if self.player.state.move_cooldown > 0:
@@ -7497,6 +7633,51 @@ class World:
         self._update_entity_titles()
         self._update_npc_reputations()
         self._handle_reputation_based_reactions()
+        self._cleanup_dead_entities()
+
+    def _cleanup_dead_entities(self):
+        """Periodically removes dead NPCs to maintain performance."""
+        if self.game_time % 100 == 0:
+            self.npcs = [npc for npc in self.npcs if not npc.physical.is_dead]
+            self.village_npcs = [npc for npc in self.village_npcs if not npc.physical.is_dead]
+
+            # Note: Do not remove the player, even if dead.
+
+    def _update_spatial_partitioning(self):
+        """Updates the entity chunk map for quick spatial queries."""
+        # Simple rebuild every tick. Can be optimized to only update moving entities later if needed.
+        self.entities_by_chunk.clear()
+
+        # Add player
+        p_cx, p_cy = self.player.x // CHUNK_SIZE, self.player.y // CHUNK_SIZE
+        if (p_cx, p_cy) not in self.entities_by_chunk:
+            self.entities_by_chunk[(p_cx, p_cy)] = set()
+        self.entities_by_chunk[(p_cx, p_cy)].add(self.player.id)
+
+        for npc in self.all_npcs:
+            if npc.physical.is_dead: continue
+            cx, cy = npc.x // CHUNK_SIZE, npc.y // CHUNK_SIZE
+            if (cx, cy) not in self.entities_by_chunk:
+                self.entities_by_chunk[(cx, cy)] = set()
+            self.entities_by_chunk[(cx, cy)].add(npc.id)
+
+    def get_entities_in_radius(self, x: int, y: int, radius: int) -> list:
+        """Returns a list of entities within a bounding box radius, using spatial partitioning."""
+        entities = []
+        min_cx = max(0, (x - radius) // CHUNK_SIZE)
+        max_cx = min(self.chunk_width - 1, (x + radius) // CHUNK_SIZE)
+        min_cy = max(0, (y - radius) // CHUNK_SIZE)
+        max_cy = min(self.chunk_height - 1, (y + radius) // CHUNK_SIZE)
+
+        for cy in range(min_cy, max_cy + 1):
+            for cx in range(min_cx, max_cx + 1):
+                chunk_entity_ids = self.entities_by_chunk.get((cx, cy), set())
+                for entity_id in chunk_entity_ids:
+                    entity = self.get_entity_by_id(entity_id)
+                    if entity:
+                        if abs(entity.x - x) <= radius and abs(entity.y - y) <= radius:
+                            entities.append(entity)
+        return entities
 
     def _trigger_event_driven_conversation(self):
         """Checks if any NPC should start a conversation with the player about a witnessed event."""
@@ -7508,43 +7689,46 @@ class World:
                 continue
 
             # Check if player is visible and close
-            if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
-                if abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 3:
-                    # Find an event the NPC knows about but hasn't discussed with the player yet
-                    undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
-                    if undiscussed_events:
-                        event_to_discuss = random.choice(undiscussed_events)
+            if npc.id in self.npc_fov_maps:
+                # Need to bound check since map is [WORLD_HEIGHT, WORLD_WIDTH] which is [y, x]
+                px, py = self.player.x, self.player.y
+                if 0 <= px < WORLD_WIDTH and 0 <= py < WORLD_HEIGHT and self.npc_fov_maps[npc.id][py, px]:
+                    if abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 3:
+                        # Find an event the NPC knows about but hasn't discussed with the player yet
+                        undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
+                        if undiscussed_events:
+                            event_to_discuss = random.choice(undiscussed_events)
 
-                        # Gather context for the prompt
-                        subject = self.get_entity_by_id(event_to_discuss.subject_id)
-                        target = self.get_entity_by_id(event_to_discuss.target_id) if event_to_discuss.target_id else None
+                            # Gather context for the prompt
+                            subject = self.get_entity_by_id(event_to_discuss.subject_id)
+                            target = self.get_entity_by_id(event_to_discuss.target_id) if event_to_discuss.target_id else None
 
-                        subject_name = getattr(subject, 'name', 'Someone')
-                        target_name = getattr(target, 'name', 'someone')
+                            subject_name = getattr(subject, 'name', 'Someone')
+                            target_name = getattr(target, 'name', 'someone')
 
-                        prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
-                            npc_name=npc.name,
-                            npc_personality=npc.social.personality,
-                            relationship_score=npc.social.relationships.get(self.player.id, 50),
-                            event_type=event_to_discuss.type,
-                            event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
-                            subject_name=subject_name,
-                            target_name=target_name,
-                            relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
-                            relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
-                        )
+                            prompt = LLM_PROMPTS["npc_event_conversation_starter"].format(
+                                npc_name=npc.name,
+                                npc_personality=npc.social.personality,
+                                relationship_score=npc.social.relationships.get(self.player.id, 50),
+                                event_type=event_to_discuss.type,
+                                event_summary=event_to_discuss.description.format(subject=subject_name, target=target_name),
+                                subject_name=subject_name,
+                                target_name=target_name,
+                                relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
+                                relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
+                            )
 
-                        starter_dialogue = self._call_llm(prompt)
-                        if starter_dialogue:
-                            self.add_message_to_chat_log(f"{npc.name} approaches you.")
-                            self.start_npc_dialogue(npc) # This clears history and sets up the UI state
-                            self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
-                            self.game_state = "DIALOGUE"
-                            self.chat_ui_target_npc = npc
-                            self.chat_ui_active = True
-                            self.needs_text_input = True
-                            npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
-                            break # Only one NPC starts a conversation per tick
+                            starter_dialogue = self._call_llm(prompt)
+                            if starter_dialogue:
+                                self.add_message_to_chat_log(f"{npc.name} approaches you.")
+                                self.start_npc_dialogue(npc) # This clears history and sets up the UI state
+                                self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
+                                self.game_state = "DIALOGUE"
+                                self.chat_ui_target_npc = npc
+                                self.chat_ui_active = True
+                                self.needs_text_input = True
+                                npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
+                                break # Only one NPC starts a conversation per tick
 
     def _handle_reputation_based_reactions(self):
         """Makes NPCs react to famous or infamous characters they see."""
@@ -7559,7 +7743,7 @@ class World:
             if npc.id in self.npc_fov_maps:
                 fov_map = self.npc_fov_maps[npc.id]
                 # Check if the player is visible to the NPC
-                if 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT and fov_map[self.player.x, self.player.y]:
+                if 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT and fov_map[self.player.y, self.player.x]:
 
                     # Reaction to Infamy
                     if self.player.social.infamy >= 50:
@@ -8419,6 +8603,13 @@ class World:
                                     village.supply[item_key] -= trade_qty
                                     partner_village.supply[item_key] = partner_supply + trade_qty
 
+                                    # Trading improves relations
+                                    current_rel = village.village_relationships.get(partner_village.id, 0)
+                                    village.village_relationships[partner_village.id] = min(100, current_rel + 2)
+
+                                    partner_rel = partner_village.village_relationships.get(village.id, 0)
+                                    partner_village.village_relationships[village.id] = min(100, partner_rel + 2)
+
                                     # Log the trade event
                                     self.log_event(
                                         event_type="trade_deal",
@@ -8428,6 +8619,44 @@ class World:
                                     )
                                     # Record local event for history
                                     village.local_events.append(self.global_events[-1])
+
+                    # --- Faction Diplomacy / Warfare ---
+                    if len(self.villages) > 1:
+                        for other_village in self.villages:
+                            if other_village.id == village.id: continue
+
+                            # Random events that worsen relationships if not trading
+                            if random.random() < 0.05:
+                                current_rel = village.village_relationships.get(other_village.id, 0)
+                                village.village_relationships[other_village.id] = max(-100, current_rel - 5)
+                                other_village.village_relationships[village.id] = max(-100, current_rel - 5)
+
+                            # Declare war if relationships fall too low
+                            if village.village_relationships.get(other_village.id, 0) < -50:
+                                if other_village.id not in village.at_war_with:
+                                    village.at_war_with.add(other_village.id)
+                                    other_village.at_war_with.add(village.id)
+
+                                    self.log_event(
+                                        event_type="war_declared",
+                                        description=f"Tensions boiled over and this village has declared war on a neighbor.",
+                                        subject_id=-1,
+                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                    )
+                                    village.local_events.append(self.global_events[-1])
+
+                            # Make peace if at war but relationships recover (unlikely without intervention but possible)
+                            if other_village.id in village.at_war_with and village.village_relationships.get(other_village.id, 0) > -10:
+                                village.at_war_with.remove(other_village.id)
+                                other_village.at_war_with.remove(village.id)
+
+                                self.log_event(
+                                    event_type="peace_declared",
+                                    description=f"A peace treaty was signed with a rival settlement.",
+                                    subject_id=-1,
+                                    location=village.interaction_points.get("town_square_center", (0,0))
+                                )
+                                village.local_events.append(self.global_events[-1])
 
                     # --- Abstract History/Scribing ---
                     # Check if there is a Scribe in this village
@@ -8953,6 +9182,7 @@ class World:
                     self.player.economic.inventory[item_key] -= 1
                     if self.player.economic.inventory[item_key] <= 0: del self.player.economic.inventory[item_key]
                     self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP.")
+                    self.visual_effects.append(FloatingTextEffect(self.player.x, self.player.y, f"+{heal_amount}", color=(0, 255, 0)))
                     consumed = True
 
             reduces_hunger_amount = on_use_dict.get("reduces_hunger")

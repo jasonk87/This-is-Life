@@ -9,6 +9,7 @@ from config import (
     COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT
 )
 from data.tiles import TILE_DEFINITIONS
+from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from entities.animal import Animal
 from engine import Player
@@ -275,11 +276,11 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "BOOK_READING":
         draw_book_reading_ui(console, world)
 
+    if world.game_state == "TRADE_MENU" or world.trade_ui_active:
+        draw_trade_menu(console, world)
+
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
-
-    if world.game_state == "INFO_MENU":
-        draw_info_menu(console, world)
 
     # Draw weather overlay
     draw_weather_overlay(console, world, camera_x, camera_y)
@@ -508,16 +509,13 @@ def draw_building_menu(console, world):
         console.print(x=details_x + 2, y=detail_y, string=f"Materials:", fg=(255, 255, 0))
         detail_y += 1
         for mat_key, mat_qty in recipe.get("materials", {}).items():
-            item_def = TILE_DEFINITIONS.get(mat_key, {}) # Assuming item definitions are accessible via this or separate import if needed.
-            # Wait, TILE_DEFINITIONS contains tiles. ITEM_DEFINITIONS is in data/items.py but not imported here except TILE_DEFINITIONS?
-            # render_console imports TILE_DEFINITIONS. engine imports ITEM_DEFINITIONS.
-            # Let's trust that main passes world which has access, or just print key if def missing.
-            # Actually, render_console doesn't import ITEM_DEFINITIONS. We should probably import it or just use keys/world.
-            # Let's just use key for now or try to use TILE_DEFINITIONS if it happens to be there (some items are tiles)
-            # Better: Import ITEM_DEFINITIONS in this file.
-
-            # For now, let's just print the key formatted nicely.
-            mat_name = mat_key.replace("_", " ").title()
+            item_def = ITEM_DEFINITIONS.get(mat_key)
+            tile_def = TILE_DEFINITIONS.get(mat_key)
+            mat_name = (
+                (item_def or {}).get("name")
+                or (tile_def or {}).get("name")
+                or mat_key.replace("_", " ").title()
+            )
             has_enough = world.player.has_item(mat_key, mat_qty)
             color = (255, 255, 255) if has_enough else (255, 0, 0)
             console.print(x=details_x + 3, y=detail_y, string=f"- {mat_name}: {mat_qty}", fg=color)
@@ -584,7 +582,6 @@ def draw_info_menu(console, world):
         qty = item.get("quantity", 1)
         display_inventory[key] = display_inventory.get(key, 0) + qty
 
-    from data.items import ITEM_DEFINITIONS # Ensure we can fetch real item names
     for item_key, quantity in sorted(display_inventory.items()):
         item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
         item_name = item_def.get("name", item_key)
@@ -600,6 +597,44 @@ def draw_info_menu(console, world):
         for quest_id, quest_data in world.player.knowledge.active_quests.items():
             console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
             inv_y += 1
+
+
+def draw_trade_menu(console, world):
+    """Draws the trade menu UI."""
+    menu_width = 60
+    menu_height = 24
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Trade", clear=True)
+
+    target_name = world.trade_ui_npc_target.name if world.trade_ui_npc_target else "Trader"
+    mode = "Selling to" if world.trade_ui_player_selling else "Buying from"
+    console.print(x=x + 2, y=y + 2, string=f"{mode} {target_name}", fg=(255, 255, 0))
+    console.print(x=x + 2, y=y + 3, string="TAB switch view | ENTER trade | ESC close", fg=(180, 180, 180))
+
+    items = world.trade_ui_player_inventory_snapshot if world.trade_ui_player_selling else world.trade_ui_merchant_inventory_snapshot
+    selected_index = world.trade_ui_player_item_index if world.trade_ui_player_selling else world.trade_ui_merchant_item_index
+
+    if not items:
+        console.print(x=x + 2, y=y + 5, string="No items available.", fg=(150, 150, 150))
+        return
+
+    visible_height = menu_height - 7
+    scroll_offset = max(0, min(selected_index, max(0, len(items) - visible_height)))
+    for row in range(visible_height):
+        item_index = scroll_offset + row
+        if item_index >= len(items):
+            break
+
+        item_key, quantity, price = items[item_index]
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+        color = (0, 255, 255) if item_index == selected_index else (255, 255, 255)
+        console.print(
+            x=x + 2,
+            y=y + 5 + row,
+            string=f"{item_name[:28]:28} x{quantity:<3} {price:>4}g",
+            fg=color,
+        )
 
 
 def draw_knowledge_menu(console, world):

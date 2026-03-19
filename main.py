@@ -16,6 +16,44 @@ from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
 from save_manager import save_game, load_game
 
+TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
+
+def _get_player_facing_position(world: World) -> tuple[int, int]:
+    """Return the coordinates directly in front of the player."""
+    return (
+        world.player.x + world.player.state.last_dx,
+        world.player.y + world.player.state.last_dy,
+    )
+
+
+def _find_nearest_npc_to_talk_to(world: World, max_distance: int = 5):
+    """Return the closest living NPC within talk range."""
+    closest_npc = None
+    max_distance_sq = max_distance * max_distance
+    min_distance_sq = max_distance_sq + 1
+
+    for npc in world.all_npcs:
+        if npc.is_dead:
+            continue
+
+        distance_sq = (world.player.x - npc.x) ** 2 + (world.player.y - npc.y) ** 2
+        if distance_sq <= max_distance_sq and distance_sq < min_distance_sq:
+            min_distance_sq = distance_sq
+            closest_npc = npc
+
+    return closest_npc
+
+
+def _get_actionable_entities(world: World, entities: list[dict]) -> list[tuple[dict, list[str]]]:
+    """Return interactable entities paired with their available actions."""
+    actionable_entities = []
+    for entity in entities:
+        actions = world._get_actions_for_entity(entity)
+        if actions:
+            actionable_entities.append((entity, actions))
+    return actionable_entities
+
+
 def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
     """Handles input when the player is in the 'PLAYING' state. Returns True if turn taken."""
     move_keys = {
@@ -45,19 +83,10 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
         world.game_state = "QUEST_MENU"
         world.quest_menu_context["selected_quest_index"] = 0
     elif event.sym == tcod.event.KeySym.E:
-        target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
+        target_x, target_y = _get_player_facing_position(world)
         open_interaction_menu(world, target_x, target_y)
     elif event.sym == tcod.event.KeySym.T:
-        # Find nearest NPC to talk to
-        import math
-        closest_npc = None
-        min_dist = float('inf')
-        for npc in world.village_npcs + world.npcs:
-            if not npc.is_dead:
-                dist = math.sqrt((world.player.x - npc.x)**2 + (world.player.y - npc.y)**2)
-                if dist < min_dist and dist <= 5: # Max talk distance
-                    min_dist = dist
-                    closest_npc = npc
+        closest_npc = _find_nearest_npc_to_talk_to(world)
 
         if closest_npc:
             start_dialogue(world, closest_npc, context_handler)
@@ -95,7 +124,7 @@ def handle_building_input(event: tcod.event.KeyDown, world: World):
     elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx["selected_recipe_index"] < len(ctx["all_recipes"]):
         selected_key = ctx["all_recipes"][ctx["selected_recipe_index"]]
         # Build at the location in front of the player
-        target_x, target_y = world.player.x + world.player.last_dx, world.player.y + world.player.last_dy
+        target_x, target_y = _get_player_facing_position(world)
         world.player_attempt_build(selected_key, target_x, target_y)
         # Optionally close menu after build? Or keep open for multiple builds?
         # Let's keep it open for now, maybe they want to build a wall.
@@ -103,6 +132,11 @@ def handle_building_input(event: tcod.event.KeyDown, world: World):
 def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
     """Handles input when the interaction menu is active. Returns True if action taken."""
     ctx = world.interaction_context
+    if not ctx["available_actions"]:
+        ctx["active"] = False
+        world.add_message_to_chat_log("There is nothing here you can interact with.")
+        return False
+
     if event.sym == tcod.event.KeySym.UP:
         ctx["selected_action_index"] = (ctx["selected_action_index"] - 1) % len(ctx["available_actions"])
     elif event.sym == tcod.event.KeySym.DOWN:
@@ -125,17 +159,23 @@ def open_interaction_menu(world: World, x: int, y: int):
         world.add_message_to_chat_log("There is nothing to interact with here.")
         return
 
+    actionable_entities = _get_actionable_entities(world, entities)
+    if not actionable_entities:
+        world.add_message_to_chat_log("There is nothing here you can interact with.")
+        return
+
+    selected_entity, available_actions = actionable_entities[0]
     world.interaction_context["active"] = True
     world.interaction_context["x"], world.interaction_context["y"] = x, y
-    world.interaction_context["target_entities"] = entities
+    world.interaction_context["target_entities"] = [entity for entity, _ in actionable_entities]
     world.interaction_context["selected_entity_index"] = 0
-    world.interaction_context["available_actions"] = world._get_actions_for_entity(entities[0])
+    world.interaction_context["available_actions"] = available_actions
     world.interaction_context["selected_action_index"] = 0
 
 def execute_interaction(world: World, context_handler) -> bool:
     """Executes the selected action from the interaction context. Returns True if turn taken."""
     ctx = world.interaction_context
-    if not ctx["active"]:
+    if not ctx["active"] or not ctx["available_actions"]:
         return False
 
     selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
@@ -168,6 +208,9 @@ def execute_interaction(world: World, context_handler) -> bool:
     if selected_action in action_map:
         action_map[selected_action]()
 
+    if selected_action in ["Talk", "Trade", "Read"]:
+        ctx["active"] = False
+
     if not world.chat_ui_active and not world.trade_ui_active:
         ctx["active"] = False
 
@@ -193,15 +236,38 @@ def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
     elif event.sym == tcod.event.KeySym.DOWN:
         world.book_reading_context["scroll_offset"] += 1
 
+def handle_trade_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is in the trade menu."""
+    if event.sym == tcod.event.KeySym.ESCAPE:
+        world.trade_ui_active = False
+        world.trade_ui_npc_target = None
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.TAB:
+        world.trade_ui_player_selling = not world.trade_ui_player_selling
+    elif event.sym == tcod.event.KeySym.UP:
+        if world.trade_ui_player_selling and world.trade_ui_player_inventory_snapshot:
+            world.trade_ui_player_item_index = (world.trade_ui_player_item_index - 1) % len(world.trade_ui_player_inventory_snapshot)
+        elif not world.trade_ui_player_selling and world.trade_ui_merchant_inventory_snapshot:
+            world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index - 1) % len(world.trade_ui_merchant_inventory_snapshot)
+    elif event.sym == tcod.event.KeySym.DOWN:
+        if world.trade_ui_player_selling and world.trade_ui_player_inventory_snapshot:
+            world.trade_ui_player_item_index = (world.trade_ui_player_item_index + 1) % len(world.trade_ui_player_inventory_snapshot)
+        elif not world.trade_ui_player_selling and world.trade_ui_merchant_inventory_snapshot:
+            world.trade_ui_merchant_item_index = (world.trade_ui_merchant_item_index + 1) % len(world.trade_ui_merchant_inventory_snapshot)
+    elif event.sym == tcod.event.KeySym.RETURN:
+        world.handle_trade_action()
+
 def handle_quest_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'QUEST_MENU' state."""
     ctx = world.quest_menu_context
+    num_quests = len(world.player.knowledge.active_quests)
     if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.Q):
         world.game_state = "PLAYING"
+    elif num_quests == 0:
+        ctx["selected_quest_index"] = 0
     elif event.sym == tcod.event.KeySym.UP:
         ctx["selected_quest_index"] = max(0, ctx.get("selected_quest_index", 0) - 1)
     elif event.sym == tcod.event.KeySym.DOWN:
-        num_quests = len(world.player.knowledge.active_quests)
         ctx["selected_quest_index"] = min(num_quests - 1, ctx.get("selected_quest_index", 0) + 1)
 
 def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handler):
@@ -231,10 +297,11 @@ def start_dialogue(world, npc, context_handler):
 
 def start_trade(world, npc):
     """Starts a trade session with an NPC."""
-    if npc.economic.profession == "Merchant":
+    if npc.economic.profession in TRADE_CAPABLE_PROFESSIONS:
+        world.game_state = "TRADE_MENU"
         world.trade_ui_npc_target = npc
-        world.initialize_trade_session()
         world.trade_ui_active = True
+        world.initialize_trade_session()
     else:
         world.add_message_to_chat_log("This person has nothing to trade.")
 
@@ -443,7 +510,7 @@ def handle_events(world, context) -> bool:
             raise SystemExit()
         if isinstance(event, tcod.event.MouseMotion):
             world.mouse_x, world.mouse_y = event.position
-        if isinstance(event, tcod.event.MouseButtonDown):
+        if isinstance(event, tcod.event.MouseButtonDown) and world.game_state == "PLAYING":
             camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
             mouse_world_x, mouse_world_y = camera_x + world.mouse_x, camera_y + world.mouse_y
 
@@ -476,6 +543,8 @@ def handle_events(world, context) -> bool:
                 handle_dialogue_input(event, world, context)
             elif world.game_state == "BOOK_READING":
                 handle_book_reading_input(event, world)
+            elif world.game_state == "TRADE_MENU":
+                handle_trade_menu_input(event, world)
             elif world.game_state == "QUEST_MENU":
                 handle_quest_menu_input(event, world)
             elif world.game_state == "HELP_MENU":

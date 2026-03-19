@@ -75,6 +75,8 @@ VILLAGE_BUILDING_PROJECTS = {
     }
 }
 
+TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
+
 import json
 import uuid
 
@@ -953,7 +955,7 @@ class World:
 
             becomes_item_key = burnt_item_def.get("properties", {}).get("on_burnout_becomes")
             if becomes_item_key:
-                self.player.economic.inventory[becomes_item_key] = self.player.economic.inventory.get(becomes_item_key, 0) + 1
+                self.player.add_item(becomes_item_key, 1)
                 # Could also remove 1 of the original item if it was stackable and not fully consumed by "lighting" it
                 # For now, lighting "unlit_torch" consumes it, and burnout creates "burnt_out_torch".
 
@@ -1199,7 +1201,8 @@ class World:
                 # If in range, just attack, don't move. The attack itself is in this task block.
                 # If not in range, switch to move_to_attack.
                 player = self.player
-                if abs(npc.x - player.x) + abs(npc.y - player.y) <= npc.attack_range:
+                attack_range = getattr(npc, "attack_range", getattr(npc.combat, "attack_range", 1))
+                if abs(npc.x - player.x) + abs(npc.y - player.y) <= attack_range:
                     # Attack is handled by this task, so we just need to ensure we don't move after.
                     self.npc_attempt_attack_player(npc, player)
                     npc.schedule.current_path = [] # Clear path after attack
@@ -1273,11 +1276,12 @@ class World:
 
             elif npc.schedule.current_task == "combat_action_move_to_attack_player":
                 player = self.player
+                attack_range = getattr(npc, "attack_range", getattr(npc.combat, "attack_range", 1))
                 # Recalculate path if no path, or if destination is not adjacent to player anymore
                 needs_new_path = False
                 if not npc.schedule.current_path or not npc.schedule.current_destination_coords:
                     needs_new_path = True
-                elif abs(npc.schedule.current_destination_coords[0] - player.x) + abs(npc.schedule.current_destination_coords[1] - player.y) > npc.attack_range:
+                elif abs(npc.schedule.current_destination_coords[0] - player.x) + abs(npc.schedule.current_destination_coords[1] - player.y) > attack_range:
                      needs_new_path = True
 
                 if needs_new_path:
@@ -1406,8 +1410,8 @@ class World:
                         npc.schedule.current_task = "idle" # Done socializing for now
                     elif npc.schedule.current_task == "visiting friend" and npc.task_target_entity_id:
                         friend = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
-                        if friend and friend.home_building_id:
-                            friend_home = self.buildings_by_id.get(friend.home_building_id)
+                        if friend and friend.schedule.home_building_id:
+                            friend_home = self.buildings_by_id.get(friend.schedule.home_building_id)
                             if friend_home and (npc.x, npc.y) == (friend_home.global_center_x, friend_home.global_center_y):
                                 # Successfully arrived at friend's house
                                 npc.social.relationships[friend.id] = min(100, npc.social.relationships.get(friend.id, 50) + 10)
@@ -2030,7 +2034,7 @@ class World:
                             continue
 
                 # Herd logic for certain herbivores
-                if npc.combat_behavior == "herd_defensive" and npc.schedule.current_task in ["idle", "wandering"]:
+                if npc.combat.combat_behavior == "herd_defensive" and npc.schedule.current_task in ["idle", "wandering"]:
                     # Try to stay near other herd members
                     herd_members = [o for o in self.get_entities_in_radius(npc.x, npc.y, 15)
                                     if isinstance(o, Animal) and o.animal_type == npc.animal_type and o.id != npc.id]
@@ -2245,8 +2249,8 @@ class World:
                             new_animal = Animal(spawn_x, spawn_y, name=f"Baby {npc.animal_type}", animal_type=npc.animal_type)
                             new_animal.char = ord(animal_def.get("char", 'a').lower())
                             new_animal.color = animal_def.get("color")
-                            new_animal.max_hp = animal_def.get("max_hp", 10) // 2
-                            new_animal.hp = new_animal.max_hp
+                            new_animal.combat.max_hp = animal_def.get("max_hp", 10) // 2
+                            new_animal.combat.hp = new_animal.combat.max_hp
                             new_animal.behavior = "Wander-Flee"
                             new_animal.gender = random.choice(["male", "female"])
                             self.npcs.append(new_animal)
@@ -2462,12 +2466,9 @@ class World:
                         elif critically_thirsty and not knows_water_source:
                             npc.knowledge.help_needed = "water"
                             needs_help = True
-                            # Water is not an inventory item, so this is a placeholder.
-                            # A real water quest might be "fix the well" or similar.
-                            # For now, we'll make it a food quest as a fallback.
-                            quest_item = "bread"
+                            quest_item = "water_flask"
                             quest_count = 1
-                            quest_type_for_help = "thirst" # Still indicates the root cause
+                            quest_type_for_help = "thirst"
 
                         if needs_help and quest_item:
                             quest_id = f"fetch_{quest_item}_{npc.id}_{self.game_time}"
@@ -2484,7 +2485,7 @@ class World:
                             self.add_message_to_chat_log(f"Debug: {npc.name} generated quest '{quest.title}'.")
 
 
-                        if needs_help and npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
+                        if needs_help and npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.y, self.player.x]:
                             npc.schedule.current_task = "approaching_player_for_help"
                             dest_x, dest_y = self._find_best_adjacent_tile(self.player.x, self.player.y, npc)
                             if dest_x is not None:
@@ -3012,7 +3013,7 @@ class World:
             if npc.economic.profession in ["Sheriff", "Guard"] and not npc.combat.is_hostile_to_player:
                 if self.player.economic.bounty >= 100: # Bounty threshold for arrest
                     # Check if player is visible to the Sheriff/Guard
-                    if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.x, self.player.y]:
+                    if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.y, self.player.x]:
                         self.add_message_to_chat_log(f"{npc.name} spots you and moves to arrest you for your crimes!")
                         npc.combat.is_hostile_to_player = True
                         # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
@@ -3417,7 +3418,7 @@ class World:
         work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
         if not work_building:
             # self.add_message_to_chat_log(f"Error: {npc.name} has work_building_id {npc.schedule.work_building_id} but building not found.")
-            npc.current_task = "idle_confused"
+            npc.schedule.current_task = "idle_confused"
             return True # Handled this confusion
 
         sub_task_sequence = profession_data["default_sub_task_sequence"]
@@ -3747,14 +3748,14 @@ class World:
                         npc.current_sub_task = next_sub_task_id
                         npc.sub_task_zone_target = current_sub_task_data.get("target_zone_tag")
                         npc.sub_task_target_coords = target_coords
-                        npc.current_path = []
+                        npc.schedule.current_path = []
                         npc.sub_task_timer = current_sub_task_data.get("duration_ticks", 10)
                         found_viable_task = True
                         break # Exit the loop once a task is found
 
                 if not found_viable_task:
                     # If no task in the entire sequence is possible, the NPC is stalled.
-                    npc.current_task = f"Working ({npc.economic.profession} - No available tasks)"
+                    npc.schedule.current_task = f"Working ({npc.economic.profession} - No available tasks)"
                     return True # Handled for this cycle
 
 
@@ -3771,7 +3772,7 @@ class World:
                         npc.schedule.current_path = path
                         npc.schedule.current_destination_coords = npc.sub_task_target_coords # For _update_npc_movement
                         # Update task display for pathing to sub-task action
-                        npc.current_task = f"Working ({npc.economic.profession} - {sub_task_disp_name} - Pathing)"
+                        npc.schedule.current_task = f"Working ({npc.economic.profession} - {sub_task_disp_name} - Pathing)"
                     else:
                         # self.add_message_to_chat_log(f"{npc.name} cannot find path to {npc.sub_task_target_coords} for {npc.current_sub_task}.")
                         # Clear current sub-task details to retry finding location / path next time
@@ -3780,10 +3781,10 @@ class World:
                         npc.sub_task_zone_target = None
                         npc.schedule.current_path = []
                         npc.schedule.current_destination_coords = None
-                        npc.current_task = f"Working ({npc.economic.profession} - Pathing Failed)"
+                        npc.schedule.current_task = f"Working ({npc.economic.profession} - Pathing Failed)"
                 else:
                      # Already pathing, ensure task display reflects this. _update_npc_movement handles the move.
-                     npc.current_task = f"Working ({npc.economic.profession} - {sub_task_disp_name} - Pathing)"
+                     npc.schedule.current_task = f"Working ({npc.economic.profession} - {sub_task_disp_name} - Pathing)"
 
             else: # NPC is at the sub-task target coordinates
                 npc.schedule.current_path = [] # Clear path as arrived
@@ -3796,7 +3797,7 @@ class World:
                 action_verb = get_sub_task_data(npc.economic.profession, npc.current_sub_task).get("action_verb", "working on")
                 total_duration = get_sub_task_data(npc.economic.profession, npc.current_sub_task).get("duration_ticks", 10)
                 progress = max(0, total_duration - npc.sub_task_timer)
-                npc.current_task = f"Working ({npc.economic.profession} - {action_verb} {sub_task_disp_name} [{progress}/{total_duration}])"
+                npc.schedule.current_task = f"Working ({npc.economic.profession} - {action_verb} {sub_task_disp_name} [{progress}/{total_duration}])"
 
                 if npc.sub_task_timer <= 0:
                     # Action complete, output handled at start of next cycle. Current_sub_task will be cleared.
@@ -3842,7 +3843,7 @@ class World:
         can_see_player = False
         if npc.id in self.npc_fov_maps and \
            0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT:
-            can_see_player = self.npc_fov_maps[npc.id][player.x, player.y]
+            can_see_player = self.npc_fov_maps[npc.id][player.y, player.x]
 
         # 2. Key Status Checks
         hp_percent = npc.combat.hp / npc.combat.max_hp
@@ -3899,7 +3900,7 @@ class World:
                     # narrative_thought = f"{npc.name} closes in."
 
         # 4. Execute Action Logic
-        npc.target_entity_id = player.id
+        npc.combat.target_entity_id = player.id
 
         if len(narrative_thought) > 0:
              # Only log significant behavior changes or thoughts to avoid combat spam
@@ -3907,28 +3908,28 @@ class World:
                 self.add_message_to_chat_log(f"({narrative_thought})")
 
         if chosen_action == "attack_player":
-            npc.current_task = "combat_action_attack_player"
+            npc.schedule.current_task = "combat_action_attack_player"
             # Sound emitted by npc_attempt_attack_player
         elif chosen_action == "move_to_attack_player":
-            npc.current_task = "combat_action_move_to_attack_player"
+            npc.schedule.current_task = "combat_action_move_to_attack_player"
         elif chosen_action == "flee_from_player":
-            npc.current_task = "combat_action_flee_from_player"
+            npc.schedule.current_task = "combat_action_flee_from_player"
             npc.add_grudge(player.id, "Forced me to flee.")
         elif chosen_action == "use_healing_item":
-             npc.current_task = "combat_action_use_healing_item"
+             npc.schedule.current_task = "combat_action_use_healing_item"
         elif chosen_action == "move_to_cover": # Not currently used in simple tree above, but supported
              cover_spot_x, cover_spot_y = self._find_best_cover_spot(npc, player.x, player.y)
              if cover_spot_x:
-                 npc.current_task = "combat_action_move_to_cover"
+                 npc.schedule.current_task = "combat_action_move_to_cover"
                  npc.task_target_coords = (cover_spot_x, cover_spot_y)
              else:
-                 npc.current_task = "combat_action_hold_position"
+                 npc.schedule.current_task = "combat_action_hold_position"
         else:
-            npc.current_task = "combat_action_hold_position"
+            npc.schedule.current_task = "combat_action_hold_position"
 
         # Clear path if switching to a non-movement action
         if chosen_action in ["attack_player", "hold_position", "use_healing_item"]:
-            npc.current_path = []
+            npc.schedule.current_path = []
             
         # Clear cover target if not moving to cover
         if chosen_action != "move_to_cover":
@@ -3956,7 +3957,7 @@ class World:
             self.add_message_to_chat_log(f"{npc.name} apprehends you! You are under arrest.")
             self.serve_jail_time()
             npc.combat.is_hostile_to_player = False
-            npc.current_task = "idle"
+            npc.schedule.current_task = "idle"
             npc.schedule.current_path = []
             return
 
@@ -3979,7 +3980,7 @@ class World:
             damage_bonus = weapon_def.get("properties", {}).get("damage_bonus", 0)
 
         # Player Defense
-        player_ac = 10 + player.defense_bonus # Base 10 + armor
+        player_ac = 10 + player.combat.defense_bonus # Base 10 + armor
 
         # 2. The Attack Roll
         d20_roll = random.randint(1, 20)
@@ -4014,9 +4015,9 @@ class World:
                 location=(npc.x, npc.y)
              )
              
-             self.add_message_to_chat_log(f"{npc.name} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.hp}/{player.max_hp})")
+             self.add_message_to_chat_log(f"{npc.name} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.combat.hp}/{player.combat.max_hp})")
 
-             if player.hp <= 0:
+             if player.combat.hp <= 0:
                 self.add_message_to_chat_log("You have been defeated!")
                 self.game_state = "PLAYER_DEAD"
                 self.log_event(
@@ -4242,7 +4243,7 @@ class World:
             if inventory[food_item_key] <= 0:
                 del inventory[food_item_key]
 
-            npc.hunger = max(0, npc.hunger - on_use["reduces_hunger"])
+            npc.physical.hunger = max(0, npc.physical.hunger - on_use["reduces_hunger"])
 
             # location = "at home" if is_building_inventory else "from their pack"
             # self.add_message_to_chat_log(f"{npc.name} eats a {item_def.get('name', food_item_key)} {location}.")
@@ -4269,12 +4270,13 @@ class World:
 
         item_key = contract["item_key"]
         qty_needed = contract["quantity_needed"]
-        player_has_qty = self.player.economic.inventory.get(item_key, 0)
+        player_has_qty = 0
+        for item in self.player.economic.inventory:
+            if item["key"] == item_key:
+                player_has_qty += item.get("quantity", 1)
 
         if player_has_qty >= qty_needed:
-            self.player.economic.inventory[item_key] = player_has_qty - qty_needed
-            if self.player.economic.inventory[item_key] <= 0:
-                del self.player.economic.inventory[item_key]
+            self.player.remove_item(item_key, qty_needed)
 
             self.player.economic.money += contract["reward"]
             completion_msg = f"Delivery complete! You gave {qty_needed} {item_key}(s) and received {contract['reward']} money."
@@ -4359,7 +4361,7 @@ class World:
                 actions.append("Attack")
             else: # It's a humanoid NPC
                 actions.extend(["Talk", "Attack"])
-                if entity_data.profession in ["Merchant", "Miller", "Scribe"]:
+                if entity_data.economic.profession in TRADE_CAPABLE_PROFESSIONS:
                     actions.append("Trade")
         elif entity_type == "item":
             actions.append("Pick up")
@@ -4689,8 +4691,8 @@ class World:
 
         self.add_message_to_chat_log(f"You mount the {animal_npc.name}.")
         # The animal should stop its current path when mounted
-        animal_npc.current_path = []
-        animal_npc.current_destination_coords = None
+        animal_npc.schedule.current_path = []
+        animal_npc.schedule.current_destination_coords = None
 
     def player_attempt_shear(self, animal_npc: Animal):
         """Handles the player's attempt to shear a sheep."""
@@ -4971,17 +4973,17 @@ class World:
             return
 
         event_summary = "the weather"
-        if speaker.known_events:
-            event = random.choice(list(speaker.known_events.values()))
+        if speaker.knowledge.known_events:
+            event = random.choice(list(speaker.knowledge.known_events.values()))
             event_summary = event.description
 
         history = "\n".join(speaker.current_conversation)
         prompt = LLM_PROMPTS["npc_npc_conversation"].format(
             speaker_name=speaker.name,
-            speaker_personality=speaker.personality,
-            speaker_attitude_to_listener=speaker.relationships.get(listener.id, 50),
+            speaker_personality=speaker.social.personality,
+            speaker_attitude_to_listener=speaker.social.relationships.get(listener.id, 50),
             listener_name=listener.name,
-            listener_personality=listener.personality,
+            listener_personality=listener.social.personality,
             event_summary=event_summary,
             conversation_history=history
         )
@@ -5031,7 +5033,7 @@ class World:
             return
 
         player_weapon_name = "Fists"
-        if self.player.economic.inventory.get("axe_stone", 0) > 0:
+        if self.player.has_item("axe_stone"):
             player_weapon_name = ITEM_DEFINITIONS["axe_stone"]["name"]
 
         player_melee_skill = getattr(self.player, 'melee_skill', 5)
@@ -5056,8 +5058,8 @@ class World:
 
         if not response_str:
             self.add_message_to_chat_log("Your attack seems to have no effect (LLM Comms Error).")
-            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
-                target_npc.is_hostile_to_player = True
+            if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
+                target_npc.combat.is_hostile_to_player = True
                 self.add_message_to_chat_log(f"{target_npc.name} becomes hostile due to your aggression!")
             return
 
@@ -5084,20 +5086,20 @@ class World:
             elif hit and damage_dealt <= 0: # A hit that does no damage
                 self.add_message_to_chat_log(f"Your attack hits but glances off {target_npc.name} harmlessly!")
 
-            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
-                 target_npc.is_hostile_to_player = True
+            if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
+                 target_npc.combat.is_hostile_to_player = True
                  self.add_message_to_chat_log(f"{target_npc.name} becomes hostile!")
 
         except json.JSONDecodeError:
             self.add_message_to_chat_log(f"The outcome of your attack is unclear. (LLM Format Error: {response_str})")
             self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=8, source_entity_id=self.player.id) # Still emit
-            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
-                target_npc.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
+            if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
+                target_npc.combat.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
         except ValueError:
             self.add_message_to_chat_log(f"The LLM provided an invalid damage amount: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
             self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=8, source_entity_id=self.player.id) # Still emit
-            if not target_npc.is_hostile_to_player and not target_npc.is_dead:
-                target_npc.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
+            if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
+                target_npc.combat.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
 
         # --- Witness Handling ---
         # After any attack attempt, check for witnesses to the crime of assault.
@@ -5244,7 +5246,7 @@ class World:
 
     def player_attempt_pick_lock(self, target_x: int, target_y: int) -> bool:
         """Handles player's attempt to pick a lock."""
-        if self.player.economic.inventory.get("lockpick", 0) <= 0:
+        if not self.player.has_item("lockpick"):
             self.add_message_to_chat_log("You don't have any lockpicks.")
             return False
 
@@ -5278,10 +5280,9 @@ class World:
             self.add_message_to_chat_log(narrative)
 
             if pick_broken:
-                self.player.economic.inventory["lockpick"] -= 1
+                self.player.remove_item("lockpick", 1)
                 self.add_message_to_chat_log("Your lockpick broke!")
-                if self.player.economic.inventory["lockpick"] <= 0:
-                    del self.player.economic.inventory["lockpick"]
+                if not self.player.has_item("lockpick"):
                     self.add_message_to_chat_log("That was your last lockpick.")
 
             if success:
@@ -5296,17 +5297,28 @@ class World:
                     return True # Escape successful
 
 
-                # For now, just message. Actual content access is next step.
-                # self.add_message_to_chat_log(f"The {target_tile.name} clicks open!")
-                # Try to find which building this chest is in to list its inventory as a placeholder
-                # This is a simplified way to get building inventory for a chest.
-                # A chest might have its own inventory in the future.
                 containing_building = self._get_building_by_tile_coords(target_x, target_y)
                 if containing_building and containing_building.building_inventory:
-                    item_list_str = ", ".join([f"{qty}x {ITEM_DEFINITIONS.get(key,{}).get('name',key)}" for key, qty in containing_building.building_inventory.items() if key != "money"])
-                    if not item_list_str : item_list_str = "nothing of note"
-                    self.add_message_to_chat_log(f"Inside the {target_tile.name} you find: {item_list_str}.")
-                elif containing_building:
+                    loot_messages = []
+                    money_found = containing_building.building_inventory.pop("money", 0)
+                    if money_found:
+                        self.player.economic.money += money_found
+                        loot_messages.append(f"{money_found} money")
+
+                    for item_key, qty in list(containing_building.building_inventory.items()):
+                        if qty <= 0:
+                            del containing_building.building_inventory[item_key]
+                            continue
+                        self.player.add_item(item_key, qty)
+                        del containing_building.building_inventory[item_key]
+                        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                        loot_messages.append(f"{qty}x {item_name}")
+
+                    if loot_messages:
+                        self.add_message_to_chat_log(f"You loot the {target_tile.name}: {', '.join(loot_messages)}.")
+                    else:
+                        self.add_message_to_chat_log(f"The {target_tile.name} is empty.")
+                else:
                     self.add_message_to_chat_log(f"The {target_tile.name} is empty.")
 
             # --- Witness Handling ---
@@ -5396,7 +5408,7 @@ class World:
         # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
         # Merchant inventory is likely in their work building
         merchant_inventory_source = {}
-        merchant_building = self.buildings_by_id.get(self.trade_ui_npc_target.work_building_id)
+        merchant_building = self.buildings_by_id.get(self.trade_ui_npc_target.schedule.work_building_id)
         if merchant_building and merchant_building.building_type in ["general_store", "mill"]:
             merchant_inventory_source = merchant_building.building_inventory
         else: # Fallback to NPC's personal inventory if no store or not a store
@@ -5419,7 +5431,7 @@ class World:
             return
 
         merchant_npc = self.trade_ui_npc_target
-        merchant_building = self.buildings_by_id.get(merchant_npc.work_building_id)
+        merchant_building = self.buildings_by_id.get(merchant_npc.schedule.work_building_id)
         merchant_village = self._get_village_for_npc(merchant_npc)
 
         # Determine merchant's actual inventory (store or personal)
@@ -5656,7 +5668,7 @@ class World:
                     loc_name = building.building_type.replace('_', ' ')
                     if loc_name not in npc_target.knowledge.known_locations:
                         npc_target.knowledge.known_locations[loc_name] = coords
-                        npc_target.relationships[self.player.id] = npc_target.relationships.get(self.player.id, 50) + 10
+                        npc_target.social.relationships[self.player.id] = npc_target.social.relationships.get(self.player.id, 50) + 10
                         self.chat_ui_history.append((npc_target.name, f"Oh, the {loc_name}? I didn't know where that was. Thank you!"))
                         shared = True
                         break
@@ -5735,11 +5747,11 @@ class World:
 
         gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
         if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
-            if not npc_target.known_events:
+            if not npc_target.knowledge.known_events:
                 self.chat_ui_history.append((npc_target.name, "I haven't heard anything interesting lately."))
             else:
                 # Select a random event to gossip about
-                event_to_share = random.choice(list(npc_target.known_events.values()))
+                event_to_share = random.choice(list(npc_target.knowledge.known_events.values()))
 
                 # Get names and relationships for the prompt
                 subject = next((n for n in self.all_npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
@@ -5748,8 +5760,8 @@ class World:
                 subject_name = getattr(subject, 'name', 'Someone') if subject else 'Someone'
                 target_name = getattr(target, 'name', 'someone') if target else 'someone'
 
-                subject_title = getattr(subject, 'title', '') if subject else ''
-                target_title = getattr(target, 'title', '') if target else ''
+                subject_title = getattr(getattr(subject, 'social', None), 'title', '') if subject else ''
+                target_title = getattr(getattr(target, 'social', None), 'title', '') if target else ''
 
                 gossip_prompt = LLM_PROMPTS["npc_share_gossip"].format(
                     npc_name=npc_target.name,
@@ -5793,7 +5805,7 @@ class World:
             long_term_memory_summary = "No specific memories of the player."
         # ---
 
-        relationship_score = npc_target.relationships.get(self.player.id, 50)
+        relationship_score = npc_target.social.relationships.get(self.player.id, 50)
 
         prompt = LLM_PROMPTS["npc_conversation_continue"].format(
             npc_name=npc_target.name,
@@ -5894,8 +5906,11 @@ class World:
             # Example: npc.schedule.current_task = "going_to_location"
             # npc.task_target_coords = (x, y) # (extracted from player_input or LLM response)
         elif goal == "start_trade":
-            if npc.economic.profession == "Merchant":
+            if npc.economic.profession in TRADE_CAPABLE_PROFESSIONS:
+                self.chat_ui_active = False
+                self.needs_text_input = False
                 self.game_state = "TRADE_MENU"
+                self.trade_ui_active = True
                 self.trade_ui_npc_target = npc
                 self.initialize_trade_session()
             else:
@@ -6424,11 +6439,11 @@ class World:
                     work_building.building_inventory["healing_salve"] = random.randint(3, 8)
                     work_building.building_inventory["wooden_plank"] = random.randint(10, 30)
                     if random.random() < 0.5: # Chance to have some logs
-                        work_building.building_inventory["log"] = random.randint(5, 20)
+                        work_building.building_inventory["raw_log"] = random.randint(5, 20)
                     # self.add_message_to_chat_log(f"Stocked General Store ({work_building.id[:6]}) for Merchant {npc.name}.")
 
                 if home_building:
-                    npc.home_building_id = home_building.id
+                    npc.schedule.home_building_id = home_building.id
                     home_building.residents.append(npc)
                     # Seed initial knowledge of home and workplace
                     npc.knowledge.known_locations[f"my home"] = (home_building.global_center_x, home_building.global_center_y)
@@ -6686,7 +6701,7 @@ class World:
                 # merchant.npc_inventory["cloth"] = random.randint(10, 20)
 
                 # Set their initial AI state
-                merchant.current_task = "traveling_to_village"
+                merchant.schedule.current_task = "traveling_to_village"
 
                 self.npcs.append(merchant) # Add them to the general NPC list, not a specific village
                 self.add_message_to_chat_log(f"A traveling merchant, {merchant.name}, has begun their journey.")
@@ -7060,13 +7075,13 @@ class World:
                                     new_animal = Animal(animal_x_world, animal_y_world, name=animal_def["name"], animal_type=animal_type)
                                     new_animal.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
                                     new_animal.color = animal_def["color"]
-                                    new_animal.max_hp = animal_def["max_hp"]
-                                    new_animal.hp = new_animal.max_hp
+                                    new_animal.combat.max_hp = animal_def["max_hp"]
+                                    new_animal.combat.hp = new_animal.combat.max_hp
                                     new_animal.behavior = animal_def.get("behavior")
-                                    new_animal.is_hostile_to_player = animal_def["hostile"]
-                                    new_animal.base_attack_name = animal_def["base_attack_name"]
-                                    new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
-                                    new_animal.combat_behavior = animal_def["combat_behavior"]
+                                    new_animal.combat.is_hostile_to_player = animal_def["hostile"]
+                                    new_animal.combat.base_attack_name = animal_def["base_attack_name"]
+                                    new_animal.combat.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                    new_animal.combat.combat_behavior = animal_def["combat_behavior"]
                                     new_animal.gender = random.choice(["male", "female"])
                                     if "prey" in animal_def:
                                         new_animal.speed = 2
@@ -7112,13 +7127,13 @@ class World:
                                             new_animal = Animal(spawn_x, spawn_y, name=animal_def["name"], animal_type=spawn_type)
                                             new_animal.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
                                             new_animal.color = animal_def["color"]
-                                            new_animal.max_hp = animal_def["max_hp"]
-                                            new_animal.hp = new_animal.max_hp
+                                            new_animal.combat.max_hp = animal_def["max_hp"]
+                                            new_animal.combat.hp = new_animal.combat.max_hp
                                             new_animal.behavior = animal_def.get("behavior")
-                                            new_animal.is_hostile_to_player = animal_def["hostile"]
-                                            new_animal.base_attack_name = animal_def["base_attack_name"]
-                                            new_animal.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
-                                            new_animal.combat_behavior = animal_def["combat_behavior"]
+                                            new_animal.combat.is_hostile_to_player = animal_def["hostile"]
+                                            new_animal.combat.base_attack_name = animal_def["base_attack_name"]
+                                            new_animal.combat.base_attack_damage_dice = animal_def["base_attack_damage_dice"]
+                                            new_animal.combat.combat_behavior = animal_def["combat_behavior"]
                                             new_animal.gender = random.choice(["male", "female"])
                                             new_animal.den_location = (world_x, world_y) # Assign this den as home
                                             if "prey" in animal_def:
@@ -7752,16 +7767,16 @@ class World:
                             continue
 
                         # Flee if personality is cowardly or neutral, and not already fleeing
-                        if npc.social.personality in ["cowardly", "neutral", "commoner"] and npc.current_task != "fleeing_from_player":
-                            npc.current_task = "fleeing_from_player"
+                        if npc.social.personality in ["cowardly", "neutral", "commoner"] and npc.schedule.current_task != "fleeing_from_player":
+                            npc.schedule.current_task = "fleeing_from_player"
                             self.add_message_to_chat_log(f"{npc.name} sees {self.player.social.title or 'an infamous figure'} and flees in terror!")
                             npc.schedule.current_path = [] # Force path recalculation
 
                     # Reaction to Fame
                     elif self.player.social.fame >= 50:
                          # Only friendly or neutral NPCs will greet
-                        if npc.social.personality in ["friendly", "gregarious", "neutral", "commoner"] and npc.current_task != "greeting_player":
-                            npc.current_task = "greeting_player"
+                        if npc.social.personality in ["friendly", "gregarious", "neutral", "commoner"] and npc.schedule.current_task != "greeting_player":
+                            npc.schedule.current_task = "greeting_player"
                             self.add_message_to_chat_log(f"{npc.name} recognizes you and approaches to greet {self.player.social.title or 'a famous hero'}.")
                             npc.schedule.current_path = [] # Force path recalculation
 
@@ -7797,7 +7812,7 @@ class World:
                         response_json = json.loads(response_str)
                         new_title = response_json.get("title")
                         if new_title:
-                            entity.title = new_title
+                            entity.social.title = new_title
                             if isinstance(entity, Player):
                                 self.add_message_to_chat_log(f"You are now known as {new_title}.")
                             else:
@@ -8871,17 +8886,17 @@ class World:
                     self.add_message_to_chat_log(f"Debug: {npc.name} now holds a grudge against {subject_name}.")
                 elif action == "mourn_death" and subject_entity:
                     # Find the home of the deceased
-                    if subject_entity.home_building_id:
-                        home_building = self.buildings_by_id.get(subject_entity.home_building_id)
+                    if subject_entity.schedule.home_building_id:
+                        home_building = self.buildings_by_id.get(subject_entity.schedule.home_building_id)
                         if home_building:
-                            npc.current_task = "mourning"
+                            npc.schedule.current_task = "mourning"
                             npc.task_target_coords = (home_building.global_center_x, home_building.global_center_y)
-                            npc.current_path = []
+                            npc.schedule.current_path = []
                             npc.task_timer = random.randint(100, 200) # Mourn for a while
                 elif action == "investigate_crime_scene" and event_to_process.location:
-                    npc.current_task = "investigating"
+                    npc.schedule.current_task = "investigating"
                     npc.task_target_coords = event_to_process.location
-                    npc.current_path = []
+                    npc.schedule.current_path = []
                     npc.task_timer = random.randint(50, 100) # Investigate for a bit
                 elif action == "apply_for_vacancy" and event_to_process.location and npc.economic.profession == "Unemployed":
                     # Trigger application logic
@@ -8940,7 +8955,7 @@ class World:
 
     def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player or NPC, victim: NPC | None = None):
         """Determines how an NPC reacts to witnessing a crime using an LLM prompt."""
-        if witness.is_hostile_to_player or witness.current_task in ["fleeing_from_player", "going_to_report_crime", "combat_action_flee_from_player"]:
+        if witness.combat.is_hostile_to_player or witness.schedule.current_task in ["fleeing_from_player", "going_to_report_crime", "combat_action_flee_from_player"]:
             return
 
         victim_name = "N/A"
@@ -8999,18 +9014,18 @@ class World:
                     self.add_message_to_chat_log(f"({witness.name} now holds a grudge against you: {grudge_reason})")
 
             if reaction == "become_hostile":
-                witness.is_hostile_to_player = True
+                witness.combat.is_hostile_to_player = True
             elif reaction == "report_crime":
                 sheriff_office = self._find_nearest_building_of_type(witness, "sheriff_office")
                 if sheriff_office:
-                    witness.current_task = "going_to_report_crime"
+                    witness.schedule.current_task = "going_to_report_crime"
                     witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
-                    witness.current_path = [] # Clear path for new destination
+                    witness.schedule.current_path = [] # Clear path for new destination
                 else:
                     self.add_message_to_chat_log(f"{witness.name} wants to report the crime but doesn't know where the sheriff is.")
             elif reaction == "flee":
-                witness.current_task = "combat_action_flee_from_player"
-                witness.current_path = [] # Force path recalculation
+                witness.schedule.current_task = "combat_action_flee_from_player"
+                witness.schedule.current_path = [] # Force path recalculation
             elif reaction == "admonish":
                 # The grudge already lowered the relationship, so this is just a verbal action.
                 pass
@@ -9130,7 +9145,7 @@ class World:
             # This means player is trying to "use" their currently lit torch, so extinguish it.
             extinguish_becomes_key = item_def.get("properties", {}).get("on_extinguish_becomes")
             if extinguish_becomes_key:
-                self.player.economic.inventory[extinguish_becomes_key] = self.player.economic.inventory.get(extinguish_becomes_key, 0) + 1
+                self.player.add_item(extinguish_becomes_key, 1)
 
             self.add_message_to_chat_log(f"You extinguish your {self.player.equipment.equipped_light_item_key}.")
             self.player.equipment.equipped_light_item_key = None
@@ -9140,7 +9155,7 @@ class World:
             return
 
         # Standard item usage from inventory
-        if self.player.economic.inventory.get(item_key, 0) <= 0:
+        if not self.player.has_item(item_key):
             self.add_message_to_chat_log(f"You don't have any {item_def.get('name', item_key)} to use.")
             return
 
@@ -9152,9 +9167,7 @@ class World:
                 return
 
             # Consume the unlit_torch
-            self.player.economic.inventory[item_key] -= 1
-            if self.player.economic.inventory[item_key] <= 0:
-                del self.player.economic.inventory[item_key]
+            self.player.remove_item(item_key, 1)
 
             # Activate "torch_lit" state
             lit_torch_def = ITEM_DEFINITIONS.get("torch_lit", {})
@@ -9179,8 +9192,7 @@ class World:
                     self.add_message_to_chat_log("You are already at full health!")
                 else:
                     self.player.combat.hp = min(self.player.combat.max_hp, self.player.combat.hp + heal_amount)
-                    self.player.economic.inventory[item_key] -= 1
-                    if self.player.economic.inventory[item_key] <= 0: del self.player.economic.inventory[item_key]
+                    self.player.remove_item(item_key, 1)
                     self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP.")
                     self.visual_effects.append(FloatingTextEffect(self.player.x, self.player.y, f"+{heal_amount}", color=(0, 255, 0)))
                     consumed = True
@@ -9191,8 +9203,7 @@ class World:
                     self.player.physical.hunger = max(0, self.player.physical.hunger - reduces_hunger_amount)
                     self.add_message_to_chat_log(f"You eat the {item_def['name']}. You feel less hungry.")
                     if not consumed: # Consume item if not already consumed by healing
-                        self.player.economic.inventory[item_key] -= 1
-                        if self.player.economic.inventory[item_key] <= 0: del self.player.economic.inventory[item_key]
+                        self.player.remove_item(item_key, 1)
                     consumed = True
                     self._update_player_hunger_thirst(initial_setup=True) # Update status messages immediately
                 else:
@@ -9205,8 +9216,7 @@ class World:
                     self.player.physical.thirst = max(0, self.player.physical.thirst - reduces_thirst_amount)
                     self.add_message_to_chat_log(f"You drink the {item_def.get('name', item_key)}. You feel less thirsty.")
                     if not consumed: # Consume item if not already consumed
-                        self.player.economic.inventory[item_key] -= 1
-                        if self.player.economic.inventory[item_key] <= 0: del self.player.economic.inventory[item_key]
+                        self.player.remove_item(item_key, 1)
                     consumed = True
                     self._update_player_hunger_thirst(initial_setup=True) # Update status messages immediately
                 else:
@@ -9388,7 +9398,7 @@ class World:
         if random.random() < 0.2: # 20% chance for NPC to catch a fish
             fish_types = ["fish", "salmon", "trout"]
             fish_caught = random.choice(fish_types)
-            work_building = self.buildings_by_id.get(npc.work_building_id)
+            work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
             if work_building:
                 work_building.building_inventory[f"raw_{fish_caught}"] = work_building.building_inventory.get(f"raw_{fish_caught}", 0) + 1
                 self.add_message_to_chat_log(f"{npc.name} caught a {fish_caught}!")

@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
-import numpy as np
+from runtime_compat import np
 from engine import World, NPC, Animal
 from data.animals import ANIMAL_DEFINITIONS
 from data.tiles import TILE_DEFINITIONS

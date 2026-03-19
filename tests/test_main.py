@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import patch
 import importlib
+from types import SimpleNamespace
 import config
+import tcod.event
 
 # Set test-specific configurations
 config.WORLD_WIDTH = 100
@@ -16,6 +18,7 @@ importlib.reload(engine)
 
 from engine import World
 import json
+import main
 
 class TestGame(unittest.TestCase):
     def setUp(self):
@@ -44,6 +47,374 @@ class TestGame(unittest.TestCase):
             self.assertIsNotNone(world.player)
         except Exception as e:
             self.fail(f"World initialization failed with an exception: {e}")
+
+
+class TestMainInputHelpers(unittest.TestCase):
+    def test_open_interaction_menu_skips_entities_without_actions(self):
+        world = SimpleNamespace(
+            interaction_context={},
+            _get_interactables_at=lambda x, y: [
+                {"name": "Plains", "type": "tile", "data": object()},
+                {"name": "Book", "type": "item", "data": {"item_key": "book_test", "quantity": 1}},
+            ],
+            _get_actions_for_entity=lambda entity: [] if entity["name"] == "Plains" else ["Pick up", "Read"],
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+
+        main.open_interaction_menu(world, 3, 4)
+
+        self.assertTrue(world.interaction_context["active"])
+        self.assertEqual(world.interaction_context["target_entities"][0]["name"], "Book")
+        self.assertEqual(world.interaction_context["available_actions"], ["Pick up", "Read"])
+        world.add_message_to_chat_log.assert_not_called()
+
+    def test_open_interaction_menu_reports_when_no_entity_has_actions(self):
+        world = SimpleNamespace(
+            interaction_context={"active": False},
+            _get_interactables_at=lambda x, y: [{"name": "Plains", "type": "tile", "data": object()}],
+            _get_actions_for_entity=lambda entity: [],
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+
+        main.open_interaction_menu(world, 1, 2)
+
+        self.assertFalse(world.interaction_context["active"])
+        world.add_message_to_chat_log.assert_called_once_with("There is nothing here you can interact with.")
+
+    def test_handle_interaction_input_closes_empty_menu_safely(self):
+        world = SimpleNamespace(
+            interaction_context={"active": True, "available_actions": []},
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+
+        took_turn = main.handle_interaction_input(event, world, context_handler=SimpleNamespace())
+
+        self.assertFalse(took_turn)
+        self.assertFalse(world.interaction_context["active"])
+        world.add_message_to_chat_log.assert_called_once_with("There is nothing here you can interact with.")
+
+    def test_interact_uses_player_facing_direction_from_state(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.E)
+        player = SimpleNamespace(x=10, y=20, state=SimpleNamespace(last_dx=1, last_dy=-1))
+        world = SimpleNamespace(player=player)
+
+        with patch("main.open_interaction_menu") as mock_open_menu:
+            main.handle_playing_input(event, world, context_handler=SimpleNamespace())
+
+        mock_open_menu.assert_called_once_with(world, 11, 19)
+
+    def test_building_menu_uses_player_facing_direction_from_state(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        player = SimpleNamespace(x=4, y=7, state=SimpleNamespace(last_dx=-1, last_dy=0))
+        building_menu_context = {"all_recipes": ["wood_wall"], "selected_recipe_index": 0}
+        world = SimpleNamespace(
+            player=player,
+            game_state="BUILDING_MENU",
+            building_menu_context=building_menu_context,
+            player_attempt_build=unittest.mock.Mock(),
+        )
+
+        main.handle_building_input(event, world)
+
+        world.player_attempt_build.assert_called_once_with("wood_wall", 3, 7)
+
+    def test_find_nearest_npc_prefers_closest_living_npc_within_range(self):
+        world = SimpleNamespace(
+            player=SimpleNamespace(x=0, y=0),
+            all_npcs=[
+                SimpleNamespace(name="Far", x=4, y=4, is_dead=False),
+                SimpleNamespace(name="Dead", x=1, y=0, is_dead=True),
+                SimpleNamespace(name="Close", x=2, y=1, is_dead=False),
+                SimpleNamespace(name="Too Far", x=6, y=0, is_dead=False),
+            ],
+        )
+
+        nearest = main._find_nearest_npc_to_talk_to(world, max_distance=5)
+
+        self.assertIsNotNone(nearest)
+        self.assertEqual(nearest.name, "Close")
+
+    def test_quest_menu_down_does_not_go_negative_when_no_quests_exist(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.DOWN)
+        world = SimpleNamespace(
+            game_state="QUEST_MENU",
+            quest_menu_context={"selected_quest_index": 0},
+            player=SimpleNamespace(knowledge=SimpleNamespace(active_quests={})),
+        )
+
+        main.handle_quest_menu_input(event, world)
+
+        self.assertEqual(world.quest_menu_context["selected_quest_index"], 0)
+
+    def test_quest_menu_clamps_selection_to_last_active_quest(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.DOWN)
+        world = SimpleNamespace(
+            game_state="QUEST_MENU",
+            quest_menu_context={"selected_quest_index": 0},
+            player=SimpleNamespace(
+                knowledge=SimpleNamespace(
+                    active_quests={
+                        "quest_1": {"title": "First"},
+                        "quest_2": {"title": "Second"},
+                    }
+                )
+            ),
+        )
+
+        main.handle_quest_menu_input(event, world)
+        main.handle_quest_menu_input(event, world)
+        main.handle_quest_menu_input(event, world)
+
+        self.assertEqual(world.quest_menu_context["selected_quest_index"], 1)
+
+    def test_start_trade_accepts_supported_non_merchant_professions(self):
+        npc = SimpleNamespace(economic=SimpleNamespace(profession="Miller"))
+        world = SimpleNamespace(
+            game_state="PLAYING",
+            trade_ui_npc_target=None,
+            trade_ui_active=False,
+            initialize_trade_session=unittest.mock.Mock(),
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+
+        main.start_trade(world, npc)
+
+        self.assertIs(world.trade_ui_npc_target, npc)
+        self.assertTrue(world.trade_ui_active)
+        self.assertEqual(world.game_state, "TRADE_MENU")
+        world.initialize_trade_session.assert_called_once_with()
+        world.add_message_to_chat_log.assert_not_called()
+
+    def test_handle_trade_menu_input_escape_closes_trade_state(self):
+        world = SimpleNamespace(
+            trade_ui_active=True,
+            trade_ui_npc_target=object(),
+            game_state="TRADE_MENU",
+        )
+        event = SimpleNamespace(sym=tcod.event.KeySym.ESCAPE)
+
+        main.handle_trade_menu_input(event, world)
+
+        self.assertFalse(world.trade_ui_active)
+        self.assertIsNone(world.trade_ui_npc_target)
+        self.assertEqual(world.game_state, "PLAYING")
+
+    def test_handle_trade_menu_input_enter_executes_trade_action(self):
+        world = SimpleNamespace(
+            trade_ui_active=True,
+            trade_ui_npc_target=object(),
+            game_state="TRADE_MENU",
+            trade_ui_player_selling=True,
+            trade_ui_player_inventory_snapshot=[("raw_log", 1, 5)],
+            trade_ui_player_item_index=0,
+            trade_ui_merchant_inventory_snapshot=[],
+            trade_ui_merchant_item_index=0,
+            handle_trade_action=unittest.mock.Mock(),
+        )
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+
+        main.handle_trade_menu_input(event, world)
+
+        world.handle_trade_action.assert_called_once_with()
+
+    def test_execute_interaction_closes_menu_for_trade_actions(self):
+        npc = SimpleNamespace(economic=SimpleNamespace(profession="Merchant"))
+        world = SimpleNamespace(
+            interaction_context={
+                "active": True,
+                "target_entities": [{"type": "npc", "data": npc, "name": "Merchant"}],
+                "selected_entity_index": 0,
+                "available_actions": ["Trade"],
+                "selected_action_index": 0,
+                "x": 0,
+                "y": 0,
+            },
+            chat_ui_active=False,
+            trade_ui_active=False,
+            game_state="PLAYING",
+            trade_ui_npc_target=None,
+            initialize_trade_session=unittest.mock.Mock(),
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+
+        took_turn = main.execute_interaction(world, context_handler=SimpleNamespace())
+
+        self.assertFalse(took_turn)
+        self.assertFalse(world.interaction_context["active"])
+        self.assertTrue(world.trade_ui_active)
+        self.assertEqual(world.game_state, "TRADE_MENU")
+
+    def test_handle_events_ignores_mouse_clicks_outside_playing_state(self):
+        world = SimpleNamespace(
+            game_state="TRADE_MENU",
+            player=SimpleNamespace(x=5, y=5, state=SimpleNamespace(current_path=[])),
+            mouse_x=1,
+            mouse_y=1,
+            chat_ui_active=False,
+            interaction_context={"active": False},
+        )
+        context = SimpleNamespace(convert_event=lambda event: None)
+        event = SimpleNamespace(button=tcod.event.MouseButton.RIGHT)
+
+        with patch("tcod.event.get", return_value=[event]), \
+             patch("main.open_interaction_menu") as mock_open_menu:
+            turn_taken = main.handle_events(world, context)
+
+        self.assertFalse(turn_taken)
+        mock_open_menu.assert_not_called()
+
+
+class TestWorldInteractionActions(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "test",
+            "family_ties": "none",
+            "attitude_to_player": "neutral",
+            "dialogue": ["Hello."],
+            "wealth_level": "average",
+            "combat_behavior": "defensive",
+            "base_attack_name": "fists"
+        })
+        self.world = World()
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_trade_action_uses_npc_economic_profession(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+
+        actions = self.world._get_actions_for_entity({"type": "npc", "data": merchant, "name": merchant.name})
+
+        self.assertIn("Talk", actions)
+        self.assertIn("Attack", actions)
+        self.assertIn("Trade", actions)
+
+    def test_initialize_trade_session_uses_schedule_work_building_id(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"raw_log": 3, "money": 25})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=None), \
+             patch.object(self.world, "get_dynamic_price", return_value=7):
+            self.world.initialize_trade_session()
+
+        self.assertIn(("raw_log", 3, 7), self.world.trade_ui_merchant_inventory_snapshot)
+
+    def test_handle_trade_action_uses_schedule_work_building_id(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"raw_log": 1, "money": 0})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.trade_ui_player_selling = False
+        self.world.trade_ui_merchant_inventory_snapshot = [("raw_log", 1, 5)]
+        self.world.trade_ui_merchant_item_index = 0
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=None):
+            self.world.handle_trade_action()
+
+        self.assertTrue(self.world.player.has_item("raw_log", 1))
+        self.assertEqual(shop.building_inventory["money"], 5)
+        self.assertNotIn("raw_log", shop.building_inventory)
+
+    def test_handle_npc_goal_start_trade_activates_trade_ui(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        self.world.chat_ui_active = True
+        self.world.needs_text_input = True
+
+        with patch.object(self.world, "initialize_trade_session") as mock_init:
+            self.world._handle_npc_goal(merchant, "start_trade", "")
+
+        self.assertEqual(self.world.game_state, "TRADE_MENU")
+        self.assertTrue(self.world.trade_ui_active)
+        self.assertIs(self.world.trade_ui_npc_target, merchant)
+        self.assertFalse(self.world.chat_ui_active)
+        self.assertFalse(self.world.needs_text_input)
+        mock_init.assert_called_once_with()
+
+    def test_npc_attempt_fish_uses_schedule_work_building_id(self):
+        fisher = engine.NPC(0, 0, name="Fisher")
+        fisher.schedule.work_building_id = "dock_1"
+        self.world.buildings_by_id = {
+            "dock_1": SimpleNamespace(building_inventory={}, building_type="dock")
+        }
+
+        with patch.object(self.world, "get_tile_at", return_value=SimpleNamespace(name="Water")), \
+             patch("engine.random.random", return_value=0.0), \
+             patch("engine.random.choice", return_value="fish"):
+            self.world.npc_attempt_fish(fisher, 5, 5)
+
+        self.assertEqual(self.world.buildings_by_id["dock_1"].building_inventory["raw_fish"], 1)
+
+    def test_player_attempt_attack_marks_target_hostile_via_combat_state(self):
+        target = engine.NPC(1, 1, name="Target")
+        target.combat.is_hostile_to_player = False
+
+        with patch.object(self.world, "_call_llm", return_value=None):
+            self.world.player_attempt_attack(target)
+
+        self.assertTrue(target.combat.is_hostile_to_player)
+
+    def test_handle_witness_reaction_uses_schedule_state_for_reporting(self):
+        witness = engine.NPC(2, 2, name="Witness")
+        witness.combat.is_hostile_to_player = False
+
+        sheriff_office = SimpleNamespace(global_center_x=10, global_center_y=12)
+        with patch.object(self.world, "_call_llm", return_value=json.dumps({"reaction": "report_crime", "dialogue": "Guards!"})), \
+             patch.object(self.world, "_find_nearest_building_of_type", return_value=sheriff_office):
+            self.world._handle_witness_reaction(witness, "theft", self.world.player)
+
+        self.assertEqual(witness.schedule.current_task, "going_to_report_crime")
+        self.assertEqual(witness.task_target_coords, (10, 12))
+        self.assertEqual(witness.schedule.current_path, [])
+
+    def test_player_attempt_ride_animal_clears_schedule_pathing(self):
+        mount = engine.Animal(3, 4, name="Deer", animal_type="deer")
+        mount.is_tame = True
+        mount.owner = self.world.player
+        mount.schedule.current_path = [(3, 4), (4, 4)]
+        mount.schedule.current_destination_coords = (4, 4)
+
+        self.world.player_attempt_ride_animal(mount)
+
+        self.assertEqual(mount.schedule.current_path, [])
+        self.assertIsNone(mount.schedule.current_destination_coords)
+
+    def test_handle_npc_work_sub_tasks_marks_missing_workplace_as_idle_confused(self):
+        worker = engine.NPC(0, 0, name="Worker")
+        worker.economic.profession = "Farmer"
+        worker.schedule.work_building_id = "missing_farm"
+
+        handled = self.world._handle_npc_work_sub_tasks(worker)
+
+        self.assertTrue(handled)
+        self.assertEqual(worker.schedule.current_task, "idle_confused")
+
+    def test_npc_eat_from_inventory_reduces_physical_hunger(self):
+        npc = engine.NPC(0, 0, name="Hungry NPC")
+        npc.physical.hunger = 40
+        inventory = {"apple": 1}
+
+        found_food, consumed_food = self.world._npc_eat_from_inventory(npc, inventory)
+
+        self.assertTrue(found_food)
+        self.assertTrue(consumed_food)
+        self.assertLess(npc.physical.hunger, 40)
+        self.assertNotIn("apple", inventory)
 
 class TestTemperatureSystem(unittest.TestCase):
     def setUp(self):
@@ -476,6 +847,222 @@ class TestPredatorPreyAI(unittest.TestCase):
         self.assertTrue(prey.physical.is_dead, "Prey should be dead after the chase.")
 
 
+class TestCombatAndAnimalStateRegression(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+            "wealth_level": "average",
+            "combat_behavior": "defensive",
+            "base_attack_name": "fists",
+        })
+        self.world = World(seed=7)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_handle_npc_combat_turn_tracks_player_on_nested_combat_state(self):
+        npc = engine.NPC(10, 10, name="Bandit")
+        npc.combat.is_hostile_to_player = True
+        self.world.player.x = 13
+        self.world.player.y = 10
+        self.world.npc_fov_maps[npc.id] = engine.np.ones((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool)
+
+        self.world._handle_npc_combat_turn(npc)
+
+        self.assertEqual(npc.combat.target_entity_id, self.world.player.id)
+        self.assertEqual(npc.schedule.current_task, "combat_action_move_to_attack_player")
+        self.assertFalse(hasattr(npc, "target_entity_id"))
+
+    def test_npc_attack_player_uses_nested_player_combat_stats(self):
+        npc = engine.NPC(self.world.player.x + 1, self.world.player.y, name="Bandit")
+        npc.combat.base_attack_name = "club"
+        npc.combat.base_attack_damage_dice = "1d1"
+
+        with patch('engine.random.randint', side_effect=[20, 1]):
+            self.world.npc_attempt_attack_player(npc, self.world.player)
+
+        self.assertEqual(self.world.player.combat.hp, self.world.player.combat.max_hp - 2)
+        self.assertTrue(any("(HP: 28/30)" in message for message in self.world.chat_log))
+
+    def test_animal_defaults_live_in_nested_component_state(self):
+        animal = engine.Animal(5, 6, name="Goat", animal_type="goat")
+
+        self.assertEqual(animal.economic.profession, "Creature")
+        self.assertEqual(animal.social.personality, "animal")
+        self.assertEqual(animal.social.family_ties["description"], "animal")
+        self.assertEqual(animal.combat.combat_behavior, "defensive")
+        self.assertEqual(animal.physical.hunger, 0)
+        self.assertEqual(animal.schedule.current_task, "idle")
+        self.assertFalse(hasattr(animal, "personality"))
+        self.assertFalse(hasattr(animal, "family_ties"))
+
+    def test_render_biome_details_sets_spawned_animal_nested_combat_stats(self):
+        from tile_types import Tile
+        plains_def = engine.TILE_DEFINITIONS["plains"]
+        chunk = engine.Chunk("plains")
+        chunk.tiles = [[Tile(plains_def['char'], plains_def['color'], plains_def['passable'], plains_def['name'], properties={})]]
+        self.world.player.x = 1000
+        self.world.player.y = 1000
+
+        test_animal_defs = {
+            "test_beast": {
+                "name": "Test Beast",
+                "char": 'b',
+                "color": (1, 2, 3),
+                "max_hp": 9,
+                "behavior": "prowls",
+                "hostile": True,
+                "base_attack_name": "bite",
+                "base_attack_damage_dice": "1d4",
+                "combat_behavior": "aggressive",
+                "spawn_biomes": ["plains"],
+                "spawn_chance": 1.0,
+            }
+        }
+
+        with patch.object(engine, 'CHUNK_SIZE', 1), \
+             patch.dict(engine.ANIMAL_DEFINITIONS, test_animal_defs, clear=True), \
+             patch('engine.random.random', side_effect=[1.0, 1.0, 1.0, 1.0, 0.0, 1.0]), \
+             patch('engine.random.choice', return_value='male'):
+            self.world.npcs.clear()
+            self.world._render_biome_details(chunk, 0, 0)
+
+        self.assertEqual(len(self.world.npcs), 1)
+        spawned = self.world.npcs[0]
+        self.assertEqual(spawned.combat.max_hp, 9)
+        self.assertEqual(spawned.combat.hp, 9)
+        self.assertEqual(spawned.combat.base_attack_name, "bite")
+        self.assertEqual(spawned.combat.base_attack_damage_dice, "1d4")
+        self.assertEqual(spawned.combat.combat_behavior, "aggressive")
+
+
+
+class TestDialogueStateRegression(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        self.world = World(seed=11)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_continue_npc_conversation_uses_nested_social_and_knowledge_state(self):
+        speaker = engine.NPC(10, 10, name="Speaker")
+        listener = engine.NPC(11, 10, name="Listener")
+        speaker.social.personality = "gregarious"
+        listener.social.personality = "reserved"
+        speaker.social.relationships[listener.id] = 77
+        speaker.knowledge.known_events["storm"] = SimpleNamespace(description="A storm rolled in.")
+        self.mock_call_llm.return_value = "Nice weather we're having."
+
+        self.world._continue_npc_conversation(speaker, listener)
+
+        prompt = self.mock_call_llm.call_args.args[0]
+        self.assertIn("gregarious", prompt)
+        self.assertIn("reserved", prompt)
+        self.assertIn("77", prompt)
+        self.assertIn("A storm rolled in.", prompt)
+
+    def test_continue_npc_dialogue_share_location_updates_nested_relationships(self):
+        npc_target = engine.NPC(10, 10, name="Villager")
+        building = SimpleNamespace(id="smithy_1", building_type="blacksmith_shop")
+        self.world.buildings_by_id[building.id] = building
+        self.world.player.knowledge.known_locations[building.id] = (4, 5)
+
+        self.world.continue_npc_dialogue(npc_target, "I know where the blacksmith shop is")
+
+        self.assertEqual(npc_target.knowledge.known_locations["blacksmith shop"], (4, 5))
+        self.assertEqual(npc_target.social.relationships[self.world.player.id], 60)
+        self.assertFalse(hasattr(npc_target, "relationships"))
+
+    def test_continue_npc_dialogue_gossip_uses_nested_known_events_and_titles(self):
+        npc_target = engine.NPC(10, 10, name="Villager")
+        self.world.player.social.title = "the Bold"
+        npc_target.knowledge.known_events["news_1"] = SimpleNamespace(
+            subject_id=self.world.player.id,
+            target_id=None,
+            description="{subject} defeated a beast.",
+        )
+        self.mock_call_llm.return_value = "I heard a remarkable tale."
+
+        self.world.continue_npc_dialogue(npc_target, "Any gossip?")
+
+        prompt = self.mock_call_llm.call_args.args[0]
+        self.assertIn("the Bold", prompt)
+        self.assertIn("defeated a beast", prompt)
+        self.assertEqual(self.world.chat_ui_history[-1], (npc_target.name, "I heard a remarkable tale."))
+
+    def test_update_entity_titles_writes_social_title(self):
+        npc = engine.NPC(10, 10, name="Legend")
+        npc.social.fame = 60
+        self.world.village_npcs.append(npc)
+        self.world.game_time = 100
+        self.mock_call_llm.return_value = json.dumps({"title": "the Bold"})
+
+        self.world._update_entity_titles()
+
+        self.assertEqual(npc.social.title, "the Bold")
+        self.assertFalse(hasattr(npc, "title"))
+
+
+
+class TestNpcFovIndexRegression(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        self.world = World(seed=13)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_handle_npc_combat_turn_reads_fov_map_as_y_x(self):
+        npc = engine.NPC(10, 10, name="Bandit")
+        npc.combat.is_hostile_to_player = True
+        self.world.player.x = 11
+        self.world.player.y = 10
+        fov_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool)
+        fov_map[self.world.player.y, self.world.player.x] = True
+        self.world.npc_fov_maps[npc.id] = fov_map
+
+        self.world._handle_npc_combat_turn(npc)
+
+        self.assertEqual(npc.schedule.current_task, "combat_action_attack_player")
+
+    def test_guard_hostility_check_reads_fov_map_as_y_x(self):
+        guard = engine.NPC(15, 15, name="Guard")
+        guard.economic.profession = "Guard"
+        guard.combat.is_hostile_to_player = False
+        self.world.village_npcs = [guard]
+        self.world.npcs = []
+        self.world.player.x = 19
+        self.world.player.y = 7
+        self.world.player.economic.bounty = 150
+        fov_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool)
+        fov_map[self.world.player.y, self.world.player.x] = True
+        self.world.npc_fov_maps[guard.id] = fov_map
+        self.world.game_time += config.NPC_SCHEDULE_UPDATE_INTERVAL
+
+        self.world._update_npc_schedules()
+
+        self.assertTrue(guard.combat.is_hostile_to_player)
+        self.assertTrue(any("moves to arrest you" in message for message in self.world.chat_log))
+
+
+
 class TestFearSystem(unittest.TestCase):
     def setUp(self):
         self.mock_ollama_patcher = patch('engine.World._call_llm')
@@ -655,7 +1242,7 @@ class TestFearSystem(unittest.TestCase):
 
         center_x, center_y = 50, 50
         civilian = NPC(x=center_x, y=center_y, name="Civilian")
-        civilian.profession = "Farmer"
+        civilian.economic.profession = "Farmer"
         self.world.village_npcs.append(civilian)
 
         wolf1 = Animal(x=center_x + 2, y=center_y, name="Wolf", animal_type="wolf")
@@ -862,6 +1449,26 @@ class TestQuestSystem(unittest.TestCase):
         self.assertNotIn(quest_id, self.world.player.knowledge.active_quests, "Quest should be removed from active quests.")
         self.assertIn(quest_id, self.world.player.knowledge.completed_quests, "Quest should be in completed quests.")
 
+    def test_dynamic_thirst_quest_requests_water_flask(self):
+        from entities.base import NPC
+        from config import NPC_SCHEDULE_UPDATE_INTERVAL
+
+        npc = NPC(x=self.world.player.x + 2, y=self.world.player.y, name="Thirsty Theo", player_id=self.world.player.id)
+        npc.physical.thirst = 95
+        npc.physical.hunger = 0
+        npc.knowledge.known_locations.clear()
+        self.world.village_npcs.append(npc)
+
+        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
+        with patch('random.random', return_value=0.05):
+            self.world._update_npc_schedules()
+
+        self.assertTrue(hasattr(npc, 'active_quest') and npc.active_quest is not None)
+        self.assertEqual(npc.knowledge.help_needed, "water")
+        self.assertEqual(npc.active_quest.item_key, "water_flask")
+        self.assertEqual(npc.active_quest.required_count, 1)
+        self.assertEqual(npc.active_quest.type, "fetch")
+
     def test_static_fetch_quest_completion_and_rewards(self):
         from entities.base import NPC
         from data.quests import QUEST_DEFINITIONS
@@ -903,6 +1510,60 @@ class TestQuestSystem(unittest.TestCase):
 
         # Check that quest items were consumed
         self.assertFalse(self.world.player.has_item(quest_def["item_to_fetch_key"]), "Quest items should have been consumed.")
+
+class TestLockpickChestLooting(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        self.world = World(seed=21)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_pick_lock_loots_chest_inventory_into_player_inventory(self):
+        from data.decorations import DECORATION_ITEM_DEFINITIONS
+        from tile_types import Tile
+
+        target_x, target_y = self.world.player.x + 1, self.world.player.y
+        self.world.get_tile_at(target_x, target_y)
+        chunk_x, chunk_y = target_x // config.CHUNK_SIZE, target_y // config.CHUNK_SIZE
+        local_x, local_y = target_x % config.CHUNK_SIZE, target_y % config.CHUNK_SIZE
+        chest_def = DECORATION_ITEM_DEFINITIONS["chest_wooden"]
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
+            chest_def["char"],
+            chest_def["color"],
+            chest_def["passable"],
+            chest_def["name"],
+            properties=chest_def["properties"].copy(),
+        )
+
+        building = engine.Building(local_x, local_y, 1, 1, building_type="house", category="residential", global_chunk_x_start=chunk_x * config.CHUNK_SIZE, global_chunk_y_start=chunk_y * config.CHUNK_SIZE)
+        building.building_inventory = {"apple": 2, "money": 7}
+        self.world.buildings_by_id[building.id] = building
+
+        starting_money = self.world.player.economic.money
+        self.world.player.add_item("lockpick", 1)
+        self.mock_call_llm.return_value = json.dumps({
+            "success": True,
+            "narrative_feedback": "Click.",
+            "lockpick_broken": False,
+        })
+
+        handled = self.world.player_attempt_pick_lock(target_x, target_y)
+
+        self.assertTrue(handled)
+        self.assertTrue(self.world.player.has_item("apple", 2))
+        self.assertEqual(self.world.player.economic.money, starting_money + 7)
+        self.assertEqual(building.building_inventory, {})
+        self.assertFalse(self.world.get_tile_at(target_x, target_y).properties["is_locked"])
+        self.assertTrue(any("You loot the Wooden Chest" in message for message in self.world.chat_log))
+
+
 
 class TestSaveLoadSystem(unittest.TestCase):
     def setUp(self):

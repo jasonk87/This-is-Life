@@ -76,6 +76,36 @@ class TestKnowledgeSystem(unittest.TestCase):
         self.assertIn(event1.id, book.referenced_event_ids)
         self.assertIn(f"book_{book.id}", library.building_inventory)
 
+    def test_scribe_writes_generic_biography_without_known_events(self):
+        scribe = NPC(x=0, y=0, name="Scribe")
+        scribe.economic.profession = "Scribe"
+        self.world.village_npcs.append(scribe)
+
+        subject = NPC(x=0, y=0, name="Hero")
+        subject.social.fame = 25
+        self.world.village_npcs.append(subject)
+
+        library = MagicMock()
+        library.building_inventory = {}
+        library.work_zone_tiles = {"writing_desk": [(0, 0)]}
+        self.world.buildings_by_id["library_1"] = library
+        scribe.schedule.work_building_id = "library_1"
+        scribe.current_sub_task = "write_biography"
+        scribe.sub_task_target_coords = (0, 0)
+        scribe.x, scribe.y = 0, 0
+        scribe.sub_task_timer = 0
+
+        self.world._handle_npc_work_sub_tasks(scribe)
+
+        self.assertEqual(len(self.world.books), 1)
+        book = self.world.books[0]
+        self.assertEqual(book.book_type, "biography")
+        self.assertEqual(book.referenced_event_ids, [])
+        self.assertIn("Biography: Hero", book.title)
+        self.assertIn("fame 25", book.content)
+        self.assertIn(f"book_{book.id}", library.building_inventory)
+
+
     def test_player_reads_book_and_learns(self):
         # Setup book with an event
         event1 = Event("historical_event", "Ancient Battle", 999, 10)

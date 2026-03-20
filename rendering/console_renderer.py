@@ -254,16 +254,12 @@ def _draw_focus_badge(console, world, focus, camera_x, camera_y):
     pulse = _pulse(world, speed=18.0, low=0.15, high=0.4, phase=1.2)
     console.bg[screen_y, screen_x] = _lighten(tuple(console.bg[screen_y, screen_x]), pulse)
 
-    if focus["source"] == "mouse":
-        info = focus["label"]
-    elif focus["actions"]:
-        info = f"E {focus['actions'][0]}"
-    else:
-        info = focus["label"]
+    # Only draw the floating badge above NPCs/Animals
+    entity_type = focus.get("entity", {}).get("type", "") if isinstance(focus.get("entity"), dict) else ""
+    if entity_type not in ("npc", "animal"):
+        return
 
-    if len(focus["actions"]) > 1:
-        info += f" +{len(focus['actions']) - 1}"
-    info = info[:22]
+    info = focus["label"][:22]
     badge_x = max(0, min(MAP_WIDTH - len(info), screen_x - (len(info) // 2)))
     badge_y = screen_y - 1 if screen_y > 1 else screen_y + 1
     console.print(x=badge_x, y=badge_y, string=info, fg=(255, 250, 210), bg=(24, 24, 36))

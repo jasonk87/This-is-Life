@@ -3,6 +3,7 @@
 from tcod_compat import tcod
 import textwrap
 import itertools
+import math
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
@@ -15,7 +16,394 @@ from data.construction import CONSTRUCTION_RECIPES
 from entities.animal import Animal
 from engine import Player
 
-def draw_status_panel(console, world):
+TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
+
+TERRAIN_BACKGROUNDS = {
+    "plains": (22, 36, 20),
+    "forest": (12, 28, 14),
+    "road": (54, 48, 40),
+    "wood_wall": (55, 34, 18),
+    "stone_wall": (48, 48, 52),
+    "door": (72, 48, 24),
+    "wood_floor": (64, 42, 22),
+    "window": (30, 48, 60),
+    "water": (10, 30, 72),
+    "deep_water": (4, 16, 48),
+    "mountain": (42, 42, 46),
+    "snow": (110, 118, 128),
+    "tall_grass": (22, 44, 20),
+    "flower": (60, 28, 44),
+    "well": (46, 52, 64),
+    "tilled_soil": (70, 42, 26),
+    "wheat_plant_growing": (38, 60, 22),
+    "wheat_plant_mature": (90, 82, 26),
+    "fire_trap_active": (88, 18, 12),
+}
+
+DISPLAY_CHARS = {
+    "plains": ".",
+    "forest": "Y",
+    "road": "=",
+    "wood_wall": "#",
+    "stone_wall": "#",
+    "door": "+",
+    "wood_floor": ".",
+    "window": "o",
+    "water": "~",
+    "deep_water": "~",
+    "mountain": "^",
+    "snow": "*",
+    "tall_grass": ";",
+    "flower": "*",
+    "well": "O",
+    "tilled_soil": ":",
+    "wheat_plant_growing": "i",
+    "wheat_plant_mature": "I",
+    "fire_trap_active": "x",
+}
+
+def _clamp_color(color):
+    return tuple(max(0, min(255, int(channel))) for channel in color)
+
+def _dim_color(color, ratio=0.55):
+    return _clamp_color((color[0] * ratio, color[1] * ratio, color[2] * ratio))
+
+def _get_tile_key(tile):
+    if tile is None:
+        return None
+
+    for key, definition in TILE_DEFINITIONS.items():
+        if definition.get("name") == tile.name and ord(definition.get("char", " ")) == tile.char:
+            return key
+    return None
+
+def _get_tile_background(tile):
+    tile_key = _get_tile_key(tile)
+    if tile_key in TERRAIN_BACKGROUNDS:
+        return TERRAIN_BACKGROUNDS[tile_key]
+
+    if tile is None:
+        return (0, 0, 0)
+    if "water" in tile.name.lower():
+        return (8, 20, 56)
+    if "wall" in tile.name.lower():
+        return (50, 36, 28)
+    if "floor" in tile.name.lower():
+        return (58, 40, 22)
+    return _dim_color(tile.color, 0.22)
+
+def _get_tile_char(tile):
+    tile_key = _get_tile_key(tile)
+    if tile_key in DISPLAY_CHARS:
+        return DISPLAY_CHARS[tile_key]
+    if tile is None:
+        return " "
+    return chr(tile.char)
+
+def _get_entity_style(entity):
+    if getattr(getattr(entity, "physical", None), "is_dead", False):
+        return (130, 130, 130), (46, 20, 20)
+    if isinstance(entity, Player):
+        return (255, 245, 140), (96, 44, 16)
+    if isinstance(entity, Animal):
+        return getattr(entity, "color", (180, 220, 140)), (24, 44, 18)
+    return getattr(entity, "color", (255, 255, 255)), (36, 36, 72)
+
+def _get_entity_marker(entity):
+    if getattr(getattr(entity, "physical", None), "is_dead", False):
+        return None
+    if getattr(getattr(entity, "combat", None), "is_hostile_to_player", False):
+        return "!", (255, 120, 120)
+    if hasattr(entity, "active_quest") and getattr(entity, "active_quest", None):
+        return "?", (255, 215, 120)
+    profession = getattr(getattr(entity, "economic", None), "profession", "")
+    if profession in TRADE_CAPABLE_PROFESSIONS:
+        return "$", (120, 255, 160)
+    if profession in {"Guard", "Sheriff", "Hunter"}:
+        return "+", (170, 210, 255)
+    if isinstance(entity, Animal):
+        return "^", (180, 220, 160)
+    return None
+
+def _get_visible_nearby_entities(world, limit=5):
+    nearby = []
+    for entity in itertools.chain(world.npcs, world.village_npcs):
+        if getattr(getattr(entity, "physical", None), "is_dead", False):
+            continue
+        if not is_visible(world, entity.x, entity.y):
+            continue
+        distance = abs(world.player.x - entity.x) + abs(world.player.y - entity.y)
+        nearby.append((distance, entity))
+    nearby.sort(key=lambda item: item[0])
+    return nearby[:limit]
+
+def _get_focus_summary(world):
+    standing_tile = world.get_tile_at(world.player.x, world.player.y)
+    standing_on = standing_tile.name if standing_tile else "Unknown"
+    nearby = _get_visible_nearby_entities(world, limit=1)
+    if nearby:
+        distance, entity = nearby[0]
+        return standing_on, f"{entity.name} ({distance}t)"
+    return standing_on, "No one nearby"
+
+def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_color):
+    maximum = max(1, maximum)
+    safe_width = max(10, width - len(label) - len(f"{value}/{maximum}") - 4)
+    filled_width = int(safe_width * max(0.0, min(1.0, value / maximum)))
+    meter = "#" * filled_width + "-" * (safe_width - filled_width)
+    console.print(x=x, y=y, string=f"{label} {meter}", fg=(210, 210, 210))
+    if filled_width > 0:
+        console.print(x=x + len(label) + 1, y=y, string="#" * filled_width, fg=fill_color)
+    if filled_width < safe_width:
+        console.print(x=x + len(label) + 1 + filled_width, y=y, string="-" * (safe_width - filled_width), fg=empty_color)
+    console.print(x=x + width - len(f"{value}/{maximum}"), y=y, string=f"{value}/{maximum}", fg=(255, 255, 255))
+
+def _pulse(world, speed=14.0, low=0.55, high=1.0, phase=0.0):
+    normalized = (math.sin((world.game_time / speed) + phase) + 1.0) * 0.5
+    return low + (high - low) * normalized
+
+def _lighten(color, factor):
+    return _clamp_color((color[0] + (255 - color[0]) * factor, color[1] + (255 - color[1]) * factor, color[2] + (255 - color[2]) * factor))
+
+def _animate_tile_colors(world, tile, fg_color, bg_color, world_x, world_y):
+    tile_key = _get_tile_key(tile)
+    time_band = ((world.game_time // 5) + world_x + world_y) % 6
+    if tile_key in {"water", "deep_water"}:
+        shimmer = 0.08 + (0.08 if time_band in {0, 1} else 0.0)
+        return _lighten(fg_color, shimmer), _lighten(bg_color, shimmer * 0.7)
+    if tile_key == "forest":
+        return fg_color, _lighten(bg_color, 0.04 if time_band in {2, 3} else 0.0)
+    if tile_key in {"road", "wood_floor"}:
+        return _lighten(fg_color, 0.04 if time_band == 0 else 0.0), bg_color
+    if tile_key == "fire_trap_active":
+        flicker = 0.12 if time_band in {0, 2, 4} else 0.02
+        return _lighten(fg_color, flicker), _lighten(bg_color, flicker)
+    return fg_color, bg_color
+
+def _get_focus_target(world, camera_x, camera_y):
+    focus = {"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}
+
+    def assign_focus(x, y, label, actions, source, entity=None):
+        focus["x"] = x
+        focus["y"] = y
+        focus["label"] = label
+        focus["actions"] = actions
+        focus["source"] = source
+        focus["entity"] = entity
+
+    if world.interaction_context.get("active") and world.interaction_context.get("target_entities"):
+        entity = world.interaction_context["target_entities"][world.interaction_context["selected_entity_index"]]
+        assign_focus(
+            world.interaction_context["x"],
+            world.interaction_context["y"],
+            entity["name"],
+            list(world.interaction_context.get("available_actions", [])),
+            "interact",
+            entity,
+        )
+        return focus
+
+    candidates = []
+    mouse_world_x = camera_x + world.mouse_x
+    mouse_world_y = camera_y + world.mouse_y
+    if 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT and is_visible(world, mouse_world_x, mouse_world_y):
+        candidates.append((mouse_world_x, mouse_world_y, "mouse"))
+    candidates.append((world.player.x + world.player.state.last_dx, world.player.y + world.player.state.last_dy, "facing"))
+
+    for target_x, target_y, source in candidates:
+        if not (0 <= target_x < WORLD_WIDTH and 0 <= target_y < WORLD_HEIGHT):
+            continue
+        tile = world.get_tile_at(target_x, target_y)
+        entities = world._get_interactables_at(target_x, target_y)
+        if entities:
+            entity = entities[0]
+            actions = list(world._get_actions_for_entity(entity))
+            if actions:
+                assign_focus(target_x, target_y, entity["name"], actions, source, entity)
+                return focus
+        if tile and is_visible(world, target_x, target_y):
+            label = tile.name
+            if source == "facing":
+                label = f"Facing {label}"
+            assign_focus(target_x, target_y, label, [], source, None)
+            return focus
+
+    return focus
+
+def _get_log_color(message):
+    lowered = message.lower()
+    if "quest" in lowered or "objective" in lowered:
+        return (255, 215, 120)
+    if any(word in lowered for word in ["attack", "damage", "hostile", "threat", "freezing", "burning"]):
+        return (255, 140, 140)
+    if any(word in lowered for word in ["hello", "says", "trade", "talk"]):
+        return (170, 210, 255)
+    if any(word in lowered for word in ["gain", "equip", "craft", "harvest", "picked up"]):
+        return (180, 235, 180)
+    return (225, 225, 225)
+
+def _draw_focus_badge(console, world, focus, camera_x, camera_y):
+    if focus["x"] is None or focus["y"] is None:
+        return
+
+    screen_x = focus["x"] - camera_x
+    screen_y = focus["y"] - camera_y
+    if not (0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT):
+        return
+
+    pulse = _pulse(world, speed=18.0, low=0.15, high=0.4, phase=1.2)
+    console.bg[screen_y, screen_x] = _lighten(tuple(console.bg[screen_y, screen_x]), pulse)
+
+    if focus["source"] == "mouse":
+        info = focus["label"]
+    elif focus["actions"]:
+        info = f"E {focus['actions'][0]}"
+    else:
+        info = focus["label"]
+
+    if len(focus["actions"]) > 1:
+        info += f" +{len(focus['actions']) - 1}"
+    info = info[:22]
+    badge_x = max(0, min(MAP_WIDTH - len(info), screen_x - (len(info) // 2)))
+    badge_y = screen_y - 1 if screen_y > 1 else screen_y + 1
+    console.print(x=badge_x, y=badge_y, string=info, fg=(255, 250, 210), bg=(24, 24, 36))
+
+def _draw_minimap_panel(console, world, panel_x, start_y, width, height):
+    console.draw_frame(x=panel_x, y=start_y, width=width, height=height, title="Minimap", clear=True, fg=(220, 220, 220), bg=(10, 12, 18))
+    inner_w = max(1, width - 2)
+    inner_h = max(1, height - 2)
+    chunk_cols = len(world.chunks[0]) if world.chunks else 0
+    chunk_rows = len(world.chunks)
+    if chunk_cols == 0 or chunk_rows == 0:
+        return start_y + height
+
+    for sy in range(inner_h):
+        world_y = int((sy / inner_h) * WORLD_HEIGHT)
+        chunk_y = min(chunk_rows - 1, max(0, world_y // CHUNK_SIZE))
+        local_y = world_y % CHUNK_SIZE
+        for sx in range(inner_w):
+            world_x = int((sx / inner_w) * WORLD_WIDTH)
+            chunk_x = min(chunk_cols - 1, max(0, world_x // CHUNK_SIZE))
+            chunk = world.chunks[chunk_y][chunk_x]
+            if not chunk.is_terrain_generated:
+                continue
+            tile = chunk.tiles[local_y][world_x % CHUNK_SIZE]
+            if tile is None:
+                continue
+            bg = _dim_color(_get_tile_background(tile), 0.9)
+            fg = _dim_color(tile.color, 0.7)
+            console.print(x=panel_x + 1 + sx, y=start_y + 1 + sy, string=".", fg=fg, bg=bg)
+
+    player_x = panel_x + 1 + min(inner_w - 1, int((world.player.x / max(1, WORLD_WIDTH - 1)) * inner_w))
+    player_y = start_y + 1 + min(inner_h - 1, int((world.player.y / max(1, WORLD_HEIGHT - 1)) * inner_h))
+    console.print(x=player_x, y=player_y, string="@", fg=(255, 245, 140), bg=(120, 55, 20))
+    return start_y + height
+
+def _light_radius_for_world(world):
+    light_name = getattr(world, "current_light_level_name", "DAY")
+    if light_name == "PITCH BLACK":
+        return 5
+    if light_name == "NIGHT":
+        return 7
+    if light_name in {"DAWN", "DUSK"}:
+        return 10
+    return 15
+
+def _apply_lighting_and_depth(console, world, camera_x, camera_y):
+    light_radius = _light_radius_for_world(world)
+    for y in range(MAP_HEIGHT):
+        map_y = camera_y + y
+        if not (0 <= map_y < WORLD_HEIGHT):
+            continue
+        for x in range(MAP_WIDTH):
+            map_x = camera_x + x
+            if not (0 <= map_x < WORLD_WIDTH):
+                continue
+            if not is_visible(world, map_x, map_y):
+                continue
+
+            tile = world.get_tile_at(map_x, map_y)
+            if tile is None:
+                continue
+
+            dist = max(abs(world.player.x - map_x), abs(world.player.y - map_y))
+            falloff = max(0.28, 1.0 - max(0, dist - 1) / max(4, light_radius + 2))
+            edge_falloff = 0.92 - (0.12 * max(x / max(1, MAP_WIDTH - 1), y / max(1, MAP_HEIGHT - 1)))
+            light_strength = max(0.2, min(1.0, falloff * edge_falloff))
+            console.fg[y, x] = _dim_color(tuple(console.fg[y, x]), 0.65 + (0.45 * light_strength))
+            console.bg[y, x] = _dim_color(tuple(console.bg[y, x]), 0.55 + (0.5 * light_strength))
+
+            if getattr(tile, "blocks_fov", False):
+                for shadow_dx, shadow_dy in ((1, 0), (0, 1), (1, 1)):
+                    sx = x + shadow_dx
+                    sy = y + shadow_dy
+                    if 0 <= sx < MAP_WIDTH and 0 <= sy < MAP_HEIGHT:
+                        console.bg[sy, sx] = _dim_color(tuple(console.bg[sy, sx]), 0.75)
+
+def _draw_entity_markers(console, world, camera_x, camera_y):
+    for entity in itertools.chain(world.npcs, world.village_npcs):
+        marker = _get_entity_marker(entity)
+        if marker is None or not is_visible(world, entity.x, entity.y):
+            continue
+
+        marker_char, marker_color = marker
+        screen_x = entity.x - camera_x
+        screen_y = entity.y - camera_y - 1
+        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+            console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color, bg=(0, 0, 0))
+
+def _draw_world_markers(console, world, camera_x, camera_y):
+    marked = 0
+    max_markers = 18
+
+    for (item_x, item_y), items in world.items_on_map.items():
+        if marked >= max_markers:
+            break
+        if not items or not is_visible(world, item_x, item_y):
+            continue
+        if max(abs(world.player.x - item_x), abs(world.player.y - item_y)) > 10:
+            continue
+        screen_x = item_x - camera_x
+        screen_y = item_y - camera_y - 1
+        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+            console.print(x=screen_x, y=screen_y, string="*", fg=(255, 245, 160), bg=(24, 24, 24))
+            marked += 1
+
+    for dy in range(-8, 9):
+        if marked >= max_markers:
+            break
+        for dx in range(-8, 9):
+            if marked >= max_markers:
+                break
+            world_x = world.player.x + dx
+            world_y = world.player.y + dy
+            if not (0 <= world_x < WORLD_WIDTH and 0 <= world_y < WORLD_HEIGHT):
+                continue
+            if not is_visible(world, world_x, world_y):
+                continue
+            tile = world.get_tile_at(world_x, world_y)
+            if tile is None:
+                continue
+
+            marker_char = None
+            marker_color = None
+            if tile.name == "Door":
+                marker_char, marker_color = "+", (210, 180, 120)
+            elif tile.name == "Well":
+                marker_char, marker_color = "W", (150, 200, 255)
+            elif tile.name in {"Tilled Soil", "Growing Wheat", "Wheat"}:
+                marker_char, marker_color = ":", (200, 220, 140)
+
+            if marker_char is None:
+                continue
+
+            screen_x = world_x - camera_x
+            screen_y = world_y - camera_y - 1
+            if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+                console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color, bg=(0, 0, 0))
+                marked += 1
+
+def _draw_status_panel_legacy(console, world):
     """Draws the status panel on the right side of the screen."""
     panel_x = MAP_WIDTH
     console.draw_frame(x=panel_x, y=0, width=STATUS_PANEL_WIDTH, height=SCREEN_HEIGHT,
@@ -133,6 +521,157 @@ def draw_status_panel(console, world):
             console.print(x=panel_x + 2, y=y, string=f"{faction[:3].upper()}: {rep}", fg=(200, 200, 200))
             y += 1
 
+def draw_status_panel(console, world, camera_x, camera_y):
+    """Draws the status panel on the right side of the screen."""
+    panel_x = MAP_WIDTH
+    panel_width = STATUS_PANEL_WIDTH
+    focus = _get_focus_target(world, camera_x, camera_y)
+    console.draw_frame(
+        x=panel_x, y=0, width=panel_width, height=SCREEN_HEIGHT,
+        title="Field Guide", clear=True, fg=(255, 255, 255), bg=(8, 10, 16)
+    )
+
+    y = 2
+    day = world.game_time // (24 * 60)
+    hour = (world.game_time // 60) % 24
+    minute = world.game_time % 60
+    time_str = f"Day {day}, {hour:02d}:{minute:02d}"
+    season = world.seasons[world.current_season_index]
+    weather = world.weather.replace("_", " ").title()
+    standing_on, focus_target = _get_focus_summary(world)
+    bar_width = panel_width - 3
+    panel_inner = panel_width - 2
+
+    console.print(x=panel_x + 1, y=y, string="Scene", fg=(255, 215, 120))
+    y += 1
+    console.print(x=panel_x + 1, y=y, string=time_str, fg=(220, 220, 220))
+    y += 1
+    console.print(x=panel_x + 1, y=y, string=f"{season} / {weather}", fg=(140, 170, 255))
+    y += 1
+    console.print(x=panel_x + 1, y=y, string=f"Standing: {standing_on}"[:panel_inner], fg=(180, 220, 180))
+    y += 1
+    if focus["label"]:
+        focus_line = f"Focus: {focus['label']}"
+    else:
+        focus_line = f"Focus: {focus_target}"
+    console.print(x=panel_x + 1, y=y, string=focus_line[:panel_inner], fg=(255, 210, 150))
+    y += 2
+
+    y = _draw_minimap_panel(console, world, panel_x, y, panel_width, 12) + 1
+
+    console.print(x=panel_x + 1, y=y, string="Vitals", fg=(255, 215, 120))
+    y += 1
+    _draw_meter(console, panel_x + 1, y, bar_width, "HP", world.player.combat.hp, world.player.combat.max_hp, (255, 90, 90), (90, 35, 35))
+    y += 1
+
+    hunger_pct = min(1.0, world.player.physical.hunger / max(1, world.player.physical.max_hunger))
+    hunger_color = (0, 255, 0)
+    if hunger_pct > 0.5:
+        hunger_color = (255, 255, 0)
+    if hunger_pct > 0.8:
+        hunger_color = (255, 0, 0)
+    _draw_meter(
+        console, panel_x + 1, y, bar_width, "HU",
+        int(world.player.physical.hunger), int(world.player.physical.max_hunger),
+        hunger_color, (72, 72, 20)
+    )
+    y += 1
+
+    thirst_pct = min(1.0, world.player.physical.thirst / max(1, world.player.physical.max_thirst))
+    thirst_color = (0, 255, 255)
+    if thirst_pct > 0.5:
+        thirst_color = (0, 150, 255)
+    if thirst_pct > 0.8:
+        thirst_color = (0, 0, 255)
+    _draw_meter(
+        console, panel_x + 1, y, bar_width, "TH",
+        int(world.player.physical.thirst), int(world.player.physical.max_thirst),
+        thirst_color, (18, 28, 72)
+    )
+    y += 2
+
+    if world.player.physical.status_effects:
+        console.print(x=panel_x + 1, y=y, string="Alerts", fg=(255, 215, 120))
+        y += 1
+        for effect in world.player.physical.status_effects:
+            color = (255, 255, 255)
+            if effect == "Wet":
+                color = COLOR_PLAYER_STATUS_WET
+            elif effect == "Freezing":
+                color = COLOR_PLAYER_STATUS_FREEZING
+            elif effect == "Overheating":
+                color = (255, 100, 0)
+            console.print(x=panel_x + 2, y=y, string=f"! {effect}"[:panel_width - 3], fg=color)
+            y += 1
+        y += 1
+
+    active_quests = list(world.player.knowledge.active_quests.values())
+    if active_quests:
+        console.print(x=panel_x + 1, y=y, string="Objective", fg=(255, 215, 0))
+        y += 1
+        quest = active_quests[0]
+        title_lines = textwrap.wrap(quest["title"], width=panel_width - 2)
+        for line in title_lines:
+            console.print(x=panel_x + 1, y=y, string=line, fg=(255, 255, 255))
+            y += 1
+
+        if quest["type"] == "fetch":
+            item_key = quest["item_to_fetch_key"]
+            req = quest["item_fetch_count"]
+            curr = 0
+            for item in world.player.economic.inventory:
+                if item["key"] == item_key:
+                    curr += item.get("quantity", 1)
+            console.print(x=panel_x + 2, y=y, string=f"({curr}/{req})", fg=(200, 200, 200))
+            y += 1
+        elif quest["type"] == "kill":
+            req = quest.get("target_count", 1)
+            curr = quest.get("progress", 0)
+            console.print(x=panel_x + 2, y=y, string=f"({curr}/{req})", fg=(200, 200, 200))
+            y += 1
+
+        if len(active_quests) > 1:
+            console.print(x=panel_x + 1, y=y, string=f"+ {len(active_quests)-1} more (Q)", fg=(100, 100, 100))
+            y += 1
+    else:
+        console.print(x=panel_x + 1, y=y, string="Objective", fg=(255, 215, 0))
+        y += 1
+        console.print(x=panel_x + 2, y=y, string="Explore and talk", fg=(160, 160, 160))
+        y += 2
+
+    console.print(x=panel_x + 1, y=y, string="Nearby", fg=(255, 215, 120))
+    y += 1
+    nearby_entities = _get_visible_nearby_entities(world, limit=4)
+    if not nearby_entities:
+        console.print(x=panel_x + 2, y=y, string="None visible", fg=(120, 120, 120))
+        y += 1
+    else:
+        for distance, entity in nearby_entities:
+            label = "Animal" if isinstance(entity, Animal) else "NPC"
+            console.print(x=panel_x + 2, y=y, string=f"{distance}t {label}: {entity.name}"[:panel_width - 3], fg=(200, 200, 200))
+            y += 1
+
+    y += 1
+    console.print(x=panel_x + 1, y=y, string="Reputation", fg=(255, 215, 120))
+    y += 1
+    shown_rep = False
+    for faction, rep in world.player.social.reputation.items():
+        if rep != 0:
+            shown_rep = True
+            console.print(x=panel_x + 2, y=y, string=f"{faction[:3].upper()}: {rep}"[:panel_width - 3], fg=(200, 200, 200))
+            y += 1
+    if not shown_rep:
+        console.print(x=panel_x + 2, y=y, string="Neutral", fg=(120, 120, 120))
+        y += 1
+
+    controls_y = SCREEN_HEIGHT - 8
+    console.print(x=panel_x + 1, y=controls_y, string="Legend", fg=(255, 215, 120))
+    console.print(x=panel_x + 2, y=controls_y + 1, string="@ You", fg=(255, 245, 140))
+    console.print(x=panel_x + 2, y=controls_y + 2, string="! hostile  ? quest", fg=(170, 200, 255))
+    console.print(x=panel_x + 2, y=controls_y + 3, string="$ trader   * loot", fg=(170, 220, 170))
+    console.print(x=panel_x + 2, y=controls_y + 4, string="Pulse = focus", fg=(220, 220, 220))
+    console.print(x=panel_x + 2, y=controls_y + 5, string="E/T act  + civic", fg=(220, 220, 220))
+
 def draw_minimap(console, world):
     """Draws a minimap in the corner of the screen."""
     # Draw frame for the minimap
@@ -237,11 +776,18 @@ def draw(console, world, camera_x, camera_y):
 
             if tile:
                 is_in_fov = fov_map[map_y, map_x] if fov_map is not None else True
+                bg_color = _get_tile_background(tile)
+                fg_color = tile.color
+                fg_color, bg_color = _animate_tile_colors(world, tile, fg_color, bg_color, map_x, map_y)
                 if is_in_fov:
-                    console.print(x=x, y=y, string=chr(tile.char), fg=tile.color)
+                    console.print(x=x, y=y, string=_get_tile_char(tile), fg=fg_color, bg=bg_color)
                     exp_map[map_y, map_x] = True
                 elif exp_map[map_y, map_x]:
-                    console.print(x=x, y=y, string=chr(tile.char), fg=(100, 100, 100)) # Explored but not visible
+                    console.print(
+                        x=x, y=y, string=_get_tile_char(tile),
+                        fg=_dim_color(fg_color, 0.45),
+                        bg=_dim_color(bg_color, 0.5)
+                    )
 
     # Draw path visualizer
     if hasattr(world.player.state, 'current_path') and world.player.state.current_path:
@@ -276,12 +822,38 @@ def draw(console, world, camera_x, camera_y):
         # Or check draw_x/y? Checking logical x/y is safer for consistency with FOV map.
         if is_visible(world, entity.x, entity.y) or is_visible(world, draw_x, draw_y):
             if 0 <= draw_x - camera_x < MAP_WIDTH and 0 <= draw_y - camera_y < MAP_HEIGHT:
-                bg_color = (100, 0, 50) if isinstance(entity, Player) else None
+                fg_color, bg_color = _get_entity_style(entity)
                 console.print(x=draw_x - camera_x, y=draw_y - camera_y,
-                              string=chr(entity.char), fg=entity.color, bg=bg_color)
+                              string=chr(entity.char), fg=fg_color, bg=bg_color)
 
-    draw_status_panel(console, world)
-    # draw_minimap(console, world)
+    player_screen_x = world.player.x - camera_x
+    player_screen_y = world.player.y - camera_y
+    if 0 <= player_screen_x < MAP_WIDTH and 0 <= player_screen_y < MAP_HEIGHT:
+        console.print(x=player_screen_x, y=player_screen_y, string="@", fg=(255, 248, 160), bg=(120, 55, 20))
+
+    _apply_lighting_and_depth(console, world, camera_x, camera_y)
+    if 0 <= player_screen_x < MAP_WIDTH and 0 <= player_screen_y < MAP_HEIGHT:
+        console.print(x=player_screen_x, y=player_screen_y, string="@", fg=(255, 248, 160), bg=(120, 55, 20))
+    _draw_entity_markers(console, world, camera_x, camera_y)
+    _draw_world_markers(console, world, camera_x, camera_y)
+
+    for distance, entity in _get_visible_nearby_entities(world, limit=3):
+        screen_x = entity.x - camera_x
+        screen_y = entity.y - camera_y - 1
+        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+            label = entity.name[:12]
+            label_x = max(0, min(MAP_WIDTH - len(label), screen_x - (len(label) // 2)))
+            console.print(x=label_x, y=screen_y, string=label, fg=(240, 240, 240), bg=(0, 0, 0))
+
+    current_tile = world.get_tile_at(world.player.x, world.player.y)
+    area_label = current_tile.name if current_tile else "Unknown"
+    hud_text = f"@ {area_label}  [{world.player.x},{world.player.y}]  {world.weather.replace('_', ' ').title()}"
+    console.print(x=1, y=1, string=hud_text[:MAP_WIDTH - 2], fg=(255, 255, 255), bg=(0, 0, 0))
+
+    focus = _get_focus_target(world, camera_x, camera_y)
+    _draw_focus_badge(console, world, focus, camera_x, camera_y)
+
+    draw_status_panel(console, world, camera_x, camera_y)
     draw_cursor_info(console, world, camera_x, camera_y)
 
     # Draw chat/interaction UI if active
@@ -344,14 +916,14 @@ def draw(console, world, camera_x, camera_y):
                     info_text += f" | {', '.join(entities_here)}"
 
                 # Draw tooltip string near bottom right of map
-                console.print(x=1, y=MAP_HEIGHT - 1, string=info_text, fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
+                console.print(x=1, y=MAP_HEIGHT - 1, string=info_text[:MAP_WIDTH - 2], fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
 
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
     console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
-                       clear=True, fg=(255, 255, 255), bg=(0, 0, 0))
+                       clear=True, fg=(255, 255, 255), bg=(6, 8, 12))
     for i, message in enumerate(world.chat_log[-4:]):
-        console.print(x=1, y=y + 1 + i, string=message)
+        console.print(x=1, y=y + 1 + i, string=message[:MAP_WIDTH - 2], fg=_get_log_color(message))
 
 def draw_weather_overlay(console, world, camera_x, camera_y):
     """Draws a simple screen overlay based on the current weather."""

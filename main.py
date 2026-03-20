@@ -6,7 +6,7 @@ from tcod_compat import tcod, libtcodpy
 import os
 import sys
 from engine import World
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES
+from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, MAP_WIDTH, MAP_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
@@ -327,9 +327,9 @@ def main():
         return
 
     try:
-        tileset = tcod.tileset.load_tilesheet("dejavu10x10_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
+        tileset = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
     except FileNotFoundError:
-        print("Error: Font file not found: 'dejavu10x10_gs_tc.png'")
+        print("Error: Font file not found: 'dejavu16x16_gs_tc.png'")
         return
 
     console = tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="F")
@@ -455,7 +455,9 @@ def start_game(context, console, world_state=None):
             render_game_over(console, context)
             break # Break to return to main menu
 
-        camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
+        camera_x, camera_y = int(world.player.x) - MAP_WIDTH // 2, int(world.player.y) - MAP_HEIGHT // 2
+        camera_x = max(0, min(camera_x, WORLD_WIDTH - MAP_WIDTH))
+        camera_y = max(0, min(camera_y, WORLD_HEIGHT - MAP_HEIGHT))
         draw(console, world, camera_x, camera_y)
         context.present(console)
 
@@ -504,10 +506,12 @@ def handle_events(world, context) -> bool:
         if isinstance(event, tcod.event.Quit):
             raise SystemExit()
         if isinstance(event, tcod.event.MouseMotion):
-            world.mouse_x, world.mouse_y = event.position
+            world.mouse_x, world.mouse_y = int(event.position[0]), int(event.position[1])
         if isinstance(event, tcod.event.MouseButtonDown) and world.game_state == "PLAYING":
-            camera_x, camera_y = world.player.x - SCREEN_WIDTH_TILES // 2, world.player.y - SCREEN_HEIGHT_TILES // 2
-            mouse_world_x, mouse_world_y = camera_x + world.mouse_x, camera_y + world.mouse_y
+            camera_x, camera_y = int(world.player.x) - MAP_WIDTH // 2, int(world.player.y) - MAP_HEIGHT // 2
+            camera_x = max(0, min(camera_x, WORLD_WIDTH - MAP_WIDTH))
+            camera_y = max(0, min(camera_y, WORLD_HEIGHT - MAP_HEIGHT))
+            mouse_world_x, mouse_world_y = int(camera_x + world.mouse_x), int(camera_y + world.mouse_y)
 
             if event.button == tcod.event.MouseButton.RIGHT:
                 world.player.state.current_path = [] # Stop moving if interaction menu opens

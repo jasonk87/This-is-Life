@@ -76,6 +76,10 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
         world.building_menu_context["all_recipes"].sort(key=lambda k: CONSTRUCTION_RECIPES[k].get("name", k))
     elif event.sym == tcod.event.KeySym.I:
         world.game_state = "INFO_MENU"
+    elif hasattr(tcod.event.KeySym, 'u') and event.sym == tcod.event.KeySym.u:
+        world.game_state = "INVENTORY_MENU"
+    elif hasattr(tcod.event.KeySym, 'U') and event.sym == tcod.event.KeySym.U:
+        world.game_state = "INVENTORY_MENU"
     elif event.sym == tcod.event.KeySym.Q:
         world.game_state = "QUEST_MENU"
         world.quest_menu_context["selected_quest_index"] = 0
@@ -222,9 +226,25 @@ def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
         world.game_state = "PLAYING"
 
 def handle_info_menu_input(event: tcod.event.KeyDown, world: World):
-    """Handles input for the info/inventory menu."""
+    """Handles input for the info menu."""
     if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.I):
         world.game_state = "PLAYING"
+    elif hasattr(tcod.event.KeySym, 'u') and event.sym == tcod.event.KeySym.u:
+        world.game_state = "INVENTORY_MENU"
+    elif hasattr(tcod.event.KeySym, 'U') and event.sym == tcod.event.KeySym.U:
+        world.game_state = "INVENTORY_MENU"
+
+def handle_inventory_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input for the dedicated inventory menu."""
+    if "inventory_scroll_offset" not in world.interaction_context:
+        world.interaction_context["inventory_scroll_offset"] = 0
+
+    if event.sym == tcod.event.KeySym.ESCAPE or (hasattr(tcod.event.KeySym, 'u') and event.sym == tcod.event.KeySym.u) or (hasattr(tcod.event.KeySym, 'U') and event.sym == tcod.event.KeySym.U):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP:
+        world.interaction_context["inventory_scroll_offset"] = max(0, world.interaction_context["inventory_scroll_offset"] - 1)
+    elif event.sym == tcod.event.KeySym.DOWN:
+        world.interaction_context["inventory_scroll_offset"] += 1
 
 def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is reading a book."""
@@ -550,6 +570,8 @@ def handle_events(world, context) -> bool:
                 handle_help_menu_input(event, world)
             elif world.game_state == "INFO_MENU":
                 handle_info_menu_input(event, world)
+            elif world.game_state == "INVENTORY_MENU":
+                handle_inventory_menu_input(event, world)
             elif world.game_state == "PLAYING":
                 if handle_playing_input(event, world, context): turn_taken = True
 

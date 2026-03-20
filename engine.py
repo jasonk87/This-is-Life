@@ -1075,6 +1075,10 @@ class World:
         if npc.physical.is_dead:
             return
 
+        distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+        if distance_to_player > 60:
+            return
+
         # Optimization: Only calculate accurate FOV if NPC is in an active state,
         # near the player, or has specific professions that require it.
         needs_strict_fov = False
@@ -3700,23 +3704,11 @@ class World:
 
         # C. Aggression (if stable)
         if chosen_action == "hold_position": # If no higher priority action taken
-            if not can_see_player:
-                # Lost sight? investigate or search
-                chosen_action = "move_to_attack_player" # Will path to last known location (player pos)
-                narrative_thought = f"{npc.name} searches for you."
-            else:
+            if can_see_player:
                 if player_in_attack_range:
                     chosen_action = "attack_player"
-                    # narrative_thought = f"{npc.name} attacks!" # Too spammy if logged every hit
                 else:
-                    # Closing the gap
-                    if npc.combat.combat_behavior == "defensive":
-                         # Defensive NPCs might wait for player to come to them if in cover, 
-                         # but for now let's have them engage if hostile.
-                         pass
-                    
                     chosen_action = "move_to_attack_player"
-                    # narrative_thought = f"{npc.name} closes in."
 
         # 4. Execute Action Logic
         npc.combat.target_entity_id = player.id
@@ -7310,9 +7302,11 @@ class World:
         new_x, new_y = self.player.x + dx, self.player.y + dy
         destination_tile = self.get_tile_at(new_x, new_y)
 
+        if dx != 0 or dy != 0:
+            self.player.state.last_dx, self.player.state.last_dy = dx, dy # Always update facing direction
+
         if destination_tile and destination_tile.passable:
             self._update_entity_position(self.player, new_x, new_y)
-            self.player.state.last_dx, self.player.state.last_dy = dx, dy # Store last move
 
             movement_cost = int(destination_tile.properties.get("movement_cost", 1))
 

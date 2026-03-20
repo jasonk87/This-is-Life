@@ -6,7 +6,8 @@ import itertools
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
-    COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT
+    COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT,
+    WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE
 )
 from data.tiles import TILE_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
@@ -183,18 +184,13 @@ def draw_cursor_info(console, world, camera_x, camera_y):
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
-    if not hasattr(world, 'player_fov_map') or not hasattr(world, 'fov_min_x') or not hasattr(world, 'fov_min_y'):
+    fov_map = getattr(world, 'player_fov_map', None)
+    if fov_map is None:
         # Fallback if FOV system isn't fully initialized
         return True
 
-    fov_map = world.player_fov_map
-    map_height, map_width = fov_map.shape
-
-    local_x = x - world.fov_min_x
-    local_y = y - world.fov_min_y
-
-    if 0 <= local_x < map_width and 0 <= local_y < map_height:
-        return fov_map[local_y, local_x]
+    if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+        return fov_map[y, x]
     return False
 
 def _draw_visual_effect(console, effect, camera_x, camera_y):
@@ -214,16 +210,37 @@ def draw(console, world, camera_x, camera_y):
     console.clear()
 
     # Draw the map
+    fov_map = getattr(world, 'player_fov_map', None)
+    exp_map = world.explored_map
+    
     for y in range(MAP_HEIGHT):
+        map_y = camera_y + y
+        if not (0 <= map_y < WORLD_HEIGHT):
+            continue
+            
+        chunk_y = map_y // CHUNK_SIZE
+        local_y = map_y % CHUNK_SIZE
+        chunk_row = world.chunks[chunk_y]
+
         for x in range(MAP_WIDTH):
-            map_x, map_y = camera_x + x, camera_y + y
-            tile = world.get_tile_at(map_x, map_y)
+            map_x = camera_x + x
+            if not (0 <= map_x < WORLD_WIDTH):
+                continue
+
+            chunk_x = map_x // CHUNK_SIZE
+            chunk = chunk_row[chunk_x]
+
+            if not chunk.is_terrain_generated:
+                world._generate_chunk_detail(chunk, chunk_x, chunk_y)
+
+            tile = chunk.tiles[local_y][map_x % CHUNK_SIZE]
+
             if tile:
-                is_in_fov = is_visible(world, map_x, map_y)
+                is_in_fov = fov_map[map_y, map_x] if fov_map is not None else True
                 if is_in_fov:
                     console.print(x=x, y=y, string=chr(tile.char), fg=tile.color)
-                    world.explored_map[map_y, map_x] = True
-                elif world.explored_map[map_y, map_x]:
+                    exp_map[map_y, map_x] = True
+                elif exp_map[map_y, map_x]:
                     console.print(x=x, y=y, string=chr(tile.char), fg=(100, 100, 100)) # Explored but not visible
 
     # Draw path visualizer
@@ -259,8 +276,9 @@ def draw(console, world, camera_x, camera_y):
         # Or check draw_x/y? Checking logical x/y is safer for consistency with FOV map.
         if is_visible(world, entity.x, entity.y) or is_visible(world, draw_x, draw_y):
             if 0 <= draw_x - camera_x < MAP_WIDTH and 0 <= draw_y - camera_y < MAP_HEIGHT:
+                bg_color = (100, 0, 50) if isinstance(entity, Player) else None
                 console.print(x=draw_x - camera_x, y=draw_y - camera_y,
-                              string=chr(entity.char), fg=entity.color)
+                              string=chr(entity.char), fg=entity.color, bg=bg_color)
 
     draw_status_panel(console, world)
     # draw_minimap(console, world)

@@ -203,13 +203,14 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Claim House": lambda: claim_house(world, entity_data),
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
-        "Read": lambda: world.player_attempt_read_book(entity_data["item_key"])
+        "Read": lambda: world.player_attempt_read_book(entity_data["item_key"]),
+        "Offer Mercenary Services": lambda: world.player_attempt_mercenary_contract(entity_data)
     }
 
     if selected_action in action_map:
         action_map[selected_action]()
 
-    if selected_action in ["Talk", "Trade", "Read"]:
+    if selected_action in ["Talk", "Trade", "Read", "Offer Mercenary Services"]:
         ctx["active"] = False
 
     apply_ui_requests(world, context_handler)

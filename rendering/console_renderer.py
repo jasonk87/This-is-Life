@@ -1224,6 +1224,19 @@ def draw_info_menu(console, world):
             console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
             inv_y += 1
 
+    inv_y += 2
+    console.print(x=x + 2, y=inv_y, string="Faction Status:", fg=(255, 255, 0))
+    inv_y += 1
+    wars_found = False
+    for v in world.villages:
+        if v.at_war_with:
+            wars_found = True
+            for enemy_id in v.at_war_with:
+                console.print(x=x + 3, y=inv_y, string=f"- Village {v.id[:4]} is at WAR with Village {enemy_id[:4]}", fg=(255, 100, 100))
+                inv_y += 1
+    if not wars_found:
+        console.print(x=x + 3, y=inv_y, string="- The realm is at peace.", fg=(150, 200, 150))
+
 def draw_inventory_menu(console, world):
     """Draws the dedicated scrollable inventory menu, grouping items by category."""
     menu_width = 60

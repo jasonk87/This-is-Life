@@ -1,0 +1,338 @@
+"""Command objects for completed NPC work sub-tasks."""
+
+from __future__ import annotations
+
+import random
+
+from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
+from data.animals import ANIMAL_DEFINITIONS
+from data.decorations import DECORATION_ITEM_DEFINITIONS
+from data.tiles import TILE_DEFINITIONS
+from entities.tree import Tree
+
+
+class CompletedWorkSubTaskCommand:
+    """Command object for applying the effects of a completed work sub-task."""
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        raise NotImplementedError
+
+
+class ChopTreesSubTaskCommand(CompletedWorkSubTaskCommand):
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        tree_tile_obj = world.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+        if not (isinstance(tree_tile_obj, Tree) and tree_tile_obj.is_choppable):
+            return
+
+        original_tree_type = tree_tile_obj.tree_type
+        yielded_resources = tree_tile_obj.chop()
+        logs_collected = yielded_resources.get("raw_log", 0)
+
+        stump_key = tree_tile_obj.becomes_on_chop_key
+        stump_def = TILE_DEFINITIONS.get(stump_key)
+        if stump_def:
+            world._change_map_tile(npc.sub_task_target_coords, stump_def, original_tree_type=original_tree_type)
+            new_stump_tile = world.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+            if new_stump_tile:
+                new_stump_tile.regrowth_timer = 100
+
+        if logs_collected > 0:
+            npc.add_item("raw_log", logs_collected)
+
+
+class ButcherCarcassSubTaskCommand(CompletedWorkSubTaskCommand):
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        target_tile_obj = world.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+        if not (target_tile_obj and target_tile_obj.name == "Animal Corpse"):
+            return
+
+        animal_type = target_tile_obj.properties.get("animal_type")
+        if animal_type in ANIMAL_DEFINITIONS:
+            animal_def = ANIMAL_DEFINITIONS[animal_type]
+            loot_table = animal_def.get("loot_drops", {})
+            for item_key, loot_info in loot_table.items():
+                if random.random() < loot_info.get("chance", 0):
+                    quantity_info = loot_info["quantity"]
+                    if isinstance(quantity_info, list) and len(quantity_info) == 2:
+                        quantity = random.randint(quantity_info[0], quantity_info[1])
+                    else:
+                        quantity = int(quantity_info)
+                    if quantity > 0:
+                        npc.add_item(item_key, quantity)
+
+        bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
+        world._change_map_tile(npc.sub_task_target_coords, bones_def)
+
+
+class AddItemToNpcInventorySubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, item_key: str, quantity: int):
+        self.item_key = item_key
+        self.quantity = quantity
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        npc.add_item(self.item_key, self.quantity)
+
+
+class PurchaseFromSupplierSubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, supplier_getter_name: str, item_key: str, quantity: int, deposit_to_work_building: bool = False, log_message: str | None = None):
+        self.supplier_getter_name = supplier_getter_name
+        self.item_key = item_key
+        self.quantity = quantity
+        self.deposit_to_work_building = deposit_to_work_building
+        self.log_message = log_message
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        supplier = getattr(world, self.supplier_getter_name)(npc)
+        if not supplier:
+            return
+
+        village = world._get_village_for_npc(npc)
+        item_price = world.get_dynamic_price(self.item_key, village)
+        total_cost = item_price * self.quantity
+        if npc.economic.money < total_cost or supplier.building_inventory.get(self.item_key, 0) < self.quantity:
+            return
+
+        supplier.building_inventory[self.item_key] -= self.quantity
+        npc.economic.money -= total_cost
+        if self.deposit_to_work_building:
+            work_building.building_inventory[self.item_key] = work_building.building_inventory.get(self.item_key, 0) + self.quantity
+        else:
+            npc.add_item(self.item_key, self.quantity)
+
+        if self.log_message:
+            world.add_message_to_chat_log(self.log_message.format(npc=npc.name, quantity=self.quantity))
+
+
+class FetchWoodSubTaskCommand(CompletedWorkSubTaskCommand):
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        lumber_mill = world.buildings_by_id.get(npc.sub_task_target_coords)
+        if not (lumber_mill and lumber_mill.building_type == "lumber_mill"):
+            return
+
+        village = world._get_village_for_npc(npc)
+        plank_price = world.get_dynamic_price("wooden_plank", village)
+        planks_to_buy = 5
+        if npc.economic.money >= plank_price * planks_to_buy and lumber_mill.building_inventory.get("wooden_plank", 0) >= planks_to_buy:
+            lumber_mill.building_inventory["wooden_plank"] -= planks_to_buy
+            npc.economic.money -= plank_price * planks_to_buy
+            work_building.building_inventory["wooden_plank"] = work_building.building_inventory.get("wooden_plank", 0) + planks_to_buy
+
+
+class WorkBuildingConversionSubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, consumed_item: str, consumed_amount: int, produced_item: str, produced_amount: int):
+        self.consumed_item = consumed_item
+        self.consumed_amount = consumed_amount
+        self.produced_item = produced_item
+        self.produced_amount = produced_amount
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        if work_building.building_inventory.get(self.consumed_item, 0) < self.consumed_amount:
+            return
+
+        work_building.building_inventory[self.consumed_item] -= self.consumed_amount
+        work_building.building_inventory[self.produced_item] = work_building.building_inventory.get(self.produced_item, 0) + self.produced_amount
+
+
+class WriteBookSubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, book_factory):
+        self.book_factory = book_factory
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        events = list(npc.knowledge.known_events.values())
+        deaths = [e.description for e in events if e.type == "entity_death"]
+        births = [e.description for e in events if e.type == "npc_birth"]
+        crimes = [e.description for e in events if e.type == "crime_witnessed"]
+
+        year = world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+        book_content = f"The Chronicle of Year {year}\nRequired Reading for Citizens.\n\n"
+
+        if births:
+            book_content += "Births:\n" + "\n".join([f"- {d}" for d in births]) + "\n\n"
+        if deaths:
+            book_content += "Deaths:\n" + "\n".join([f"- {d}" for d in deaths]) + "\n\n"
+        if crimes:
+            book_content += "Criminal Activity:\n" + "\n".join([f"- {d}" for d in crimes]) + "\n\n"
+        if not any([births, deaths, crimes]):
+            book_content += "A year of tranquility and little note."
+
+        new_book = self.book_factory(
+            title=f"Year {year} Chronicle",
+            author_id=npc.id,
+            author_name=npc.name,
+            year_written=year,
+            content=book_content,
+            book_type="chronicle",
+            referenced_event_ids=list(npc.knowledge.known_events.keys()),
+        )
+        world.books.append(new_book)
+        work_building.building_inventory[f"book_{new_book.id}"] = 1
+        world.add_message_to_chat_log(f"{npc.name} has written a new historical chronicle.")
+
+
+class WriteBiographySubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, book_factory):
+        self.book_factory = book_factory
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        candidates = []
+        for potential_subject in world.village_npcs + [world.player]:
+            if potential_subject.id == npc.id:
+                continue
+            score = potential_subject.social.fame + potential_subject.social.infamy
+            if score > 0:
+                candidates.append((score, potential_subject))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        subject = candidates[0][1] if candidates else random.choice(world.village_npcs)
+        subject_events = [e for e in npc.knowledge.known_events.values() if e.subject_id == subject.id]
+
+        if len(subject_events) >= 1:
+            book_content = f"The Life of {subject.name}\n"
+            book_content += f"Title: {subject.social.title}\n\n"
+            book_content += "Known Deeds:\n"
+            for event in subject_events:
+                book_content += f"- {event.description}\n"
+
+            new_book = self.book_factory(
+                title=f"Biography: {subject.name}",
+                author_id=npc.id,
+                author_name=npc.name,
+                year_written=world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+                content=book_content,
+                book_type="biography",
+                referenced_event_ids=[e.id for e in subject_events],
+            )
+            world.books.append(new_book)
+            work_building.building_inventory[f"book_{new_book.id}"] = 1
+            world.add_message_to_chat_log(f"{npc.name} has written a biography of {subject.name}.")
+            return
+
+        reputation_summary = []
+        if subject.social.fame > 0:
+            reputation_summary.append(f"They are remembered for notable deeds (fame {subject.social.fame}).")
+        if subject.social.infamy > 0:
+            reputation_summary.append(f"They are also shadowed by infamy ({subject.social.infamy}).")
+        if not reputation_summary:
+            reputation_summary.append(f"Little is recorded about {subject.name}, but their story is still worth preserving.")
+
+        book_content = f"The Life of {subject.name}\n"
+        book_content += f"Title: {subject.social.title or 'Unknown'}\n\n"
+        book_content += "Known Deeds:\n"
+        for summary_line in reputation_summary:
+            book_content += f"- {summary_line}\n"
+
+        new_book = self.book_factory(
+            title=f"Biography: {subject.name}",
+            author_id=npc.id,
+            author_name=npc.name,
+            year_written=world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
+            content=book_content,
+            book_type="biography",
+            referenced_event_ids=[],
+        )
+        world.books.append(new_book)
+        work_building.building_inventory[f"book_{new_book.id}"] = 1
+        world.add_message_to_chat_log(f"{npc.name} has written a general biography of {subject.name}.")
+
+
+class CompileCensusSubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, book_factory):
+        self.book_factory = book_factory
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        village = world._get_village_for_npc(npc)
+        if village:
+            citizens = [n for n in world.village_npcs if world._get_village_for_npc(n) == village]
+        else:
+            citizens = world.village_npcs
+        if not citizens:
+            citizens = [npc]
+
+        population = len(citizens)
+        wealth_values = [n.economic.money for n in citizens]
+        total_wealth = sum(wealth_values)
+        avg_wealth = total_wealth / max(1, len(wealth_values))
+        richest = max(citizens, key=lambda n: n.economic.money)
+        poorest = min(citizens, key=lambda n: n.economic.money)
+
+        professions = {}
+        for citizen in citizens:
+            profession = citizen.economic.profession
+            professions[profession] = professions.get(profession, 0) + 1
+
+        year = world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
+        report_content = f"Official Census Report - Year {year}\n\n"
+        report_content += f"Jurisdiction: {village.name if village and hasattr(village, 'name') else 'Unknown'}\n"
+        report_content += f"Total Population: {population}\n"
+        report_content += f"Total Village Wealth: {total_wealth} coins\n"
+        report_content += f"Average Income: {int(avg_wealth)} coins\n\n"
+        report_content += f"Economic Status:\n- Richest Citizen: {richest.name} ({richest.economic.money} coins)\n"
+        report_content += f"- Poorest Citizen: {poorest.name} ({poorest.economic.money} coins)\n\n"
+        report_content += "Employment Statistics:\n"
+        for profession, count in professions.items():
+            report_content += f"- {profession}: {count}\n"
+
+        new_book = self.book_factory(
+            title=f"Census Report {year}",
+            author_id=npc.id,
+            author_name=npc.name,
+            year_written=year,
+            content=report_content,
+            book_type="census",
+        )
+        world.books.append(new_book)
+        work_building.building_inventory[f"book_{new_book.id}"] = 1
+        world.add_message_to_chat_log(f"{npc.name} has filed the official census.")
+
+
+class FarmerTileTransitionSubTaskCommand(CompletedWorkSubTaskCommand):
+    def __init__(self, *, consume_output: bool = False, harvest_output: bool = False):
+        self.consume_output = consume_output
+        self.harvest_output = harvest_output
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        target_tile_obj = world.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
+        original_tile_name = target_tile_obj.name if target_tile_obj else "None"
+        expected_tile_name = TILE_DEFINITIONS.get(sub_task_data.get("target_tile_type_key"), {}).get("name")
+
+        if not (target_tile_obj and original_tile_name == expected_tile_name):
+            return
+
+        if self.harvest_output:
+            if not target_tile_obj.properties.get("is_harvestable"):
+                return
+            world._produce_sub_task_output(npc, work_building, sub_task_data, target_tile_obj=target_tile_obj)
+            becomes_key = target_tile_obj.properties.get("becomes_on_harvest_key") or sub_task_data.get("becomes_tile_type_key")
+        else:
+            if self.consume_output and not world._produce_sub_task_output(npc, work_building, sub_task_data):
+                return
+            becomes_key = sub_task_data.get("becomes_tile_type_key")
+
+        new_tile_def = TILE_DEFINITIONS.get(becomes_key)
+        if new_tile_def:
+            world._change_map_tile(npc.sub_task_target_coords, new_tile_def)
+
+
+class DefaultProduceOutputSubTaskCommand(CompletedWorkSubTaskCommand):
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        world._produce_sub_task_output(npc, work_building, sub_task_data)
+
+
+def create_completed_work_sub_task_commands(book_factory):
+    return {
+        "chop_trees": ChopTreesSubTaskCommand(),
+        "butcher_carcass": ButcherCarcassSubTaskCommand(),
+        "mine_ore": AddItemToNpcInventorySubTaskCommand("iron_ore", 1),
+        "fetch_ore": PurchaseFromSupplierSubTaskCommand("_find_nearest_mine", "iron_ore", 5),
+        "fetch_wood": FetchWoodSubTaskCommand(),
+        "craft_furniture": WorkBuildingConversionSubTaskCommand("wooden_plank", 2, "wooden_chair", 1),
+        "fetch_wheat": PurchaseFromSupplierSubTaskCommand("_find_nearest_farm", "wheat", 5, deposit_to_work_building=True, log_message="{npc} the Miller bought {quantity} wheat."),
+        "fetch_flour": PurchaseFromSupplierSubTaskCommand("_find_nearest_mill", "flour", 5, deposit_to_work_building=True),
+        "write_book": WriteBookSubTaskCommand(book_factory),
+        "write_biography": WriteBiographySubTaskCommand(book_factory),
+        "compile_census": CompileCensusSubTaskCommand(book_factory),
+        "mill_flour": WorkBuildingConversionSubTaskCommand("wheat", 1, "flour", 1),
+        "till_soil": FarmerTileTransitionSubTaskCommand(),
+        "plant_seeds": FarmerTileTransitionSubTaskCommand(consume_output=True),
+        "harvest_crops": FarmerTileTransitionSubTaskCommand(harvest_output=True),
+    }

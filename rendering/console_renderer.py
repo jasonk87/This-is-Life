@@ -1,14 +1,16 @@
 # rendering/console_renderer.py
 
-import tcod
+from tcod_compat import tcod
 import textwrap
 import itertools
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
-    COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT
+    COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT,
+    WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE
 )
 from data.tiles import TILE_DEFINITIONS
+from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from entities.animal import Animal
 from engine import Player
@@ -182,35 +184,63 @@ def draw_cursor_info(console, world, camera_x, camera_y):
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
-    if not hasattr(world, 'player_fov_map') or not hasattr(world, 'fov_min_x') or not hasattr(world, 'fov_min_y'):
+    fov_map = getattr(world, 'player_fov_map', None)
+    if fov_map is None:
         # Fallback if FOV system isn't fully initialized
         return True
 
-    fov_map = world.player_fov_map
-    map_height, map_width = fov_map.shape
-
-    local_x = x - world.fov_min_x
-    local_y = y - world.fov_min_y
-
-    if 0 <= local_x < map_width and 0 <= local_y < map_height:
-        return fov_map[local_y, local_x]
+    if 0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT:
+        return fov_map[y, x]
     return False
+
+def _draw_visual_effect(console, effect, camera_x, camera_y):
+    effect_type = getattr(effect, "effect_type", None)
+    draw_x = int(round(getattr(effect, "x", 0))) - camera_x
+    draw_y = int(round(getattr(effect, "y", 0))) - camera_y
+    if not (0 <= draw_x < console.width and 0 <= draw_y < console.height):
+        return
+
+    if effect_type == "floating_text":
+        console.print(x=draw_x, y=draw_y, string=getattr(effect, "text", ""), fg=getattr(effect, "color", (255, 255, 255)))
+    elif effect_type == "projectile":
+        console.print(x=draw_x, y=draw_y, string=getattr(effect, "char", "*"), fg=getattr(effect, "color", (255, 255, 0)))
 
 def draw(console, world, camera_x, camera_y):
     """Draws the main game screen."""
     console.clear()
 
     # Draw the map
+    fov_map = getattr(world, 'player_fov_map', None)
+    exp_map = world.explored_map
+    
     for y in range(MAP_HEIGHT):
+        map_y = camera_y + y
+        if not (0 <= map_y < WORLD_HEIGHT):
+            continue
+            
+        chunk_y = map_y // CHUNK_SIZE
+        local_y = map_y % CHUNK_SIZE
+        chunk_row = world.chunks[chunk_y]
+
         for x in range(MAP_WIDTH):
-            map_x, map_y = camera_x + x, camera_y + y
-            tile = world.get_tile_at(map_x, map_y)
+            map_x = camera_x + x
+            if not (0 <= map_x < WORLD_WIDTH):
+                continue
+
+            chunk_x = map_x // CHUNK_SIZE
+            chunk = chunk_row[chunk_x]
+
+            if not chunk.is_terrain_generated:
+                world._generate_chunk_detail(chunk, chunk_x, chunk_y)
+
+            tile = chunk.tiles[local_y][map_x % CHUNK_SIZE]
+
             if tile:
-                is_in_fov = is_visible(world, map_x, map_y)
+                is_in_fov = fov_map[map_y, map_x] if fov_map is not None else True
                 if is_in_fov:
                     console.print(x=x, y=y, string=chr(tile.char), fg=tile.color)
-                    world.explored_map[map_y, map_x] = True
-                elif world.explored_map[map_y, map_x]:
+                    exp_map[map_y, map_x] = True
+                elif exp_map[map_y, map_x]:
                     console.print(x=x, y=y, string=chr(tile.char), fg=(100, 100, 100)) # Explored but not visible
 
     # Draw path visualizer
@@ -226,7 +256,7 @@ def draw(console, world, camera_x, camera_y):
 
     # Draw Visual Effects
     for effect in world.visual_effects:
-        effect.draw(console, camera_x, camera_y)
+        _draw_visual_effect(console, effect, camera_x, camera_y)
 
     # Draw entities
     all_entities = itertools.chain(world.npcs, world.village_npcs, [world.player])
@@ -246,8 +276,9 @@ def draw(console, world, camera_x, camera_y):
         # Or check draw_x/y? Checking logical x/y is safer for consistency with FOV map.
         if is_visible(world, entity.x, entity.y) or is_visible(world, draw_x, draw_y):
             if 0 <= draw_x - camera_x < MAP_WIDTH and 0 <= draw_y - camera_y < MAP_HEIGHT:
+                bg_color = (100, 0, 50) if isinstance(entity, Player) else None
                 console.print(x=draw_x - camera_x, y=draw_y - camera_y,
-                              string=chr(entity.char), fg=entity.color)
+                              string=chr(entity.char), fg=entity.color, bg=bg_color)
 
     draw_status_panel(console, world)
     # draw_minimap(console, world)
@@ -275,11 +306,11 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "BOOK_READING":
         draw_book_reading_ui(console, world)
 
+    if world.game_state == "TRADE_MENU" or world.trade_ui_active:
+        draw_trade_menu(console, world)
+
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
-
-    if world.game_state == "INFO_MENU":
-        draw_info_menu(console, world)
 
     # Draw weather overlay
     draw_weather_overlay(console, world, camera_x, camera_y)
@@ -508,16 +539,13 @@ def draw_building_menu(console, world):
         console.print(x=details_x + 2, y=detail_y, string=f"Materials:", fg=(255, 255, 0))
         detail_y += 1
         for mat_key, mat_qty in recipe.get("materials", {}).items():
-            item_def = TILE_DEFINITIONS.get(mat_key, {}) # Assuming item definitions are accessible via this or separate import if needed.
-            # Wait, TILE_DEFINITIONS contains tiles. ITEM_DEFINITIONS is in data/items.py but not imported here except TILE_DEFINITIONS?
-            # render_console imports TILE_DEFINITIONS. engine imports ITEM_DEFINITIONS.
-            # Let's trust that main passes world which has access, or just print key if def missing.
-            # Actually, render_console doesn't import ITEM_DEFINITIONS. We should probably import it or just use keys/world.
-            # Let's just use key for now or try to use TILE_DEFINITIONS if it happens to be there (some items are tiles)
-            # Better: Import ITEM_DEFINITIONS in this file.
-
-            # For now, let's just print the key formatted nicely.
-            mat_name = mat_key.replace("_", " ").title()
+            item_def = ITEM_DEFINITIONS.get(mat_key)
+            tile_def = TILE_DEFINITIONS.get(mat_key)
+            mat_name = (
+                (item_def or {}).get("name")
+                or (tile_def or {}).get("name")
+                or mat_key.replace("_", " ").title()
+            )
             has_enough = world.player.has_item(mat_key, mat_qty)
             color = (255, 255, 255) if has_enough else (255, 0, 0)
             console.print(x=details_x + 3, y=detail_y, string=f"- {mat_name}: {mat_qty}", fg=color)
@@ -584,7 +612,6 @@ def draw_info_menu(console, world):
         qty = item.get("quantity", 1)
         display_inventory[key] = display_inventory.get(key, 0) + qty
 
-    from data.items import ITEM_DEFINITIONS # Ensure we can fetch real item names
     for item_key, quantity in sorted(display_inventory.items()):
         item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
         item_name = item_def.get("name", item_key)
@@ -600,6 +627,44 @@ def draw_info_menu(console, world):
         for quest_id, quest_data in world.player.knowledge.active_quests.items():
             console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
             inv_y += 1
+
+
+def draw_trade_menu(console, world):
+    """Draws the trade menu UI."""
+    menu_width = 60
+    menu_height = 24
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Trade", clear=True)
+
+    target_name = world.trade_ui_npc_target.name if world.trade_ui_npc_target else "Trader"
+    mode = "Selling to" if world.trade_ui_player_selling else "Buying from"
+    console.print(x=x + 2, y=y + 2, string=f"{mode} {target_name}", fg=(255, 255, 0))
+    console.print(x=x + 2, y=y + 3, string="TAB switch view | ENTER trade | ESC close", fg=(180, 180, 180))
+
+    items = world.trade_ui_player_inventory_snapshot if world.trade_ui_player_selling else world.trade_ui_merchant_inventory_snapshot
+    selected_index = world.trade_ui_player_item_index if world.trade_ui_player_selling else world.trade_ui_merchant_item_index
+
+    if not items:
+        console.print(x=x + 2, y=y + 5, string="No items available.", fg=(150, 150, 150))
+        return
+
+    visible_height = menu_height - 7
+    scroll_offset = max(0, min(selected_index, max(0, len(items) - visible_height)))
+    for row in range(visible_height):
+        item_index = scroll_offset + row
+        if item_index >= len(items):
+            break
+
+        item_key, quantity, price = items[item_index]
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+        color = (0, 255, 255) if item_index == selected_index else (255, 255, 255)
+        console.print(
+            x=x + 2,
+            y=y + 5 + row,
+            string=f"{item_name[:28]:28} x{quantity:<3} {price:>4}g",
+            fg=color,
+        )
 
 
 def draw_knowledge_menu(console, world):

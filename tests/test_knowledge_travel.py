@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
-import numpy as np
+from runtime_compat import np
 from engine import World, Event, NPC, Animal
 from entities.base import DireWolf
 from config import NPC_SCHEDULE_UPDATE_INTERVAL, WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE

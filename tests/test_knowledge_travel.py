@@ -80,13 +80,39 @@ class TestKnowledgeTravel(unittest.TestCase):
         self.world.npc_fov_maps[hunter.id] = np.full((WORLD_HEIGHT, WORLD_WIDTH), True)
 
         # Advance time to trigger schedule update
-        self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL + 1
+        self.world.game_time = 1000
+        hunter.schedule.game_time_last_updated = 0
+
+        # We must set hunter's _force_fov_update to True or just not patch it out if we want it to run.
+        # But if we patch it out, it relies on our mock fov map, which is fine.
+        # However, the logic also checks if threats are visible in self.world.npcs/self.world.village_npcs
+        # Ensure wolf1 and wolf2 have proper positions and are in self.world.npcs (which they are)
+        # Ensure they are not dead
+        wolf1.physical.is_dead = False
+        wolf2.physical.is_dead = False
+        hunter.physical.is_dead = False
+        hunter.combat.is_hostile_to_player = False
+
+        # Manually ensure coordinates are correct so they aren't considered dead/out of bounds
+        wolf1.x, wolf1.y = 15, 10
+        wolf2.x, wolf2.y = 16, 10
+        hunter.x, hunter.y = 10, 10
+
+        # Create a boolean array where everything is True so the wolves are "visible"
+        fake_fov = np.full((WORLD_HEIGHT, WORLD_WIDTH), True)
+        self.world.npc_fov_maps[hunter.id] = fake_fov
+
+        # Update entity positions so they can be found by spatial queries if needed (though FOV check just iterates them)
+        self.world._rebuild_entity_positions()
+
+        # Ensure we set _force_fov_update so the FEAR SYSTEM processes it properly if needed.
+        hunter._force_fov_update = True
 
         # Mock _update_npc_fov to avoid re-calculating and overwriting our simple map
         with patch.object(self.world, '_update_npc_fov'):
             self.world._update_npc_schedules()
 
-        self.assertTrue(hunter.is_frightened)
+        self.assertTrue(getattr(hunter, 'is_frightened', False), "Hunter should be frightened")
         self.assertIn(wolf1.id, hunter.threat_source_ids)
 
         # Check if event was logged

@@ -201,10 +201,13 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Trade": lambda: start_trade(world, entity_data),
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
         "Claim House": lambda: claim_house(world, entity_data),
+
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
         "Read": lambda: world.player_attempt_read_book(entity_data["item_key"]),
-        "Offer Mercenary Services": lambda: world.player_attempt_mercenary_contract(entity_data)
+        "Offer Mercenary Services": lambda: world.player_attempt_mercenary_contract(entity_data),
+        "Loot Chest": lambda: world.player_attempt_loot_chest(target_x, target_y)
+
     }
 
     if selected_action in action_map:

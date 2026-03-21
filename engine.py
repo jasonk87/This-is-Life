@@ -4259,6 +4259,7 @@ class World:
             actions.append("Pick up")
             if entity_data["item_key"].startswith("book_"):
                 actions.append("Read")
+
         elif entity_type == "tile":
             if isinstance(entity_data, Tree) and entity_data.is_choppable:
                 actions.append("Chop")
@@ -4266,6 +4267,9 @@ class World:
                 actions.append("Toggle Door")
             elif entity_data.name == "Animal Corpse":
                 actions.append("Butcher")
+            elif entity_data.name == "Treasure Chest":
+                actions.append("Loot Chest")
+
             elif entity_data.name == "Plains" and self.player.has_item("stone_hoe"):
                 actions.append("Till Soil")
             elif entity_data.name == "Tilled Soil" and self.player.has_item("wheat_seeds"):
@@ -4468,6 +4472,46 @@ class World:
             if learned_count > 0:
                 self.add_message_to_chat_log(f"You learned about {learned_count} historical events from reading this book.")
             self.player.knowledge.known_books.add(book_item_key)
+
+
+    def player_attempt_loot_chest(self, x: int, y: int):
+        """Handles the player interacting with a treasure chest."""
+        target_tile = self.get_tile_at(x, y)
+        if not target_tile or target_tile.name != "Treasure Chest":
+            self.add_message_to_chat_log("There is no chest here.")
+            return
+
+        properties = target_tile.properties
+        if properties.get("is_locked"):
+            self.add_message_to_chat_log("The chest is locked. You need a lockpick.")
+            # Lockpicking logic could go here
+            return
+
+        loot = properties.get("loot", [])
+        if not loot:
+            self.add_message_to_chat_log("The chest is empty.")
+            return
+
+        self.add_message_to_chat_log(f"You open the chest and find: {', '.join([ITEM_DEFINITIONS.get(k, {}).get('name', k) for k in loot])}.")
+
+        for item_key in loot:
+            if item_key == "money":
+                self.player.economic.money += random.randint(10, 50)
+                self.add_message_to_chat_log("You found some gold coins.")
+            else:
+                self.player.add_item(item_key, 1)
+
+        # Empty the chest
+        target_tile.properties["loot"] = []
+        target_tile.name = "Empty Chest"
+
+        # Trigger an event
+        self.log_event(
+            event_type="chest_looted",
+            description="The player plundered a dungeon chest.",
+            subject_id=self.player.id,
+            location=(x, y)
+        )
 
     def player_attempt_mercenary_contract(self, npc: NPC):
         """Handles the player attempting to offer mercenary services to a warring village."""
@@ -6960,7 +7004,7 @@ class World:
         if chunk.village:
             self._render_village_tiles(chunk)
         elif chunk.ruin:
-            self._generate_ruin_layout(chunk) # Renders directly to tiles
+            self._generate_ruin_layout(chunk, chunk_x, chunk_y) # Renders directly to tiles
 
     def _render_biome_details(self, chunk, chunk_x, chunk_y):
         """Renders trees, grass, and animals for a chunk."""
@@ -7276,8 +7320,9 @@ class World:
                 local_y = wy % CHUNK_SIZE
                 tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
 
-    def _generate_ruin_layout(self, chunk: Chunk):
-        """Generates a ruined structure within a chunk."""
+
+    def _generate_ruin_layout(self, chunk: Chunk, global_chunk_x: int, global_chunk_y: int):
+        """Generates a multi-room ruined structure within a chunk."""
         tiles = chunk.tiles if chunk.tiles else [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
         chunk.tiles = tiles
 
@@ -7285,29 +7330,118 @@ class World:
         floor_tile = TILE_DEFINITIONS["mossy_cobblestone"]
         rubble_decor = DECORATION_ITEM_DEFINITIONS["rubble"]
 
-        # Simple rectangular ruin
-        ruin_w = random.randint(8, 12)
-        ruin_h = random.randint(8, 12)
-        ruin_x = (CHUNK_SIZE - ruin_w) // 2
-        ruin_y = (CHUNK_SIZE - ruin_h) // 2
+        # Simple dungeon generator (BSP-ish / Drunkard Walk combination)
+        rooms = []
+        num_rooms = random.randint(3, 5)
 
-        for y in range(ruin_h):
-            for x in range(ruin_w):
-                is_border = x == 0 or x == ruin_w - 1 or y == 0 or y == ruin_h - 1
+        for _ in range(num_rooms):
+            rw = random.randint(5, 9)
+            rh = random.randint(5, 9)
+            rx = random.randint(2, CHUNK_SIZE - rw - 2)
+            ry = random.randint(2, CHUNK_SIZE - rh - 2)
 
-                # Introduce gaps in the walls
-                if is_border and random.random() > 0.3: # 30% chance of a gap
-                    tiles[ruin_y + y][ruin_x + x] = Tile(wall_tile["char"], wall_tile["color"], wall_tile["passable"], wall_tile["name"], wall_tile["properties"])
-                elif not is_border:
-                    tiles[ruin_y + y][ruin_x + x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+            # Check overlap
+            overlap = False
+            for (orx, ory, orw, orh) in rooms:
+                if (rx < orx + orw and rx + rw > orx and ry < ory + orh and ry + rh > ory):
+                    overlap = True
+                    break
 
-        # Scatter rubble inside
-        for _ in range(random.randint(5, 15)):
-            rx = random.randint(1, ruin_w - 2)
-            ry = random.randint(1, ruin_h - 2)
-            tiles[ruin_y + ry][ruin_x + rx] = Tile(rubble_decor["char"], rubble_decor["color"], rubble_decor["passable"], rubble_decor["name"], rubble_decor["properties"])
+            if not overlap:
+                rooms.append((rx, ry, rw, rh))
 
+        if not rooms:
+            return tiles
+
+        # Draw rooms
+        for (rx, ry, rw, rh) in rooms:
+            for y in range(ry, ry + rh):
+                for x in range(rx, rx + rw):
+                    is_border = (x == rx or x == rx + rw - 1 or y == ry or y == ry + rh - 1)
+                    if is_border:
+                        tiles[y][x] = Tile(wall_tile["char"], wall_tile["color"], wall_tile["passable"], wall_tile["name"], wall_tile["properties"])
+                    else:
+                        tiles[y][x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+
+        # Draw corridors
+        for i in range(len(rooms) - 1):
+            r1 = rooms[i]
+            r2 = rooms[i+1]
+            c1 = (r1[0] + r1[2]//2, r1[1] + r1[3]//2)
+            c2 = (r2[0] + r2[2]//2, r2[1] + r2[3]//2)
+
+            # Draw L-shaped corridor
+            if random.random() > 0.5:
+                # Horizontal then Vertical
+                for x in range(min(c1[0], c2[0]), max(c1[0], c2[0]) + 1):
+                    tiles[c1[1]][x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+                for y in range(min(c1[1], c2[1]), max(c1[1], c2[1]) + 1):
+                    tiles[y][c2[0]] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+            else:
+                # Vertical then Horizontal
+                for y in range(min(c1[1], c2[1]), max(c1[1], c2[1]) + 1):
+                    tiles[y][c1[0]] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+                for x in range(min(c1[0], c2[0]), max(c1[0], c2[0]) + 1):
+                    tiles[c2[1]][x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+
+        # Scatter rubble and add dungeon features
+        for (rx, ry, rw, rh) in rooms:
+            for _ in range(random.randint(2, 6)):
+                rdx = random.randint(rx + 1, rx + rw - 2)
+                rdy = random.randint(ry + 1, ry + rh - 2)
+                tiles[rdy][rdx] = Tile(rubble_decor["char"], rubble_decor["color"], rubble_decor["passable"], rubble_decor["name"], rubble_decor["properties"])
+
+
+            # Maybe spawn a hostile entity
+            if random.random() < 0.7:
+                ex, ey = random.randint(rx + 1, rx + rw - 2), random.randint(ry + 1, ry + rh - 2)
+                global_x = global_chunk_x * CHUNK_SIZE + ex
+                global_y = global_chunk_y * CHUNK_SIZE + ey
+
+                # Cultists or feral beasts
+                if random.random() < 0.5:
+                    animal_type = random.choice(["wolf", "dire_wolf"])
+                    animal_def = ANIMAL_DEFINITIONS.get(animal_type)
+                    if animal_def:
+                        new_entity = Animal(global_x, global_y, name=f"Dungeon {animal_def['name']}", animal_type=animal_type)
+                        new_entity.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
+                        new_entity.color = animal_def["color"]
+                        new_entity.combat.max_hp = animal_def["max_hp"]
+                        new_entity.combat.hp = new_entity.combat.max_hp
+                        new_entity.combat.is_hostile_to_player = True
+                        new_entity.behavior = "Aggressive"
+                        self.npcs.append(new_entity)
+                else:
+                    new_entity = NPC(global_x, global_y, name="Cultist", dialogue=["The master awakens..."], personality="fanatic")
+                    new_entity.economic.profession = "Cultist"
+                    new_entity.combat.is_hostile_to_player = True
+                    new_entity.combat.max_hp = 30
+                    new_entity.combat.hp = 30
+                    new_entity.char = ord('c')
+                    new_entity.color = (150, 0, 150) # Purple
+                    self.npcs.append(new_entity)
+
+
+        # Add a Treasure Chest in the last room
+        last_room = rooms[-1]
+        cx, cy = last_room[0] + last_room[2]//2, last_room[1] + last_room[3]//2
+        chest_def = DECORATION_ITEM_DEFINITIONS["chest_wooden"].copy()
+
+        # Add random loot to chest properties
+        loot_items = []
+        for _ in range(random.randint(2, 5)):
+            loot_items.append(random.choice(["money", "healing_salve", "iron_ingot", "gemstone", "sword_iron"]))
+
+        properties = chest_def.get("properties", {}).copy()
+        properties["is_dungeon_chest"] = True
+        properties["loot"] = loot_items
+        properties["is_locked"] = False # Unlocked for simple looting
+
+        tiles[cy][cx] = Tile(chest_def["char"], (255, 215, 0), False, "Treasure Chest", properties)
+
+        self._mark_entity_positions_dirty()
         return tiles
+
 
     def _draw_building(self, tiles, building, wall_tile_key):
         for i in range(building.height):

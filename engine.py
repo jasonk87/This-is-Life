@@ -355,6 +355,7 @@ class PlayerKnowledge:
     known_books: set[str] = field(default_factory=set)
     lockpicking_skill: int = 3
     known_locations: dict[str, tuple[int, int]] = field(default_factory=dict)
+    known_npcs: set[int] = field(default_factory=set)
 
 @dataclass
 class PlayerState:
@@ -736,6 +737,8 @@ class World:
 
     def request_open_dialogue(self, npc: NPC, mode: str = "talk"):
         """Queue a request for the UI layer to open dialogue with an NPC."""
+        if npc.id not in self.player.knowledge.known_npcs:
+            self.player.knowledge.known_npcs.add(npc.id)
         self.ui_requests.append(open_dialogue_request(npc, mode=mode))
 
     def request_close_dialogue(self, target_npc: NPC | None = None):
@@ -744,6 +747,8 @@ class World:
 
     def request_open_trade(self, npc: NPC):
         """Queue a request for the UI layer to open a trade session."""
+        if npc.id not in self.player.knowledge.known_npcs:
+            self.player.knowledge.known_npcs.add(npc.id)
         self.ui_requests.append(open_trade_request(npc))
 
     def request_close_trade(self, target_npc: NPC | None = None):
@@ -3808,11 +3813,19 @@ class World:
 
         player_in_attack_range = (manhattan_distance <= effective_attack_range)
 
+        # Ensure FOV is updated if they are hostile
+        if npc.id not in self.npc_fov_maps:
+            self._update_npc_fov(npc)
+
         # Determine visibility
         can_see_player = False
         if npc.id in self.npc_fov_maps and \
            0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT:
             can_see_player = self.npc_fov_maps[npc.id][player.y, player.x]
+
+        # If they can't explicitly "see" through FOV but are directly adjacent or very close (e.g., night time but aggressive)
+        if not can_see_player and manhattan_distance <= 3:
+            can_see_player = True
 
         # 2. Key Status Checks
         hp_percent = npc.combat.hp / npc.combat.max_hp

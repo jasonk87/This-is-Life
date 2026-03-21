@@ -290,7 +290,8 @@ class TestMainInputHelpers(unittest.TestCase):
 
     def test_world_goal_start_trade_emits_ui_request_instead_of_mutating_ui_state(self):
         world = object.__new__(engine.World)
-        npc = SimpleNamespace(economic=SimpleNamespace(profession="Merchant"), name="Merchant")
+        npc = SimpleNamespace(economic=SimpleNamespace(profession="Merchant"), name="Merchant", id=999)
+        world.player = SimpleNamespace(knowledge=SimpleNamespace(known_npcs=set()))
         world.ui_requests = []
         world.add_message_to_chat_log = unittest.mock.Mock()
         world.chat_ui_active = True

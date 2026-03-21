@@ -143,8 +143,34 @@ def _get_focus_summary(world):
     nearby = _get_visible_nearby_entities(world, limit=1)
     if nearby:
         distance, entity = nearby[0]
-        return standing_on, f"{entity.name} ({distance}t)"
+        name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
+        return standing_on, f"{name} ({distance}t)"
     return standing_on, "No one nearby"
+
+def _get_npc_display_name_and_color(world, npc):
+    """Returns the display name and color for an NPC based on player knowledge."""
+    if isinstance(npc, Animal):
+        return npc.name, (200, 200, 200)
+
+    is_known = npc.id in world.player.knowledge.known_npcs
+    is_famous = npc.social.fame >= 50
+    is_family = False # Can be expanded later
+
+    # Color logic
+    if is_famous:
+        color = (255, 215, 0) # Gold
+    elif is_family:
+        color = (100, 255, 100) # Green
+    else:
+        color = (240, 240, 240) # White/Gray
+
+    # Name logic
+    if is_known or is_famous:
+        return npc.name, color
+    else:
+        # Generic name
+        prof = getattr(npc.economic, "profession", "Person")
+        return f"Unknown {prof}", (150, 150, 150)
 
 def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_color):
     maximum = max(1, maximum)
@@ -193,10 +219,15 @@ def _get_focus_target(world, camera_x, camera_y):
 
     if world.interaction_context.get("active") and world.interaction_context.get("target_entities"):
         entity = world.interaction_context["target_entities"][world.interaction_context["selected_entity_index"]]
+        name = entity["name"]
+        if entity["type"] == "NPC":
+            actual_entity = world.get_entity_by_id(entity["id"])
+            if actual_entity:
+                name = _get_npc_display_name_and_color(world, actual_entity)[0]
         assign_focus(
             world.interaction_context["x"],
             world.interaction_context["y"],
-            entity["name"],
+            name,
             list(world.interaction_context.get("available_actions", [])),
             "interact",
             entity,
@@ -219,7 +250,13 @@ def _get_focus_target(world, camera_x, camera_y):
             entity = entities[0]
             actions = list(world._get_actions_for_entity(entity))
             if actions:
-                assign_focus(target_x, target_y, entity["name"], actions, source, entity)
+                name = entity["name"]
+                if entity["type"] == "NPC":
+                    # Check known npcs
+                    actual_entity = world.get_entity_by_id(entity["id"])
+                    if actual_entity:
+                        name = _get_npc_display_name_and_color(world, actual_entity)[0]
+                assign_focus(target_x, target_y, name, actions, source, entity)
                 return focus
         if tile and is_visible(world, target_x, target_y):
             label = tile.name
@@ -767,17 +804,35 @@ def draw_cursor_info(console, world, camera_x, camera_y):
     info_str = ""
     tile = world.get_tile_at(world_x, world_y)
     if tile:
-        info_str = f"Tile: {tile.name} ({world_x}, {world_y})"
-
-        # Add weather info to the cursor
-        info_str += f" | Weather: {world.weather}"
-
+        info_str = f"Tile: {tile.name}"
         if tile.name == "Animal Corpse" and "animal_type" in tile.properties:
             info_str += f" ({tile.properties['animal_type'].replace('_', ' ')})"
 
+        # Check for entities
+        entities_here = []
+        for entity in itertools.chain([world.player], world.all_npcs):
+            if int(entity.x) == world_x and int(entity.y) == world_y:
+                if entity.id == world.player.id:
+                    entities_here.append("You")
+                elif hasattr(entity, "physical") and entity.physical.is_dead:
+                    name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
+                    entities_here.append(f"Dead {name}")
+                else:
+                    name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
+                    entities_here.append(name)
+
+        if (world_x, world_y) in world.items_on_map:
+            items = world.items_on_map[(world_x, world_y)]
+            if items:
+                entities_here.append(f"Items ({len(items)})")
+
+        if entities_here:
+            info_str += f" | {', '.join(entities_here)}"
+
     if info_str:
-        # Print info at the bottom of the map view
-        console.print(x=1, y=MAP_HEIGHT - 1, string=info_str, fg=COLOR_CURSOR_INFO_TEXT)
+        # Print info at the bottom of the map view (we clear the line first)
+        console.print(x=1, y=MAP_HEIGHT - 1, string=" " * (MAP_WIDTH - 2), bg=(0,0,0))
+        console.print(x=1, y=MAP_HEIGHT - 1, string=info_str[:MAP_WIDTH - 2], fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
@@ -898,10 +953,12 @@ def draw(console, world, camera_x, camera_y):
     for distance, entity in _get_visible_nearby_entities(world, limit=3):
         screen_x = entity.x - camera_x
         screen_y = entity.y - camera_y - 1
-        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-            label = entity.name[:12]
-            label_x = max(0, min(MAP_WIDTH - len(label), screen_x - (len(label) // 2)))
-            console.print(x=label_x, y=screen_y, string=label, fg=(240, 240, 240), bg=(0, 0, 0))
+        # Only draw names above non-animal NPCs or important entities to reduce clutter
+        if not isinstance(entity, Animal) and 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+            name, color = _get_npc_display_name_and_color(world, entity)
+            label = name[:16]
+            label_x = max(0, min(MAP_WIDTH - len(label), int(screen_x) - (len(label) // 2)))
+            console.print(x=label_x, y=int(screen_y), string=label, fg=color, bg=(0, 0, 0))
 
     current_tile = world.get_tile_at(world.player.x, world.player.y)
     area_label = current_tile.name if current_tile else "Unknown"
@@ -958,15 +1015,21 @@ def draw(console, world, camera_x, camera_y):
             tile = world.get_tile_at(mouse_world_x, mouse_world_y)
             if tile:
                 info_text = tile.name
+                if tile.name == "Animal Corpse" and "animal_type" in tile.properties:
+                    info_text += f" ({tile.properties['animal_type'].replace('_', ' ')})"
 
                 # Check for entities
                 entities_here = []
                 for entity in itertools.chain([world.player], world.all_npcs):
-                    if entity.x == mouse_world_x and entity.y == mouse_world_y:
-                        if hasattr(entity, "physical") and entity.physical.is_dead:
-                            entities_here.append(f"Dead {entity.name}")
+                    if int(entity.x) == mouse_world_x and int(entity.y) == mouse_world_y:
+                        if entity.id == world.player.id:
+                            entities_here.append("You")
+                        elif hasattr(entity, "physical") and entity.physical.is_dead:
+                            name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
+                            entities_here.append(f"Dead {name}")
                         else:
-                            entities_here.append(entity.name)
+                            name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
+                            entities_here.append(name)
 
                 if (mouse_world_x, mouse_world_y) in world.items_on_map:
                     items = world.items_on_map[(mouse_world_x, mouse_world_y)]
@@ -977,6 +1040,7 @@ def draw(console, world, camera_x, camera_y):
                     info_text += f" | {', '.join(entities_here)}"
 
                 # Draw tooltip string near bottom right of map
+                console.print(x=1, y=MAP_HEIGHT - 1, string=" " * (MAP_WIDTH - 2), bg=(0,0,0))
                 console.print(x=1, y=MAP_HEIGHT - 1, string=info_text[:MAP_WIDTH - 2], fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
 
     # Draw chat log at the bottom

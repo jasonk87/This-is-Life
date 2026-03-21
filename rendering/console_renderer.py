@@ -44,19 +44,19 @@ DISPLAY_CHARS = {
     "plains": ".",
     "forest": "Y",
     "road": "=",
-    "wood_wall": "#",
-    "stone_wall": "#",
+    "wood_wall": "█",
+    "stone_wall": "█",
     "door": "+",
     "wood_floor": ".",
     "window": "o",
     "water": "~",
-    "deep_water": "~",
-    "mountain": "^",
+    "deep_water": "≈",
+    "mountain": "▲",
     "snow": "*",
-    "tall_grass": ";",
+    "tall_grass": "\"",
     "flower": "*",
     "well": "O",
-    "tilled_soil": ":",
+    "tilled_soil": "≈",
     "wheat_plant_growing": "i",
     "wheat_plant_mature": "I",
     "fire_trap_active": "x",
@@ -254,16 +254,23 @@ def _draw_focus_badge(console, world, focus, camera_x, camera_y):
     pulse = _pulse(world, speed=18.0, low=0.15, high=0.4, phase=1.2)
     console.bg[screen_y, screen_x] = _lighten(tuple(console.bg[screen_y, screen_x]), pulse)
 
-    if focus["source"] == "mouse":
-        info = focus["label"]
-    elif focus["actions"]:
-        info = f"E {focus['actions'][0]}"
+    # Only draw the floating badge above NPCs/Animals
+    # focus["entity"] might be a dictionary (from _get_interactables_at) or an object (if passed directly).
+    entity_obj = focus.get("entity")
+    if isinstance(entity_obj, dict):
+        entity_type = entity_obj.get("type", "")
+        if entity_type not in ("npc", "animal"):
+            return
+    elif entity_obj is None:
+        return # If there's no entity, don't draw a floating badge
     else:
-        info = focus["label"]
+        # It's an object, check its class or type
+        if not hasattr(entity_obj, "physical") or getattr(entity_obj.physical, "is_dead", False):
+            # Only living NPCs/Animals get floating text in this context
+            # (Assuming living things have 'physical' components, and inanimate objects don't)
+            return
 
-    if len(focus["actions"]) > 1:
-        info += f" +{len(focus['actions']) - 1}"
-    info = info[:22]
+    info = focus["label"][:22]
     badge_x = max(0, min(MAP_WIDTH - len(info), screen_x - (len(info) // 2)))
     badge_y = screen_y - 1 if screen_y > 1 else screen_y + 1
     console.print(x=badge_x, y=badge_y, string=info, fg=(255, 250, 210), bg=(24, 24, 36))
@@ -285,18 +292,43 @@ def _draw_minimap_panel(console, world, panel_x, start_y, width, height):
             world_x = int((sx / inner_w) * WORLD_WIDTH)
             chunk_x = min(chunk_cols - 1, max(0, world_x // CHUNK_SIZE))
             chunk = world.chunks[chunk_y][chunk_x]
+
             if not chunk.is_terrain_generated:
                 continue
+
             tile = chunk.tiles[local_y][world_x % CHUNK_SIZE]
             if tile is None:
                 continue
-            bg = _dim_color(_get_tile_background(tile), 0.9)
-            fg = _dim_color(tile.color, 0.7)
-            console.print(x=panel_x + 1 + sx, y=start_y + 1 + sy, string=".", fg=fg, bg=bg)
+
+            # If there's a village and the player has explored this chunk (or we just want to show POIs), render V or R
+            # Wait, let's only show discovered POIs. If it's explored map:
+            if hasattr(world, 'explored_map') and world.explored_map[world_y, world_x]:
+                if chunk.poi_type == "village":
+                    console.print(x=panel_x + 1 + sx, y=start_y + 1 + sy, string="V", fg=(255, 215, 0), bg=(0, 0, 0))
+                elif chunk.poi_type == "ruin":
+                    console.print(x=panel_x + 1 + sx, y=start_y + 1 + sy, string="R", fg=(180, 100, 200), bg=(0, 0, 0))
+                else:
+                    bg = _dim_color(_get_tile_background(tile), 0.9)
+                    fg = _dim_color(tile.color, 0.7)
+                    console.print(x=panel_x + 1 + sx, y=start_y + 1 + sy, string=".", fg=fg, bg=bg)
+            else:
+                # Unexplored, don't show POI but maybe show general terrain colors faintly
+                bg = _dim_color(_get_tile_background(tile), 0.95)
+                fg = _dim_color(tile.color, 0.8)
+                console.print(x=panel_x + 1 + sx, y=start_y + 1 + sy, string=".", fg=fg, bg=bg)
 
     player_x = panel_x + 1 + min(inner_w - 1, int((world.player.x / max(1, WORLD_WIDTH - 1)) * inner_w))
     player_y = start_y + 1 + min(inner_h - 1, int((world.player.y / max(1, WORLD_HEIGHT - 1)) * inner_h))
     console.print(x=player_x, y=player_y, string="@", fg=(255, 245, 140), bg=(120, 55, 20))
+
+    # Active Quest Marker
+    active_quests = list(world.player.knowledge.active_quests.values())
+    if active_quests and "target_location" in active_quests[0]:
+        t_loc = active_quests[0]["target_location"]
+        q_x = panel_x + 1 + min(inner_w - 1, int((t_loc[0] / max(1, WORLD_WIDTH - 1)) * inner_w))
+        q_y = start_y + 1 + min(inner_h - 1, int((t_loc[1] / max(1, WORLD_HEIGHT - 1)) * inner_h))
+        console.print(x=q_x, y=q_y, string="?", fg=(255, 100, 100), bg=(0, 0, 0))
+
     return start_y + height
 
 def _light_radius_for_world(world):
@@ -607,12 +639,12 @@ def draw_status_panel(console, world, camera_x, camera_y):
 
     active_quests = list(world.player.knowledge.active_quests.values())
     if active_quests:
-        console.print(x=panel_x + 1, y=y, string="Objective", fg=(255, 215, 0))
+        console.print(x=panel_x + 1, y=y, string="[Active Quest]", fg=(255, 215, 0))
         y += 1
         quest = active_quests[0]
-        title_lines = textwrap.wrap(quest["title"], width=panel_width - 2)
+        title_lines = textwrap.wrap(f"{quest['title']}", width=panel_width - 2)
         for line in title_lines:
-            console.print(x=panel_x + 1, y=y, string=line, fg=(255, 255, 255))
+            console.print(x=panel_x + 1, y=y, string=line, fg=(200, 240, 255))
             y += 1
 
         if quest["type"] == "fetch":
@@ -622,19 +654,22 @@ def draw_status_panel(console, world, camera_x, camera_y):
             for item in world.player.economic.inventory:
                 if item["key"] == item_key:
                     curr += item.get("quantity", 1)
-            console.print(x=panel_x + 2, y=y, string=f"({curr}/{req})", fg=(200, 200, 200))
+
+            color = (0, 255, 0) if curr >= req else (220, 220, 220)
+            console.print(x=panel_x + 2, y=y, string=f"Fetch {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)}: {curr}/{req}", fg=color)
             y += 1
         elif quest["type"] == "kill":
             req = quest.get("target_count", 1)
             curr = quest.get("progress", 0)
-            console.print(x=panel_x + 2, y=y, string=f"({curr}/{req})", fg=(200, 200, 200))
+            color = (0, 255, 0) if curr >= req else (220, 220, 220)
+            console.print(x=panel_x + 2, y=y, string=f"Targets Defeated: {curr}/{req}", fg=color)
             y += 1
 
         if len(active_quests) > 1:
             console.print(x=panel_x + 1, y=y, string=f"+ {len(active_quests)-1} more (Q)", fg=(100, 100, 100))
             y += 1
     else:
-        console.print(x=panel_x + 1, y=y, string="Objective", fg=(255, 215, 0))
+        console.print(x=panel_x + 1, y=y, string="[Active Quest]", fg=(255, 215, 0))
         y += 1
         console.print(x=panel_x + 2, y=y, string="Explore and talk", fg=(160, 160, 160))
         y += 2
@@ -868,6 +903,9 @@ def draw(console, world, camera_x, camera_y):
 
     if world.game_state == "INFO_MENU":
         draw_info_menu(console, world)
+
+    if world.game_state == "INVENTORY_MENU":
+        draw_inventory_menu(console, world)
 
     if world.game_state == "KNOWLEDGE_MENU":
         draw_knowledge_menu(console, world)
@@ -1172,12 +1210,52 @@ def draw_info_menu(console, world):
 
     stat_y += 1
 
-    # Inventory section
+    # Display note to use dedicated inventory menu
     inv_y = stat_y
-    console.print(x=x + 2, y=inv_y, string=f"Inventory ({len(world.player.economic.inventory)} items):", fg=(255, 255, 0))
-    inv_y += 1
+    console.print(x=x + 2, y=inv_y, string=f"Inventory has been moved to its own menu. Press 'U' to view.", fg=(180, 180, 180))
 
-    # Aggregate inventory for display
+    inv_y += 3
+    console.print(x=x + 2, y=inv_y, string="Active Quests:", fg=(255, 255, 0))
+    inv_y += 1
+    if not world.player.knowledge.active_quests:
+        console.print(x=x + 3, y=inv_y, string="- None", fg=(128, 128, 128))
+    else:
+        for quest_id, quest_data in world.player.knowledge.active_quests.items():
+            console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
+            inv_y += 1
+
+    inv_y += 2
+    console.print(x=x + 2, y=inv_y, string="Faction Status:", fg=(255, 255, 0))
+    inv_y += 1
+    wars_found = False
+    for v in world.villages:
+        if v.at_war_with:
+            wars_found = True
+            for enemy_id in v.at_war_with:
+                console.print(x=x + 3, y=inv_y, string=f"- Village {v.id[:4]} is at WAR with Village {enemy_id[:4]}", fg=(255, 100, 100))
+                inv_y += 1
+    if not wars_found:
+        console.print(x=x + 3, y=inv_y, string="- The realm is at peace.", fg=(150, 200, 150))
+
+def draw_inventory_menu(console, world):
+    """Draws the dedicated scrollable inventory menu, grouping items by category."""
+    menu_width = 60
+    menu_height = 40
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Inventory", clear=True)
+
+    console.print(x=x + 2, y=y + menu_height - 2, string="Up/Down to scroll | ESC to close", fg=(150, 150, 150))
+
+    # Aggregate and categorize inventory
+    categories = {
+        "Weapons/Armor": [],
+        "Food/Drink": [],
+        "Materials": [],
+        "Miscellaneous": []
+    }
+
     display_inventory = {}
     for item in world.player.economic.inventory:
         key = item["key"]
@@ -1187,18 +1265,66 @@ def draw_info_menu(console, world):
     for item_key, quantity in sorted(display_inventory.items()):
         item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
         item_name = item_def.get("name", item_key)
-        console.print(x=x + 3, y=inv_y, string=f"- {item_name}: {quantity}")
-        inv_y += 1
+        tags = item_def.get("item_type_tags", [])
 
-    inv_y += 2
-    console.print(x=x + 2, y=inv_y, string="Active Quests:", fg=(255, 255, 0))
-    inv_y += 1
-    if not world.player.knowledge.active_quests:
-        console.print(x=x + 3, y=inv_y, string="- None", fg=(128, 128, 128))
-    else:
-        for quest_id, quest_data in world.player.knowledge.active_quests.items():
-            console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
-            inv_y += 1
+        entry = f"{item_name} x{quantity}"
+
+        if "armor" in tags or "weapon" in tags:
+            categories["Weapons/Armor"].append(entry)
+        elif "food" in tags or "drink" in tags or "consumable" in tags:
+            categories["Food/Drink"].append(entry)
+        elif "resource" in tags or "material" in tags:
+            categories["Materials"].append(entry)
+        else:
+            categories["Miscellaneous"].append(entry)
+
+    # Build the flattened list of lines to draw
+    lines = []
+    lines.append(f"Money: {world.player.economic.money} coins")
+    lines.append("")
+
+    for cat_name, items in categories.items():
+        if items:
+            lines.append(f"--- {cat_name} ---")
+            for item_line in items:
+                lines.append(f"  {item_line}")
+            lines.append("")
+
+    if not lines:
+        lines.append("Your inventory is empty.")
+
+    # Implement scrolling
+    max_lines_to_display = menu_height - 4
+
+    if "inventory_scroll_offset" not in world.interaction_context:
+        world.interaction_context["inventory_scroll_offset"] = 0
+
+    scroll_offset = world.interaction_context["inventory_scroll_offset"]
+
+    # Bound check
+    max_scroll = max(0, len(lines) - max_lines_to_display)
+    if scroll_offset > max_scroll:
+        scroll_offset = max_scroll
+        world.interaction_context["inventory_scroll_offset"] = scroll_offset
+    elif scroll_offset < 0:
+        scroll_offset = 0
+        world.interaction_context["inventory_scroll_offset"] = scroll_offset
+
+    for i in range(max_lines_to_display):
+        list_index = scroll_offset + i
+        if list_index < len(lines):
+            line_text = lines[list_index]
+            fg_color = (255, 255, 255)
+            if line_text.startswith("--- "):
+                fg_color = (255, 215, 0)
+            elif line_text.startswith("Money:"):
+                fg_color = (150, 255, 150)
+            console.print(x=x + 2, y=y + 2 + i, string=line_text[:menu_width-4], fg=fg_color)
+
+    # Draw scrollbar if needed
+    if len(lines) > max_lines_to_display:
+        scrollbar_y = y + 2 + int((scroll_offset / max_scroll) * (max_lines_to_display - 1))
+        console.print(x=x + menu_width - 1, y=scrollbar_y, string="█", fg=(100, 100, 100))
 
 
 def draw_trade_menu(console, world):

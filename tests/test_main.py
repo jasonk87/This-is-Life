@@ -608,6 +608,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.world.trade_ui_merchant_item_index = 0
         self.world.buildings_by_id = {"shop_1": shop}
 
+        self.world.player.economic.money = 10 # Provide enough money for purchase
         with patch.object(self.world, "_get_village_for_npc", return_value=None):
             self.world.handle_trade_action()
 

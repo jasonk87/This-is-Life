@@ -1982,12 +1982,87 @@ class World:
                 pass
 
 
+
             # --- SCHEDULED UPDATES (Low Frequency) ---
             if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
                 continue
 
             npc.schedule.game_time_last_updated = self.game_time
             self._update_npc_fov(npc) # Update vision for AI decisions
+
+            # --- FACTION COMBAT / RAIDERS ---
+            if getattr(npc, "faction_id", None) and getattr(npc, "enemy_faction_id", None):
+                # Raider logic
+                if npc.id in self.npc_fov_maps:
+                    fov_map = self.npc_fov_maps[npc.id]
+                    visible_enemies = []
+                    for vn in self.village_npcs + [self.player]:
+                        if getattr(getattr(vn, 'physical', None), 'is_dead', False):
+                            continue
+                        if not (0 <= vn.x < WORLD_WIDTH and 0 <= vn.y < WORLD_HEIGHT):
+                            continue
+                        if not fov_map[vn.y, vn.x]:
+                            continue
+                        if isinstance(vn, Player):
+                            visible_enemies.append(vn)
+                            continue
+                        # Determine if this NPC is an enemy
+                        vn_village = self._get_village_for_npc(vn)
+                        if vn_village and vn_village.id == npc.enemy_faction_id:
+                            visible_enemies.append(vn)
+
+                    if visible_enemies:
+                        npc.combat.is_hostile_to_player = False # Explicitly tracking NPCs instead
+                        nearest_enemy = min(visible_enemies, key=lambda e: (npc.x - e.x)**2 + (npc.y - e.y)**2)
+
+                        # In the current implementation, 'is_hostile_to_player' controls combat AI for NPCs against the player.
+                        # We need a way for NPCs to attack OTHER NPCs. The codebase has `npc_attempt_attack_npc`.
+                        # Let's override the current task to engage the enemy.
+
+                        distance_to_enemy = abs(npc.x - nearest_enemy.x) + abs(npc.y - nearest_enemy.y)
+                        if distance_to_enemy <= 1:
+                            if isinstance(nearest_enemy, Player):
+                                self.npc_attempt_attack_player(npc, nearest_enemy)
+                            else:
+                                self.npc_attempt_attack_npc(npc, nearest_enemy)
+                            npc.schedule.current_path = []
+                            npc.schedule.current_destination_coords = None
+                        else:
+                            # Path to enemy
+                            if npc.schedule.current_task != "raiding_combat" or not npc.schedule.current_path or npc.schedule.current_destination_coords != (nearest_enemy.x, nearest_enemy.y):
+                                path = self.calculate_path(npc.x, npc.y, nearest_enemy.x, nearest_enemy.y)
+                                if path:
+                                    npc.schedule.current_path = path
+                                    npc.schedule.current_destination_coords = (nearest_enemy.x, nearest_enemy.y)
+                                    npc.schedule.current_task = "raiding_combat"
+                        continue # Skip normal scheduling if in faction combat
+
+            # --- VILLAGE DEFENDERS ---
+            if npc.economic.profession in ["Guard", "Sheriff", "Militia"]:
+                if npc.id in self.npc_fov_maps:
+                    fov_map = self.npc_fov_maps[npc.id]
+                    visible_raiders = [
+                        r for r in self.npcs
+                        if getattr(r, "enemy_faction_id", None) and not r.physical.is_dead and
+                           0 <= r.x < WORLD_WIDTH and 0 <= r.y < WORLD_HEIGHT and fov_map[r.y, r.x]
+                    ]
+                    if visible_raiders:
+                        nearest_raider = min(visible_raiders, key=lambda e: (npc.x - e.x)**2 + (npc.y - e.y)**2)
+                        distance = abs(npc.x - nearest_raider.x) + abs(npc.y - nearest_raider.y)
+
+                        if distance <= 1:
+                            self.npc_attempt_attack_npc(npc, nearest_raider)
+                            npc.schedule.current_path = []
+                        else:
+                            if npc.schedule.current_task != "defending_village":
+                                self.add_message_to_chat_log(f"{npc.name} spots a raider and charges!")
+                            path = self.calculate_path(npc.x, npc.y, nearest_raider.x, nearest_raider.y)
+                            if path:
+                                npc.schedule.current_path = path
+                                npc.schedule.current_destination_coords = (nearest_raider.x, nearest_raider.y)
+                                npc.schedule.current_task = "defending_village"
+                        continue
+
 
             current_time_in_day = self.game_time % DAY_LENGTH_TICKS
             time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
@@ -4174,10 +4249,17 @@ class World:
                 actions.extend(["Talk", "Attack"])
                 if entity_data.economic.profession in TRADE_CAPABLE_PROFESSIONS:
                     actions.append("Trade")
+
+                # Check if this NPC is an official in a warring village
+                village = self._get_village_for_npc(entity_data)
+                if village and village.at_war_with and entity_data.economic.profession in ["Mayor", "Sheriff", "Guard"]:
+                    actions.append("Offer Mercenary Services")
+
         elif entity_type == "item":
             actions.append("Pick up")
             if entity_data["item_key"].startswith("book_"):
                 actions.append("Read")
+
         elif entity_type == "tile":
             if isinstance(entity_data, Tree) and entity_data.is_choppable:
                 actions.append("Chop")
@@ -4185,6 +4267,9 @@ class World:
                 actions.append("Toggle Door")
             elif entity_data.name == "Animal Corpse":
                 actions.append("Butcher")
+            elif entity_data.name == "Treasure Chest":
+                actions.append("Loot Chest")
+
             elif entity_data.name == "Plains" and self.player.has_item("stone_hoe"):
                 actions.append("Till Soil")
             elif entity_data.name == "Tilled Soil" and self.player.has_item("wheat_seeds"):
@@ -4387,6 +4472,82 @@ class World:
             if learned_count > 0:
                 self.add_message_to_chat_log(f"You learned about {learned_count} historical events from reading this book.")
             self.player.knowledge.known_books.add(book_item_key)
+
+
+    def player_attempt_loot_chest(self, x: int, y: int):
+        """Handles the player interacting with a treasure chest."""
+        target_tile = self.get_tile_at(x, y)
+        if not target_tile or target_tile.name != "Treasure Chest":
+            self.add_message_to_chat_log("There is no chest here.")
+            return
+
+        properties = target_tile.properties
+        if properties.get("is_locked"):
+            self.add_message_to_chat_log("The chest is locked. You need a lockpick.")
+            # Lockpicking logic could go here
+            return
+
+        loot = properties.get("loot", [])
+        if not loot:
+            self.add_message_to_chat_log("The chest is empty.")
+            return
+
+        self.add_message_to_chat_log(f"You open the chest and find: {', '.join([ITEM_DEFINITIONS.get(k, {}).get('name', k) for k in loot])}.")
+
+        for item_key in loot:
+            if item_key == "money":
+                self.player.economic.money += random.randint(10, 50)
+                self.add_message_to_chat_log("You found some gold coins.")
+            else:
+                self.player.add_item(item_key, 1)
+
+        # Empty the chest
+        target_tile.properties["loot"] = []
+        target_tile.name = "Empty Chest"
+
+        # Trigger an event
+        self.log_event(
+            event_type="chest_looted",
+            description="The player plundered a dungeon chest.",
+            subject_id=self.player.id,
+            location=(x, y)
+        )
+
+    def player_attempt_mercenary_contract(self, npc: NPC):
+        """Handles the player attempting to offer mercenary services to a warring village."""
+        village = self._get_village_for_npc(npc)
+        if not village or not village.at_war_with:
+            self.add_message_to_chat_log(f"{npc.name} tells you they have no need for mercenaries right now.")
+            return
+
+        enemy_village_id = list(village.at_war_with)[0] # Just grab the first one for simplicity
+
+        # Check if already on a contract
+        contract_id = f"merc_contract_{enemy_village_id}"
+        if contract_id in self.player.knowledge.active_quests:
+            self.add_message_to_chat_log(f"{npc.name} says: 'You already have a contract! Go defeat our enemies!'")
+            return
+
+        self.add_message_to_chat_log(f"{npc.name} looks you up and down.")
+
+        if self.player.combat.max_hp < 20 and self.player.social.fame < 50:
+            self.add_message_to_chat_log(f"{npc.name} scoffs. 'You don't look tough enough to help us in the war.'")
+            return
+
+        self.add_message_to_chat_log(f"{npc.name} says: 'We are at war. If you defeat 3 raiders or enemy guards, we will pay you 100 gold.'")
+
+        # Add dynamic quest
+        self.player.knowledge.active_quests[contract_id] = {
+            "title": f"Mercenary: Defend the Village",
+            "description": f"{npc.name} hired you to defeat enemies from the rival village.",
+            "type": "kill",
+            "target_faction_id": enemy_village_id,
+            "target_count": 3,
+            "progress": 0,
+            "reward_money": 100,
+            "giver_id": npc.id
+        }
+        self.add_message_to_chat_log(f"Quest accepted: Mercenary: Defend the Village.")
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
@@ -4949,6 +5110,14 @@ class World:
 
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         self.add_message_to_chat_log(f"{dead_npc.name} has died!")
+
+        if killer_id == self.player.id:
+            for quest_id, quest_data in self.player.knowledge.active_quests.items():
+                if quest_data.get("type") == "kill" and "target_faction_id" in quest_data:
+                    if getattr(dead_npc, "faction_id", getattr(dead_npc, "enemy_faction_id", None)) == quest_data["target_faction_id"]:
+                        quest_data["progress"] += 1
+                        self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})")
+
 
         death_event = self.log_event(
             event_type="entity_death",
@@ -6835,7 +7004,7 @@ class World:
         if chunk.village:
             self._render_village_tiles(chunk)
         elif chunk.ruin:
-            self._generate_ruin_layout(chunk) # Renders directly to tiles
+            self._generate_ruin_layout(chunk, chunk_x, chunk_y) # Renders directly to tiles
 
     def _render_biome_details(self, chunk, chunk_x, chunk_y):
         """Renders trees, grass, and animals for a chunk."""
@@ -7151,8 +7320,9 @@ class World:
                 local_y = wy % CHUNK_SIZE
                 tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
 
-    def _generate_ruin_layout(self, chunk: Chunk):
-        """Generates a ruined structure within a chunk."""
+
+    def _generate_ruin_layout(self, chunk: Chunk, global_chunk_x: int, global_chunk_y: int):
+        """Generates a multi-room ruined structure within a chunk."""
         tiles = chunk.tiles if chunk.tiles else [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
         chunk.tiles = tiles
 
@@ -7160,29 +7330,118 @@ class World:
         floor_tile = TILE_DEFINITIONS["mossy_cobblestone"]
         rubble_decor = DECORATION_ITEM_DEFINITIONS["rubble"]
 
-        # Simple rectangular ruin
-        ruin_w = random.randint(8, 12)
-        ruin_h = random.randint(8, 12)
-        ruin_x = (CHUNK_SIZE - ruin_w) // 2
-        ruin_y = (CHUNK_SIZE - ruin_h) // 2
+        # Simple dungeon generator (BSP-ish / Drunkard Walk combination)
+        rooms = []
+        num_rooms = random.randint(3, 5)
 
-        for y in range(ruin_h):
-            for x in range(ruin_w):
-                is_border = x == 0 or x == ruin_w - 1 or y == 0 or y == ruin_h - 1
+        for _ in range(num_rooms):
+            rw = random.randint(5, 9)
+            rh = random.randint(5, 9)
+            rx = random.randint(2, CHUNK_SIZE - rw - 2)
+            ry = random.randint(2, CHUNK_SIZE - rh - 2)
 
-                # Introduce gaps in the walls
-                if is_border and random.random() > 0.3: # 30% chance of a gap
-                    tiles[ruin_y + y][ruin_x + x] = Tile(wall_tile["char"], wall_tile["color"], wall_tile["passable"], wall_tile["name"], wall_tile["properties"])
-                elif not is_border:
-                    tiles[ruin_y + y][ruin_x + x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+            # Check overlap
+            overlap = False
+            for (orx, ory, orw, orh) in rooms:
+                if (rx < orx + orw and rx + rw > orx and ry < ory + orh and ry + rh > ory):
+                    overlap = True
+                    break
 
-        # Scatter rubble inside
-        for _ in range(random.randint(5, 15)):
-            rx = random.randint(1, ruin_w - 2)
-            ry = random.randint(1, ruin_h - 2)
-            tiles[ruin_y + ry][ruin_x + rx] = Tile(rubble_decor["char"], rubble_decor["color"], rubble_decor["passable"], rubble_decor["name"], rubble_decor["properties"])
+            if not overlap:
+                rooms.append((rx, ry, rw, rh))
 
+        if not rooms:
+            return tiles
+
+        # Draw rooms
+        for (rx, ry, rw, rh) in rooms:
+            for y in range(ry, ry + rh):
+                for x in range(rx, rx + rw):
+                    is_border = (x == rx or x == rx + rw - 1 or y == ry or y == ry + rh - 1)
+                    if is_border:
+                        tiles[y][x] = Tile(wall_tile["char"], wall_tile["color"], wall_tile["passable"], wall_tile["name"], wall_tile["properties"])
+                    else:
+                        tiles[y][x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+
+        # Draw corridors
+        for i in range(len(rooms) - 1):
+            r1 = rooms[i]
+            r2 = rooms[i+1]
+            c1 = (r1[0] + r1[2]//2, r1[1] + r1[3]//2)
+            c2 = (r2[0] + r2[2]//2, r2[1] + r2[3]//2)
+
+            # Draw L-shaped corridor
+            if random.random() > 0.5:
+                # Horizontal then Vertical
+                for x in range(min(c1[0], c2[0]), max(c1[0], c2[0]) + 1):
+                    tiles[c1[1]][x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+                for y in range(min(c1[1], c2[1]), max(c1[1], c2[1]) + 1):
+                    tiles[y][c2[0]] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+            else:
+                # Vertical then Horizontal
+                for y in range(min(c1[1], c2[1]), max(c1[1], c2[1]) + 1):
+                    tiles[y][c1[0]] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+                for x in range(min(c1[0], c2[0]), max(c1[0], c2[0]) + 1):
+                    tiles[c2[1]][x] = Tile(floor_tile["char"], floor_tile["color"], floor_tile["passable"], floor_tile["name"])
+
+        # Scatter rubble and add dungeon features
+        for (rx, ry, rw, rh) in rooms:
+            for _ in range(random.randint(2, 6)):
+                rdx = random.randint(rx + 1, rx + rw - 2)
+                rdy = random.randint(ry + 1, ry + rh - 2)
+                tiles[rdy][rdx] = Tile(rubble_decor["char"], rubble_decor["color"], rubble_decor["passable"], rubble_decor["name"], rubble_decor["properties"])
+
+
+            # Maybe spawn a hostile entity
+            if random.random() < 0.7:
+                ex, ey = random.randint(rx + 1, rx + rw - 2), random.randint(ry + 1, ry + rh - 2)
+                global_x = global_chunk_x * CHUNK_SIZE + ex
+                global_y = global_chunk_y * CHUNK_SIZE + ey
+
+                # Cultists or feral beasts
+                if random.random() < 0.5:
+                    animal_type = random.choice(["wolf", "dire_wolf"])
+                    animal_def = ANIMAL_DEFINITIONS.get(animal_type)
+                    if animal_def:
+                        new_entity = Animal(global_x, global_y, name=f"Dungeon {animal_def['name']}", animal_type=animal_type)
+                        new_entity.char = animal_def["char"] if isinstance(animal_def["char"], int) else ord(animal_def["char"])
+                        new_entity.color = animal_def["color"]
+                        new_entity.combat.max_hp = animal_def["max_hp"]
+                        new_entity.combat.hp = new_entity.combat.max_hp
+                        new_entity.combat.is_hostile_to_player = True
+                        new_entity.behavior = "Aggressive"
+                        self.npcs.append(new_entity)
+                else:
+                    new_entity = NPC(global_x, global_y, name="Cultist", dialogue=["The master awakens..."], personality="fanatic")
+                    new_entity.economic.profession = "Cultist"
+                    new_entity.combat.is_hostile_to_player = True
+                    new_entity.combat.max_hp = 30
+                    new_entity.combat.hp = 30
+                    new_entity.char = ord('c')
+                    new_entity.color = (150, 0, 150) # Purple
+                    self.npcs.append(new_entity)
+
+
+        # Add a Treasure Chest in the last room
+        last_room = rooms[-1]
+        cx, cy = last_room[0] + last_room[2]//2, last_room[1] + last_room[3]//2
+        chest_def = DECORATION_ITEM_DEFINITIONS["chest_wooden"].copy()
+
+        # Add random loot to chest properties
+        loot_items = []
+        for _ in range(random.randint(2, 5)):
+            loot_items.append(random.choice(["money", "healing_salve", "iron_ingot", "gemstone", "sword_iron"]))
+
+        properties = chest_def.get("properties", {}).copy()
+        properties["is_dungeon_chest"] = True
+        properties["loot"] = loot_items
+        properties["is_locked"] = False # Unlocked for simple looting
+
+        tiles[cy][cx] = Tile(chest_def["char"], (255, 215, 0), False, "Treasure Chest", properties)
+
+        self._mark_entity_positions_dirty()
         return tiles
+
 
     def _draw_building(self, tiles, building, wall_tile_key):
         for i in range(building.height):
@@ -8063,7 +8322,64 @@ class World:
             location=(work_building.global_center_x, work_building.global_center_y)
         )
 
+
+    def _spawn_raiding_party(self, source_village, target_village):
+        """Spawns a raiding party from source_village to attack target_village."""
+        if not source_village or not target_village: return
+
+        # Pick a spawn location near the edge of the source village chunk
+        # For simplicity, spawn at town square of source
+        spawn_x, spawn_y = 0, 0
+        if "town_square_center" in source_village.interaction_points:
+            spawn_x, spawn_y = source_village.interaction_points["town_square_center"][0]
+        else:
+            return
+
+        target_coords = None
+        if "town_square_center" in target_village.interaction_points:
+            target_coords = target_village.interaction_points["town_square_center"][0]
+        else:
+            return
+
+        party_size = random.randint(2, 4)
+        for i in range(party_size):
+            # Offset spawns slightly
+            dx, dy = random.randint(-2, 2), random.randint(-2, 2)
+            raider = NPC(
+                x=max(0, min(WORLD_WIDTH - 1, spawn_x + dx)),
+                y=max(0, min(WORLD_HEIGHT - 1, spawn_y + dy)),
+                name=f"Raider of Village {source_village.id[:4]}",
+                dialogue=["Die, scum!", "For our village!", "Give me your gold!"],
+                personality="aggressive",
+                player_id=self.player.id
+            )
+            raider.economic.profession = "Raider"
+            raider.combat.max_hp = 35
+            raider.combat.hp = 35
+            raider.char = ord('r')
+            raider.color = (255, 100, 100) # Reddish
+            raider.speed = 1.2
+
+            # Custom properties for raiders
+            raider.faction_id = source_village.id
+            raider.enemy_faction_id = target_village.id
+
+            # Start them moving towards the target
+            path = self.calculate_path(raider.x, raider.y, target_coords[0], target_coords[1])
+            if path:
+                raider.schedule.current_path = path
+                raider.schedule.current_destination_coords = target_coords
+                raider.schedule.current_task = "raiding_village"
+            else:
+                raider.schedule.current_task = "wandering_hostile"
+
+            self.npcs.append(raider) # Spawn as world npcs, not village_npcs
+            self._mark_entity_positions_dirty()
+
+        self.add_message_to_chat_log(f"A raiding party was spotted leaving for a rival settlement!")
+
     def _spawn_migrant(self, village: Village, x: int, y: int):
+
         """Spawns a new migrant NPC into the village."""
         prompt = LLM_PROMPTS["npc_personality"].format(
             player_criminal_points=0,
@@ -8454,6 +8770,7 @@ class World:
                                     )
                                     village.local_events.append(self.global_events[-1])
 
+
                             # Make peace if at war but relationships recover (unlikely without intervention but possible)
                             if other_village.id in village.at_war_with and village.village_relationships.get(other_village.id, 0) > -10:
                                 village.at_war_with.remove(other_village.id)
@@ -8466,6 +8783,19 @@ class World:
                                     location=village.interaction_points.get("town_square_center", (0,0))
                                 )
                                 village.local_events.append(self.global_events[-1])
+
+                            # Dispatch raiding parties if still at war
+                            if other_village.id in village.at_war_with:
+                                if random.random() < 0.1: # 10% chance per day per enemy village
+                                    self._spawn_raiding_party(village, other_village)
+                                    self.log_event(
+                                        event_type="raiding_party_dispatched",
+                                        description=f"A raiding party was sent to attack a rival village.",
+                                        subject_id=-1,
+                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                    )
+                                    village.local_events.append(self.global_events[-1])
+
 
                     # --- Abstract History/Scribing ---
                     # Check if there is a Scribe in this village

@@ -12,6 +12,8 @@ class MockWorld(World):
         self.player = MagicMock(spec=Player)
         self.player.id = 1
         self.player.name = "Player" # Fix for name sort
+        self.player.x = 0
+        self.player.y = 0
         self.buildings_by_id = {}
         self.add_message_to_chat_log = MagicMock()
         self.chunks = [[MagicMock()]]
@@ -25,6 +27,10 @@ class MockWorld(World):
         self.player_fov_map = MagicMock()
         self.npc_fov_maps = {}
         self.items_on_map = {}
+        self.entity_positions_dirty = True
+        self.entity_chunks_dirty = True
+        self.entity_positions = {}
+        self.entities_by_chunk = {}
 
     def get_entity_by_id(self, entity_id):
         if entity_id == self.player.id: return self.player

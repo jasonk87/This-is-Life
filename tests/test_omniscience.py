@@ -29,6 +29,10 @@ class MockWorld(World):
         self.trade_ui_npc_target = None
         self.trade_ui_active = False
         self.last_talked_to_npc = None
+        self.entity_positions_dirty = True
+        self.entity_chunks_dirty = True
+        self.entity_positions = {}
+        self.entities_by_chunk = {}
 
     def get_entity_by_id(self, entity_id):
         pass # To be mocked

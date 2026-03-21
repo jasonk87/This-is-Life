@@ -61,14 +61,14 @@ TILE_DEFINITIONS = {
         "name": "Road"
     },
     "wood_wall": {
-        "char": "#",
+        "char": "█", # Solid block for walls makes buildings much more recognizable
         "color": COLORS["wall_fg"],
         "passable": False,
         "name": "Wood Wall",
         "properties": {"provides_shelter": True}
     },
     "stone_wall": {
-        "char": "#",
+        "char": "█",
         "color": COLORS["grey"],
         "passable": False,
         "name": "Stone Wall",
@@ -137,7 +137,7 @@ TILE_DEFINITIONS = {
         "name": "Well"
     },
     "capital_hall_wall": {
-        "char": "#",
+        "char": "█",
         "color": (150, 150, 150), # Grey stone
         "passable": False,
         "name": "Capital Hall Wall",
@@ -150,7 +150,7 @@ TILE_DEFINITIONS = {
         "name": "Jail Bars"
     },
     "sheriff_office_wall": {
-        "char": "#",
+        "char": "█",
         "color": (120, 100, 80), # Brownish grey
         "passable": False,
         "name": "Sheriff Office Wall",
@@ -278,7 +278,7 @@ TILE_DEFINITIONS["wheat_plant"] = {
 }
 
 TILE_DEFINITIONS["cracked_stone_wall"] = {
-    "char": "#",
+    "char": "▒", # Shaded block to look like cracked wall
     "color": (105, 105, 105), # DimGray
     "passable": False,
     "name": "Cracked Stone Wall",

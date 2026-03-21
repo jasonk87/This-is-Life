@@ -458,17 +458,40 @@ def _draw_status_panel_legacy(console, world):
 
     # --- Vitals ---
     # HP Bar
-    hp_pct = world.player.combat.hp / world.player.combat.max_hp
+    hp_pct = world.player.combat.hp / world.player.combat.max_hp if world.player.combat.max_hp > 0 else 0
     bar_width = STATUS_PANEL_WIDTH - 4
     filled_width = int(bar_width * hp_pct)
 
-    console.print(x=panel_x + 1, y=y, string="Health:", fg=(255, 100, 100))
+    console.print(x=panel_x + 1, y=y, string="Overall Health:", fg=(255, 100, 100))
     y += 1
     console.draw_rect(x=panel_x + 1, y=y, width=bar_width, height=1, ch=ord('░'), fg=(100, 0, 0)) # Empty
     if filled_width > 0:
         console.draw_rect(x=panel_x + 1, y=y, width=filled_width, height=1, ch=ord('█'), fg=(255, 0, 0)) # Filled
     console.print(x=panel_x + 2, y=y, string=f"{world.player.combat.hp}/{world.player.combat.max_hp}", fg=(255, 255, 255))
     y += 2
+
+    # Draw small body part indicators if injured
+    injured_parts = []
+    for part, hp in world.player.combat.body_parts_hp.items():
+        max_hp = world.player.combat.body_parts_max_hp.get(part, 1)
+        if hp < max_hp:
+            injured_parts.append((part, hp, max_hp))
+
+    if injured_parts:
+        console.print(x=panel_x + 1, y=y, string="Injuries:", fg=(255, 100, 0))
+        y += 1
+        for part, hp, max_hp in injured_parts[:4]: # Show top 4 injuries to save space
+            hp_pct = hp / max_hp if max_hp > 0 else 0
+            if hp_pct > 0.5: color = (255, 255, 0)
+            elif hp_pct > 0: color = (255, 100, 0)
+            else: color = (255, 0, 0)
+
+            p_name = part.replace("_", " ").title()[:12]
+            console.print(x=panel_x + 2, y=y, string=f"{p_name}: {hp}/{max_hp}", fg=color)
+            y += 1
+        if len(injured_parts) > 4:
+            console.print(x=panel_x + 2, y=y, string=f"+{len(injured_parts) - 4} more...", fg=(100, 100, 100))
+            y += 1
 
     # Hunger
     hunger_pct = min(1.0, world.player.physical.hunger / world.player.physical.max_hunger)
@@ -1184,6 +1207,24 @@ def draw_info_menu(console, world):
     if world.player.social.title:
         console.print(x=x + 2, y=stat_y, string=f"Title: {world.player.social.title}", fg=(0, 255, 255))
     stat_y += 2
+
+    # Body Parts Health
+    console.print(x=x + 2, y=stat_y, string="Body Status:", fg=(255, 100, 100))
+    stat_y += 1
+    for part, hp in world.player.combat.body_parts_hp.items():
+        max_hp = world.player.combat.body_parts_max_hp.get(part, 1)
+        part_name = part.replace("_", " ").title()
+
+        # Color based on health
+        hp_pct = hp / max_hp if max_hp > 0 else 0
+        if hp_pct > 0.75: color = (0, 255, 0)
+        elif hp_pct > 0.25: color = (255, 255, 0)
+        elif hp_pct > 0: color = (255, 100, 0)
+        else: color = (255, 0, 0)
+
+        console.print(x=x + 3, y=stat_y, string=f"- {part_name}: {hp}/{max_hp}", fg=color)
+        stat_y += 1
+    stat_y += 1
 
     # Equipment section
     stat_y += 1

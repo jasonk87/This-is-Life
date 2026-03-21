@@ -1189,7 +1189,7 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
             self.world.npc_attempt_attack_player(npc, self.world.player)
 
         self.assertEqual(self.world.player.combat.hp, self.world.player.combat.max_hp - 2)
-        self.assertTrue(any("(HP: 28/30)" in message for message in self.world.chat_log))
+        self.assertTrue(any("(HP:" in message and "28/30" in message for message in self.world.chat_log) or any(f"HP: {self.world.player.combat.hp}/{self.world.player.combat.max_hp}" in message for message in self.world.chat_log))
 
     def test_animal_defaults_live_in_nested_component_state(self):
         animal = engine.Animal(5, 6, name="Goat", animal_type="goat")

@@ -278,9 +278,46 @@ class PlayerPhysicalState:
 
 @dataclass
 class PlayerCombatStats:
-    max_hp: int = 30
-    hp: int = 30
+    body_parts_hp: dict[str, int] = field(default_factory=lambda: {"head": 10, "torso": 20, "left_arm": 10, "right_arm": 10, "left_leg": 10, "right_leg": 10})
+    body_parts_max_hp: dict[str, int] = field(default_factory=lambda: {"head": 10, "torso": 20, "left_arm": 10, "right_arm": 10, "left_leg": 10, "right_leg": 10})
     defense_bonus: int = 0
+
+    @property
+    def hp(self) -> int:
+        return sum(max(0, hp) for hp in self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value: int):
+        # We handle setting hp = max_hp or healing/damaging generally.
+        current = self.hp
+        if current == 0:
+            return
+        ratio = value / current if current > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = min(self.body_parts_max_hp[part], int(self.body_parts_hp[part] * ratio))
+        # Optional: ensure exact match if needed, but for our case maxing is the most common use.
+        if value >= self.max_hp:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = self.body_parts_max_hp[part]
+
+    @property
+    def max_hp(self) -> int:
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value: int):
+        current_max = self.max_hp
+        if current_max == 0:
+            self.body_parts_max_hp = {"head": value//6, "torso": value//3, "left_arm": value//6, "right_arm": value//6, "left_leg": value//6, "right_leg": value//6}
+            return
+
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+
+        remainder = value - sum(self.body_parts_max_hp.values())
+        if remainder != 0:
+            self.body_parts_max_hp["torso"] += remainder
 
 @dataclass
 class PlayerSocialState:
@@ -362,17 +399,37 @@ class Player:
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
         effective_damage = max(0, amount - self.combat.defense_bonus)
-        self.combat.hp -= effective_damage
-        if self.combat.hp < 0:
-            self.combat.hp = 0
+
+        if effective_damage > 0:
+            import random
+            available_parts = [part for part, hp in self.combat.body_parts_hp.items() if hp > 0]
+            if not available_parts:
+                available_parts = list(self.combat.body_parts_hp.keys())
+
+            target_part = random.choice(available_parts)
+            self.combat.body_parts_hp[target_part] -= effective_damage
+
+            world_ref = world if world else getattr(self, 'world_ref', None)
+            if world_ref:
+                world_ref.add_message_to_chat_log(f"Your {target_part.replace('_', ' ')} takes {effective_damage} damage!")
+
+            if self.combat.body_parts_hp[target_part] < 0:
+                overflow = -self.combat.body_parts_hp[target_part]
+                self.combat.body_parts_hp[target_part] = 0
+                if target_part != "torso":
+                    self.combat.body_parts_hp["torso"] -= overflow
+                    if self.combat.body_parts_hp["torso"] < 0:
+                        self.combat.body_parts_hp["torso"] = 0
 
         world_ref = world if world else getattr(self, 'world_ref', None)
 
-        if world_ref:
+        if world_ref and effective_damage > 0:
             world_ref.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 0, 0)))
 
-        if self.combat.hp <= 0 and world_ref:
-            world_ref.game_state = "PLAYER_DEAD"
+        # Death conditions
+        if self.combat.body_parts_hp.get("torso", 0) <= 0 or self.combat.body_parts_hp.get("head", 0) <= 0 or self.combat.hp <= 0:
+            if world_ref:
+                world_ref.game_state = "PLAYER_DEAD"
 
         return effective_damage
 
@@ -1383,6 +1440,20 @@ class World:
             if npc.schedule.current_path:
                 moves_made = 0
                 max_moves = getattr(npc, 'speed', 1)
+
+                # Factor in leg damage
+                if hasattr(npc, 'combat') and hasattr(npc.combat, 'body_parts_hp'):
+                    ll = npc.combat.body_parts_hp.get("left_leg", 1)
+                    rl = npc.combat.body_parts_hp.get("right_leg", 1)
+                    if ll <= 0 and rl <= 0:
+                        max_moves = 0 # Can't move at all if both legs are broken
+                    elif ll <= 0 or rl <= 0:
+                        # 50% chance to not move this turn if one leg is broken
+                        if random.random() < 0.5:
+                            max_moves = 0
+                        else:
+                            max_moves = max(1, max_moves // 2)
+
                 while moves_made < max_moves and npc.schedule.current_path and len(npc.schedule.current_path) > 1:
                     next_x, next_y = npc.schedule.current_path[1] # Path index 0 is current pos
 
@@ -7558,6 +7629,17 @@ class World:
                 self.player.state.riding_animal_id = None
                 return 0
 
+        # Leg damage checks
+        ll = self.player.combat.body_parts_hp.get("left_leg", 1)
+        rl = self.player.combat.body_parts_hp.get("right_leg", 1)
+        if ll <= 0 and rl <= 0:
+            self.add_message_to_chat_log("Your legs are broken, you cannot move!")
+            return 1 # Wasted turn
+        elif ll <= 0 or rl <= 0:
+            if random.random() < 0.5:
+                self.add_message_to_chat_log("You stumble due to your injured leg.")
+                return 1 # Wasted turn
+
         new_x, new_y = self.player.x + dx, self.player.y + dy
         destination_tile = self.get_tile_at(new_x, new_y)
 
@@ -7568,6 +7650,8 @@ class World:
             self._update_entity_position(self.player, new_x, new_y)
 
             movement_cost = int(destination_tile.properties.get("movement_cost", 1))
+            if ll <= 0 or rl <= 0:
+                movement_cost *= 2 # Moving with a broken leg costs twice as much time
 
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)

@@ -10,55 +10,9 @@ from data.items import ITEM_DEFINITIONS
 @dataclass
 class CombatStats:
     """Stores combat-related attributes for an entity."""
-    body_parts_hp: dict[str, int] = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
-    body_parts_max_hp: dict[str, int] = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    max_hp: int = 20
+    hp: int = 20
     toughness: str = "average"
-
-    @property
-    def hp(self) -> int:
-        return sum(max(0, hp) for hp in self.body_parts_hp.values())
-
-    @hp.setter
-    def hp(self, value: int):
-        current = self.hp
-        if current == 0 and value > 0:
-            # Reviving or healing from 0
-            for part in self.body_parts_hp:
-                self.body_parts_hp[part] = max(1, int(self.body_parts_max_hp[part] * (value / self.max_hp)))
-            return
-        elif current == 0:
-            return
-
-        ratio = value / current if current > 0 else 0
-        for part in self.body_parts_hp:
-            self.body_parts_hp[part] = min(self.body_parts_max_hp[part], int(self.body_parts_hp[part] * ratio))
-
-        if value >= self.max_hp:
-            for part in self.body_parts_hp:
-                self.body_parts_hp[part] = self.body_parts_max_hp[part]
-
-    @property
-    def max_hp(self) -> int:
-        return sum(self.body_parts_max_hp.values())
-
-    @max_hp.setter
-    def max_hp(self, value: int):
-        # When max_hp is updated, distribute it proportionally
-        current_max = self.max_hp
-        if current_max == 0:
-            # Defaults
-            self.body_parts_max_hp = {"head": value//6, "torso": value//3, "left_arm": value//6, "right_arm": value//6, "left_leg": value//6, "right_leg": value//6}
-            return
-
-        ratio = value / current_max
-        for part in self.body_parts_max_hp:
-            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
-
-        # Ensure sum matches value (give remainder to torso)
-        remainder = value - sum(self.body_parts_max_hp.values())
-        if remainder != 0:
-            self.body_parts_max_hp["torso"] += remainder
-
     is_hostile_to_player: bool = False
     combat_behavior: str = "defensive"
     base_attack_name: str = "fists"
@@ -283,32 +237,14 @@ class NPC:
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
 
         effective_damage = max(0, amount - total_defense_bonus)
-
-        # Distribute damage to a random body part
-        if effective_damage > 0:
-            import random
-            available_parts = [part for part, hp in self.combat.body_parts_hp.items() if hp > 0]
-            if not available_parts:
-                available_parts = list(self.combat.body_parts_hp.keys())
-
-            target_part = random.choice(available_parts)
-            self.combat.body_parts_hp[target_part] -= effective_damage
-            if self.combat.body_parts_hp[target_part] < 0:
-                # Overflow damage to torso if not torso, else just cap at 0
-                overflow = -self.combat.body_parts_hp[target_part]
-                self.combat.body_parts_hp[target_part] = 0
-                if target_part != "torso":
-                    self.combat.body_parts_hp["torso"] -= overflow
-                    if self.combat.body_parts_hp["torso"] < 0:
-                        self.combat.body_parts_hp["torso"] = 0
+        self.combat.hp -= effective_damage
 
         # Add visual effect if world is passed
         if world:
             from engine import FloatingTextEffect
             world.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 50, 50)))
 
-        # Death conditions: torso <= 0 or head <= 0
-        if self.combat.body_parts_hp.get("torso", 0) <= 0 or self.combat.body_parts_hp.get("head", 0) <= 0 or self.combat.hp <= 0:
+        if self.combat.hp <= 0:
             self.combat.hp = 0
             self.physical.is_dead = True
             return True
@@ -324,12 +260,10 @@ class DireWolf(NPC):
     def __init__(self, x, y, name="Dire Wolf"):
         super().__init__(x, y, name=name)
         self.char, self.color = ord('w'), (160, 160, 160)
-        self.combat = CombatStats(toughness="average",
+        self.combat = CombatStats(max_hp=15, hp=15, toughness="average",
                                   is_hostile_to_player=True, combat_behavior="aggressive",
                                   base_attack_name="bite", base_attack_damage_dice="1d6",
                                   attack_range=1)
-        self.combat.max_hp = 15
-        self.combat.hp = 15
         self.economic.profession = "Creature"
         self.dialogue = ["*Growl*", "*Snarl*"]
         self.speech_volume = 5

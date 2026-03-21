@@ -143,34 +143,8 @@ def _get_focus_summary(world):
     nearby = _get_visible_nearby_entities(world, limit=1)
     if nearby:
         distance, entity = nearby[0]
-        name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
-        return standing_on, f"{name} ({distance}t)"
+        return standing_on, f"{entity.name} ({distance}t)"
     return standing_on, "No one nearby"
-
-def _get_npc_display_name_and_color(world, npc):
-    """Returns the display name and color for an NPC based on player knowledge."""
-    if isinstance(npc, Animal):
-        return npc.name, (200, 200, 200)
-
-    is_known = npc.id in world.player.knowledge.known_npcs
-    is_famous = npc.social.fame >= 50
-    is_family = False # Can be expanded later
-
-    # Color logic
-    if is_famous:
-        color = (255, 215, 0) # Gold
-    elif is_family:
-        color = (100, 255, 100) # Green
-    else:
-        color = (240, 240, 240) # White/Gray
-
-    # Name logic
-    if is_known or is_famous:
-        return npc.name, color
-    else:
-        # Generic name
-        prof = getattr(npc.economic, "profession", "Person")
-        return f"Unknown {prof}", (150, 150, 150)
 
 def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_color):
     maximum = max(1, maximum)
@@ -219,15 +193,10 @@ def _get_focus_target(world, camera_x, camera_y):
 
     if world.interaction_context.get("active") and world.interaction_context.get("target_entities"):
         entity = world.interaction_context["target_entities"][world.interaction_context["selected_entity_index"]]
-        name = entity["name"]
-        if entity["type"] == "NPC":
-            actual_entity = world.get_entity_by_id(entity["id"])
-            if actual_entity:
-                name = _get_npc_display_name_and_color(world, actual_entity)[0]
         assign_focus(
             world.interaction_context["x"],
             world.interaction_context["y"],
-            name,
+            entity["name"],
             list(world.interaction_context.get("available_actions", [])),
             "interact",
             entity,
@@ -250,13 +219,7 @@ def _get_focus_target(world, camera_x, camera_y):
             entity = entities[0]
             actions = list(world._get_actions_for_entity(entity))
             if actions:
-                name = entity["name"]
-                if entity["type"] == "NPC":
-                    # Check known npcs
-                    actual_entity = world.get_entity_by_id(entity["id"])
-                    if actual_entity:
-                        name = _get_npc_display_name_and_color(world, actual_entity)[0]
-                assign_focus(target_x, target_y, name, actions, source, entity)
+                assign_focus(target_x, target_y, entity["name"], actions, source, entity)
                 return focus
         if tile and is_visible(world, target_x, target_y):
             label = tile.name
@@ -495,40 +458,17 @@ def _draw_status_panel_legacy(console, world):
 
     # --- Vitals ---
     # HP Bar
-    hp_pct = world.player.combat.hp / world.player.combat.max_hp if world.player.combat.max_hp > 0 else 0
+    hp_pct = world.player.combat.hp / world.player.combat.max_hp
     bar_width = STATUS_PANEL_WIDTH - 4
     filled_width = int(bar_width * hp_pct)
 
-    console.print(x=panel_x + 1, y=y, string="Overall Health:", fg=(255, 100, 100))
+    console.print(x=panel_x + 1, y=y, string="Health:", fg=(255, 100, 100))
     y += 1
     console.draw_rect(x=panel_x + 1, y=y, width=bar_width, height=1, ch=ord('░'), fg=(100, 0, 0)) # Empty
     if filled_width > 0:
         console.draw_rect(x=panel_x + 1, y=y, width=filled_width, height=1, ch=ord('█'), fg=(255, 0, 0)) # Filled
     console.print(x=panel_x + 2, y=y, string=f"{world.player.combat.hp}/{world.player.combat.max_hp}", fg=(255, 255, 255))
     y += 2
-
-    # Draw small body part indicators if injured
-    injured_parts = []
-    for part, hp in world.player.combat.body_parts_hp.items():
-        max_hp = world.player.combat.body_parts_max_hp.get(part, 1)
-        if hp < max_hp:
-            injured_parts.append((part, hp, max_hp))
-
-    if injured_parts:
-        console.print(x=panel_x + 1, y=y, string="Injuries:", fg=(255, 100, 0))
-        y += 1
-        for part, hp, max_hp in injured_parts[:4]: # Show top 4 injuries to save space
-            hp_pct = hp / max_hp if max_hp > 0 else 0
-            if hp_pct > 0.5: color = (255, 255, 0)
-            elif hp_pct > 0: color = (255, 100, 0)
-            else: color = (255, 0, 0)
-
-            p_name = part.replace("_", " ").title()[:12]
-            console.print(x=panel_x + 2, y=y, string=f"{p_name}: {hp}/{max_hp}", fg=color)
-            y += 1
-        if len(injured_parts) > 4:
-            console.print(x=panel_x + 2, y=y, string=f"+{len(injured_parts) - 4} more...", fg=(100, 100, 100))
-            y += 1
 
     # Hunger
     hunger_pct = min(1.0, world.player.physical.hunger / world.player.physical.max_hunger)
@@ -804,35 +744,17 @@ def draw_cursor_info(console, world, camera_x, camera_y):
     info_str = ""
     tile = world.get_tile_at(world_x, world_y)
     if tile:
-        info_str = f"Tile: {tile.name}"
+        info_str = f"Tile: {tile.name} ({world_x}, {world_y})"
+
+        # Add weather info to the cursor
+        info_str += f" | Weather: {world.weather}"
+
         if tile.name == "Animal Corpse" and "animal_type" in tile.properties:
             info_str += f" ({tile.properties['animal_type'].replace('_', ' ')})"
 
-        # Check for entities
-        entities_here = []
-        for entity in itertools.chain([world.player], world.all_npcs):
-            if int(entity.x) == world_x and int(entity.y) == world_y:
-                if entity.id == world.player.id:
-                    entities_here.append("You")
-                elif hasattr(entity, "physical") and entity.physical.is_dead:
-                    name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
-                    entities_here.append(f"Dead {name}")
-                else:
-                    name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
-                    entities_here.append(name)
-
-        if (world_x, world_y) in world.items_on_map:
-            items = world.items_on_map[(world_x, world_y)]
-            if items:
-                entities_here.append(f"Items ({len(items)})")
-
-        if entities_here:
-            info_str += f" | {', '.join(entities_here)}"
-
     if info_str:
-        # Print info at the bottom of the map view (we clear the line first)
-        console.print(x=1, y=MAP_HEIGHT - 1, string=" " * (MAP_WIDTH - 2), bg=(0,0,0))
-        console.print(x=1, y=MAP_HEIGHT - 1, string=info_str[:MAP_WIDTH - 2], fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
+        # Print info at the bottom of the map view
+        console.print(x=1, y=MAP_HEIGHT - 1, string=info_str, fg=COLOR_CURSOR_INFO_TEXT)
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
@@ -953,12 +875,10 @@ def draw(console, world, camera_x, camera_y):
     for distance, entity in _get_visible_nearby_entities(world, limit=3):
         screen_x = entity.x - camera_x
         screen_y = entity.y - camera_y - 1
-        # Only draw names above non-animal NPCs or important entities to reduce clutter
-        if not isinstance(entity, Animal) and 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-            name, color = _get_npc_display_name_and_color(world, entity)
-            label = name[:16]
-            label_x = max(0, min(MAP_WIDTH - len(label), int(screen_x) - (len(label) // 2)))
-            console.print(x=label_x, y=int(screen_y), string=label, fg=color, bg=(0, 0, 0))
+        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
+            label = entity.name[:12]
+            label_x = max(0, min(MAP_WIDTH - len(label), screen_x - (len(label) // 2)))
+            console.print(x=label_x, y=screen_y, string=label, fg=(240, 240, 240), bg=(0, 0, 0))
 
     current_tile = world.get_tile_at(world.player.x, world.player.y)
     area_label = current_tile.name if current_tile else "Unknown"
@@ -1015,21 +935,15 @@ def draw(console, world, camera_x, camera_y):
             tile = world.get_tile_at(mouse_world_x, mouse_world_y)
             if tile:
                 info_text = tile.name
-                if tile.name == "Animal Corpse" and "animal_type" in tile.properties:
-                    info_text += f" ({tile.properties['animal_type'].replace('_', ' ')})"
 
                 # Check for entities
                 entities_here = []
                 for entity in itertools.chain([world.player], world.all_npcs):
-                    if int(entity.x) == mouse_world_x and int(entity.y) == mouse_world_y:
-                        if entity.id == world.player.id:
-                            entities_here.append("You")
-                        elif hasattr(entity, "physical") and entity.physical.is_dead:
-                            name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
-                            entities_here.append(f"Dead {name}")
+                    if entity.x == mouse_world_x and entity.y == mouse_world_y:
+                        if hasattr(entity, "physical") and entity.physical.is_dead:
+                            entities_here.append(f"Dead {entity.name}")
                         else:
-                            name = entity.name if isinstance(entity, Animal) else _get_npc_display_name_and_color(world, entity)[0]
-                            entities_here.append(name)
+                            entities_here.append(entity.name)
 
                 if (mouse_world_x, mouse_world_y) in world.items_on_map:
                     items = world.items_on_map[(mouse_world_x, mouse_world_y)]
@@ -1040,7 +954,6 @@ def draw(console, world, camera_x, camera_y):
                     info_text += f" | {', '.join(entities_here)}"
 
                 # Draw tooltip string near bottom right of map
-                console.print(x=1, y=MAP_HEIGHT - 1, string=" " * (MAP_WIDTH - 2), bg=(0,0,0))
                 console.print(x=1, y=MAP_HEIGHT - 1, string=info_text[:MAP_WIDTH - 2], fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
 
     # Draw chat log at the bottom
@@ -1271,24 +1184,6 @@ def draw_info_menu(console, world):
     if world.player.social.title:
         console.print(x=x + 2, y=stat_y, string=f"Title: {world.player.social.title}", fg=(0, 255, 255))
     stat_y += 2
-
-    # Body Parts Health
-    console.print(x=x + 2, y=stat_y, string="Body Status:", fg=(255, 100, 100))
-    stat_y += 1
-    for part, hp in world.player.combat.body_parts_hp.items():
-        max_hp = world.player.combat.body_parts_max_hp.get(part, 1)
-        part_name = part.replace("_", " ").title()
-
-        # Color based on health
-        hp_pct = hp / max_hp if max_hp > 0 else 0
-        if hp_pct > 0.75: color = (0, 255, 0)
-        elif hp_pct > 0.25: color = (255, 255, 0)
-        elif hp_pct > 0: color = (255, 100, 0)
-        else: color = (255, 0, 0)
-
-        console.print(x=x + 3, y=stat_y, string=f"- {part_name}: {hp}/{max_hp}", fg=color)
-        stat_y += 1
-    stat_y += 1
 
     # Equipment section
     stat_y += 1

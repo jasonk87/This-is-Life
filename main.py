@@ -351,9 +351,9 @@ def main():
         return
 
     try:
-        tileset = tcod.tileset.load_tilesheet("assets/terminal16x16_gs_ro.png", 16, 16, tcod.tileset.CHARMAP_CP437)
+        tileset = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
     except FileNotFoundError:
-        print("Error: Font file not found: 'assets/terminal16x16_gs_ro.png'")
+        print("Error: Font file not found: 'dejavu16x16_gs_tc.png'")
         return
 
     console = tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="F")

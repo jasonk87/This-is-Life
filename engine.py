@@ -278,46 +278,9 @@ class PlayerPhysicalState:
 
 @dataclass
 class PlayerCombatStats:
-    body_parts_hp: dict[str, int] = field(default_factory=lambda: {"head": 10, "torso": 20, "left_arm": 10, "right_arm": 10, "left_leg": 10, "right_leg": 10})
-    body_parts_max_hp: dict[str, int] = field(default_factory=lambda: {"head": 10, "torso": 20, "left_arm": 10, "right_arm": 10, "left_leg": 10, "right_leg": 10})
+    max_hp: int = 30
+    hp: int = 30
     defense_bonus: int = 0
-
-    @property
-    def hp(self) -> int:
-        return sum(max(0, hp) for hp in self.body_parts_hp.values())
-
-    @hp.setter
-    def hp(self, value: int):
-        # We handle setting hp = max_hp or healing/damaging generally.
-        current = self.hp
-        if current == 0:
-            return
-        ratio = value / current if current > 0 else 0
-        for part in self.body_parts_hp:
-            self.body_parts_hp[part] = min(self.body_parts_max_hp[part], int(self.body_parts_hp[part] * ratio))
-        # Optional: ensure exact match if needed, but for our case maxing is the most common use.
-        if value >= self.max_hp:
-            for part in self.body_parts_hp:
-                self.body_parts_hp[part] = self.body_parts_max_hp[part]
-
-    @property
-    def max_hp(self) -> int:
-        return sum(self.body_parts_max_hp.values())
-
-    @max_hp.setter
-    def max_hp(self, value: int):
-        current_max = self.max_hp
-        if current_max == 0:
-            self.body_parts_max_hp = {"head": value//6, "torso": value//3, "left_arm": value//6, "right_arm": value//6, "left_leg": value//6, "right_leg": value//6}
-            return
-
-        ratio = value / current_max
-        for part in self.body_parts_max_hp:
-            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
-
-        remainder = value - sum(self.body_parts_max_hp.values())
-        if remainder != 0:
-            self.body_parts_max_hp["torso"] += remainder
 
 @dataclass
 class PlayerSocialState:
@@ -355,7 +318,6 @@ class PlayerKnowledge:
     known_books: set[str] = field(default_factory=set)
     lockpicking_skill: int = 3
     known_locations: dict[str, tuple[int, int]] = field(default_factory=dict)
-    known_npcs: set[int] = field(default_factory=set)
 
 @dataclass
 class PlayerState:
@@ -400,37 +362,17 @@ class Player:
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
         effective_damage = max(0, amount - self.combat.defense_bonus)
-
-        if effective_damage > 0:
-            import random
-            available_parts = [part for part, hp in self.combat.body_parts_hp.items() if hp > 0]
-            if not available_parts:
-                available_parts = list(self.combat.body_parts_hp.keys())
-
-            target_part = random.choice(available_parts)
-            self.combat.body_parts_hp[target_part] -= effective_damage
-
-            world_ref = world if world else getattr(self, 'world_ref', None)
-            if world_ref:
-                world_ref.add_message_to_chat_log(f"Your {target_part.replace('_', ' ')} takes {effective_damage} damage!")
-
-            if self.combat.body_parts_hp[target_part] < 0:
-                overflow = -self.combat.body_parts_hp[target_part]
-                self.combat.body_parts_hp[target_part] = 0
-                if target_part != "torso":
-                    self.combat.body_parts_hp["torso"] -= overflow
-                    if self.combat.body_parts_hp["torso"] < 0:
-                        self.combat.body_parts_hp["torso"] = 0
+        self.combat.hp -= effective_damage
+        if self.combat.hp < 0:
+            self.combat.hp = 0
 
         world_ref = world if world else getattr(self, 'world_ref', None)
 
-        if world_ref and effective_damage > 0:
+        if world_ref:
             world_ref.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 0, 0)))
 
-        # Death conditions
-        if self.combat.body_parts_hp.get("torso", 0) <= 0 or self.combat.body_parts_hp.get("head", 0) <= 0 or self.combat.hp <= 0:
-            if world_ref:
-                world_ref.game_state = "PLAYER_DEAD"
+        if self.combat.hp <= 0 and world_ref:
+            world_ref.game_state = "PLAYER_DEAD"
 
         return effective_damage
 
@@ -737,8 +679,6 @@ class World:
 
     def request_open_dialogue(self, npc: NPC, mode: str = "talk"):
         """Queue a request for the UI layer to open dialogue with an NPC."""
-        if npc.id not in self.player.knowledge.known_npcs:
-            self.player.knowledge.known_npcs.add(npc.id)
         self.ui_requests.append(open_dialogue_request(npc, mode=mode))
 
     def request_close_dialogue(self, target_npc: NPC | None = None):
@@ -747,8 +687,6 @@ class World:
 
     def request_open_trade(self, npc: NPC):
         """Queue a request for the UI layer to open a trade session."""
-        if npc.id not in self.player.knowledge.known_npcs:
-            self.player.knowledge.known_npcs.add(npc.id)
         self.ui_requests.append(open_trade_request(npc))
 
     def request_close_trade(self, target_npc: NPC | None = None):
@@ -1445,20 +1383,6 @@ class World:
             if npc.schedule.current_path:
                 moves_made = 0
                 max_moves = getattr(npc, 'speed', 1)
-
-                # Factor in leg damage
-                if hasattr(npc, 'combat') and hasattr(npc.combat, 'body_parts_hp'):
-                    ll = npc.combat.body_parts_hp.get("left_leg", 1)
-                    rl = npc.combat.body_parts_hp.get("right_leg", 1)
-                    if ll <= 0 and rl <= 0:
-                        max_moves = 0 # Can't move at all if both legs are broken
-                    elif ll <= 0 or rl <= 0:
-                        # 50% chance to not move this turn if one leg is broken
-                        if random.random() < 0.5:
-                            max_moves = 0
-                        else:
-                            max_moves = max(1, max_moves // 2)
-
                 while moves_made < max_moves and npc.schedule.current_path and len(npc.schedule.current_path) > 1:
                     next_x, next_y = npc.schedule.current_path[1] # Path index 0 is current pos
 
@@ -2168,7 +2092,7 @@ class World:
                 fov_map = self.npc_fov_maps[npc.id]
                 visible_npcs = [
                     other_npc for other_npc in self.npcs + self.village_npcs
-                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.y, other_npc.x]
+                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[int(other_npc.y), int(other_npc.x)]
                 ]
                 # Expanded threat detection for Hunters and others
                 visible_threats = [
@@ -2207,7 +2131,7 @@ class World:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
 
 
-                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.y, threat.x]:
+                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[int(threat.y), int(threat.x)]:
                             threats_still_visible = True
                             break
                 if threats_still_visible:
@@ -3813,19 +3737,11 @@ class World:
 
         player_in_attack_range = (manhattan_distance <= effective_attack_range)
 
-        # Ensure FOV is updated if they are hostile
-        if npc.id not in self.npc_fov_maps:
-            self._update_npc_fov(npc)
-
         # Determine visibility
         can_see_player = False
         if npc.id in self.npc_fov_maps and \
            0 <= player.x < WORLD_WIDTH and 0 <= player.y < WORLD_HEIGHT:
             can_see_player = self.npc_fov_maps[npc.id][player.y, player.x]
-
-        # If they can't explicitly "see" through FOV but are directly adjacent or very close (e.g., night time but aggressive)
-        if not can_see_player and manhattan_distance <= 3:
-            can_see_player = True
 
         # 2. Key Status Checks
         hp_percent = npc.combat.hp / npc.combat.max_hp
@@ -7642,17 +7558,6 @@ class World:
                 self.player.state.riding_animal_id = None
                 return 0
 
-        # Leg damage checks
-        ll = self.player.combat.body_parts_hp.get("left_leg", 1)
-        rl = self.player.combat.body_parts_hp.get("right_leg", 1)
-        if ll <= 0 and rl <= 0:
-            self.add_message_to_chat_log("Your legs are broken, you cannot move!")
-            return 1 # Wasted turn
-        elif ll <= 0 or rl <= 0:
-            if random.random() < 0.5:
-                self.add_message_to_chat_log("You stumble due to your injured leg.")
-                return 1 # Wasted turn
-
         new_x, new_y = self.player.x + dx, self.player.y + dy
         destination_tile = self.get_tile_at(new_x, new_y)
 
@@ -7663,8 +7568,6 @@ class World:
             self._update_entity_position(self.player, new_x, new_y)
 
             movement_cost = int(destination_tile.properties.get("movement_cost", 1))
-            if ll <= 0 or rl <= 0:
-                movement_cost *= 2 # Moving with a broken leg costs twice as much time
 
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)

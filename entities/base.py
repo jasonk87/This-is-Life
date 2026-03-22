@@ -19,6 +19,7 @@ class CombatStats:
     base_attack_damage_dice: str = "1d3"
     attack_range: int = 1
     target_entity_id: int | None = None
+    last_hit_part: str | None = None
 
     @property
     def max_hp(self):
@@ -279,6 +280,7 @@ class NPC:
         import random
         if remaining_damage > 0:
             hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            self.combat.last_hit_part = hit_part
             if self.combat.body_parts_hp[hit_part] >= remaining_damage:
                 self.combat.body_parts_hp[hit_part] -= remaining_damage
                 remaining_damage = 0

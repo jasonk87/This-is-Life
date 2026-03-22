@@ -263,3 +263,44 @@ class TestNpcFovIndexRegression(unittest.TestCase):
                 arrest_call_found = True
                 break
         self.assertTrue(arrest_call_found, "Expected 'moves to arrest you' message to be logged.")
+
+
+class TestCombatMemory(unittest.TestCase):
+    def setUp(self):
+        self.world = engine.World(seed=13)
+
+    def test_deterministic_combat_memory_logging(self):
+        attacker = engine.NPC(x=10, y=10, name="Attacker")
+        attacker.economic.profession = "Guard"
+        defender = engine.NPC(x=11, y=10, name="Defender")
+        defender.combat.hp = 30
+        defender.combat.max_hp = 30
+
+        witness_a = engine.NPC(x=12, y=10, name="Witness A") # in FOV
+        witness_b = engine.NPC(x=50, y=50, name="Witness B") # out of FOV
+
+        self.world.npcs = [attacker, defender, witness_a, witness_b]
+        self.world.village_npcs = []
+
+        import config
+        fov_a = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool)
+        fov_a[10, 11] = True # Can see defender
+        self.world.npc_fov_maps[witness_a.id] = fov_a
+
+        fov_b = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool)
+        self.world.npc_fov_maps[witness_b.id] = fov_b
+
+        # Manually invoke broadcast
+        defender.take_damage = MagicMock(return_value=False)
+        defender.combat.hp = 25 # Assume 5 damage
+        defender.combat.last_hit_part = "left_leg"
+        defender.physical.status_effects = ["broken_leg"]
+
+        self.world._broadcast_combat_memory(attacker, defender, "sword", 5, {"broken_leg"})
+
+        memory_str = "Witnessed Attacker strike Defender's left_leg with sword for 5 damage. ...causing a broken_leg."
+
+        self.assertIn(memory_str, witness_a.knowledge.long_term_memory)
+        self.assertNotIn(memory_str, witness_b.knowledge.long_term_memory)
+        self.assertIn(memory_str, attacker.knowledge.long_term_memory)
+        self.assertIn(memory_str, defender.knowledge.long_term_memory)

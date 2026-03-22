@@ -288,6 +288,7 @@ class PlayerCombatStats:
     body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
     body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
     defense_bonus: int = 0
+    last_hit_part: str | None = None
 
     @property
     def max_hp(self):
@@ -411,6 +412,7 @@ class Player:
         if remaining_damage > 0:
             import random
             hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            self.combat.last_hit_part = hit_part
             if self.combat.body_parts_hp[hit_part] >= remaining_damage:
                 self.combat.body_parts_hp[hit_part] -= remaining_damage
                 remaining_damage = 0
@@ -2065,10 +2067,10 @@ class World:
                                     npc.schedule.current_path = path
                     else:
                         # No patients, check inventory for salves
-                        salves_count = sum(item["quantity"] for item in getattr(npc.economic, "inventory", []) if getattr(item, "key", "") == "healing_salve") if hasattr(npc.economic, "inventory") else npc.economic.npc_inventory.get("healing_salve", 0)
+                        salves_count = npc.economic.npc_inventory.get("healing_salve", 0)
 
                         if salves_count < 5:
-                            herbs_count = sum(item["quantity"] for item in getattr(npc.economic, "inventory", []) if getattr(item, "key", "") == "medicinal_herb") if hasattr(npc.economic, "inventory") else npc.economic.npc_inventory.get("medicinal_herb", 0)
+                            herbs_count = npc.economic.npc_inventory.get("medicinal_herb", 0)
 
                             if herbs_count < 2:
                                 npc.schedule.current_task = "foraging_for_herbs"
@@ -4125,7 +4127,11 @@ class World:
                  total_damage *= 2
                  self.add_message_to_chat_log(f"CRITICAL HIT! {npc.name} strikes you perfectly with their {weapon_name}!")
              
+             hp_before = player.combat.hp
+             statuses_before = set(player.physical.status_effects)
              actual_damage = player.take_damage(total_damage, world=self)
+             new_statuses = set(player.physical.status_effects) - statuses_before
+             self._broadcast_combat_memory(npc, player, weapon_name, hp_before - player.combat.hp, new_statuses)
              
              self.log_event(
                 event_type="combat_attack",
@@ -4175,7 +4181,11 @@ class World:
             location=(attacker.x, attacker.y)
         )
 
+        hp_before = target.combat.hp
+        statuses_before = set(target.physical.status_effects)
         was_killed = target.take_damage(damage, self)
+        new_statuses = set(target.physical.status_effects) - statuses_before
+        self._broadcast_combat_memory(attacker, target, "attack", hp_before - target.combat.hp, new_statuses)
 
         if was_killed:
             if can_player_see:
@@ -5283,7 +5293,11 @@ class World:
                     target_id=target_npc.id,
                     location=(self.player.x, self.player.y)
                 )
+                hp_before = target_npc.combat.hp
+                statuses_before = set(target_npc.physical.status_effects)
                 target_npc.take_damage(damage_dealt, self)
+                new_statuses = set(target_npc.physical.status_effects) - statuses_before
+                self._broadcast_combat_memory(self.player, target_npc, weapon_name, hp_before - target_npc.combat.hp, new_statuses)
                 if target_npc.is_dead:
                     self.handle_npc_death(target_npc, killer_id=self.player.id)
             elif hit and damage_dealt <= 0: # A hit that does no damage
@@ -9321,6 +9335,37 @@ class World:
                     witnesses.append(npc)
 
         return witnesses
+
+    def _broadcast_combat_memory(self, attacker, defender, weapon_name: str, actual_damage: int, new_statuses: set[str]):
+        """Constructs and logs a deterministic memory string for a combat event."""
+        if actual_damage <= 0:
+            return
+
+        attacker_name = attacker.name if hasattr(attacker, "name") else "Someone"
+        defender_name = defender.name if hasattr(defender, "name") else "someone"
+        body_part = defender.combat.last_hit_part if hasattr(defender, "combat") and getattr(defender.combat, "last_hit_part", None) else "body"
+
+        memory_str = f"Witnessed {attacker_name} strike {defender_name}'s {body_part} with {weapon_name} for {actual_damage} damage."
+
+        if "broken_leg" in new_statuses:
+            memory_str += " ...causing a broken_leg."
+
+        # Add to attacker and defender
+        if hasattr(attacker, "knowledge") and hasattr(attacker.knowledge, "long_term_memory"):
+            attacker.knowledge.long_term_memory.append(memory_str)
+        if hasattr(defender, "knowledge") and hasattr(defender.knowledge, "long_term_memory"):
+            defender.knowledge.long_term_memory.append(memory_str)
+
+        # Broadcast to witnesses in FOV
+        for w_npc in self.all_npcs:
+            if w_npc.id == attacker.id or w_npc.id == defender.id or w_npc.physical.is_dead:
+                continue
+
+            if w_npc.id in self.npc_fov_maps:
+                if 0 <= defender.x < WORLD_WIDTH and 0 <= defender.y < WORLD_HEIGHT:
+                    if self.npc_fov_maps[w_npc.id][defender.y, defender.x]:
+                        if hasattr(w_npc, "knowledge") and hasattr(w_npc.knowledge, "long_term_memory"):
+                            w_npc.knowledge.long_term_memory.append(memory_str)
 
     def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player or NPC, victim: NPC | None = None):
         """Determines how an NPC reacts to witnessing a crime using an LLM prompt."""

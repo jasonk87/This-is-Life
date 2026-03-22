@@ -350,16 +350,49 @@ def main():
         run_headless(world, args.ticks)
         return
 
-    try:
-        tileset = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
-    except FileNotFoundError:
-        print("Error: Font file not found: 'dejavu16x16_gs_tc.png'")
+    tileset = load_custom_tileset()
+    if not tileset:
         return
 
     console = tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="F")
 
     # Main Menu State
     main_menu_loop(console, tileset)
+
+def load_custom_tileset():
+    """Loads the base ASCII font and appends DawnLike tiles mapped to Unicode PUA."""
+    # Base ASCII tileset (16x16 pixels per tile, 32x8 tiles)
+    try:
+        tileset = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
+    except FileNotFoundError:
+        print("Error: Font file not found: 'dejavu16x16_gs_tc.png'")
+        return None
+
+    # Load combined DawnLike tiles
+    try:
+        from PIL import Image
+        import numpy as np
+        img = Image.open("assets/dawnlike_combined.png").convert("RGBA")
+        arr = np.array(img)
+
+        # Split into 16x16 tiles and map them starting at 0xE000
+        tile_width = 16
+        tile_height = 16
+        img_width, img_height = img.size
+
+        cols = img_width // tile_width
+        rows = img_height // tile_height
+
+        base_code = 0xE000
+        for r in range(rows):
+            for c in range(cols):
+                tile_arr = arr[r * tile_height:(r + 1) * tile_height, c * tile_width:(c + 1) * tile_width, :]
+                tileset.set_tile(base_code + (r * cols) + c, tile_arr)
+
+    except Exception as e:
+        print(f"Warning: Could not load DawnLike tileset: {e}")
+
+    return tileset
 
 def main_menu_loop(console, tileset):
     """Displays the main menu and handles selection."""

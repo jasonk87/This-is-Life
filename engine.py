@@ -376,7 +376,7 @@ class PlayerState:
     riding_animal_id: int | None = None
     last_dx: int = 0
     last_dy: int = -1
-    original_char: int = ord('@')
+    original_char: int = 0xE000
     current_path: list[tuple[int, int]] = field(default_factory=list)
     move_cooldown: int = 0
 
@@ -387,7 +387,7 @@ class Player:
         self.y = y
         self.render_x = float(x)
         self.render_y = float(y)
-        self.char = ord('@')
+        self.char = 0xE000
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
 
@@ -2111,7 +2111,7 @@ class World:
                     if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
                         # Arrived at foraging spot
                         self.add_message_to_chat_log(f"{npc.name} foraged some medicinal herbs.")
-                        npc.add_item("medicinal_herb", random.randint(2, 4))
+                        amt = random.randint(2, 4); npc.economic.npc_inventory["medicinal_herb"] = npc.economic.npc_inventory.get("medicinal_herb", 0) + amt
                         npc.schedule.current_task = "idle"
                         npc.schedule.current_destination_coords = None
 
@@ -2122,9 +2122,10 @@ class World:
 
                         npc.task_timer -= 1
                         if npc.task_timer <= 0:
-                            if npc.has_item("medicinal_herb", 2):
-                                npc.remove_item("medicinal_herb", 2)
-                                npc.add_item("healing_salve", 1)
+                            if npc.economic.npc_inventory.get("medicinal_herb", 0) >= 2:
+                                npc.economic.npc_inventory["medicinal_herb"] -= 2
+                                if npc.economic.npc_inventory["medicinal_herb"] <= 0: del npc.economic.npc_inventory["medicinal_herb"]
+                                npc.economic.npc_inventory["healing_salve"] = npc.economic.npc_inventory.get("healing_salve", 0) + 1
                                 self.add_message_to_chat_log(f"{npc.name} crafted a healing salve.")
                             npc.schedule.current_task = "idle"
                             npc.schedule.current_destination_coords = None
@@ -2151,8 +2152,9 @@ class World:
                             if patient.economic.money >= 10:
                                 patient.economic.money -= 10
                                 npc.economic.money += 10
-                            elif npc.has_item("healing_salve", 1):
-                                npc.remove_item("healing_salve", 1)
+                            elif npc.economic.npc_inventory.get("healing_salve", 0) >= 1:
+                                npc.economic.npc_inventory["healing_salve"] -= 1
+                                if npc.economic.npc_inventory["healing_salve"] <= 0: del npc.economic.npc_inventory["healing_salve"]
 
                             self.add_message_to_chat_log(f"{npc.name} successfully treats {patient.name}'s broken leg.")
                             npc.schedule.current_task = "idle"
@@ -2662,7 +2664,7 @@ class World:
                         spawn_x, spawn_y = self._find_best_adjacent_tile(npc.x, npc.y, npc)
                         if spawn_x is not None:
                             new_animal = Animal(spawn_x, spawn_y, name=f"Baby {npc.animal_type}", animal_type=npc.animal_type)
-                            new_animal.char = ord(animal_def.get("char", 'a').lower())
+                            char_val = animal_def.get("char", 0xE500); new_animal.char = char_val if isinstance(char_val, int) else ord(str(char_val).lower())
                             new_animal.color = animal_def.get("color")
                             new_animal.combat.max_hp = animal_def.get("max_hp", 10) // 2
                             new_animal.combat.hp = new_animal.combat.max_hp
@@ -2692,7 +2694,7 @@ class World:
                         if (npc.x, npc.y) == (den_x, den_y):
                             npc.schedule.current_task = "sleeping"
                             npc.original_char_before_sleep = npc.char
-                            npc.char = ord('z')
+                            npc.char = 0xE001
                         else:
                             npc.schedule.current_task = "returning_to_den"
                             path = self.calculate_path(npc.x, npc.y, den_x, den_y)
@@ -2707,7 +2709,7 @@ class World:
                         if npc.den_location and (npc.x, npc.y) == npc.den_location:
                              npc.schedule.current_task = "sleeping"
                              npc.original_char_before_sleep = npc.char
-                             npc.char = ord('z')
+                             npc.char = 0xE001
 
                 elif animal_def.get("can_mate") and animal_def.get("mating_season") == self.seasons[self.current_season_index] and not npc.is_pregnant:
                     if npc.schedule.current_task not in ["seeking_mate", "mating"]:
@@ -3305,7 +3307,7 @@ class World:
                                 if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords: # At the bed
                                     npc.schedule.current_task = "sleeping"
                                     npc.original_char_before_sleep = npc.char
-                                    npc.char = ord('z')
+                                    npc.char = 0xE001
                                 elif sleep_spot_coords and (npc.x, npc.y) != sleep_spot_coords: # At home, but not at bed
                                     new_task_label = "going to bed"
                                     destination_coords = sleep_spot_coords
@@ -3314,7 +3316,7 @@ class World:
                                     # For now, just mark as sleeping if at home center and bed exists broadly.
                                     npc.schedule.current_task = "sleeping"
                                     npc.original_char_before_sleep = npc.char
-                                    npc.char = ord('z')
+                                    npc.char = 0xE001
                                 # else: npc stays "at home" if no bed / no specific sleep spot
                             else: # Not at home, but it's night -> go to bed if possible, else home center
                                 if sleep_spot_coords:
@@ -3336,7 +3338,7 @@ class World:
                     # Wake up logic: If sleeping and it's no longer night
                     if npc.schedule.current_task == "sleeping" and not is_night_time:
                         npc.schedule.current_task = "at home" # Or "idle"
-                        if hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'): # only restore if actually 'z'
+                        if hasattr(npc, 'original_char_before_sleep') and npc.char == 0xE001: # only restore if actually 'z'
                              npc.char = npc.original_char_before_sleep
                         # self.add_message_to_chat_log(f"{npc.name} woke up.")
 
@@ -3442,7 +3444,7 @@ class World:
                 # The old _handle_npc_production is removed.
                 self._handle_npc_work_sub_tasks(npc)
 
-            if npc.schedule.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'):
+            if npc.schedule.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == 0xE001:
                 if hasattr(npc, 'original_char_before_sleep'): # Ensure it exists before trying to access
                     npc.char = npc.original_char_before_sleep
 
@@ -7672,7 +7674,7 @@ class World:
                     new_entity.combat.is_hostile_to_player = True
                     new_entity.combat.max_hp = 30
                     new_entity.combat.hp = 30
-                    new_entity.char = ord('c')
+                    new_entity.char = 0xE103
                     new_entity.color = (150, 0, 150) # Purple
                     self.npcs.append(new_entity)
 
@@ -8614,7 +8616,7 @@ class World:
             raider.economic.profession = "Raider"
             raider.combat.max_hp = 35
             raider.combat.hp = 35
-            raider.char = ord('r')
+            raider.char = 0xE104
             raider.color = (255, 100, 100) # Reddish
             raider.speed = 1.2
 

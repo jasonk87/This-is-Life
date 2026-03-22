@@ -22,7 +22,7 @@ class Animal(NPC):
         self.economic.money = 0
         self.economic.npc_inventory = {}
 
-        self.char = ord('a')
+        self.char = 0xE500
         self.color = (255, 255, 255)
 
         self.combat.is_hostile_to_player = False

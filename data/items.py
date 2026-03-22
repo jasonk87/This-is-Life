@@ -10,7 +10,7 @@ ITEM_DEFINITIONS = {
     "raw_log": {
         "name": "Raw Log",
         "description": "A rough, unprocessed log directly from a felled tree.",
-        "char": "l",
+        "char": 0xeb01,
         "color": COLORS["saddlebrown"],
         "value": 2,
         "weight": 5,
@@ -20,7 +20,7 @@ ITEM_DEFINITIONS = {
     "stone_chunk": {
         "name": "Stone Chunk",
         "description": "A rough piece of stone, useful for basic construction.",
-        "char": "s",
+        "char": 0xeb03,
         "color": COLORS["grey"],
         "value": 1,
         "weight": 8,
@@ -30,7 +30,7 @@ ITEM_DEFINITIONS = {
     "medicinal_herb": {
         "name": "Medicinal Herb",
         "description": "A rare herb with potent healing properties.",
-        "char": "*",
+        "char": 0xef10,
         "color": COLORS["light_green"],
         "value": 5,
         "weight": 0.1,
@@ -40,7 +40,7 @@ ITEM_DEFINITIONS = {
     "herb_generic": {
         "name": "Common Herb",
         "description": "A common herb, often used in simple remedies.",
-        "char": "*",
+        "char": 0xef01,
         "color": COLORS["forest_fg"],
         "value": 3,
         "weight": 0.1,
@@ -50,7 +50,7 @@ ITEM_DEFINITIONS = {
     "wheat": {
         "name": "Wheat",
         "description": "Grains of wheat, can be milled into flour or used as animal feed.",
-        "char": "w",
+        "char": 0xef02,
         "color": COLORS["khaki"],
         "value": 2,
         "weight": 0.5,
@@ -60,7 +60,7 @@ ITEM_DEFINITIONS = {
     "flour": {
         "name": "Flour",
         "description": "Fine powder ground from grain, used for baking.",
-        "char": "f",
+        "char": 0xef03,
         "color": (255, 255, 255),
         "value": 4,
         "weight": 0.4,
@@ -70,7 +70,7 @@ ITEM_DEFINITIONS = {
     "bread": {
         "name": "Bread",
         "description": "A loaf of bread.",
-        "char": "b",
+        "char": 0xef04,
         "color": COLORS["yellow_green"],
         "value": 8,
         "weight": 0.5,
@@ -87,7 +87,7 @@ ITEM_DEFINITIONS = {
     "iron_ore": {
         "name": "Iron Ore",
         "description": "A chunk of rock containing iron.",
-        "char": "o",
+        "char": 0xeb04,
         "color": COLORS["dark_orange"],
         "value": 4,
         "weight": 10,
@@ -97,7 +97,7 @@ ITEM_DEFINITIONS = {
     "iron_ingot": {
         "name": "Iron Ingot",
         "description": "A bar of refined iron, ready for smithing.",
-        "char": "=",
+        "char": 0xeb05,
         "color": COLORS["silver"],
         "value": 15,
         "weight": 8,
@@ -124,7 +124,7 @@ ITEM_DEFINITIONS = {
     "wooden_plank": {
         "name": "Wooden Plank",
         "description": "A processed wooden plank, ready for construction.",
-        "char": "p",
+        "char": 0xeb02,
         "color": COLORS["tan"],
         "value": 5,
         "weight": 2,
@@ -232,7 +232,7 @@ ITEM_DEFINITIONS = {
     "wheat_seeds": {
         "name": "Wheat Seeds",
         "description": "Seeds for growing wheat.",
-        "char": "\"",
+        "char": 0xef0f,
         "color": COLORS["khaki"],
         "value": 1,
         "weight": 0.1,
@@ -294,7 +294,7 @@ ITEM_DEFINITIONS = {
     "healing_salve": {
         "name": "Healing Salve",
         "description": "A simple paste that heals minor wounds.",
-        "char": "!",
+        "char": 0xef0e,
         "color": COLORS["light_green"],
         "value": 15,
         "weight": 0.5,
@@ -310,7 +310,7 @@ ITEM_DEFINITIONS = {
     "unlit_torch": {
         "name": "Unlit Torch",
         "description": "A stick with oil-soaked rags, needs to be lit.",
-        "char": "\\",
+        "char": 0xed01,
         "color": COLORS["dark_amber"],
         "value": 3,
         "weight": 1,
@@ -322,7 +322,7 @@ ITEM_DEFINITIONS = {
     "torch_lit": {
         "name": "Lit Torch",
         "description": "A burning torch, casting a flickering light.",
-        "char": "\\",
+        "char": 0xed02,
         "color": COLORS["flame"],
         "value": 3,
         "weight": 1,
@@ -341,7 +341,7 @@ ITEM_DEFINITIONS = {
     "burnt_out_torch": {
         "name": "Burnt Out Torch",
         "description": "The charred remains of a torch. Useless.",
-        "char": "~",
+        "char": 0xed03,
         "color": COLORS["darkest_grey"],
         "value": 0,
         "weight": 0.5,
@@ -382,7 +382,7 @@ ITEM_DEFINITIONS = {
     "apple": {
         "name": "Apple",
         "description": "A crisp, juicy apple.",
-        "char": "a",
+        "char": 0xef0b,
         "color": COLORS["red"],
         "value": 3,
         "weight": 0.3,
@@ -400,7 +400,7 @@ ITEM_DEFINITIONS = {
     "pear": {
         "name": "Pear",
         "description": "A sweet and soft pear.",
-        "char": "p",
+        "char": 0xef0c,
         "color": COLORS["yellow_green"],
         "value": 3,
         "weight": 0.3,
@@ -418,7 +418,7 @@ ITEM_DEFINITIONS = {
     "acorn": {
         "name": "Acorn",
         "description": "The nut of an oak tree. Edible in a pinch.",
-        "char": ".",
+        "char": 0xef0d,
         "color": COLORS["dark_orange"],
         "value": 1,
         "weight": 0.1,
@@ -441,7 +441,7 @@ ITEM_DEFINITIONS = {
     "raw_venison": {
         "name": "Raw Venison",
         "description": "A cut of raw deer meat.",
-        "char": "m",
+        "char": 0xef07,
         "color": COLORS["crimson"],
         "value": 8,
         "weight": 2,
@@ -455,7 +455,7 @@ ITEM_DEFINITIONS = {
     "raw_meat": {
         "name": "Raw Meat",
         "description": "A chunk of raw meat from an animal.",
-        "char": "m",
+        "char": 0xef05,
         "color": COLORS["crimson"],
         "value": 5,
         "weight": 1,
@@ -469,7 +469,7 @@ ITEM_DEFINITIONS = {
     "cooked_meat": {
         "name": "Cooked Meat",
         "description": "Meat cooked over a fire. Savory and filling.",
-        "char": "m",
+        "char": 0xef06,
         "color": COLORS["saddlebrown"],
         "value": 10,
         "weight": 1,
@@ -507,7 +507,7 @@ ITEM_DEFINITIONS = {
     "animal_pelt": {
         "name": "Animal Pelt",
         "description": "The uncured hide of an animal, with fur intact.",
-        "char": "p",
+        "char": 0xeb09,
         "color": COLORS["saddlebrown"],
         "value": 10,
         "weight": 3,
@@ -530,7 +530,7 @@ ITEM_DEFINITIONS = {
     "raw_mutton": {
         "name": "Raw Mutton",
         "description": "A cut of raw sheep meat.",
-        "char": "m",
+        "char": 0xef08,
         "color": COLORS["crimson"],
         "value": 6,
         "weight": 2,
@@ -692,7 +692,7 @@ ITEM_DEFINITIONS = {
     "stone_hoe": {
         "name": "Stone Hoe",
         "description": "A crude hoe for tilling soil.",
-        "char": "h",
+        "char": 0xed04,
         "color": COLORS["dark_slate_gray"],
         "value": 20,
         "weight": 6,
@@ -837,7 +837,7 @@ ITEM_DEFINITIONS = {
     "cloth": {
         "name": "Cloth",
         "description": "A piece of woven cloth.",
-        "char": "c",
+        "char": 0xeb08,
         "color": (220, 220, 220),
         "value": 25,
         "weight": 0.5,
@@ -871,7 +871,7 @@ ITEM_DEFINITIONS = {
     "fishing_rod": {
         "name": "Fishing Rod",
         "description": "A simple fishing rod for catching fish.",
-        "char": "/",
+        "char": 0xed05,
         "color": COLORS["dark_sepia"],
         "value": 20,
         "weight": 3,
@@ -889,7 +889,7 @@ ITEM_DEFINITIONS = {
     "raw_fish": {
         "name": "Raw Fish",
         "description": "A raw fish, freshly caught. Should be cooked.",
-        "char": "f",
+        "char": 0xef09,
         "color": COLORS["silver"],
         "value": 4,
         "weight": 1,
@@ -906,7 +906,7 @@ ITEM_DEFINITIONS = {
     "cooked_fish": {
         "name": "Cooked Fish",
         "description": "A fish, cooked over a fire. A satisfying meal.",
-        "char": "f",
+        "char": 0xef0a,
         "color": COLORS["dark_orange"],
         "value": 8,
         "weight": 1,

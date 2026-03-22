@@ -120,7 +120,7 @@ class TestMedicalSystem(unittest.TestCase):
 
         # Force them to craft (since they are idle and have herbs but no salves)
         # Add extra herbs just in case random roll gave 2 (need 3)
-        healer.add_item("medicinal_herb", 3)
+        healer.economic.npc_inventory["medicinal_herb"] = healer.economic.npc_inventory.get("medicinal_herb", 0) + 3
         world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
         world._update_npc_schedules()
 

@@ -43,121 +43,121 @@ COLORS = {
 # --- Tile Definitions (Back to ASCII!) ---
 TILE_DEFINITIONS = {
     "plains": {
-        "char": ".",
+        "char": 0xea01,
         "color": COLORS["plains_fg"],
         "passable": True,
         "name": "Plains"
     },
     "forest": {
-        "char": '"',
+        "char": 0xea02,
         "color": COLORS["forest_fg"],
         "passable": True,
         "name": "Forest"
     },
     "road": {
-        "char": "#",
+        "char": 0xe802,
         "color": COLORS["road_fg"],
         "passable": True,
         "name": "Road"
     },
     "wood_wall": {
-        "char": "█", # Solid block for walls makes buildings much more recognizable
+        "char": 0xe704, # Solid block for walls makes buildings much more recognizable
         "color": COLORS["wall_fg"],
         "passable": False,
         "name": "Wood Wall",
         "properties": {"provides_shelter": True}
     },
     "stone_wall": {
-        "char": "█",
+        "char": 0xe700,
         "color": COLORS["grey"],
         "passable": False,
         "name": "Stone Wall",
         "properties": {"provides_shelter": True}
     },
     "door": {
-        "char": "+",
+        "char": 0xe900,
         "color": COLORS["door_fg"],
         "passable": True,
         "name": "Door"
     },
     "wood_floor": {
-        "char": ".",
+        "char": 0xe803,
         "color": (160, 82, 45), # Sienna
         "passable": True,
         "name": "Wood Floor"
     },
     "window": {
-        "char": "o",
+        "char": 0xe707,
         "color": (173, 216, 230), # Light Blue
         "passable": False,
         "name": "Window",
         "properties": {"blocks_fov": False} # Windows don't block FOV
     },
     "water": {
-        "char": "~",
+        "char": 0xea05,
         "color": COLORS["water_fg"],
         "passable": False,
         "name": "Water"
     },
     "deep_water": {
-        "char": "~",
+        "char": 0xea06,
         "color": COLORS["deep_water_fg"],
         "passable": False,
         "name": "Deep Water"
     },
     "mountain": {
-        "char": "^",
+        "char": 0xea08,
         "color": COLORS["mountain_fg"],
         "passable": False,
         "name": "Mountain"
     },
     "snow": {
-        "char": "*",
+        "char": 0xea0b,
         "color": COLORS["snow_fg"],
         "passable": True,
         "name": "Snow",
         "properties": {"movement_cost": 2}
     },
     "tall_grass": {
-        "char": "}",
+        "char": 0xea0c,
         "color": COLORS["tall_grass_fg"],
         "passable": True,
         "name": "Tall Grass"
     },
     "flower": {
-        "char": "*",
+        "char": 0xea0d,
         "color": COLORS["flower_fg"],
         "passable": True,
         "name": "Flower"
     },
     "well": {
-        "char": "W",
+        "char": 0xeb06,
         "color": (100, 100, 150), # Stone color
         "passable": False,
         "name": "Well"
     },
     "capital_hall_wall": {
-        "char": "█",
+        "char": 0xe70a,
         "color": (150, 150, 150), # Grey stone
         "passable": False,
         "name": "Capital Hall Wall",
         "properties": {"provides_shelter": True}
     },
     "jail_bars": {
-        "char": "=",
+        "char": 0xe70b,
         "color": (70, 70, 70), # Dark grey
         "passable": False,
         "name": "Jail Bars"
     },
     "sheriff_office_wall": {
-        "char": "█",
+        "char": 0xe70d,
         "color": (120, 100, 80), # Brownish grey
         "passable": False,
         "name": "Sheriff Office Wall",
         "properties": {"provides_cover_value": 0.7, "provides_shelter": True}
     },
     "tree_generic": { # Example if we had a distinct tree tile
-        "char": "T",
+        "char": 0xec00,
         "color": COLORS["forest_fg"],
         "passable": False, # Trunk itself
         "name": "Tree",
@@ -225,7 +225,7 @@ TILE_DEFINITIONS["tall_grass"]["properties"]["yields_on_pass_through"] = {
 }
 
 TILE_DEFINITIONS["stump_generic"] = {
-    "char": "o",
+    "char": 0xec10,
     "color": (101, 67, 33),  # Brownish, like a cut log
     "passable": True,
     "name": "Tree Stump",
@@ -236,7 +236,7 @@ TILE_DEFINITIONS["stump_generic"] = {
 }
 
 TILE_DEFINITIONS["sapling"] = {
-    "char": "y",
+    "char": 0xec20,
     "color": (154, 205, 50), # YellowGreen
     "passable": True,
     "name": "Sapling",
@@ -247,14 +247,14 @@ TILE_DEFINITIONS["sapling"] = {
 }
 
 TILE_DEFINITIONS["tilled_soil"] = {
-    "char": "~",  # Using tilde for furrowed earth look
+    "char": 0xe808,  # Using tilde for furrowed earth look
     "color": (160, 110, 70),  # Darker, richer brown than wood_floor
     "passable": True,
     "name": "Tilled Soil",
     "properties": {}
 }
 TILE_DEFINITIONS["wheat_plant_growing"] = {
-    "char": "i",
+    "char": 0xec30,
     "color": (144, 238, 144), # Light green
     "passable": True,
     "name": "Growing Wheat",
@@ -265,7 +265,7 @@ TILE_DEFINITIONS["wheat_plant_growing"] = {
     }
 }
 TILE_DEFINITIONS["wheat_plant"] = {
-    "char": "W",
+    "char": 0xec31,
     "color": (255, 223, 0),  # Golden yellow
     "passable": True,
     "name": "Wheat",
@@ -278,7 +278,7 @@ TILE_DEFINITIONS["wheat_plant"] = {
 }
 
 TILE_DEFINITIONS["cracked_stone_wall"] = {
-    "char": "▒", # Shaded block to look like cracked wall
+    "char": 0xe701, # Shaded block to look like cracked wall
     "color": (105, 105, 105), # DimGray
     "passable": False,
     "name": "Cracked Stone Wall",
@@ -286,7 +286,7 @@ TILE_DEFINITIONS["cracked_stone_wall"] = {
 }
 
 TILE_DEFINITIONS["mossy_cobblestone"] = {
-    "char": ".",
+    "char": 0xe805,
     "color": (85, 107, 47), # DarkOliveGreen
     "passable": True,
     "name": "Mossy Cobblestone"

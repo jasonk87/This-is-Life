@@ -8,7 +8,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "wooden_door_closed": {
         "name": "Wooden Door",
         "description": "A closed wooden door.",
-        "char": "+",
+        "char": 0xe900,
         "color": COLORS["sienna"],
         "passable": False, # Closed door
         "blocks_fov": True,
@@ -22,7 +22,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "wooden_door_open": {
         "name": "Open Wooden Door",
         "description": "An open wooden door.",
-        "char": "-",
+        "char": 0xe901,
         "color": COLORS["sienna"],
         "passable": True, # Open door
         "blocks_fov": False,
@@ -37,7 +37,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "chest_wooden": {
         "name": "Wooden Chest",
         "description": "A simple wooden chest for storage.",
-        "char": "C",
+        "char": 0xeb13,
         "color": COLORS["saddlebrown"],
         "passable": False,
         "blocks_fov": False,
@@ -53,7 +53,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "bed_simple": {
         "name": "Simple Bed",
         "description": "A simple bed with a straw mattress.",
-        "char": "B",
+        "char": 0xeb12,
         "color": COLORS["tan"],
         # Can walk over it, maybe? Or treat as non-passable? Let's say passable for now.
         "passable": True,
@@ -66,7 +66,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "wooden_chair": {
         "name": "Wooden Chair",
         "description": "A simple wooden chair.",
-        "char": "h",
+        "char": 0xeb10,
         "color": COLORS["saddlebrown"],
         "passable": True,
         "blocks_fov": False,
@@ -127,7 +127,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "smoking_rack": {
         "name": "Smoking Rack",
         "description": "A wooden rack for smoking meat and fish.",
-        "char": "#",
+        "char": 0xeb1a,
         "color": COLORS["saddlebrown"],
         "passable": False,
         "blocks_fov": False,
@@ -140,7 +140,7 @@ DECORATION_ITEM_DEFINITIONS = {
      "wooden_table": {
         "name": "Wooden Table",
         "description": "A sturdy wooden table.",
-        "char": "T",
+        "char": 0xeb11,
         "color": COLORS["saddlebrown"],
         "passable": False, # Can't walk through a table
         "blocks_fov": False,
@@ -150,7 +150,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "wall_shelf": {
         "name": "Wall Shelf",
         "description": "A simple shelf mounted on the wall.",
-        "char": "=",
+        "char": 0xeb14,
         "color": COLORS["saddlebrown"],
         "passable": True, # Placed on a wall tile, so this doesn't matter much
         "blocks_fov": False,
@@ -160,7 +160,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "fire_pit_simple": {
         "name": "Simple Fire Pit",
         "description": "A ring of stones for a small fire.",
-        "char": "o",
+        "char": 0xeb15,
         "color": COLORS["grey"],
         "passable": True,
         "blocks_fov": False,
@@ -231,7 +231,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "rubble": {
         "name": "Rubble",
         "description": "A pile of fallen stones.",
-        "char": ",",
+        "char": 0xeb17,
         "color": COLORS["grey"],
         "passable": True,
         "blocks_fov": False,
@@ -254,7 +254,7 @@ DECORATION_ITEM_DEFINITIONS = {
     "bones": {
         "name": "Bones",
         "description": "A pile of bones.",
-        "char": ";",
+        "char": 0xeb1b,
         "color": (245, 245, 220),
         "passable": True,
         "blocks_fov": False,

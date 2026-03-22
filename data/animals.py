@@ -4,7 +4,7 @@ This file defines the properties of all animals in the game.
 ANIMAL_DEFINITIONS = {
     "deer": {
         "name": "Deer",
-        "char": "d",
+        "char": 0xe502,
         "color": (205, 133, 63),
         "max_hp": 10,
         "behavior": "Wander-Flee",
@@ -38,7 +38,7 @@ ANIMAL_DEFINITIONS = {
     },
     "bear": {
         "name": "Bear",
-        "char": "B",
+        "char": 0xe503,
         "color": (139, 69, 19),
         "max_hp": 30,
         "behavior": "Wander-Aggressive",
@@ -65,7 +65,7 @@ ANIMAL_DEFINITIONS = {
     },
     "fish": {
         "name": "Fish",
-        "char": "f",
+        "char": 0xe501,
         "color": (0, 191, 255),
         "max_hp": 3,
         "behavior": "Wander-Water",
@@ -113,7 +113,7 @@ ANIMAL_DEFINITIONS = {
     },
     "dire_wolf": {
         "name": "Dire Wolf",
-        "char": "W",
+        "char": 0xe601,
         "color": (105, 105, 105),
         "max_hp": 25,
         "hostile": True,
@@ -175,7 +175,7 @@ ANIMAL_DEFINITIONS = {
     },
     "fox": {
         "name": "Fox",
-        "char": "x",
+        "char": 0xe303,
         "color": (210, 105, 30),
         "max_hp": 8,
         "hostile": False,

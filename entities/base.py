@@ -136,7 +136,7 @@ class NPC:
                  wealth_level="average"):
         self.x, self.y, self.name = x, y, name
         self.render_x, self.render_y = float(x), float(y) # For smooth animation
-        self.char, self.color, self.speed, self.id = ord('N'), (0, 255, 0), 1, id(self)
+        self.char, self.color, self.speed, self.id = 0xE100, (0, 255, 0), 1, id(self)
 
         self.dialogue = dialogue if dialogue is not None else ["Hello!"]
         self.player_id = player_id
@@ -326,7 +326,7 @@ class DireWolf(NPC):
     """
     def __init__(self, x, y, name="Dire Wolf"):
         super().__init__(x, y, name=name)
-        self.char, self.color = ord('w'), (160, 160, 160)
+        self.char, self.color = 0xE302, (160, 160, 160)
         self.combat = CombatStats(toughness="average",
                                   is_hostile_to_player=True, combat_behavior="aggressive",
                                   base_attack_name="bite", base_attack_damage_dice="1d6",

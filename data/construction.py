@@ -5,6 +5,13 @@ and the type of object it places (tile or decoration).
 """
 
 CONSTRUCTION_RECIPES = {
+    "clinic": {
+        "name": "Clinic",
+        "tile_def_key": "wood_wall", # Placeholder or use a specific tile if needed, but it's a building
+        "source": "building", # Assuming 'building' is valid or use 'decoration' with a placeholder
+        "materials": {"raw_log": 40, "stone_chunk": 10},
+        "description": "A place for healing and treatment."
+    },
     "wood_wall": {
         "name": "Wooden Wall",
         "tile_def_key": "wood_wall", # From TILE_DEFINITIONS

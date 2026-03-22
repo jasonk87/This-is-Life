@@ -10,8 +10,8 @@ from data.items import ITEM_DEFINITIONS
 @dataclass
 class CombatStats:
     """Stores combat-related attributes for an entity."""
-    max_hp: int = 20
-    hp: int = 20
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
     toughness: str = "average"
     is_hostile_to_player: bool = False
     combat_behavior: str = "defensive"
@@ -19,6 +19,43 @@ class CombatStats:
     base_attack_damage_dice: str = "1d3"
     attack_range: int = 1
     target_entity_id: int | None = None
+
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
 
 @dataclass
 class PhysicalState:
@@ -237,7 +274,34 @@ class NPC:
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
 
         effective_damage = max(0, amount - total_defense_bonus)
-        self.combat.hp -= effective_damage
+
+        remaining_damage = effective_damage
+        import random
+        if remaining_damage > 0:
+            hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
+                self.combat.body_parts_hp[hit_part] -= remaining_damage
+                remaining_damage = 0
+            else:
+                remaining_damage -= self.combat.body_parts_hp[hit_part]
+                self.combat.body_parts_hp[hit_part] = 0
+                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
+                    if remaining_damage <= 0:
+                        break
+                    if self.combat.body_parts_hp[part] > 0:
+                        if self.combat.body_parts_hp[part] >= remaining_damage:
+                            self.combat.body_parts_hp[part] -= remaining_damage
+                            remaining_damage = 0
+                        else:
+                            remaining_damage -= self.combat.body_parts_hp[part]
+                            self.combat.body_parts_hp[part] = 0
+
+            # Check for broken legs
+            if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
+                if "broken_leg" not in self.physical.status_effects:
+                    self.physical.status_effects.append("broken_leg")
+                    if world:
+                        world.add_message_to_chat_log(f"{self.name}'s leg is broken!")
 
         # Add visual effect if world is passed
         if world:
@@ -250,7 +314,8 @@ class NPC:
             return True
         if not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
             self.combat.is_hostile_to_player = True
-            world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+            if world:
+                world.add_message_to_chat_log(f"{self.name} becomes hostile!")
         return False
 
 class DireWolf(NPC):
@@ -260,10 +325,12 @@ class DireWolf(NPC):
     def __init__(self, x, y, name="Dire Wolf"):
         super().__init__(x, y, name=name)
         self.char, self.color = ord('w'), (160, 160, 160)
-        self.combat = CombatStats(max_hp=15, hp=15, toughness="average",
+        self.combat = CombatStats(toughness="average",
                                   is_hostile_to_player=True, combat_behavior="aggressive",
                                   base_attack_name="bite", base_attack_damage_dice="1d6",
                                   attack_range=1)
+        self.combat.max_hp = 15
+        self.combat.hp = 15
         self.economic.profession = "Creature"
         self.dialogue = ["*Growl*", "*Snarl*"]
         self.speech_volume = 5

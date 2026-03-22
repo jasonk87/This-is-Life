@@ -657,7 +657,7 @@ class TestFearSystem(unittest.TestCase):
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
 
         from unittest.mock import patch
-        with patch.object(self.world, "_update_npc_fov"):
+        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
             # Mock threat detection because the FOV logic heavily depends on lighting and precise raycasting
             civilian.is_frightened = True
             civilian.threat_source_ids = [wolf1.id, wolf2.id]
@@ -737,7 +737,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 2. Execution
         from unittest.mock import patch
-        with patch.object(self.world, "_update_npc_fov"):
+        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
             with patch.object(self.world, "calculate_path", return_value=[(guard1.x, guard1.y), (guard1.x+1, guard1.y)]):
                 guard1.is_frightened = True
                 guard1.threat_source_ids = [wolf1.id, wolf2.id]
@@ -774,7 +774,8 @@ class TestFearSystem(unittest.TestCase):
 
         # 5. Execution (Second update)
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
-        self.world._update_npc_schedules()
+        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+            self.world._update_npc_schedules()
 
         # 6. Assertion (Guards become hostile)
         self.assertTrue(guard1.combat.is_hostile_to_player, "Alerting guard should become hostile.")
@@ -824,7 +825,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 2. Execution (Initial fear)
         from unittest.mock import patch
-        with patch.object(self.world, "_update_npc_fov"):
+        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
             self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
             self.world._update_npc_schedules()
         self.assertNotEqual(civilian.schedule.current_task, "idle")
@@ -840,7 +841,8 @@ class TestFearSystem(unittest.TestCase):
 
         # 4. Execution (Calm down)
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
-        self.world._update_npc_schedules()
+        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+            self.world._update_npc_schedules()
 
         # 5. Assertion
         self.assertFalse(civilian.is_frightened)

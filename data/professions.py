@@ -388,6 +388,30 @@ PROFESSIONS = {
         "sub_tasks": [],
         "default_sub_task_sequence": []
     },
+    "Healer": {
+        "display_name": "Healer",
+        "wage": 35,
+        "description": "Treats injuries and illnesses.",
+        "work_building_categories": ["Clinic"],
+        "sub_tasks": [
+            {
+                "id": "treating_patient",
+                "display_name": "Treating Patient",
+                "action_verb": "treating",
+                "duration_ticks": 50,
+                "target_zone_tag": "medical_bed"
+            },
+            {
+                "id": "preparing_salves",
+                "display_name": "Preparing Salves",
+                "action_verb": "preparing",
+                "duration_ticks": 100,
+                "target_zone_tag": "alchemy_station",
+                "produces_item_at_workplace": {"healing_salve": 1}
+            }
+        ],
+        "default_sub_task_sequence": ["preparing_salves"]
+    },
     "Scribe": {
         "display_name": "Scribe",
         "wage": 28,

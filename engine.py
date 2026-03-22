@@ -64,6 +64,13 @@ from work_subtasks import (
 from world_generation import WorldGenerator
 
 VILLAGE_BUILDING_PROJECTS = {
+    "clinic": {
+        "cost": {"raw_log": 40, "stone_chunk": 10},
+        "width": 7,
+        "height": 6,
+        "category": "civic_workplace",
+        "description": "A place for healing and treatment."
+    },
     "house": {
         "cost": {"raw_log": 50},
         "width": 7,
@@ -278,9 +285,46 @@ class PlayerPhysicalState:
 
 @dataclass
 class PlayerCombatStats:
-    max_hp: int = 30
-    hp: int = 30
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
     defense_bonus: int = 0
+
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
 
 @dataclass
 class PlayerSocialState:
@@ -362,9 +406,34 @@ class Player:
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
         effective_damage = max(0, amount - self.combat.defense_bonus)
-        self.combat.hp -= effective_damage
-        if self.combat.hp < 0:
-            self.combat.hp = 0
+
+        remaining_damage = effective_damage
+        if remaining_damage > 0:
+            import random
+            hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
+                self.combat.body_parts_hp[hit_part] -= remaining_damage
+                remaining_damage = 0
+            else:
+                remaining_damage -= self.combat.body_parts_hp[hit_part]
+                self.combat.body_parts_hp[hit_part] = 0
+                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
+                    if remaining_damage <= 0:
+                        break
+                    if self.combat.body_parts_hp[part] > 0:
+                        if self.combat.body_parts_hp[part] >= remaining_damage:
+                            self.combat.body_parts_hp[part] -= remaining_damage
+                            remaining_damage = 0
+                        else:
+                            remaining_damage -= self.combat.body_parts_hp[part]
+                            self.combat.body_parts_hp[part] = 0
+
+            # Check for broken legs
+            if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
+                if "broken_leg" not in self.physical.status_effects:
+                    self.physical.status_effects.append("broken_leg")
+                    if world:
+                        world.add_message_to_chat_log("Your leg is broken!")
 
         world_ref = world if world else getattr(self, 'world_ref', None)
 
@@ -874,7 +943,11 @@ class World:
         entity.physical.temperature += temp_diff * change_rate
 
         # 3. Apply Effects
-        entity.physical.status_effects.clear()
+        if "Freezing" in entity.physical.status_effects:
+            entity.physical.status_effects.remove("Freezing")
+        if "Overheating" in entity.physical.status_effects:
+            entity.physical.status_effects.remove("Overheating")
+
         if entity.physical.temperature < 35.0:
             entity.physical.status_effects.append("Freezing")
         elif entity.physical.temperature > 38.5:
@@ -1928,6 +2001,103 @@ class World:
         for npc in self.all_npcs:
             if npc.physical.is_dead:
                 continue
+
+            # HIGH PRIORITY OVERRIDE
+            if "broken_leg" in npc.physical.status_effects:
+                if not hasattr(npc, 'original_speed'):
+                    npc.original_speed = getattr(npc, 'speed', 1)
+                npc.speed = max(0.5, getattr(npc, 'original_speed', 1) / 2.0)
+
+                if npc.schedule.current_task not in ["seeking_healer", "waiting_for_treatment", "resting_in_bed"]:
+                    npc.schedule.current_task = "seeking_healer"
+
+                    # Try to find a clinic
+                    clinic = self._find_nearest_building_of_type(npc, "clinic")
+                    if clinic:
+                        dest_x, dest_y = clinic.global_center_x, clinic.global_center_y
+                        npc.schedule.current_destination_coords = (dest_x, dest_y)
+                        path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                        if path:
+                            npc.schedule.current_path = path
+                        else:
+                            npc.schedule.current_task = "waiting_for_treatment"
+                            npc.schedule.current_path = []
+                    elif npc.schedule.home_building_id:
+                        home = self.buildings_by_id.get(npc.schedule.home_building_id)
+                        if home:
+                            npc.schedule.current_destination_coords = (home.global_center_x, home.global_center_y)
+                            path = self.calculate_path(npc.x, npc.y, home.global_center_x, home.global_center_y)
+                            if path:
+                                npc.schedule.current_path = path
+                            else:
+                                npc.schedule.current_task = "resting_in_bed"
+                                npc.schedule.current_path = []
+                    else:
+                        npc.schedule.current_task = "resting_in_bed"
+                        npc.schedule.current_path = []
+
+            # Check arrival at clinic
+            if npc.schedule.current_task == "seeking_healer":
+                if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                    if npc.schedule.current_destination_coords:
+                        if abs(npc.x - npc.schedule.current_destination_coords[0]) + abs(npc.y - npc.schedule.current_destination_coords[1]) <= 3:
+                            npc.schedule.current_task = "waiting_for_treatment"
+                            npc.schedule.current_path = []
+                            npc.schedule.current_destination_coords = None
+
+            # --- HEALER AI ---
+            if npc.economic.profession == "Healer" and npc.schedule.current_task != "treating_patient":
+                # Look for injured NPCs nearby
+                patients = [p for p in self.all_npcs if not p.physical.is_dead and "broken_leg" in p.physical.status_effects]
+                if patients:
+                    closest_patient = min(patients, key=lambda p: abs(npc.x - p.x) + abs(npc.y - p.y))
+                    if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) < 15:
+                        npc.schedule.current_task = "treating_patient"
+                        npc.task_target_entity_id = closest_patient.id
+                        npc.task_timer = 20 # 20 ticks to treat
+                        npc.schedule.current_path = []
+
+                        # Move to patient if not adjacent
+                        if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) > 1:
+                            path = self.calculate_path(npc.x, npc.y, closest_patient.x, closest_patient.y)
+                            if path:
+                                npc.schedule.current_path = path
+
+            elif npc.schedule.current_task == "treating_patient":
+                patient = self.get_entity_by_id(npc.task_target_entity_id)
+                if not patient or patient.physical.is_dead or "broken_leg" not in patient.physical.status_effects:
+                    npc.schedule.current_task = "idle"
+                    npc.task_target_entity_id = None
+                else:
+                    if abs(npc.x - patient.x) + abs(npc.y - patient.y) <= 1:
+                        if npc.task_timer > 0:
+                            npc.task_timer -= 1
+                        else:
+                            # Treatment complete
+                            patient.physical.status_effects.remove("broken_leg")
+                            # Restore HP
+                            if patient.combat.body_parts_hp.get("left_leg", 0) <= 0:
+                                patient.combat.body_parts_hp["left_leg"] = max(1, patient.combat.body_parts_max_hp.get("left_leg", 5))
+                            if patient.combat.body_parts_hp.get("right_leg", 0) <= 0:
+                                patient.combat.body_parts_hp["right_leg"] = max(1, patient.combat.body_parts_max_hp.get("right_leg", 5))
+
+                            # Economy hook
+                            if patient.economic.money >= 10:
+                                patient.economic.money -= 10
+                                npc.economic.money += 10
+                            elif npc.has_item("healing_salve", 1):
+                                npc.remove_item("healing_salve", 1)
+
+                            self.add_message_to_chat_log(f"{npc.name} successfully treats {patient.name}'s broken leg.")
+                            npc.schedule.current_task = "idle"
+                            patient.schedule.current_task = "idle"
+                            patient.speed = getattr(patient, 'original_speed', 1) # Ensure speed goes back to normal if stored
+                    else:
+                        # Move closer
+                        if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                            path = self.calculate_path(npc.x, npc.y, patient.x, patient.y)
+                            if path:
+                                npc.schedule.current_path = path
 
             # --- Real-time Logic (Runs every tick or frequently) ---
             if npc.combat.is_hostile_to_player:
@@ -5682,6 +5852,7 @@ class World:
                     if work_building.building_type == "sheriff_office": new_prof = "Deputy"
                     elif work_building.building_type == "lumber_mill": new_prof = "Woodcutter"
                     elif work_building.building_type == "blacksmith_shop": new_prof = "Blacksmith Apprentice"
+                    elif work_building.building_type == "clinic": new_prof = "Healer's Assistant"
                     elif work_building.building_type == "tavern": new_prof = "Server"
                     elif work_building.building_type == "farm": new_prof = "Farmhand"
                     elif work_building.building_type == "general_store": new_prof = "Shop Assistant"
@@ -7196,6 +7367,12 @@ class World:
         # Capital Hall
         try_place_building("capital_hall", "civic", 9, 7, road_x - 11, road_y - 3, max_workers=3)
 
+        # Clinic
+        clinic = try_place_building("clinic", "civic_workplace", 7, 6, road_x - 10, road_y - 8, max_workers=2)
+        if clinic:
+            clinic.work_zone_tiles["medical_bed"] = [(clinic.global_origin_x + 1, clinic.global_origin_y + 1)]
+            clinic.work_zone_tiles["alchemy_station"] = [(clinic.global_origin_x + 5, clinic.global_origin_y + 1)]
+
         # Jail
         jail = try_place_building("jail", "civic", 7, 5, road_x + 2, road_y - 2, max_workers=2)
 
@@ -7683,6 +7860,8 @@ class World:
                 else:
                     # Set cooldown for next move (e.g., 5 ticks for fast movement)
                     self.player.state.move_cooldown = 5
+                    if "broken_leg" in self.player.physical.status_effects:
+                        self.player.state.move_cooldown += 5 # Increase cooldown drastically
                     # Add to game time based on action cost (though update also adds 1)
                     # If we want consistent time, we should probably just let update add 1
                     # and assume player moves faster than world ticks?
@@ -8300,6 +8479,7 @@ class World:
         elif work_building.building_type == "capital_hall": new_profession = "Town Official"
         elif work_building.building_type == "jail": new_profession = "Guard"
         elif work_building.building_type == "blacksmith_shop": new_profession = "Blacksmith"
+        elif work_building.building_type == "clinic": new_profession = "Healer"
 
         npc.economic.profession = new_profession
         npc.economic.job_satisfaction = 70

@@ -152,7 +152,7 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
             self.world.npc_attempt_attack_player(npc, self.world.player)
 
         self.assertEqual(self.world.player.combat.hp, self.world.player.combat.max_hp - 2)
-        self.assertTrue(any("(HP: 28/30)" in message for message in self.world.chat_log))
+        self.assertTrue(any("(HP: 33/35)" in message for message in self.world.chat_log))
 
     def test_animal_defaults_live_in_nested_component_state(self):
         animal = engine.Animal(5, 6, name="Goat", animal_type="goat")
@@ -249,8 +249,17 @@ class TestNpcFovIndexRegression(unittest.TestCase):
         self.world.npc_fov_maps[guard.id] = fov_map
         self.world.game_time += config.NPC_SCHEDULE_UPDATE_INTERVAL
 
+        self.world.chat_log = []
+        self.world.npcs = []
         with patch.object(self.world, "_update_npc_fov"):
-            self.world._update_npc_schedules()
+            with patch.object(self.world, "add_message_to_chat_log") as mock_add_msg:
+                self.world._update_npc_schedules()
 
         self.assertTrue(guard.combat.is_hostile_to_player)
-        self.assertTrue(any("moves to arrest you" in message for message in self.world.chat_log))
+
+        arrest_call_found = False
+        for call in mock_add_msg.call_args_list:
+            if "moves to arrest you" in call.args[0]:
+                arrest_call_found = True
+                break
+        self.assertTrue(arrest_call_found, "Expected 'moves to arrest you' message to be logged.")

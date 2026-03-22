@@ -1,0 +1,140 @@
+Let's see the tests!
+```bash
+grep -rn "test_npc_careers" .
+```
+We have tests, so let's make sure our modifications to CombatStats don't break existing tests that rely on CombatStats being initialized without arguments (as we've seen).
+By using properties for `hp` and `max_hp`, we can maintain backward compatibility.
+
+Wait, if we use `@property`, `dataclasses.asdict` might not serialize it. Does the game use `asdict` or `pickle` for save/load?
+`save_manager.py` uses `pickle.dump`! Pickle handles properties just fine because it pickles the underlying dict and `__class__`.
+
+So the dataclass with properties is perfectly fine!
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class CombatStats:
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    toughness: str = "average"
+    is_hostile_to_player: bool = False
+    combat_behavior: str = "defensive"
+    base_attack_name: str = "fists"
+    base_attack_damage_dice: str = "1d3"
+    attack_range: int = 1
+    target_entity_id: int | None = None
+
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
+```
+If we do this, `hp` and `max_hp` are NOT fields of the dataclass.
+In `entities/base.py`:
+`CombatStats(max_hp=15, hp=15, ...)` will raise `TypeError: CombatStats.__init__() got an unexpected keyword argument 'max_hp'`.
+We must modify the two places where `CombatStats` or `PlayerCombatStats` is instantiated with `hp` or `max_hp`.
+
+1. `entities/base.py`:
+```python
+        self.combat = CombatStats(toughness="average",
+                                  is_hostile_to_player=True, combat_behavior="aggressive",
+                                  base_attack_name="bite", base_attack_damage_dice="1d6",
+                                  attack_range=1)
+        self.combat.max_hp = 15
+        self.combat.hp = 15
+```
+2. `engine.py` (Wait, does `PlayerCombatStats` get instantiated with args?):
+```python
+        self.combat = PlayerCombatStats()
+```
+It doesn't use arguments, so we're fine there.
+
+Let's double check `take_damage` implementation in `NPC`:
+```python
+    def take_damage(self, amount: int, world) -> bool:
+        if self.physical.is_dead:
+            return False
+
+        total_defense_bonus = 0
+        if self.equipment.body and self.equipment.body in ITEM_DEFINITIONS:
+            armor_def = ITEM_DEFINITIONS[self.equipment.body]
+            total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
+        if self.equipment.head and self.equipment.head in ITEM_DEFINITIONS:
+            armor_def = ITEM_DEFINITIONS[self.equipment.head]
+            total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
+
+        effective_damage = max(0, amount - total_defense_bonus)
+
+        remaining_damage = effective_damage
+        if remaining_damage > 0:
+            hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
+                self.combat.body_parts_hp[hit_part] -= remaining_damage
+                remaining_damage = 0
+            else:
+                remaining_damage -= self.combat.body_parts_hp[hit_part]
+                self.combat.body_parts_hp[hit_part] = 0
+                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
+                    if remaining_damage <= 0:
+                        break
+                    if self.combat.body_parts_hp[part] > 0:
+                        if self.combat.body_parts_hp[part] >= remaining_damage:
+                            self.combat.body_parts_hp[part] -= remaining_damage
+                            remaining_damage = 0
+                        else:
+                            remaining_damage -= self.combat.body_parts_hp[part]
+                            self.combat.body_parts_hp[part] = 0
+
+            if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
+                if "broken_leg" not in self.physical.status_effects:
+                    self.physical.status_effects.append("broken_leg")
+                    if world:
+                        world.add_message_to_chat_log(f"{self.name}'s leg is broken!")
+
+        # Add visual effect if world is passed
+        if world:
+            from engine import FloatingTextEffect
+            world.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 50, 50)))
+
+        if self.combat.hp <= 0:
+            self.combat.hp = 0
+            self.physical.is_dead = True
+            return True
+        if not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
+            self.combat.is_hostile_to_player = True
+            world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+        return False
+```

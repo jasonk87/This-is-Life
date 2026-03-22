@@ -1,0 +1,122 @@
+Okay, only two usages! `CombatStats()` and `CombatStats(max_hp=15, hp=15, ...)`.
+We can use `InitVar` in the dataclass!
+
+```python
+from dataclasses import dataclass, field, InitVar
+
+@dataclass
+class CombatStats:
+    max_hp_val: InitVar[int] = 20
+    hp_val: InitVar[int] = 20
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    toughness: str = "average"
+    is_hostile_to_player: bool = False
+    combat_behavior: str = "defensive"
+    base_attack_name: str = "fists"
+    base_attack_damage_dice: str = "1d3"
+    attack_range: int = 1
+    target_entity_id: int | None = None
+
+    def __post_init__(self, max_hp_val, hp_val):
+        self.max_hp = max_hp_val
+        self.hp = hp_val
+
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
+```
+
+But wait, if we rename it to `max_hp_val` and `hp_val`, then `CombatStats(max_hp=15, hp=15)` will fail! We should name them `max_hp` and `hp` as `InitVar`. But then `max_hp` will conflict with the property name!
+So we have to just write a custom `__init__` instead of relying on dataclass to generate it, OR just define `hp` and `max_hp` as properties and modify the usages of `CombatStats` to assign properties after init.
+Wait, `target_entity_id: int | None = None` uses new python union.
+
+Let's modify `entities/base.py` `CombatStats` and `engine.py` `PlayerCombatStats` manually instead of generated `__init__` if needed, or we just change the 1 usage of `CombatStats(max_hp=15, hp=15, ...)` in `entities/base.py` to:
+```python
+        self.combat = CombatStats(toughness="average",
+                                  is_hostile_to_player=True, combat_behavior="aggressive",
+                                  base_attack_name="bite", base_attack_damage_dice="1d6",
+                                  attack_range=1)
+        self.combat.max_hp = 15
+        self.combat.hp = 15
+```
+This is trivial to change and avoids `__init__` arguments for `max_hp` and `hp`.
+Same for `PlayerCombatStats`.
+
+Wait, how do we assign damage to body parts? When damage is applied, how does it distribute?
+"Entities access health and combat stats via their combat component... which track localized damage via body_parts_hp and body_parts_max_hp dictionaries... If an NPC takes a critical hit to the leg, their move_cooldown or speed could drastically drop."
+We should modify `take_damage` to apply damage to a random body part!
+
+In `entities/base.py`:
+```python
+    def take_damage(self, amount: int, world) -> bool:
+```
+We need to distribute `amount` among `body_parts_hp`. Let's pick a random body part and decrease its HP.
+But wait! If the damage is more than the body part's HP, does the excess spill over?
+Normally yes, or it just reduces total HP. If `hp` is an aggregate property, we just subtract from a body part, and if it goes below 0, we can set it to 0 and apply the rest to "torso" or just leave it at 0 and let it spill.
+Actually, standard localized damage:
+```python
+import random
+...
+        effective_damage = max(0, amount - total_defense_bonus)
+        if effective_damage > 0:
+            # Pick a body part that still has HP
+            available_parts = [p for p, hp in self.combat.body_parts_hp.items() if hp > 0]
+            if not available_parts:
+                available_parts = ["torso"] # Fallback
+            part = random.choice(available_parts)
+            self.combat.body_parts_hp[part] -= effective_damage
+
+            # handle spillover to torso? or just clamp and subtract remainder?
+            if self.combat.body_parts_hp[part] < 0:
+                spill = -self.combat.body_parts_hp[part]
+                self.combat.body_parts_hp[part] = 0
+                if part != "torso":
+                    self.combat.body_parts_hp["torso"] -= spill
+                    if self.combat.body_parts_hp["torso"] < 0:
+                        self.combat.body_parts_hp["torso"] = 0
+```
+This automatically updates `self.combat.hp`.
+
+Then in `_update_npc_schedules` (in `engine.py`), the prompt says:
+"In _update_npc_schedules(), you could add a high-priority check: if an NPC has a "broken_leg" status effect, they override their normal tasks and default to seeking_healer or resting_in_bed."
+Wait, how do they get the "broken_leg" status effect?
+If `body_parts_hp["left_leg"] == 0` or `body_parts_hp["right_leg"] == 0`, we could add "broken_leg" to `self.physical.status_effects`.
+Actually, the prompt implies the system sets the status effect or checks the leg HP directly.
+"If an NPC takes a critical hit to the leg, their move_cooldown or speed could drastically drop... if an NPC has a "broken_leg" status effect, they override their normal tasks..."
+
+So we should probably update their status effects when they take damage, or calculate it dynamically in `recalculate_stats` or just check it in `_update_npc_schedules`.
+Let's add a check in `take_damage` or wherever that adds "broken_leg" to `status_effects` if leg HP <= 0.

@@ -1,0 +1,119 @@
+Let's see the Player class `take_damage` in `engine.py`.
+```python
+    def take_damage(self, amount: int, world=None) -> int:
+        """Applies damage to the player after accounting for armor, returns actual damage dealt."""
+        effective_damage = max(0, amount - self.combat.defense_bonus)
+
+        remaining_damage = effective_damage
+        if remaining_damage > 0:
+            hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
+                self.combat.body_parts_hp[hit_part] -= remaining_damage
+                remaining_damage = 0
+            else:
+                remaining_damage -= self.combat.body_parts_hp[hit_part]
+                self.combat.body_parts_hp[hit_part] = 0
+                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
+                    if remaining_damage <= 0:
+                        break
+                    if self.combat.body_parts_hp[part] > 0:
+                        if self.combat.body_parts_hp[part] >= remaining_damage:
+                            self.combat.body_parts_hp[part] -= remaining_damage
+                            remaining_damage = 0
+                        else:
+                            remaining_damage -= self.combat.body_parts_hp[part]
+                            self.combat.body_parts_hp[part] = 0
+
+            # Check for broken legs
+            if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
+                if "broken_leg" not in self.physical.status_effects:
+                    self.physical.status_effects.append("broken_leg")
+                    if world:
+                        world.add_message_to_chat_log("Your leg is broken!")
+
+        world_ref = world if world else getattr(self, 'world_ref', None)
+
+        if world_ref:
+            world_ref.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 0, 0)))
+
+        if self.combat.hp <= 0 and world_ref:
+            world_ref.game_state = "PLAYER_DEAD"
+
+        return effective_damage
+```
+
+Then in `_update_npc_schedules`, how to handle `broken_leg`?
+```python
+        for npc in self.all_npcs:
+            if npc.physical.is_dead:
+                continue
+
+            if "broken_leg" in npc.physical.status_effects:
+                npc.speed = 0.5
+                if npc.schedule.current_task not in ["seeking_healer", "resting_in_bed"]:
+                    npc.schedule.current_task = "seeking_healer"
+                    npc.schedule.current_path = []
+                    npc.schedule.current_destination_coords = None
+                    # Optionally find healer or bed
+                    if hasattr(self, '_find_nearest_building_of_type'): # or whatever logic to seek healer
+                        healer_spot = self.buildings_by_id.get(npc.schedule.home_building_id)
+                        if healer_spot:
+                            npc.schedule.current_task = "resting_in_bed"
+                            npc.schedule.current_destination_coords = (healer_spot.global_center_x, healer_spot.global_center_y)
+
+                # We should skip regular task scheduling if they are resting or seeking healer?
+                # Actually, if we just set their task to "seeking_healer", we can add a simple elif branch for it later or let it stay in this task.
+                # If we continue, they won't do other things.
+                # But wait! If they are "seeking_healer", what happens when they get there?
+                if npc.schedule.current_task == "seeking_healer" and npc.schedule.current_destination_coords:
+                     path = self.calculate_path(npc.x, npc.y, npc.schedule.current_destination_coords[0], npc.schedule.current_destination_coords[1])
+                     if path:
+                         npc.schedule.current_path = path
+                     else:
+                         npc.schedule.current_task = "resting_in_bed"
+
+            # --- Real-time Logic (Runs every tick or frequently) ---
+            if npc.combat.is_hostile_to_player:
+                ...
+```
+If we do it this way, we have to be careful with existing logic.
+Or, we can just let `_update_npc_schedules` have a high-priority check that overrides `current_task`, and then `continue` (or just let path movement execute).
+"In _update_npc_schedules(), you could add a high-priority check: if an NPC has a "broken_leg" status effect, they override their normal tasks and default to seeking_healer or resting_in_bed."
+We can put this at the very top of `_update_npc_schedules` or inside the `for npc in self.all_npcs:` loop:
+
+```python
+        for npc in self.all_npcs:
+            if npc.physical.is_dead:
+                continue
+
+            # HIGH PRIORITY OVERRIDE
+            if "broken_leg" in npc.physical.status_effects:
+                npc.speed = 0.5
+                if npc.schedule.current_task not in ["seeking_healer", "resting_in_bed"]:
+                    npc.schedule.current_task = "seeking_healer"
+                    # Try to find a place to rest (e.g. home)
+                    if npc.schedule.home_building_id:
+                        home = self.buildings_by_id.get(npc.schedule.home_building_id)
+                        if home:
+                            npc.schedule.current_destination_coords = (home.global_center_x, home.global_center_y)
+                            path = self.calculate_path(npc.x, npc.y, home.global_center_x, home.global_center_y)
+                            if path:
+                                npc.schedule.current_path = path
+                    else:
+                        npc.schedule.current_task = "resting_in_bed" # no home, just rest where they are
+                        npc.schedule.current_path = []
+
+                # if resting in bed, don't move
+                if npc.schedule.current_task == "resting_in_bed":
+                    npc.schedule.current_path = []
+
+                continue # Skip other schedules
+```
+Wait, if we `continue`, they won't update their `npc_fov`, which might cause issues or skip other real-time logic. But "override their normal tasks" could mean we don't `continue` but rather just ensure `current_task` is set, and let pathing happen. If we `continue`, we skip combat! But if a leg is broken, they probably shouldn't be attacking?
+Actually, the prompt says "they override their normal tasks and default to seeking_healer or resting_in_bed".
+I'll just add it right after `if npc.physical.is_dead: continue` and skip scheduling by continuing, OR just set it and let the loop continue but bypass normal scheduling by putting `continue` AFTER the needed real-time logic.
+Wait, if they are hostile, should they still attack?
+"override their normal tasks" -> normal tasks. Combat might not be a "normal task".
+Let's just put it in the "SCHEDULED UPDATES" section, or just after FEAR system.
+
+Let's read `_update_npc_schedules` closely to see where to insert.

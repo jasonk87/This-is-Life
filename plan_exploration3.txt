@@ -1,0 +1,59 @@
+So let's modify the entities/base.py and engine.py for CombatStats as a dataclass. The issue with standard `@property` with a `dataclass` is that `dataclasses` don't treat properties as fields, so they won't be initialized by `__init__`.
+Instead of properties, we can keep `hp` and `max_hp` as actual fields, but define custom setter methods, or use properties but initialize `body_parts_hp` and `body_parts_max_hp` explicitly.
+
+Actually, using properties `hp` and `max_hp` is tricky for `dataclass` if we still want them in the constructor. Wait, the prompt says: "`hp` and `max_hp` act as aggregate properties". So we don't need to put them in `__init__` if we use `InitVar` or just accept them.
+
+Let's override `__setattr__` or define them as properties and remove `hp` and `max_hp` from the class fields if they act as properties.
+Wait, if we do:
+```python
+@dataclass
+class CombatStats:
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    toughness: str = "average"
+...
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
+```
+If we do this, `max_hp` and `hp` are properties. Any code doing `CombatStats(max_hp=15, hp=15)` will fail because `max_hp` and `hp` are no longer fields!
+
+Wait, wait. Python `dataclasses` don't allow `InitVar` to be easily mixed with properties without an `__post_init__` to handle initial values.
+We could just keep `hp` and `max_hp` as properties, and handle initial values in `__init__`. Since `entities/base.py` uses `@dataclass`, maybe we can just use `InitVar` or define a custom `__init__` instead.
+But `@dataclass` writes `__init__` for us. If we define properties, `dataclass` ignores them. If there's `CombatStats(max_hp=15, hp=15)` calls in the codebase, we'll get a `TypeError`!
+
+Let's check where `CombatStats` is instantiated.
+`grep -rn "CombatStats(" .`

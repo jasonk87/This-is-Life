@@ -74,5 +74,73 @@ class TestMedicalSystem(unittest.TestCase):
         self.assertEqual(patient.schedule.current_task, "seeking_healer")
         self.assertEqual(patient.schedule.current_destination_coords, (clinic.global_center_x, clinic.global_center_y))
 
+
+    def test_healer_forages_and_crafts(self):
+        world = engine.World(seed=13)
+        healer = engine.NPC(x=11, y=10, name="Healer NPC")
+        healer.economic.profession = "Healer"
+        healer.economic.money = 0
+
+        world.village_npcs = [healer]
+        world.npcs = []
+        world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
+        world._update_npc_fov = MagicMock()
+        world._update_entity_temperature = MagicMock()
+        world._apply_temperature_effects = MagicMock()
+
+        # Mock calculate path to allow foraging
+        world.calculate_path = MagicMock(return_value=[(11,10), (12,10)])
+
+        world._update_npc_schedules()
+
+        # 1. Should start foraging
+        self.assertEqual(healer.schedule.current_task, "foraging_for_herbs")
+
+        # Arrive at foraging spot
+        healer.schedule.current_path = []
+        world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
+        world._update_npc_schedules()
+
+        # 2. Should finish foraging, become idle, and have herbs
+        self.assertEqual(healer.schedule.current_task, "idle")
+        self.assertGreaterEqual(healer.economic.npc_inventory.get("medicinal_herb", 0), 2)
+
+        # Add a clinic with alchemy station
+        clinic = engine.Building(11, 11, 5, 5, building_type="clinic", category="civic_workplace")
+        clinic.id = "clinic_1"
+        clinic.work_zone_tiles["alchemy_station"] = [(11, 11)]
+        world.buildings_by_id[clinic.id] = clinic
+
+        village = engine.Village()
+        village.buildings.append(clinic)
+        world._get_village_for_npc = MagicMock(return_value=village)
+
+        # Need to mock path to clinic now
+        world.calculate_path = MagicMock(return_value=[(12,10), (11,11)])
+
+        # Force them to craft (since they are idle and have herbs but no salves)
+        # Add extra herbs just in case random roll gave 2 (need 3)
+        healer.add_item("medicinal_herb", 3)
+        world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
+        world._update_npc_schedules()
+
+        # 3. Should start crafting
+        self.assertEqual(healer.schedule.current_task, "crafting_medical_supplies")
+
+        # Move to alchemy station and craft
+        healer.schedule.current_path = []
+        healer.x, healer.y = 11, 11
+        world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
+        world._update_npc_schedules()
+
+        # Advance timer
+        healer.task_timer = 1
+        world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
+        world._update_npc_schedules()
+
+        # 4. Should finish crafting, become idle, and have 1 salve
+        self.assertEqual(healer.schedule.current_task, "idle")
+        self.assertEqual(healer.economic.npc_inventory.get("healing_salve", 0), 1)
+
 if __name__ == '__main__':
     unittest.main()

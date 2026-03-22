@@ -27,6 +27,16 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["resource"],
     },
+    "medicinal_herb": {
+        "name": "Medicinal Herb",
+        "description": "A rare herb with potent healing properties.",
+        "char": "*",
+        "color": COLORS["light_green"],
+        "value": 5,
+        "weight": 0.1,
+        "stackable": True,
+        "item_type_tags": ["resource", "reagent"],
+    },
     "herb_generic": {
         "name": "Common Herb",
         "description": "A common herb, often used in simple remedies.",
@@ -291,7 +301,7 @@ ITEM_DEFINITIONS = {
         "stackable": True,
         "item_type_tags": ["consumable", "healing"],
         "crafting_recipe": {
-            "herb_generic": 3
+            "medicinal_herb": 2
         },
         "on_use": {
             "heal_amount": 10

@@ -2046,24 +2046,88 @@ class World:
                             npc.schedule.current_destination_coords = None
 
             # --- HEALER AI ---
-            if npc.economic.profession == "Healer" and npc.schedule.current_task != "treating_patient":
-                # Look for injured NPCs nearby
-                patients = [p for p in self.all_npcs if not p.physical.is_dead and "broken_leg" in p.physical.status_effects]
-                if patients:
-                    closest_patient = min(patients, key=lambda p: abs(npc.x - p.x) + abs(npc.y - p.y))
-                    if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) < 15:
-                        npc.schedule.current_task = "treating_patient"
-                        npc.task_target_entity_id = closest_patient.id
-                        npc.task_timer = 20 # 20 ticks to treat
-                        npc.schedule.current_path = []
+            if npc.economic.profession == "Healer":
+                if npc.schedule.current_task not in ["treating_patient", "foraging_for_herbs", "crafting_medical_supplies"]:
+                    # Look for injured NPCs nearby
+                    patients = [p for p in self.all_npcs if not p.physical.is_dead and "broken_leg" in p.physical.status_effects]
+                    if patients:
+                        closest_patient = min(patients, key=lambda p: abs(npc.x - p.x) + abs(npc.y - p.y))
+                        if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) < 15:
+                            npc.schedule.current_task = "treating_patient"
+                            npc.task_target_entity_id = closest_patient.id
+                            npc.task_timer = 20 # 20 ticks to treat
+                            npc.schedule.current_path = []
 
-                        # Move to patient if not adjacent
-                        if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) > 1:
-                            path = self.calculate_path(npc.x, npc.y, closest_patient.x, closest_patient.y)
-                            if path:
-                                npc.schedule.current_path = path
+                            # Move to patient if not adjacent
+                            if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) > 1:
+                                path = self.calculate_path(npc.x, npc.y, closest_patient.x, closest_patient.y)
+                                if path:
+                                    npc.schedule.current_path = path
+                    else:
+                        # No patients, check inventory for salves
+                        salves_count = sum(item["quantity"] for item in getattr(npc.economic, "inventory", []) if getattr(item, "key", "") == "healing_salve") if hasattr(npc.economic, "inventory") else npc.economic.npc_inventory.get("healing_salve", 0)
 
-            elif npc.schedule.current_task == "treating_patient":
+                        if salves_count < 5:
+                            herbs_count = sum(item["quantity"] for item in getattr(npc.economic, "inventory", []) if getattr(item, "key", "") == "medicinal_herb") if hasattr(npc.economic, "inventory") else npc.economic.npc_inventory.get("medicinal_herb", 0)
+
+                            if herbs_count < 2:
+                                npc.schedule.current_task = "foraging_for_herbs"
+                                # Find wilderness/forest
+                                # Random point 10-20 tiles away to simulate foraging
+                                angle = random.uniform(0, 2 * math.pi)
+                                dist = random.uniform(10, 20)
+                                target_x = max(0, min(WORLD_WIDTH - 1, int(npc.x + math.cos(angle) * dist)))
+                                target_y = max(0, min(WORLD_HEIGHT - 1, int(npc.y + math.sin(angle) * dist)))
+                                npc.schedule.current_destination_coords = (target_x, target_y)
+                                path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                                if path:
+                                    npc.schedule.current_path = path
+                                else:
+                                    npc.schedule.current_task = "idle" # Try again later
+                            else:
+                                npc.schedule.current_task = "crafting_medical_supplies"
+                                # Move to clinic alchemy station
+                                clinic = self._find_nearest_building_of_type(npc, "clinic")
+                                if clinic and "alchemy_station" in clinic.work_zone_tiles and clinic.work_zone_tiles["alchemy_station"]:
+                                    dest = clinic.work_zone_tiles["alchemy_station"][0]
+                                    npc.schedule.current_destination_coords = dest
+                                    if (npc.x, npc.y) != dest:
+                                        path = self.calculate_path(npc.x, npc.y, dest[0], dest[1])
+                                        if path:
+                                            npc.schedule.current_path = path
+                                        else:
+                                            npc.schedule.current_task = "idle"
+                                else:
+                                    # Stand still and craft if no clinic
+                                    npc.task_timer = 5
+                                    npc.schedule.current_destination_coords = (npc.x, npc.y)
+
+            # Keep these outside the "if npc.schedule.current_task not in..." block, so they can process!
+            # Oh wait, they need to be processed even if they are in those tasks!
+            if npc.economic.profession == "Healer":
+                if npc.schedule.current_task == "foraging_for_herbs":
+                    if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                        # Arrived at foraging spot
+                        self.add_message_to_chat_log(f"{npc.name} foraged some medicinal herbs.")
+                        npc.add_item("medicinal_herb", random.randint(2, 4))
+                        npc.schedule.current_task = "idle"
+                        npc.schedule.current_destination_coords = None
+
+                elif npc.schedule.current_task == "crafting_medical_supplies":
+                    if npc.schedule.current_destination_coords and (npc.x, npc.y) == npc.schedule.current_destination_coords:
+                        if not hasattr(npc, "task_timer") or npc.task_timer <= 0:
+                            npc.task_timer = 5
+
+                        npc.task_timer -= 1
+                        if npc.task_timer <= 0:
+                            if npc.has_item("medicinal_herb", 2):
+                                npc.remove_item("medicinal_herb", 2)
+                                npc.add_item("healing_salve", 1)
+                                self.add_message_to_chat_log(f"{npc.name} crafted a healing salve.")
+                            npc.schedule.current_task = "idle"
+                            npc.schedule.current_destination_coords = None
+
+            if npc.schedule.current_task == "treating_patient":
                 patient = self.get_entity_by_id(npc.task_target_entity_id)
                 if not patient or patient.physical.is_dead or "broken_leg" not in patient.physical.status_effects:
                     npc.schedule.current_task = "idle"

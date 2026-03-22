@@ -206,6 +206,7 @@ Your personality is: {npc_personality}.
 **Relationship with Player:**
 - Your general attitude: {npc_attitude}
 - Your numerical relationship score (0-100): {relationship_score}
+- Your concrete relationship to the player: {npc_relationship_to_player}
 
 **Current Environment:**
 - Time of Day: {time_of_day}
@@ -216,6 +217,12 @@ Your personality is: {npc_personality}.
 - Fame: {player_fame}
 - Infamy: {player_infamy}
 - Title: "{player_title}" (may be empty)
+
+**How To Address The Player:**
+- The player does not have a spoken proper name in the UI.
+- Address them directly as "you", or use "traveler" if you need a noun.
+- If they have a title, you may use that title.
+- Never output placeholder text like "[Player Name]", "player_name", or "{{player_name}}".
 
 **Past Interactions (Long-Term Memory):**
 {long_term_memory}
@@ -245,6 +252,7 @@ Your current task is: {npc_current_task}.
 **Relationship with Player:**
 - Your general attitude: {npc_attitude}
 - Your numerical relationship score (0-100): {relationship_score}
+- Your concrete relationship to the player: {npc_relationship_to_player}
 
 **Current Environment:**
 - Time of Day: {time_of_day}
@@ -255,6 +263,12 @@ Your current task is: {npc_current_task}.
 - Fame: {player_fame}
 - Infamy: {player_infamy}
 - Title: "{player_title}" (may be empty)
+
+**How To Address The Player:**
+- The player does not have a spoken proper name in the UI.
+- Address them directly as "you", or use "traveler" if you need a noun.
+- If they have a title, you may use that title.
+- Never output placeholder text like "[Player Name]", "player_name", or "{{player_name}}".
 
 **Past Interactions (Long-Term Memory):**
 {long_term_memory}
@@ -268,6 +282,8 @@ Available Goals for you to take after responding:
 - "follow_player": If the player asks you to follow them.
 - "go_to_location": If the player tells you about a specific place to check out.
 - "start_trade": If the player wants to trade and you are a merchant.
+- "give_item": If the player asks you for an item, weapon, or gift, and you verbally agree to hand it over.
+- "attack_target": If the player deeply insults, physically threatens, or angers you to the point of violence.
 - "end_conversation": If the conversation is over.
 - "continue_conversation": If you should just continue talking without taking a new action.
 
@@ -929,11 +945,13 @@ Example 2 (Villainous):
 JSON Output:
 """,
     "npc_npc_conversation": """\
-You are an AI generating a single line of dialogue for an NPC in a conversation.
+You are an AI generating a single line of dialogue and a follow-up goal for an NPC in a conversation.
 
 **NPCs Involved:**
 - **Speaker:** {speaker_name} (Personality: {speaker_personality}, Attitude towards listener: {speaker_attitude_to_listener})
-- **Listener:** {listener_name} (Personality: {listener_personality})
+- **Listener:** {listener_name} (Personality: {listener_personality}, Attitude towards speaker: {listener_relationship_to_speaker})
+- **Speaker Current Task:** {speaker_current_task}
+- **Listener Current Task:** {listener_current_task}
 
 **Conversation Context:**
 - **Topic:** A brief summary of a recent event they both know about: "{event_summary}"
@@ -941,11 +959,13 @@ You are an AI generating a single line of dialogue for an NPC in a conversation.
 {conversation_history}
 
 **Task:**
-Generate a single, short, in-character line of dialogue for the **Speaker**.
+Generate a single, short, in-character line of dialogue for the **Speaker**, and decide whether the speaker adopts a concrete next goal because of this conversation.
 - The dialogue should be a natural continuation of the conversation if there is a history.
 - It should reflect the Speaker's personality and their attitude towards the Listener.
 - It should be related to the event they are discussing.
-- Do not wrap the output in quotes.
+- Return JSON with:
+  - "response": the spoken line
+  - "goal": one of "continue_conversation", "end_conversation", "socialize", "visit_listener_home", "go_home", "go_to_work"
 
 **Example 1:**
 - Speaker: Borin (gruff), Listener: Elara (wise)
@@ -957,7 +977,7 @@ Generate a single, short, in-character line of dialogue for the **Speaker**.
 - Topic: "Borin fought a wolf."
 - Elara's line could be: "You were fortunate, Borin. Your strength is a blessing to this village."
 
-Dialogue Line:
+JSON Output:
 """,
     "npc_event_conversation_starter": """\
 You are {npc_name}, an NPC in a fantasy village, and you have decided to start a conversation with the player about something you witnessed.

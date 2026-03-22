@@ -101,15 +101,16 @@ def _build_genai_fallback():
     class _Response:
         text = ""
 
-    class _GenerativeModel:
-        def __init__(self, model_name):
-            self.model_name = model_name
-
-        def generate_content(self, prompt):
+    class _Models:
+        def generate_content(self, model, contents, **kwargs):
             return _Response()
 
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            self.models = _Models()
+
     return SimpleNamespace(
-        GenerativeModel=_GenerativeModel,
+        Client=_Client,
         configure=lambda **kwargs: None,
     )
 
@@ -125,6 +126,6 @@ except ModuleNotFoundError:
     requests = _build_requests_fallback()
 
 try:
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
 except ModuleNotFoundError:
     genai = _build_genai_fallback()

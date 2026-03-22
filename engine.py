@@ -2,6 +2,9 @@
 import math
 import random
 import itertools
+import re
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from runtime_compat import genai, np, requests
 from tcod_compat import tcod, libtcodpy
 import time
@@ -92,8 +95,23 @@ TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant
 import json
 import uuid
 
-if GOOGLE_API_KEY:
+if GOOGLE_API_KEY and hasattr(genai, "configure"):
     genai.configure(api_key=GOOGLE_API_KEY)
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
+
+FAMILY_LAST_NAMES = [
+    "Hart", "Miller", "Bennett", "Rowan", "Turner", "Hale", "Mercer", "Wilder",
+    "Graves", "Sawyer", "Fletcher", "Briar",
+]
+FAMILY_FIRST_NAMES = {
+    "male": ["Elias", "Jonah", "Caleb", "Owen", "Silas", "Theo", "Nathan", "Micah"],
+    "female": ["Elara", "Mara", "Nora", "Clara", "Tessa", "Lena", "Iris", "Ada"],
+}
+PLACEHOLDER_FAMILY_NAME_RE = re.compile(r"^(Mother|Father|Brother|Sister)\s+Family_\d+$", re.IGNORECASE)
+BACKGROUND_LLM_PENDING = object()
 
 class Quest:
     """A class to represent an active quest."""
@@ -387,6 +405,8 @@ class Player:
         self.y = y
         self.render_x = float(x)
         self.render_y = float(y)
+        self.name = "Player"
+        self.first_name = "Player"
         self.char = 0xE000
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
@@ -600,13 +620,18 @@ class World:
         return itertools.chain(self.village_npcs, self.npcs)
 
     """World class now uses a generator for a more complex map."""
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, player_first_name: str | None = None):
         if seed is not None:
             random.seed(seed)
         self.chat_log = [] # Stores chat messages
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
+        if player_first_name:
+            chosen_name = player_first_name.strip()
+            if chosen_name:
+                self.player.first_name = chosen_name
+                self.player.name = chosen_name
         self.player.world_ref = self
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height, seed=seed)
         self.chunks = self._initialize_chunks()
@@ -621,6 +646,9 @@ class World:
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
         self.needs_text_input = False
+        self._llm_warning_issued = False
+        self._background_llm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="world-llm")
+        self._background_llm_tasks = {}
 
         # Season and Temperature
         self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
@@ -4444,7 +4472,7 @@ class World:
         # 3. Add NPCs
         for npc in self.all_npcs:
             if npc.x == x and npc.y == y and not npc.is_dead:
-                entities.append({"type": "npc", "data": npc, "name": npc.name})
+                entities.append({"type": "npc", "data": npc, "name": self.get_entity_display_name(npc, include_relationship=True)})
 
         # 4. Add Buildings
         building = self.get_building_at(x,y)
@@ -5178,7 +5206,8 @@ class World:
 
     def _continue_npc_conversation(self, speaker, listener):
         if len(speaker.current_conversation) >= 6:
-            self.add_message_to_chat_log(f"The conversation between {speaker.name} and {listener.name} ends.")
+            if self._can_player_overhear(speaker):
+                self.add_message_to_chat_log(f"You overhear {self.get_entity_display_name(speaker)} and {self.get_entity_display_name(listener)} wrap up their conversation.")
             speaker.conversation_partner_id = None
             listener.conversation_partner_id = None
             speaker.current_conversation = []
@@ -5193,27 +5222,63 @@ class World:
             event_summary = event.description
 
         history = "\n".join(speaker.current_conversation)
+        task_key = ("npc_conversation", speaker.id, listener.id)
+        if not self._is_npc_llm_relevant_to_player(speaker, listener):
+            self._cancel_background_llm_task(task_key)
+            spoken_line, goal = self._fallback_npc_social_line(speaker, listener)
+            speaker.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            listener.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            self._handle_npc_social_goal(speaker, listener, goal)
+            speaker.last_conversation_time = self.game_time
+            listener.last_conversation_time = self.game_time
+            listener.conversation_partner_id = speaker.id
+            speaker.conversation_partner_id = listener.id
+            return
+
+        dialogue = self._poll_background_llm_task(task_key)
+        if dialogue is BACKGROUND_LLM_PENDING:
+            return
+        if dialogue is not None:
+            spoken_line = ""
+            goal = "continue_conversation"
+            if dialogue:
+                response_json = self._parse_llm_json_object(dialogue)
+                if response_json is not None:
+                    spoken_line = response_json.get("response", "").strip()
+                    goal = response_json.get("goal", "continue_conversation")
+                else:
+                    spoken_line = dialogue.strip()
+
+            if not spoken_line:
+                spoken_line, goal = self._fallback_npc_social_line(speaker, listener)
+
+            if self._can_player_overhear(speaker):
+                self.add_message_to_chat_log(
+                    f"You overhear {self.get_entity_display_name(speaker)} tell {self.get_entity_display_name(listener)}: {spoken_line}"
+                )
+            speaker.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            listener.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            self._handle_npc_social_goal(speaker, listener, goal)
+
+            speaker.last_conversation_time = self.game_time
+            listener.last_conversation_time = self.game_time
+            listener.conversation_partner_id = speaker.id
+            speaker.conversation_partner_id = listener.id
+            return
+
         prompt = LLM_PROMPTS["npc_npc_conversation"].format(
             speaker_name=speaker.name,
             speaker_personality=speaker.social.personality,
             speaker_attitude_to_listener=speaker.social.relationships.get(listener.id, 50),
             listener_name=listener.name,
             listener_personality=listener.social.personality,
+            listener_relationship_to_speaker=listener.social.relationships.get(speaker.id, 50),
+            speaker_current_task=speaker.schedule.current_task,
+            listener_current_task=listener.schedule.current_task,
             event_summary=event_summary,
             conversation_history=history
         )
-        dialogue = self._call_llm(prompt)
-        if dialogue:
-            self.add_message_to_chat_log(f"{speaker.name} to {listener.name}: {dialogue}")
-            speaker.current_conversation.append(f"{speaker.name}: {dialogue}")
-            listener.current_conversation.append(f"{speaker.name}: {dialogue}")
-
-        speaker.last_conversation_time = self.game_time
-        listener.last_conversation_time = self.game_time
-
-        # Swap speaker and listener for the next turn
-        listener.conversation_partner_id = speaker.id
-        speaker.conversation_partner_id = listener.id
+        self._submit_background_llm_task(task_key, prompt)
 
     def _start_npc_socialization(self, npc: NPC):
         if npc.conversation_cooldown > 0:
@@ -5235,8 +5300,10 @@ class World:
         npc.last_conversation_time = self.game_time
         partner.last_conversation_time = self.game_time
 
-        # For now, let's just log that a conversation has started.
-        self.add_message_to_chat_log(f"{npc.name} and {partner.name} start a conversation.")
+        if self._can_player_overhear(npc):
+            self.add_message_to_chat_log(
+                f"You overhear {self.get_entity_display_name(npc)} and {self.get_entity_display_name(partner)} start talking."
+            )
 
     def player_attempt_attack(self, target_npc: NPC):
         if not target_npc:
@@ -5774,11 +5841,14 @@ class World:
         # ---
 
         relationship_score = npc_target.social.relationships.get(self.player.id, 50)
+        npc_display_name = self.get_entity_display_name(npc_target)
+        relationship_context = self._describe_relationship_for_prompt(npc_target)
 
         prompt = LLM_PROMPTS["npc_conversation_greeting"].format(
-            npc_name=npc_target.name,
+            npc_name=npc_display_name,
             npc_personality=npc_target.social.personality,
             npc_attitude=npc_target.attitude_to_player,
+            npc_relationship_to_player=relationship_context,
             relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
@@ -5790,10 +5860,10 @@ class World:
             npc_help_needed=npc_target.knowledge.help_needed
         )
         greeting = self._call_llm(prompt)
-        if not greeting:
-            greeting = f"Hello. (LLM failed to provide greeting)"
+        if self._llm_output_is_empty(greeting) or self._contains_placeholder_player_reference(greeting):
+            greeting = self._fallback_dialogue_greeting(npc_target)
 
-        self.chat_ui_history.append((npc_target.name, greeting.strip()))
+        self.chat_ui_history.append((self.get_entity_display_name(npc_target), greeting.strip()))
 
         # If the NPC has a dynamic quest to offer, add it to the dialogue
         if hasattr(npc_target, 'active_quest') and npc_target.active_quest:
@@ -6037,10 +6107,14 @@ class World:
         # ---
 
         relationship_score = npc_target.social.relationships.get(self.player.id, 50)
+        npc_display_name = self.get_entity_display_name(npc_target)
+        relationship_context = self._describe_relationship_for_prompt(npc_target)
 
         prompt = LLM_PROMPTS["npc_conversation_continue"].format(
-            npc_name=npc_target.name,
+            npc_name=npc_display_name,
             npc_personality=npc_target.social.personality,
+            npc_attitude=npc_target.attitude_to_player,
+            npc_relationship_to_player=relationship_context,
             relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
@@ -6055,21 +6129,30 @@ class World:
         )
 
         response_str = self._call_llm(prompt)
-        if not response_str:
-            self.chat_ui_history.append((npc_target.name, "... (LLM failed to respond)"))
+        if self._llm_output_is_empty(response_str):
+            fallback_response, fallback_goal = self._fallback_dialogue_continue(npc_target, player_input_text)
+            self.chat_ui_history.append((npc_display_name, fallback_response))
+            self._handle_npc_goal(npc_target, fallback_goal, player_input_text)
             return
 
-        try:
-            response_json = json.loads(response_str)
-            npc_response = response_json.get("response", "...")
+        response_json = self._parse_llm_json_object(response_str)
+        if response_json is not None:
+            npc_response = response_json.get("response", "").strip() or self._fallback_dialogue_continue(npc_target, player_input_text)[0]
             goal = response_json.get("goal", "continue_conversation")
+            if self._contains_placeholder_player_reference(npc_response):
+                npc_response, goal = self._fallback_dialogue_continue(npc_target, player_input_text)
 
-            self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+            self.chat_ui_history.append((npc_display_name, npc_response.strip()))
             self._handle_npc_goal(npc_target, goal, player_input_text)
-
-        except json.JSONDecodeError:
+        else:
             # If the LLM fails to return valid JSON, just treat the whole response as dialogue
-            self.chat_ui_history.append((npc_target.name, response_str.strip()))
+            fallback_response, fallback_goal = self._fallback_dialogue_continue(npc_target, player_input_text)
+            dialogue_text = response_str.strip() if not self._llm_output_is_empty(response_str) else fallback_response
+            if self._contains_placeholder_player_reference(dialogue_text):
+                dialogue_text = fallback_response
+            self.chat_ui_history.append((npc_display_name, dialogue_text))
+            if dialogue_text == fallback_response:
+                self._handle_npc_goal(npc_target, fallback_goal, player_input_text)
 
         # After NPC response, check if this NPC should offer a job
         if npc_target.economic.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
@@ -6141,6 +6224,19 @@ class World:
                 self.request_open_trade(npc)
             else:
                 self.add_message_to_chat_log(f"{npc.name} seems to want to trade, but isn't a merchant.")
+        elif goal == "give_item":
+            if len(npc.inventory) > 0:
+                item = npc.inventory.pop(0) # In the future, parse the exact item name
+                self.player.inventory.append(item)
+                self.add_message_to_chat_log(f"{npc.name} gave you {item.name}.")
+            else:
+                self.add_message_to_chat_log(f"{npc.name} has nothing to give.")
+            self.request_close_dialogue()
+        elif goal == "attack_target":
+            npc.attitude_to_player = "hostile"
+            npc.social.relationships[self.player.id] = 0
+            self.add_message_to_chat_log(f"{npc.name} becomes incredibly hostile!")
+            self.request_close_dialogue()
         elif goal == "end_conversation":
             self._summarize_and_store_conversation(npc, self.chat_ui_history)
             self.request_close_dialogue()
@@ -6208,22 +6304,59 @@ class World:
     def _call_llm(self, prompt: str) -> str:
         """Makes a request to the configured LLM backend and returns the response."""
         if not ENABLE_LLM_CONNECTION:
-            return "{}"
+            return ""
 
         if LLM_BACKEND == "gemini":
             return self._call_gemini(prompt)
         else:
             return self._call_ollama_backend(prompt)
 
+    def _call_llm_for_worldgen(self, prompt: str) -> str:
+        """World generation should stay fast and local; reserve LLM calls for live gameplay."""
+        return ""
+
+    def _call_llm_for_background(self, prompt: str) -> str:
+        """Background simulation should not block on remote model calls during active play."""
+        return ""
+
+    def _submit_background_llm_task(self, task_key, prompt: str) -> None:
+        if task_key in self._background_llm_tasks:
+            return
+        if len(self._background_llm_tasks) >= 4:
+            return
+        self._background_llm_tasks[task_key] = self._background_llm_executor.submit(self._call_llm, prompt)
+
+    def _cancel_background_llm_task(self, task_key) -> None:
+        future = self._background_llm_tasks.pop(task_key, None)
+        if future is not None:
+            future.cancel()
+
+    def _poll_background_llm_task(self, task_key):
+        future = self._background_llm_tasks.get(task_key)
+        if future is None:
+            return None
+        if not future.done():
+            return BACKGROUND_LLM_PENDING
+        del self._background_llm_tasks[task_key]
+        try:
+            return future.result()
+        except Exception:
+            return ""
+
     def _call_gemini(self, prompt: str) -> str:
         if not GOOGLE_API_KEY:
-            return "{}"
+            self._warn_missing_llm_once()
+            return ""
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt)
-            return response.text.strip()
+            client = genai.Client(api_key=GOOGLE_API_KEY)
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt
+            )
+            response_text = getattr(response, "text", "") or ""
+            return response_text.strip()
         except Exception as e:
-            # # print(f"Error communicating with Gemini: {e}")
+            self.add_message_to_chat_log(f"Gemini error: {e}")
             return ""
 
     def _call_ollama_backend(self, prompt: str) -> str:
@@ -6545,7 +6678,7 @@ class World:
                 family_ties_hint="",
                 attitude_to_player_hint=""
             )
-            llm_response = self._call_llm(llm_prompt)
+            llm_response = self._call_llm_for_worldgen(llm_prompt)
             try:
                 npc_data = json.loads(llm_response)
                 # Assign home
@@ -6734,7 +6867,30 @@ class World:
             self.village_npcs = []
 
         for npc in self.npcs + self.village_npcs:
+            task_key = ("ambient_speech", npc.id)
+            if task_key in self._background_llm_tasks and not self._is_npc_llm_relevant_to_player(npc):
+                self._cancel_background_llm_task(task_key)
+            llm_dialogue = self._poll_background_llm_task(task_key)
+            if llm_dialogue is not None and llm_dialogue is not BACKGROUND_LLM_PENDING:
+                if llm_dialogue:
+                    distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+                    can_hear = (
+                        distance_to_player <= self.player.physical.hearing_radius
+                        and distance_to_player <= npc.speech_volume
+                    )
+                    if can_hear:
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)}: {llm_dialogue.strip()}")
+                npc.last_speech_time = current_time
+                continue
+
+            if task_key in self._background_llm_tasks:
+                continue
+
             if current_time - npc.last_speech_time > random.randint(10, 30):
+                if not self._is_npc_llm_relevant_to_player(npc):
+                    self._cancel_background_llm_task(task_key)
+                    npc.last_speech_time = current_time
+                    continue
                 # Ambient speech might be general, or react to player if nearby and reputation is notable
                 prompt = (
                     f"NPC {npc.name} (Personality: {npc.social.personality}, Attitude to Player: {npc.attitude_to_player}, Family: {npc.social.family_ties}) "
@@ -6745,23 +6901,7 @@ class World:
                     f"or a comment related to the player if their reputation is particularly high or low and the player is assumed to be generally known or nearby. "
                     f"Keep it concise."
                 )
-                llm_dialogue = self._call_llm(prompt)
-                if llm_dialogue:
-                    # Check if player can hear this NPC
-                    distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y) # Manhattan distance
-
-                    can_hear = False
-                    if distance_to_player <= self.player.physical.hearing_radius and \
-                       distance_to_player <= npc.speech_volume:
-                        can_hear = True
-
-                    if can_hear:
-                        # For now, keep existing message format.
-                        # Could later add "(you overhear)" or similar if NPC not visible.
-                        self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue.strip()}")
-                    # Else, player doesn't hear it, so don't add to log.
-
-                    npc.last_speech_time = current_time # Update speech time regardless of player hearing
+                self._submit_background_llm_task(task_key, prompt)
 
     def decorate_building_interior(self, building: Building, chunk: Chunk):
         decoration_data = {'decorations': []}
@@ -6818,7 +6958,7 @@ class World:
 
         # self.add_message_to_chat_log(f"Decorating prompt for {building.id[:6]}:\n{prompt}") # For debugging the full prompt
 
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm_for_worldgen(prompt)
         try:
             # If the response is a valid JSON, use it. Otherwise, fallback to placeholder.
             decoration_data = json.loads(llm_response)
@@ -6903,7 +7043,7 @@ class World:
                 family_ties_hint="none",
                 attitude_to_player_hint="neutral"
             )
-            llm_response = self._call_llm(prompt)
+            llm_response = self._call_llm_for_worldgen(prompt)
             try:
                 npc_data = json.loads(llm_response)
 
@@ -6955,7 +7095,7 @@ class World:
                 f"Generate a short, in-character dialogue response from {closest_npc.name} to the player. "
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
             )
-            llm_dialogue = self._call_llm(prompt)
+            llm_dialogue = self._call_llm_for_background(prompt)
             # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
             print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
             self.last_talked_to_npc = closest_npc # Store for potential follow-up actions like persuasion
@@ -7075,8 +7215,6 @@ class World:
 
     def _create_family_npc(self, role: str, last_name: str, home_building: Building, family_ties: dict):
         """Helper to create a family member NPC."""
-        npc_name = f"{role} {last_name}" # Fallback name
-
         # Determine age and gender based on role
         if role == "Father":
             age = random.randint(35, 55)
@@ -7099,6 +7237,9 @@ class World:
             gender = "male"
             name_hint = "a villager"
 
+        fallback_first_name = random.choice(FAMILY_FIRST_NAMES.get(gender, FAMILY_FIRST_NAMES["male"]))
+        fallback_name = f"{fallback_first_name} {last_name}"
+
         prompt = LLM_PROMPTS["npc_personality"].format(
             player_criminal_points=0,
             player_hero_points=0,
@@ -7109,20 +7250,23 @@ class World:
         )
 
         npc_data = {}
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm_for_worldgen(prompt)
         try:
             npc_data = json.loads(llm_response)
         except:
             npc_data = {
-                "name": f"{role} {last_name}",
+                "name": fallback_name,
                 "dialogue": ["Hello, dear."],
                 "personality": "friendly"
             }
 
+        family_ties = dict(family_ties)
+        family_ties.setdefault("relation_to_player", role.lower())
+
         npc = NPC(
             x=home_building.global_center_x,
             y=home_building.global_center_y,
-            name=npc_data.get("name", f"{role} {last_name}"),
+            name=npc_data.get("name") or fallback_name,
             dialogue=npc_data.get("dialogue", ["Welcome home."]),
             personality=npc_data.get("personality", "friendly"),
             family_ties=family_ties,
@@ -7155,6 +7299,14 @@ class World:
 
     def _generate_player_family(self):
         """Generates a family for the player and assigns them a home."""
+        family_name = self.player.social.family_ties.get("last_name")
+        if not family_name:
+            family_name = random.choice(FAMILY_LAST_NAMES)
+            self.player.social.family_ties["last_name"] = family_name
+        first_name = str(getattr(self.player, "first_name", "") or "Player").strip() or "Player"
+        self.player.first_name = first_name
+        self.player.name = f"{first_name} {family_name}"
+
         if not self.villages:
             return
 
@@ -7199,22 +7351,20 @@ class World:
         elif wealth == "Wealthy":
             self.player.economic.money = random.randint(200, 500)
 
-        family_name = f"Family_{random.randint(1000,9999)}"
-
         # 5. Create NPCs
         if "Mother" in scenario or scenario == "Nuclear":
-            self._create_family_npc("Mother", family_name, player_home, {"son_id": self.player.id})
+            self._create_family_npc("Mother", family_name, player_home, {"child_id": self.player.id, "relation_to_player": "mother"})
             self.player.social.family_ties["mother_id"] = self.village_npcs[-1].id
 
         if "Father" in scenario or scenario == "Nuclear":
-            self._create_family_npc("Father", family_name, player_home, {"son_id": self.player.id})
+            self._create_family_npc("Father", family_name, player_home, {"child_id": self.player.id, "relation_to_player": "father"})
             self.player.social.family_ties["father_id"] = self.village_npcs[-1].id
 
         # Siblings
         num_siblings = random.randint(0, 3)
         for i in range(num_siblings):
             role = random.choice(["Brother", "Sister"])
-            self._create_family_npc(role, family_name, player_home, {"sibling_id": self.player.id})
+            self._create_family_npc(role, family_name, player_home, {"sibling_id": self.player.id, "relation_to_player": role.lower()})
             if "sibling_ids" not in self.player.social.family_ties:
                 self.player.social.family_ties["sibling_ids"] = []
             if isinstance(self.player.social.family_ties["sibling_ids"], list):
@@ -7372,7 +7522,7 @@ class World:
         """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""
 
         llm_prompt = LLM_PROMPTS["village_lore"].format(biome=chunk.biome)
-        llm_response = self._call_llm(llm_prompt)
+        llm_response = self._call_llm_for_worldgen(llm_prompt)
         try:
             lore_data = json.loads(llm_response)
             chunk.village.lore = lore_data.get("village_lore", "The mists of time have obscured this village's history.")
@@ -8027,6 +8177,19 @@ class World:
                         undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
                         if undiscussed_events:
                             event_to_discuss = random.choice(undiscussed_events)
+                            task_key = ("event_dialogue", npc.id, event_to_discuss.id)
+                            starter_dialogue = self._poll_background_llm_task(task_key)
+                            if starter_dialogue is BACKGROUND_LLM_PENDING:
+                                continue
+                            if starter_dialogue is not None:
+                                npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
+                                if starter_dialogue:
+                                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} approaches you.")
+                                    self.start_npc_dialogue(npc)
+                                    self.chat_ui_history.append((self.get_entity_display_name(npc), starter_dialogue))
+                                    self.request_open_dialogue(npc)
+                                    break
+                                continue
 
                             # Gather context for the prompt
                             subject = self.get_entity_by_id(event_to_discuss.subject_id)
@@ -8046,15 +8209,7 @@ class World:
                                 relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
                                 relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
                             )
-
-                            starter_dialogue = self._call_llm(prompt)
-                            if starter_dialogue:
-                                self.add_message_to_chat_log(f"{npc.name} approaches you.")
-                                self.start_npc_dialogue(npc) # This clears history and sets up the UI state
-                                self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
-                                self.request_open_dialogue(npc)
-                                npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
-                                break # Only one NPC starts a conversation per tick
+                            self._submit_background_llm_task(task_key, prompt)
 
     def _handle_reputation_based_reactions(self):
         """Makes NPCs react to famous or infamous characters they see."""
@@ -8100,6 +8255,294 @@ class World:
                 return npc
         return None
 
+    def _is_placeholder_family_name(self, name: str) -> bool:
+        return bool(name and PLACEHOLDER_FAMILY_NAME_RE.match(name))
+
+    def get_relationship_to_player(self, entity) -> str | None:
+        """Return the entity's relationship to the player from the player's perspective."""
+        if not entity or entity == self.player:
+            return None
+
+        social = getattr(entity, "social", None)
+        ties = getattr(social, "family_ties", {}) or {}
+        relation = str(ties.get("relation_to_player", "")).strip().lower()
+        if relation:
+            return relation
+
+        player_ties = getattr(self.player.social, "family_ties", {}) or {}
+        if player_ties.get("mother_id") == entity.id:
+            return "mother"
+        if player_ties.get("father_id") == entity.id:
+            return "father"
+        if entity.id in player_ties.get("sibling_ids", []):
+            return "sibling"
+        if player_ties.get("partner_id") == entity.id:
+            return "partner"
+        if ties.get("child_id") == self.player.id:
+            return "parent"
+        if ties.get("son_id") == self.player.id or ties.get("daughter_id") == self.player.id:
+            inferred = entity.name.split(" ", 1)[0].strip().lower()
+            if inferred in {"mother", "father"}:
+                return inferred
+            return "parent"
+        if ties.get("sibling_id") == self.player.id:
+            inferred = entity.name.split(" ", 1)[0].strip().lower()
+            if inferred in {"brother", "sister"}:
+                return inferred
+            return "sibling"
+        return None
+
+    def get_relationship_label(self, entity) -> str:
+        relation = self.get_relationship_to_player(entity)
+        if not relation:
+            return ""
+        label_map = {
+            "mother": "Mother",
+            "father": "Father",
+            "brother": "Brother",
+            "sister": "Sister",
+            "sibling": "Sibling",
+            "parent": "Parent",
+            "partner": "Partner",
+            "child": "Child",
+        }
+        return label_map.get(relation, relation.replace("_", " ").title())
+
+    def get_entity_display_name(self, entity, include_relationship: bool = False) -> str:
+        """Return a player-facing label for an entity."""
+        if not entity:
+            return "Unknown"
+        if entity == self.player:
+            return "You"
+
+        original_name = str(getattr(entity, "name", "Unknown")).strip()
+        raw_name = original_name.replace("_", " ").strip()
+        relation_label = self.get_relationship_label(entity)
+        if self._is_placeholder_family_name(original_name) and relation_label:
+            base_name = relation_label
+        else:
+            base_name = raw_name or "Unknown"
+
+        if include_relationship and relation_label and base_name != relation_label:
+            return f"{base_name} [{relation_label}]"
+        return base_name
+
+    def get_entity_relationship_summary(self, entity) -> str:
+        """Return a short player-facing summary of how the player knows an NPC."""
+        if not entity or entity == self.player:
+            return ""
+
+        parts = []
+        relation_label = self.get_relationship_label(entity)
+        if relation_label:
+            parts.append(f"your {relation_label.lower()}")
+
+        profession = getattr(getattr(entity, "economic", None), "profession", "")
+        if profession and profession not in {"", "Unemployed"}:
+            parts.append(profession.lower())
+
+        attitude = getattr(entity, "attitude_to_player", "")
+        if attitude:
+            parts.append(attitude)
+
+        return ", ".join(parts[:3])
+
+    def _describe_relationship_for_prompt(self, entity) -> str:
+        relation = self.get_relationship_to_player(entity)
+        if not relation:
+            return "No known family relation to the player."
+        prompt_map = {
+            "mother": "You are the player's mother.",
+            "father": "You are the player's father.",
+            "brother": "You are the player's brother.",
+            "sister": "You are the player's sister.",
+            "sibling": "You are the player's sibling.",
+            "partner": "You are the player's partner.",
+            "parent": "You are the player's parent.",
+            "child": "You are the player's child.",
+        }
+        return prompt_map.get(relation, f"You are the player's {relation.replace('_', ' ')}.")
+
+    def _llm_output_is_empty(self, response_text: str | None) -> bool:
+        if response_text is None:
+            return True
+        normalized = str(response_text).strip()
+        return normalized in {"", "{}", "[]", "null", '""'}
+
+    def _contains_placeholder_player_reference(self, response_text: str | None) -> bool:
+        if response_text is None:
+            return False
+        text = str(response_text)
+        placeholder_patterns = [
+            r"\[\s*player\s*name\s*\]",
+            r"\{\s*player_name\s*\}",
+            r"\bplayer_name\b",
+            r"\bplayer name\b",
+        ]
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in placeholder_patterns)
+
+    def _extract_json_object_text(self, response_text: str | None) -> str | None:
+        """Best-effort extraction of a JSON object from model output."""
+        if response_text is None:
+            return None
+
+        text = str(response_text).strip()
+        if not text:
+            return None
+
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+            if text.lower().startswith("json"):
+                text = text[4:].lstrip()
+
+        if text.startswith("{") and text.endswith("}"):
+            return text
+
+        start = text.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:index + 1]
+        return None
+
+    def _parse_llm_json_object(self, response_text: str | None):
+        json_text = self._extract_json_object_text(response_text)
+        if not json_text:
+            return None
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError:
+            return None
+
+    def _warn_missing_llm_once(self) -> None:
+        if self._llm_warning_issued:
+            return
+        self._llm_warning_issued = True
+        self.add_message_to_chat_log("LLM dialogue is offline. Add a GOOGLE_API_KEY or switch to Ollama for AI responses.")
+
+    def _fallback_dialogue_greeting(self, npc_target: NPC) -> str:
+        relation = self.get_relationship_label(npc_target)
+        attitude = npc_target.attitude_to_player
+        if npc_target.knowledge.help_needed:
+            return f"Please, I need help with {npc_target.knowledge.help_needed}."
+        if relation == "Mother":
+            return "There you are. Are you keeping yourself fed?"
+        if relation == "Father":
+            return "Good to see you. How are you holding up?"
+        if relation in {"Brother", "Sister", "Sibling"}:
+            return "Hey. What do you need?"
+        if attitude in {"warm", "friendly"}:
+            return npc_target.dialogue[0] if npc_target.dialogue else "Good to see you."
+        if attitude in {"hostile", "unfriendly"}:
+            return "What do you want?"
+        return npc_target.dialogue[0] if npc_target.dialogue else "Hello."
+
+    def _fallback_dialogue_continue(self, npc_target: NPC, player_input_text: str) -> tuple[str, str]:
+        text = player_input_text.lower().strip()
+        relation = self.get_relationship_label(npc_target)
+
+        if any(word in text for word in ["bye", "goodbye", "see you", "farewell"]):
+            return ("Take care.", "end_conversation")
+        if "how are you" in text or "how're you" in text:
+            if relation == "Mother":
+                return ("I'm managing. You should be asking how you are doing, too.", "continue_conversation")
+            if relation == "Father":
+                return ("Still standing. Work never stops around here.", "continue_conversation")
+            if relation in {"Brother", "Sister", "Sibling"}:
+                return ("I've been alright. Same village, same troubles.", "continue_conversation")
+            return ("I've been alright.", "continue_conversation")
+        if any(word in text for word in ["who are you", "your name", "name?"]):
+            return (f"I'm {self.get_entity_display_name(npc_target)}.", "continue_conversation")
+        if any(word in text for word in ["follow me", "come with me"]):
+            return ("Alright. Lead the way.", "follow_player")
+        if "trade" in text and npc_target.economic.profession in {"Merchant", "Miller", "Scribe", "Traveling Merchant"}:
+            return ("Let's see what we can trade.", "start_trade")
+        if relation:
+            return ("I'm listening.", "continue_conversation")
+        return ("I hear you.", "continue_conversation")
+
+    def _can_player_overhear(self, speaker) -> bool:
+        distance_to_player = abs(speaker.x - self.player.x) + abs(speaker.y - self.player.y)
+        return (
+            distance_to_player <= self.player.physical.hearing_radius
+            and distance_to_player <= getattr(speaker, "speech_volume", 0)
+        )
+
+    def _is_npc_llm_relevant_to_player(self, *entities) -> bool:
+        for entity in entities:
+            if entity and self._can_player_overhear(entity):
+                return True
+        return False
+
+    def _fallback_npc_social_line(self, speaker, listener) -> tuple[str, str]:
+        attitude = speaker.social.relationships.get(listener.id, 50)
+        if attitude >= 70:
+            return (f"It's good to see you, {listener.name}.", "continue_conversation")
+        if attitude <= 30:
+            return ("I don't have much to say to you.", "end_conversation")
+        if speaker.schedule.work_building_id and random.random() < 0.3:
+            return ("I should get back to work soon.", "go_to_work")
+        if speaker.schedule.home_building_id and random.random() < 0.2:
+            return ("I ought to head home before long.", "go_home")
+        return ("Strange day, isn't it?", "continue_conversation")
+
+    def _handle_npc_social_goal(self, speaker, listener, goal: str) -> None:
+        if goal == "go_to_work" and speaker.schedule.work_building_id:
+            dest = self._get_building_global_center_coords(speaker.schedule.work_building_id)
+            if dest:
+                speaker.schedule.current_task = "going to work"
+                speaker.schedule.current_destination_coords = dest
+                speaker.schedule.current_path = []
+        elif goal == "go_home" and speaker.schedule.home_building_id:
+            dest = self._get_building_global_center_coords(speaker.schedule.home_building_id)
+            if dest:
+                speaker.schedule.current_task = "going home"
+                speaker.schedule.current_destination_coords = dest
+                speaker.schedule.current_path = []
+        elif goal == "visit_listener_home" and listener.schedule.home_building_id:
+            friend_home = self.buildings_by_id.get(listener.schedule.home_building_id)
+            if friend_home:
+                speaker.schedule.current_task = "visiting friend"
+                speaker.task_target_entity_id = listener.id
+                speaker.schedule.current_destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
+                speaker.schedule.current_path = []
+        elif goal == "socialize":
+            dest_x, dest_y = self._find_best_adjacent_tile(listener.x, listener.y, speaker)
+            if dest_x is not None:
+                speaker.schedule.current_task = "socializing"
+                speaker.task_target_entity_id = listener.id
+                speaker.schedule.current_destination_coords = (dest_x, dest_y)
+                speaker.schedule.current_path = []
+        elif goal == "end_conversation":
+            speaker.conversation_partner_id = None
+            listener.conversation_partner_id = None
+
     def _update_entity_titles(self):
         """Periodically checks and updates titles for all entities based on fame/infamy."""
         if self.game_time % 100 != 0:  # Check every 100 ticks
@@ -8107,6 +8550,25 @@ class World:
 
         entities_to_check = itertools.chain([self.player], self.all_npcs)
         for entity in entities_to_check:
+            task_key = ("title_generation", entity.id)
+            response_str = self._poll_background_llm_task(task_key)
+            if response_str is BACKGROUND_LLM_PENDING:
+                continue
+            if response_str is not None:
+                if response_str:
+                    try:
+                        response_json = json.loads(response_str)
+                        new_title = response_json.get("title")
+                        if new_title:
+                            entity.social.title = new_title
+                            if isinstance(entity, Player):
+                                self.add_message_to_chat_log(f"You are now known as {new_title}.")
+                            else:
+                                self.add_message_to_chat_log(f"{self.get_entity_display_name(entity)} is now known as {new_title}.")
+                    except json.JSONDecodeError:
+                        pass
+                continue
+
             if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
                 # Only use public knowledge events
                 recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"] and e.public_knowledge]
@@ -8117,19 +8579,7 @@ class World:
                     player_infamy=entity.social.infamy,
                     player_actions_summary=actions_summary
                 )
-                response_str = self._call_llm(prompt)
-                if response_str:
-                    try:
-                        response_json = json.loads(response_str)
-                        new_title = response_json.get("title")
-                        if new_title:
-                            entity.social.title = new_title
-                            if isinstance(entity, Player):
-                                self.add_message_to_chat_log(f"You are now known as {new_title}.")
-                            else:
-                                self.add_message_to_chat_log(f"{entity.name} is now known as {new_title}.")
-                    except json.JSONDecodeError:
-                        pass
+                self._submit_background_llm_task(task_key, prompt)
 
     def _update_npc_reputations(self):
         """
@@ -8649,7 +9099,7 @@ class World:
             family_ties_hint="none",
             attitude_to_player_hint="neutral"
         )
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm_for_background(prompt)
         try:
             npc_data = json.loads(llm_response)
             npc = NPC(
@@ -9071,7 +9521,7 @@ class World:
                                 known_events_summary=recent_events_summary,
                                 year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
                             )
-                            llm_response = self._call_llm(prompt)
+                            llm_response = self._call_llm_for_background(prompt)
                             try:
                                 book_data = json.loads(llm_response)
                                 new_book = Book(
@@ -9239,7 +9689,7 @@ class World:
                 event_type=event_to_process.type
             )
 
-            response_str = self._call_llm(prompt)
+            response_str = self._call_llm_for_background(prompt)
             if not response_str:
                 continue
 

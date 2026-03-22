@@ -6,7 +6,7 @@ from tcod_compat import tcod, libtcodpy
 import os
 import sys
 from engine import World
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, MAP_WIDTH, MAP_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT
+from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, MAP_WIDTH, MAP_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
@@ -14,6 +14,96 @@ from save_manager import save_game, load_game
 from ui_requests import apply_ui_requests
 
 TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
+DEFAULT_PLAYER_FIRST_NAME = "Player"
+
+
+def normalize_player_first_name(raw_name: str | None) -> str:
+    """Return a safe player first name for new-game creation."""
+    if raw_name is None:
+        return DEFAULT_PLAYER_FIRST_NAME
+    cleaned = "".join(ch for ch in str(raw_name) if ch.isalpha() or ch in {" ", "-", "'"}).strip()
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return DEFAULT_PLAYER_FIRST_NAME
+    return cleaned[:20]
+
+
+def prompt_for_new_player_name(console, context) -> str | None:
+    """Prompt for a player first name before generating a new world."""
+    input_value = ""
+    if hasattr(context, "start_text_input"):
+        context.start_text_input()
+
+    try:
+        while True:
+            console.clear()
+            console.print(
+                console.width // 2,
+                console.height // 3,
+                "NEW CHARACTER",
+                alignment=libtcodpy.CENTER,
+                fg=(255, 255, 0),
+            )
+            console.print(
+                console.width // 2,
+                console.height // 2 - 1,
+                "Enter your first name",
+                alignment=libtcodpy.CENTER,
+            )
+            console.print(
+                console.width // 2,
+                console.height // 2 + 1,
+                normalize_player_first_name(input_value) if input_value.strip() else "_",
+                alignment=libtcodpy.CENTER,
+                fg=(255, 255, 255),
+            )
+            console.print(
+                console.width // 2,
+                console.height // 2 + 4,
+                "Last name is chosen by your in-game family.",
+                alignment=libtcodpy.CENTER,
+                fg=(160, 160, 160),
+            )
+            console.print(
+                console.width // 2,
+                console.height - 4,
+                "Enter = start   Esc = cancel",
+                alignment=libtcodpy.CENTER,
+                fg=(160, 160, 160),
+            )
+            context.present(console)
+
+            for event in tcod.event.wait():
+                context.convert_event(event)
+                if isinstance(event, tcod.event.Quit):
+                    raise SystemExit()
+                if isinstance(event, tcod.event.TextInput):
+                    if len(input_value) < 20:
+                        input_value += event.text
+                elif isinstance(event, tcod.event.KeyDown):
+                    if event.sym == tcod.event.KeySym.ESCAPE:
+                        return None
+                    if event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, 'KP_ENTER', 1073741912)):
+                        return normalize_player_first_name(input_value)
+                    if event.sym == tcod.event.KeySym.BACKSPACE:
+                        input_value = input_value[:-1]
+                    elif event.sym == tcod.event.KeySym.SPACE and len(input_value) < 20:
+                        input_value += " "
+                    elif 33 <= event.sym <= 126 and len(input_value) < 20:
+                        char = chr(event.sym)
+                        if char.isalpha() or char in {"-", "'"}:
+                            try:
+                                mod = getattr(event, 'mod', 0)
+                                shifted = bool(mod & 3)
+                            except Exception:
+                                shifted = False
+                            if shifted and char.islower():
+                                char = char.upper()
+                            input_value += char
+                break
+    finally:
+        if hasattr(context, "stop_text_input"):
+            context.stop_text_input()
 
 def _get_player_facing_position(world: World) -> tuple[int, int]:
     """Return the coordinates directly in front of the player."""
@@ -297,16 +387,51 @@ def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handl
     if event.sym == tcod.event.KeySym.ESCAPE:
         world.request_close_dialogue()
         apply_ui_requests(world, context_handler)
-    elif event.sym == tcod.event.KeySym.RETURN:
-        if world.chat_ui_input_line:
-            # Add player's line to history and process NPC response
+    elif event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, 'KP_ENTER', 1073741912)):
+        if getattr(world, 'chat_ui_input_line', '').strip():
             world.chat_ui_history.append(("Player", world.chat_ui_input_line))
             world.continue_npc_dialogue(world.chat_ui_target_npc, world.chat_ui_input_line)
             world.chat_ui_input_line = "" # Clear input line
             apply_ui_requests(world, context_handler)
     elif event.sym == tcod.event.KeySym.BACKSPACE:
-        if world.chat_ui_input_line:
+        if getattr(world, 'chat_ui_input_line', ''):
             world.chat_ui_input_line = world.chat_ui_input_line[:-1]
+    elif event.sym == tcod.event.KeySym.SPACE:
+        world.chat_ui_input_line += " "
+    else:
+        # Fallback character typing if TextInput event lacks SDL bindings
+        if 33 <= event.sym <= 126:
+            char = chr(event.sym)
+            try:
+                mod = getattr(event, 'mod', 0)
+                # KMOD_LSHIFT is 1, KMOD_RSHIFT is 2. Fallbacks for either.
+                shifted = bool(mod & 3)
+            except:
+                shifted = False
+            
+            if shifted:
+                if char.islower(): char = char.upper()
+                elif char == '1': char = '!'
+                elif char == '2': char = '@'
+                elif char == '3': char = '#'
+                elif char == '4': char = '$'
+                elif char == '5': char = '%'
+                elif char == '6': char = '^'
+                elif char == '7': char = '&'
+                elif char == '8': char = '*'
+                elif char == '9': char = '('
+                elif char == '0': char = ')'
+                elif char == '-': char = '_'
+                elif char == '=': char = '+'
+                elif char == '[': char = '{'
+                elif char == ']': char = '}'
+                elif char == ';': char = ':'
+                elif char == "'": char = '"'
+                elif char == ',': char = '<'
+                elif char == '.': char = '>'
+                elif char == '/': char = '?'
+            
+            world.chat_ui_input_line += char
 
 def start_dialogue(world, npc, context_handler):
     """Starts a dialogue with an NPC."""
@@ -396,8 +521,15 @@ def load_custom_tileset():
 
 def main_menu_loop(console, tileset):
     """Displays the main menu and handles selection."""
-    with tcod.context.new(columns=console.width, rows=console.height, tileset=tileset,
-                          title="This is Life", vsync=True) as context:
+    with tcod.context.new(
+        width=WINDOW_WIDTH,
+        height=WINDOW_HEIGHT,
+        columns=console.width,
+        rows=console.height,
+        tileset=tileset,
+        title="This is Life",
+        vsync=True,
+    ) as context:
         selected_index = 0
         options = ["New Game", "Load Game", "Exit"]
 
@@ -425,7 +557,9 @@ def main_menu_loop(console, tileset):
                         selected_index = (selected_index + 1) % len(options)
                     elif event.sym == tcod.event.KeySym.RETURN:
                         if options[selected_index] == "New Game":
-                            start_game(context, console, None)
+                            player_first_name = prompt_for_new_player_name(console, context)
+                            if player_first_name is not None:
+                                start_game(context, console, None, player_first_name=player_first_name)
                         elif options[selected_index] == "Load Game":
                             loaded_world = load_game_menu(console, context)
                             if loaded_world:
@@ -467,7 +601,7 @@ def load_game_menu(console, context):
                 elif event.sym == tcod.event.KeySym.ESCAPE:
                     return None
 
-def start_game(context, console, world_state=None):
+def start_game(context, console, world_state=None, player_first_name: str | None = None):
     """Starts the actual gameplay loop."""
     import time
     if world_state:
@@ -495,7 +629,7 @@ def start_game(context, console, world_state=None):
         console.clear()
         console.print(console.width // 2, console.height // 2, "Generating World...", alignment=libtcodpy.CENTER)
         context.present(console)
-        world = World()
+        world = World(player_first_name=normalize_player_first_name(player_first_name))
 
     last_time = time.perf_counter()
 
@@ -528,7 +662,8 @@ def start_game(context, console, world_state=None):
             apply_ui_requests(world, context)
 
         if world.needs_text_input:
-            context.start_text_input()
+            if hasattr(context, "start_text_input"):
+                context.start_text_input()
             world.needs_text_input = False
 
 def run_headless(world, num_ticks):
@@ -589,13 +724,7 @@ def handle_events(world, context) -> bool:
             if event.sym in [tcod.event.KeySym.UP, tcod.event.KeySym.DOWN, tcod.event.KeySym.LEFT, tcod.event.KeySym.RIGHT]:
                 world.player.state.current_path = []
 
-            if world.interaction_context["active"]:
-                if handle_interaction_input(event, world, context): turn_taken = True
-            elif world.game_state == "CRAFTING_MENU":
-                handle_crafting_input(event, world)
-            elif world.game_state == "BUILDING_MENU":
-                handle_building_input(event, world)
-            elif world.game_state == "DIALOGUE":
+            if world.game_state == "DIALOGUE":
                 handle_dialogue_input(event, world, context)
             elif world.game_state == "BOOK_READING":
                 handle_book_reading_input(event, world)
@@ -609,6 +738,12 @@ def handle_events(world, context) -> bool:
                 handle_info_menu_input(event, world)
             elif world.game_state == "INVENTORY_MENU":
                 handle_inventory_menu_input(event, world)
+            elif world.interaction_context["active"]:
+                if handle_interaction_input(event, world, context): turn_taken = True
+            elif world.game_state == "CRAFTING_MENU":
+                handle_crafting_input(event, world)
+            elif world.game_state == "BUILDING_MENU":
+                handle_building_input(event, world)
             elif world.game_state == "PLAYING":
                 if handle_playing_input(event, world, context): turn_taken = True
 

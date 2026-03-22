@@ -73,7 +73,9 @@ def _get_tile_key(tile):
         return None
 
     for key, definition in TILE_DEFINITIONS.items():
-        if definition.get("name") == tile.name and ord(definition.get("char", " ")) == tile.char:
+        char_val = definition.get("char", " ")
+        char_int = ord(char_val) if isinstance(char_val, str) else char_val
+        if definition.get("name") == tile.name and char_int == tile.char:
             return key
     return None
 
@@ -143,7 +145,7 @@ def _get_focus_summary(world):
     nearby = _get_visible_nearby_entities(world, limit=1)
     if nearby:
         distance, entity = nearby[0]
-        return standing_on, f"{entity.name} ({distance}t)"
+        return standing_on, f"{world.get_entity_display_name(entity, include_relationship=True)} ({distance}t)"
     return standing_on, "No one nearby"
 
 def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_color):
@@ -343,11 +345,14 @@ def _light_radius_for_world(world):
 
 def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     light_radius = _light_radius_for_world(world)
-    for y in range(MAP_HEIGHT):
+    console_height = min(MAP_HEIGHT, getattr(console, "height", MAP_HEIGHT), console.bg.shape[0], console.fg.shape[0])
+    console_width = min(MAP_WIDTH, getattr(console, "width", MAP_WIDTH), console.bg.shape[1], console.fg.shape[1])
+
+    for y in range(console_height):
         map_y = camera_y + y
         if not (0 <= map_y < WORLD_HEIGHT):
             continue
-        for x in range(MAP_WIDTH):
+        for x in range(console_width):
             map_x = camera_x + x
             if not (0 <= map_x < WORLD_WIDTH):
                 continue
@@ -369,7 +374,7 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
                 for shadow_dx, shadow_dy in ((1, 0), (0, 1), (1, 1)):
                     sx = x + shadow_dx
                     sy = y + shadow_dy
-                    if 0 <= sx < MAP_WIDTH and 0 <= sy < MAP_HEIGHT:
+                    if 0 <= sx < console_width and 0 <= sy < console_height:
                         console.bg[sy, sx] = _dim_color(tuple(console.bg[sy, sx]), 0.75)
 
 def _draw_entity_markers(console, world, camera_x, camera_y):
@@ -683,7 +688,8 @@ def draw_status_panel(console, world, camera_x, camera_y):
     else:
         for distance, entity in nearby_entities:
             label = "Animal" if isinstance(entity, Animal) else "NPC"
-            console.print(x=panel_x + 2, y=y, string=f"{distance}t {label}: {entity.name}"[:panel_width - 3], fg=(200, 200, 200))
+            entity_name = world.get_entity_display_name(entity, include_relationship=True)
+            console.print(x=panel_x + 2, y=y, string=f"{distance}t {label}: {entity_name}"[:panel_width - 3], fg=(200, 200, 200))
             y += 1
 
     y += 1
@@ -876,7 +882,7 @@ def draw(console, world, camera_x, camera_y):
         screen_x = entity.x - camera_x
         screen_y = entity.y - camera_y - 1
         if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-            label = entity.name[:12]
+            label = world.get_entity_display_name(entity)[:12]
             label_x = max(0, min(MAP_WIDTH - len(label), screen_x - (len(label) // 2)))
             console.print(x=label_x, y=screen_y, string=label, fg=(240, 240, 240), bg=(0, 0, 0))
 
@@ -912,6 +918,9 @@ def draw(console, world, camera_x, camera_y):
 
     if world.game_state == "QUEST_MENU":
         draw_quest_menu(console, world)
+
+    if world.game_state == "DIALOGUE" or world.chat_ui_active:
+        draw_dialogue_menu(console, world)
 
     if world.game_state == "BOOK_READING":
         draw_book_reading_ui(console, world)
@@ -1386,6 +1395,47 @@ def draw_knowledge_menu(console, world):
             if book:
                 console.print(x=x + 3, y=line, string=f"- {book.title}")
                 line += 1
+
+def draw_dialogue_menu(console, world):
+    """Draws the interactive Dialogue UI."""
+    width = 60
+    height = 20
+    from config import MAP_WIDTH, SCREEN_HEIGHT
+    x = max(0, (MAP_WIDTH - width) // 2)
+    y = max(0, (SCREEN_HEIGHT - height) // 2)
+    
+    npc_name = world.get_entity_display_name(world.chat_ui_target_npc, include_relationship=True) if getattr(world, 'chat_ui_target_npc', None) else "Unknown"
+    title = f" Conversation with {npc_name} "
+    
+    console.draw_frame(x=x, y=y, width=width, height=height, title=title, clear=True, fg=(255, 255, 255), bg=(12, 14, 20))
+    
+    import textwrap
+    max_history_lines = height - 4
+    wrapped_lines = []
+    
+    target_npc = getattr(world, 'chat_ui_target_npc', None)
+    raw_target_name = getattr(target_npc, 'name', None)
+    display_target_name = world.get_entity_display_name(target_npc) if target_npc else None
+
+    for speaker, text in getattr(world, 'chat_ui_history', []):
+        if raw_target_name and speaker == raw_target_name:
+            speaker = display_target_name
+        color = (200, 240, 255) if speaker == "Player" else (255, 215, 120)
+        prefix = f"{speaker}: "
+        lines = textwrap.wrap(prefix + text, width=width - 4)
+        for line in lines:
+            wrapped_lines.append((line, color))
+            
+    start_idx = max(0, len(wrapped_lines) - max_history_lines)
+    display_lines = wrapped_lines[start_idx:]
+    
+    cur_y = y + 2
+    for line_text, color in display_lines:
+        console.print(x=x + 2, y=cur_y, string=line_text, fg=color)
+        cur_y += 1
+        
+    input_y = y + height - 2
+    console.print(x=x + 2, y=input_y, string="> " + getattr(world, 'chat_ui_input_line', '') + "_", fg=(255, 255, 255))
 
 def draw_quest_menu(console, world):
     """Draws the quest log menu."""

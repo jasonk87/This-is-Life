@@ -111,6 +111,14 @@ class TestPredatorPreyAI(unittest.TestCase):
         self.assertLess(prey.combat.hp, initial_prey_hp, "Prey should have taken damage")
         self.assertTrue(prey.physical.is_dead, "Prey should be dead after the chase.")
 
+    def test_get_tile_at_generation_does_not_spawn_wildlife_side_effects(self):
+        initial_npc_count = len(self.world.npcs)
+
+        tile = self.world.get_tile_at(50, 50)
+
+        self.assertIsNotNone(tile)
+        self.assertEqual(len(self.world.npcs), initial_npc_count)
+
 
 
 class TestCombatAndAnimalStateRegression(unittest.TestCase):
@@ -154,6 +162,34 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
         self.assertEqual(self.world.player.combat.hp, self.world.player.combat.max_hp - 2)
         self.assertTrue(any("(HP: 33/35)" in message for message in self.world.chat_log))
 
+    def test_npc_attack_breaks_equipped_tool_weapon_and_clears_slot(self):
+        npc = engine.NPC(self.world.player.x + 1, self.world.player.y, name="Raider")
+        npc.add_item("axe_stone", 1)
+        npc.equipment.weapon = "axe_stone"
+        npc_weapon = npc.economic.npc_inventory.get_item_reference("axe_stone")
+        npc_weapon.current_durability = 1
+
+        with patch('engine.random.randint', side_effect=[20, 1]):
+            self.world.npc_attempt_attack_player(npc, self.world.player)
+
+        self.assertFalse(npc.equipment.weapon)
+        self.assertEqual(npc.economic.npc_inventory.get("axe_stone", 0), 0)
+        self.assertEqual(npc.economic.npc_inventory.get("broken_tool_handle", 0), 1)
+        self.assertTrue(any("broke into Broken Tool Handle" in message for message in self.world.chat_log))
+
+    def test_armor_breaks_when_it_absorbs_damage(self):
+        target = engine.NPC(5, 5, name="Guard")
+        target.add_item("leather_jerkin", 1)
+        target.equipment.body = "leather_jerkin"
+        armor = target.economic.npc_inventory.get_item_reference("leather_jerkin")
+        armor.current_durability = 1
+
+        target.take_damage(1, self.world)
+
+        self.assertFalse(target.equipment.body)
+        self.assertEqual(target.economic.npc_inventory.get("leather_jerkin", 0), 0)
+        self.assertTrue(any("leather jerkin broke" in message.lower() for message in self.world.chat_log))
+
     def test_animal_defaults_live_in_nested_component_state(self):
         animal = engine.Animal(5, 6, name="Goat", animal_type="goat")
 
@@ -192,10 +228,12 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
 
         with patch.object(engine, 'CHUNK_SIZE', 1), \
              patch.dict(engine.ANIMAL_DEFINITIONS, test_animal_defs, clear=True), \
-             patch('engine.random.random', side_effect=[1.0, 1.0, 1.0, 1.0, 0.0, 1.0]), \
              patch('engine.random.choice', return_value='male'):
             self.world.npcs.clear()
-            self.world._render_biome_details(chunk, 0, 0)
+            with patch('engine.random.random', return_value=1.0):
+                self.world._render_biome_details(chunk, 0, 0)
+            with patch('engine.random.random', return_value=0.0):
+                self.world._populate_chunk_wildlife(chunk, 0, 0)
 
         self.assertEqual(len(self.world.npcs), 1)
         spawned = self.world.npcs[0]

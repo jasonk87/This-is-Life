@@ -93,6 +93,96 @@ class TestMainInputHelpers(unittest.TestCase):
 
         world.player_attempt_build.assert_called_once_with("wood_wall", 3, 7)
 
+    def test_handle_noticeboard_menu_input_enter_claims_selected_task(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={"mode": "browse", "task_ids": ["haul:task_1"], "selected_task_index": 0, "scroll_offset": 0},
+            claim_noticeboard_task=unittest.mock.Mock(),
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        world.claim_noticeboard_task.assert_called_once_with("task_1")
+
+    def test_handle_noticeboard_menu_input_escape_returns_to_playing(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.ESCAPE)
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={"task_ids": [], "selected_task_index": 0, "scroll_offset": 0},
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        self.assertEqual(world.game_state, "PLAYING")
+
+    def test_handle_noticeboard_menu_input_p_opens_job_posting(self):
+        event = SimpleNamespace(sym=ord("p"))
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={"mode": "browse", "task_ids": [], "selected_task_index": 0, "scroll_offset": 0},
+            open_job_posting_menu=unittest.mock.Mock(),
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        world.open_job_posting_menu.assert_called_once_with()
+
+    def test_handle_noticeboard_post_job_input_return_posts_selected_role(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        building = object()
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={
+                "mode": "post_job",
+                "posting_building_id": "shop_1",
+                "selected_role_index": 1,
+                "selected_wage_index": 2,
+                "wage_options": [10, 15, 20],
+            },
+            _get_job_posting_building=unittest.mock.Mock(return_value=building),
+            _get_job_posting_role_options=unittest.mock.Mock(return_value=["Merchant", "Scribe"]),
+            _get_player_owned_buildings=unittest.mock.Mock(return_value=[building]),
+            get_job_posting_wage=unittest.mock.Mock(return_value=20),
+            post_employment_listing=unittest.mock.Mock(),
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        world.post_employment_listing.assert_called_once_with(building, "Scribe", 20)
+
+    def test_handle_company_ledger_menu_input_return_executes_selected_transfer(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        building = object()
+        world = SimpleNamespace(
+            game_state="COMPANY_LEDGER_MENU",
+            company_ledger_menu_context={
+                "building_id": "shop_1",
+                "selected_action_index": 1,
+                "selected_amount_index": 2,
+                "amount_options": [1, 10, 50, 100],
+            },
+            get_company_ledger_building=unittest.mock.Mock(return_value=building),
+            get_company_ledger_amount=unittest.mock.Mock(return_value=50),
+            transfer_company_funds=unittest.mock.Mock(),
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+
+        main.handle_company_ledger_menu_input(event, world)
+
+        world.transfer_company_funds.assert_called_once_with(building, 50, withdraw=True)
+
+    def test_handle_company_ledger_menu_input_escape_returns_to_playing(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.ESCAPE)
+        world = SimpleNamespace(
+            game_state="COMPANY_LEDGER_MENU",
+            company_ledger_menu_context={"selected_action_index": 0, "selected_amount_index": 0, "amount_options": [1, 10]},
+        )
+
+        main.handle_company_ledger_menu_input(event, world)
+
+        self.assertEqual(world.game_state, "PLAYING")
+
     def test_find_nearest_npc_prefers_closest_living_npc_within_range(self):
         world = SimpleNamespace(
             player=SimpleNamespace(x=0, y=0),

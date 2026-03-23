@@ -10,6 +10,9 @@ CONSTRUCTION_RECIPES = {
         "tile_def_key": "wood_wall", # Placeholder or use a specific tile if needed, but it's a building
         "source": "building", # Assuming 'building' is valid or use 'decoration' with a placeholder
         "materials": {"raw_log": 40, "stone_chunk": 10},
+        "width": 5,
+        "height": 5,
+        "category": "civic_workplace",
         "description": "A place for healing and treatment."
     },
     "wood_wall": {

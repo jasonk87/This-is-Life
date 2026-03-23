@@ -158,6 +158,9 @@ def set_entity_profession(entity, profession: str, reason: str = "", game_time: 
         entity.economic.profession = normalized
     if hasattr(entity, "career"):
         entity.career.set_role(normalized, reason=reason, game_time=game_time)
+    ai_brain = getattr(entity, "ai_brain", None)
+    if ai_brain and hasattr(ai_brain, "assign_profession"):
+        ai_brain.assign_profession(normalized)
     return normalized
 
 

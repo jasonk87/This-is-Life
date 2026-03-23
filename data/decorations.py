@@ -158,6 +158,18 @@ DECORATION_ITEM_DEFINITIONS = {
         "item_type_tags": ["furniture", "container"], # Can conceptually hold things
         "properties": {}
     },
+    "noticeboard": {
+        "name": "Noticeboard",
+        "description": "A wooden board covered in hauling requests and village notices.",
+        "char": WORLD_DECORATION_SPRITES["wall_shelf"],
+        "color": COLORS["saddlebrown"],
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture"],
+        "properties": {
+            "interaction_hint": "noticeboard"
+        }
+    },
     "fire_pit_simple": {
         "name": "Simple Fire Pit",
         "description": "A ring of stones for a small fire.",

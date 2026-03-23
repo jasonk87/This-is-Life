@@ -72,7 +72,18 @@ from simulation.careers import (
     resolve_profession_for_building,
     set_entity_profession,
 )
-from simulation.history import Book, Event, HistoryLedger
+from simulation.history import (
+    BirthRecord,
+    Book,
+    DeathRecord,
+    EmploymentRecord,
+    Event,
+    HistoryLedger,
+    MarriageRecord,
+    MigrationRecord,
+)
+from simulation.records import ChronicleArchive
+from simulation.knowledge import KnowledgeSystem
 from simulation.world_model import Building, Chunk, Ruin, Village, WorldAtlas
 from work_subtasks import (
     CompletedWorkSubTaskCommand,
@@ -193,7 +204,7 @@ class ProjectileEffect(VisualEffect):
         return self.traveled >= self.total_dist
 
 
-COMPLETED_WORK_SUB_TASK_COMMANDS: dict[str, CompletedWorkSubTaskCommand] = create_completed_work_sub_task_commands(Book)
+COMPLETED_WORK_SUB_TASK_COMMANDS: dict[str, CompletedWorkSubTaskCommand] = create_completed_work_sub_task_commands()
 
 @dataclass
 class PlayerPhysicalState:
@@ -577,6 +588,8 @@ class World:
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height, seed=seed)
         self.atlas = WorldAtlas()
         self.history = HistoryLedger(event_limit=200)
+        self.records = ChronicleArchive(self.history)
+        self.knowledge_system = KnowledgeSystem(self.records)
         self.chunks = self._initialize_chunks()
         self.npcs = []
         self.village_npcs = []
@@ -688,7 +701,7 @@ class World:
 
         # Gossip and Event System
         self.global_events = self.history.events
-        self.books = self.history.books
+        self.books = self.records.books
 
         # Visual Effects
         self.visual_effects: list[VisualEffect] = []
@@ -1506,22 +1519,12 @@ class World:
                             ]
                             if key_npcs:
                                 gossip_recipient = random.choice(key_npcs)
-                                events_shared = 0
-                                # Share remote events (distant news)
-                                for event_id, event_obj in npc.knowledge.known_events.items():
-                                    # Only share if event didn't happen in this village
-                                    is_local = False
-                                    if event_obj.location:
-                                        chunk_x = event_obj.location[0] // CHUNK_SIZE
-                                        chunk_y = event_obj.location[1] // CHUNK_SIZE
-                                        current_chunk_x = npc.x // CHUNK_SIZE
-                                        current_chunk_y = npc.y // CHUNK_SIZE
-                                        if chunk_x == current_chunk_x and chunk_y == current_chunk_y:
-                                            is_local = True
-
-                                    if not is_local and event_id not in gossip_recipient.knowledge.known_events:
-                                        gossip_recipient.knowledge.known_events[event_id] = event_obj
-                                        events_shared += 1
+                                events_shared = self.knowledge_system.share_remote_events(
+                                    npc,
+                                    gossip_recipient,
+                                    current_coords=(npc.x, npc.y),
+                                    chunk_size=CHUNK_SIZE,
+                                )
                                 if events_shared > 0:
                                     self.add_message_to_chat_log(
                                         f"{self.get_entity_display_name(npc)} shared news from afar with {self.get_entity_display_name(gossip_recipient)}."
@@ -1529,15 +1532,15 @@ class World:
 
                         # Clear old events but keep some "news" to carry
                         # Actually, better to clear all and relearn local news to carry to next village
-                        npc.knowledge.known_events.clear()
+                        self.knowledge_system.reset_known_events(npc)
                         village_center_x = (npc.x // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
                         village_center_y = (npc.y // CHUNK_SIZE) * CHUNK_SIZE + CHUNK_SIZE // 2
-                        for event in self.global_events:
-                            if event.location:
-                                dist_sq = (event.location[0] - village_center_x)**2 + (event.location[1] - village_center_y)**2
-                                if dist_sq < (CHUNK_SIZE * 1.5)**2:
-                                    if event.id not in npc.knowledge.known_events:
-                                        npc.knowledge.known_events[event.id] = event
+                        self.knowledge_system.learn_local_events(
+                            npc,
+                            self.global_events,
+                            center=(village_center_x, village_center_y),
+                            radius_sq=(CHUNK_SIZE * 1.5) ** 2,
+                        )
                         if npc.knowledge.known_events:
                             self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.")
 
@@ -1547,14 +1550,14 @@ class World:
                             # Successfully met up, now exchange gossip
                             # NPC shares most interesting news with partner
                             event_to_share = self._get_most_interesting_known_event(npc)
-                            if event_to_share and event_to_share.id not in chat_partner.knowledge.known_events:
-                                chat_partner.knowledge.known_events[event_to_share.id] = event_to_share
+                            if event_to_share:
+                                self.knowledge_system.share_event(npc, chat_partner, event_to_share)
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} told {chat_partner.name} about {event_to_share.type}.")
 
                             # Partner shares most interesting news back
                             event_to_share_back = self._get_most_interesting_known_event(chat_partner)
-                            if event_to_share_back and event_to_share_back.id not in npc.knowledge.known_events:
-                                npc.knowledge.known_events[event_to_share_back.id] = event_to_share_back
+                            if event_to_share_back:
+                                self.knowledge_system.share_event(chat_partner, npc, event_to_share_back)
                                 # self.add_message_to_chat_log(f"Debug: {chat_partner.name} told {npc.name} about {event_to_share_back.type}.")
 
                             # Increase relationship
@@ -1621,12 +1624,11 @@ class World:
                                 self.add_message_to_chat_log(
                                     f"{self.get_entity_display_name(npc)} and {self.get_entity_display_name(partner)} are now married!"
                                 )
-                                self.log_event(
-                                    event_type="npc_marriage",
+                                self.record_marriage_event(
+                                    spouse_a=npc,
+                                    spouse_b=partner,
                                     description=f"{npc.name} and {partner.name} were married.",
-                                    subject_id=npc.id,
-                                    target_id=partner.id,
-                                    location=(npc.x, npc.y)
+                                    location=(npc.x, npc.y),
                                 )
                                 # Post-marriage changes
                                 if partner.schedule.home_building_id:
@@ -4679,7 +4681,7 @@ class World:
             return
 
         book_id = book_item_key.split("_", 1)[1]
-        book = next((b for b in self.books if b.id == book_id), None)
+        book = self.records.get_book(book_id)
 
         if not book:
             self.add_message_to_chat_log("You try to open the book, but the pages are stuck (Book data missing).")
@@ -4692,18 +4694,13 @@ class World:
 
         # Knowledge Transfer
         if hasattr(book, 'referenced_event_ids') and book.referenced_event_ids:
-            learned_count = 0
-            for event_id in book.referenced_event_ids:
-                if event_id not in self.player.knowledge.known_events:
-                    # Find event in global log (O(N) but N is small ~200)
-                    event_obj = next((e for e in self.global_events if e.id == event_id), None)
-                    if event_obj:
-                        self.player.knowledge.known_events[event_id] = event_obj
-                        learned_count += 1
-
+            learned_count = self.knowledge_system.learn_from_book(
+                self.player,
+                book,
+                book_item_key=book_item_key,
+            )
             if learned_count > 0:
                 self.add_message_to_chat_log(f"You learned about {learned_count} historical events from reading this book.")
-            self.player.knowledge.known_books.add(book_item_key)
 
 
     def player_attempt_loot_chest(self, x: int, y: int):
@@ -5389,7 +5386,8 @@ class World:
 
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
         dead_npc_name = self.get_entity_display_name(dead_npc)
-        self.add_message_to_chat_log(self.text.entity_died(dead_npc))
+        death_message = self.text.entity_died(dead_npc) if hasattr(self, "text") else f"{dead_npc_name} died."
+        self.add_message_to_chat_log(death_message)
 
         if killer_id == self.player.id:
             for quest_id, quest_data in self.player.knowledge.active_quests.items():
@@ -5399,12 +5397,12 @@ class World:
                         self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})")
 
 
-        death_event = self.log_event(
-            event_type="entity_death",
+        death_event = self.record_death_event(
+            deceased=dead_npc,
             description="{subject} was killed by {target}.",
-            subject_id=dead_npc.id,
-            target_id=killer_id,
-            location=(dead_npc.x, dead_npc.y)
+            killer_id=killer_id,
+            location=(dead_npc.x, dead_npc.y),
+            cause_of_death="killed",
         )
 
         # Handle Reputation impact if the death was witnessed (public knowledge)
@@ -6341,9 +6339,18 @@ class World:
         except requests.exceptions.RequestException as e:
             return ""
 
-    def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None) -> Event:
-        """Creates an Event object and adds it to the global event log."""
-        new_event = self.history.add_event(
+    def log_event(
+        self,
+        event_type: str,
+        description: str,
+        subject_id: int,
+        target_id: int | None = None,
+        location: tuple[int, int] | None = None,
+        *,
+        event: Event | None = None,
+    ) -> Event:
+        """Creates a history event and adds it to the world ledger."""
+        new_event = event or self.history.add_event(
             event_type=event_type,
             description=description,
             subject_id=subject_id,
@@ -6351,6 +6358,8 @@ class World:
             location=location,
             game_time=self.game_time
         )
+        if event is not None and self.history.get_event(event.id) is None:
+            self.history.add_record(event)
 
         # Determine if the event is public knowledge (witnessed)
         if location:
@@ -6379,6 +6388,145 @@ class World:
                 new_event.public_knowledge = True
 
         return new_event
+
+    def record_birth_event(
+        self,
+        *,
+        child: NPC,
+        parent_ids: tuple[int, ...],
+        description: str,
+        location: tuple[int, int] | None = None,
+        settlement_id: str | None = None,
+        region_id: str | None = None,
+    ) -> BirthRecord:
+        birth_record = self.history.record_birth(
+            child_id=child.id,
+            parent_ids=parent_ids,
+            child_name=child.name,
+            description=description,
+            game_time=self.game_time,
+            location=location,
+            settlement_id=settlement_id,
+            region_id=region_id,
+        )
+        self.log_event(
+            birth_record.type,
+            birth_record.description,
+            birth_record.subject_id,
+            birth_record.target_id,
+            birth_record.location,
+            event=birth_record,
+        )
+        return birth_record
+
+    def record_death_event(
+        self,
+        *,
+        deceased: NPC,
+        description: str,
+        killer_id: int | None = None,
+        location: tuple[int, int] | None = None,
+        cause_of_death: str = "",
+    ) -> DeathRecord:
+        death_record = self.history.record_death(
+            deceased_id=deceased.id,
+            description=description,
+            game_time=self.game_time,
+            killer_id=killer_id,
+            location=location,
+            cause_of_death=cause_of_death,
+        )
+        self.log_event(
+            death_record.type,
+            death_record.description,
+            death_record.subject_id,
+            death_record.target_id,
+            death_record.location,
+            event=death_record,
+        )
+        return death_record
+
+    def record_marriage_event(
+        self,
+        *,
+        spouse_a: NPC,
+        spouse_b: NPC,
+        description: str,
+        location: tuple[int, int] | None = None,
+    ) -> MarriageRecord:
+        marriage_record = self.history.record_marriage(
+            spouse_ids=(spouse_a.id, spouse_b.id),
+            description=description,
+            game_time=self.game_time,
+            location=location,
+        )
+        self.log_event(
+            marriage_record.type,
+            marriage_record.description,
+            marriage_record.subject_id,
+            marriage_record.target_id,
+            marriage_record.location,
+            event=marriage_record,
+        )
+        return marriage_record
+
+    def record_employment_event(
+        self,
+        *,
+        npc: NPC,
+        profession: str,
+        employment_action: str,
+        description: str,
+        location: tuple[int, int] | None = None,
+        building_id: str | None = None,
+    ) -> EmploymentRecord:
+        employment_record = self.history.record_employment_change(
+            worker_id=npc.id,
+            profession=profession,
+            employment_action=employment_action,
+            description=description,
+            game_time=self.game_time,
+            location=location,
+            building_id=building_id,
+        )
+        self.log_event(
+            employment_record.type,
+            employment_record.description,
+            employment_record.subject_id,
+            employment_record.target_id,
+            employment_record.location,
+            event=employment_record,
+        )
+        return employment_record
+
+    def record_migration_event(
+        self,
+        *,
+        npc: NPC,
+        migration_kind: str,
+        description: str,
+        location: tuple[int, int] | None = None,
+        origin_label: str | None = None,
+        destination_label: str | None = None,
+    ) -> MigrationRecord:
+        migration_record = self.history.record_migration(
+            traveler_id=npc.id,
+            migration_kind=migration_kind,
+            description=description,
+            game_time=self.game_time,
+            location=location,
+            origin_label=origin_label,
+            destination_label=destination_label,
+        )
+        self.log_event(
+            migration_record.type,
+            migration_record.description,
+            migration_record.subject_id,
+            migration_record.target_id,
+            migration_record.location,
+            event=migration_record,
+        )
+        return migration_record
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
         """Finds the nearest lit heat source for an NPC."""
@@ -8009,8 +8157,7 @@ class World:
 
             dist = math.sqrt((speaker_npc.x - npc.x)**2 + (speaker_npc.y - npc.y)**2)
             if dist <= radius:
-                if event_to_share.id not in npc.knowledge.known_events:
-                    npc.knowledge.known_events[event_to_share.id] = event_to_share
+                if self.knowledge_system.learn_event(npc, event_to_share):
                     count_listeners += 1
 
         # self.add_message_to_chat_log(f"Debug: {speaker_npc.name} broadcasted news to {count_listeners} people.")
@@ -8772,11 +8919,13 @@ class World:
                     # Log firing event
                     # Use workplace location for the event if possible, so gossiping unemployed NPCs know where to go
                     fired_location = (work_building.global_center_x, work_building.global_center_y) if work_building else (npc.x, npc.y)
-                    self.log_event(
-                        event_type="npc_fired",
+                    self.record_employment_event(
+                        npc=npc,
+                        profession=old_profession,
+                        employment_action="fired",
                         description=f"{{subject}} was fired from their job as {old_profession}.",
-                        subject_id=npc.id,
-                        location=fired_location
+                        location=fired_location,
+                        building_id=work_building.id if work_building else None,
                     )
 
                 # Quitting Logic
@@ -8798,11 +8947,13 @@ class World:
                     work_building = self.buildings_by_id.get(npc.schedule.work_building_id) if npc.schedule.work_building_id else None
                     quit_location = (work_building.global_center_x, work_building.global_center_y) if work_building else (npc.x, npc.y)
 
-                    self.log_event(
-                        event_type="npc_quit_job",
+                    self.record_employment_event(
+                        npc=npc,
+                        profession=old_profession,
+                        employment_action="quit",
                         description=f"{{subject}} quit their job as {old_profession}.",
-                        subject_id=npc.id,
-                        location=quit_location
+                        location=quit_location,
+                        building_id=work_building.id if work_building else None,
                     )
 
             else: # Is Unemployed
@@ -8854,7 +9005,12 @@ class World:
                 npc.schedule.current_destination_coords = (edge_x, edge_y)
 
                 self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has decided to leave the village in search of better opportunities.")
-                self.log_event(event_type="npc_emigrated", description=f"{{subject}} left the village.", subject_id=npc.id, location=(npc.x, npc.y))
+                self.record_migration_event(
+                    npc=npc,
+                    migration_kind="emigrated",
+                    description=f"{{subject}} left the village.",
+                    location=(npc.x, npc.y),
+                )
 
         # --- Job Hopping (for Employed NPCs) ---
         # Check if employed NPCs want to switch jobs
@@ -8947,11 +9103,13 @@ class World:
             # Boss likes the new hire too
             boss.social.relationships[npc.id] = min(100, boss.social.relationships.get(npc.id, 50) + 10)
 
-        self.log_event(
-            event_type="npc_hired",
+        self.record_employment_event(
+            npc=npc,
+            profession=new_profession,
+            employment_action="hired",
             description=f"{{subject}} started a new job as a {new_profession}.",
-            subject_id=npc.id,
-            location=(work_building.global_center_x, work_building.global_center_y)
+            location=(work_building.global_center_x, work_building.global_center_y),
+            building_id=work_building.id,
         )
 
 
@@ -9459,8 +9617,7 @@ class World:
                                     content=book_data.get("content", "..."),
                                     book_type="chronicle"
                                 )
-                                self.history.add_book(new_book)
-                                village.supply[f"book_{new_book.id}"] = village.supply.get(f"book_{new_book.id}", 0) + 1
+                                self.records.register_book_item(new_book, village.supply)
                                 # Clear events so we don't write the same history forever
                                 village.local_events = []
                             except json.JSONDecodeError:
@@ -9507,12 +9664,11 @@ class World:
                                 if home_building:
                                     home_building.residents.append(child)
 
-                            self.log_event(
-                                event_type="npc_birth",
+                            self.record_birth_event(
+                                child=child,
+                                parent_ids=(parent1.id, parent2.id),
                                 description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
-                                subject_id=parent1.id,
-                                target_id=parent2.id,
-                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE)
+                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
                             )
                             # self.add_message_to_chat_log(f"A child was born in a distant village.")
 
@@ -9563,7 +9719,7 @@ class World:
                     if 0 <= event_x < WORLD_WIDTH and 0 <= event_y < WORLD_HEIGHT:
                         if fov_map[event_y, event_x]:
                             # NPC witnessed the event. Add to their knowledge.
-                            npc.knowledge.known_events[event.id] = event
+                            self.knowledge_system.learn_event(npc, event)
 
     def _process_npc_gossip_reaction(self):
         """

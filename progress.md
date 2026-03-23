@@ -1,6 +1,6 @@
 # This is Life: Architecture Status
 
-Last updated: 2026-03-22
+Last updated: 2026-03-23
 Workspace: `C:\Users\Owner\Desktop\This is Life`
 
 ## Project Direction
@@ -21,6 +21,129 @@ The long-term goal is Dwarf Fortress style growth:
 - fewer hardcoded strings and one-off checks
 - new features added as modules instead of by searching giant files
 - future systems like anatomy, armor, childbirth, weather effects, memory, law, religion, magic, and social edge cases plugging into stable foundations
+
+## Architectural Rules For Emergent Systems
+
+This section is the most important design guidance going forward.
+
+If the game is going to support long-running, highly interdependent, emergent simulation, then every new feature should be placed into one of five ownership layers instead of being added directly to the engine.
+
+### The Five Ownership Layers
+
+#### 1. Definitions (`data/`)
+
+Owns static authored content:
+
+- species definitions
+- item definitions
+- profession catalogs
+- terrain/decor data
+- biome/resource templates
+- relationship role labels
+- building archetypes
+
+Rules:
+
+- definitions should be declarative whenever possible
+- definitions should not contain runtime world state
+- definitions should not directly narrate outcomes
+
+#### 2. Entity State (`entities/`)
+
+Owns identity and per-actor state:
+
+- name
+- ancestry/family links
+- body/physical state
+- social state
+- economic state
+- knowledge state
+- career state
+- equipment state
+- long-term traits and capabilities
+
+Rules:
+
+- entities should own “who/what am I?” state
+- entities may expose narrow helper methods around their own state
+- entities should not become giant rule processors
+
+#### 3. Simulation Systems (`simulation/`)
+
+Owns world rules and progression:
+
+- history
+- geography
+- careers
+- records
+- social propagation
+- law/reputation
+- ecology
+- physiology
+- combat resolution
+- settlement economics
+
+Rules:
+
+- a system owns the truth for one domain
+- systems should produce structured outcomes, not only strings
+- systems should expose APIs that the engine orchestrates
+
+#### 4. Presentation (`presentation/`)
+
+Owns player-facing interpretation:
+
+- log text
+- UI labels
+- summaries
+- book text assembly
+- reputation descriptions
+- history/chronicle formatting
+
+Rules:
+
+- presentation should consume structured state/results
+- presentation should not be the place where rules are decided
+- avoid hand-writing strings inside systems when a formatter can own them
+
+#### 5. Orchestration (`engine.py`)
+
+Owns sequencing and integration:
+
+- tick order
+- calling systems
+- compatibility shims
+- save/load coordination hooks
+- player input integration points
+
+Rules:
+
+- the engine should ask systems to do work
+- the engine should not become the permanent home of domain rules
+- when a subsystem grows, extract it instead of adding another hundred lines to engine code
+
+### Emergence Rule Of Thumb
+
+Emergent behavior should come from system interaction, not special-case scripts.
+
+Preferred pattern:
+
+1. geography creates constraints/resources
+2. ecology/economy convert those into pressures/opportunities
+3. entity goals/needs react to those pressures
+4. social/knowledge systems spread consequences
+5. history/records preserve what happened
+6. presentation interprets the results for the player
+
+Bad pattern:
+
+- “if this exact story beat happens, print this exact line and manually assign three unrelated effects”
+
+Good pattern:
+
+- “a drought lowers crop yield; low crop yield raises prices and hunger; hunger increases theft risk; theft affects law, reputation, rumor, injury, and future records”
+
+That is the level of causality the architecture should support.
 
 ## Major Work Completed
 
@@ -297,6 +420,307 @@ Needed systems:
 Reason:
 
 - these are required for long-term depth like dismemberment, armor coverage, pregnancy later, survival effects, and simulation-heavy edge cases
+
+## Target System Map
+
+This is the recommended medium-term module layout for the simulation layer.
+
+Not every file has to be created immediately, but new work should aim toward this structure instead of deepening the monolith.
+
+### World Structure
+
+- `simulation/world_model.py`
+  - `WorldAtlas`
+  - `Region`
+  - `SettlementNetwork`
+  - `Village`
+  - `Ruin`
+  - `Building`
+  - `TravelRoute`
+
+Purpose:
+
+- authoritative geography, settlement, and connectivity model
+
+### Historical Truth
+
+- `simulation/history.py`
+  - `HistoryLedger`
+  - typed event/record classes
+  - historical indexing by entity, settlement, region, and era
+
+Purpose:
+
+- authoritative truth of what happened
+
+### Cultural / Written Memory
+
+- `simulation/records.py`
+  - `ChronicleArchive`
+  - `CensusLedger`
+  - `BookCompiler`
+  - rumor/book/chronicle generation inputs
+
+Purpose:
+
+- bridge structured history into what societies preserve, distort, or forget
+
+### Social Causality
+
+- `simulation/social_model.py`
+  - relationships
+  - obligations
+  - trust/fear/respect
+  - factions/households
+  - role expectations
+
+Purpose:
+
+- model why people help, betray, marry, accuse, obey, gossip, and retaliate
+
+### Knowledge / Information Flow
+
+- `simulation/knowledge.py`
+  - witnessed facts
+  - rumor propagation
+  - certainty/confidence
+  - source tracking
+  - forgetting/distortion
+
+Purpose:
+
+- separate “what happened” from “who believes what happened”
+
+### Law / Reputation / Justice
+
+- `simulation/law.py`
+  - crimes
+  - accusations
+  - evidence
+  - punishment
+  - reputation consequences
+
+Purpose:
+
+- convert actions and knowledge into institutional/social response
+
+### Economy / Production
+
+- `simulation/economy.py`
+  - production chains
+  - inventories at settlement scale
+  - prices/scarcity
+  - labor demand
+  - trade routes
+
+Purpose:
+
+- make resources and jobs matter as systemic pressures
+
+### Ecology / Environment
+
+- `simulation/ecology.py`
+  - animal populations
+  - foraging pressure
+  - seasonal food availability
+  - predator/prey pressure
+  - biome resource regeneration
+
+Purpose:
+
+- make the map a living resource system, not a static backdrop
+
+### Physiology / Anatomy
+
+- `simulation/anatomy.py`
+  - body parts
+  - wound sites
+  - organ/material tags
+  - pregnancy-capable anatomy later
+
+- `simulation/physiology.py`
+  - temperature
+  - wetness
+  - pain
+  - fatigue
+  - hunger/thirst
+  - infection/intoxication
+
+Purpose:
+
+- support survival depth and meaningful physical consequences
+
+### Equipment / Armor / Damage Resolution
+
+- `simulation/equipment.py`
+  - clothing layers
+  - armor coverage
+  - carried/worn item interactions
+
+- `simulation/combat_rules.py`
+  - attacks
+  - hit resolution
+  - wound generation
+  - weapon/material effects
+
+Purpose:
+
+- make gear and injuries interact with anatomy instead of raw HP-only abstractions
+
+## System Interaction Contracts
+
+To keep these modules composable, future work should prefer these contracts:
+
+### Systems should return structured results
+
+Examples:
+
+- `DamageResult`
+- `CrimeReport`
+- `BirthRecord`
+- `MigrationOutcome`
+- `TradeTransaction`
+- `RumorSpreadResult`
+
+Why:
+
+- the same outcome can feed history, knowledge, presentation, achievements, AI reaction, and save data without re-deriving it from strings
+
+### Systems should consume IDs/references, not fragile text labels
+
+Prefer:
+
+- entity IDs
+- settlement IDs
+- building IDs
+- region IDs
+- typed enums/constants where appropriate
+
+Avoid:
+
+- comparing loose display strings to decide world rules
+
+### Time should be explicit
+
+Every important systemic event should carry:
+
+- tick/time
+- location
+- participants
+- causal tags
+
+This is necessary for:
+
+- memory decay
+- chronicle generation
+- legal evidence windows
+- pregnancy/illness/injury progression
+- migration/travel reconstruction
+
+### Cross-system bridges should be one-way where possible
+
+Recommended flow:
+
+- systems generate structured results
+- history stores results
+- knowledge ingests selected results
+- presentation formats results
+
+Avoid:
+
+- presentation code mutating core simulation
+- history code hardcoding UI behavior
+- entity classes directly managing unrelated world systems
+
+## Concrete Next Extraction Sequence
+
+If continuing this architecture work in implementation order, the highest-value path is:
+
+### Phase A: Typed historical records
+
+Build:
+
+- `BirthRecord`
+- `DeathRecord`
+- `MarriageRecord`
+- `CrimeRecord`
+- `MigrationRecord`
+- `EmploymentRecord`
+
+Why first:
+
+- nearly every future system benefits from structured world facts
+
+### Phase B: Records/knowledge bridge
+
+Build:
+
+- `simulation/records.py`
+- APIs that turn historical facts into chronicles/census/book inputs
+- shared lookup surfaces for “what is known,” “what is recorded,” and “what is rumored”
+
+Why second:
+
+- this is the backbone for lore, books, gossip, reputation, and future AI memory work
+
+### Phase C: Social and knowledge formalization
+
+Build:
+
+- relationship and household ownership in a social module
+- witness/rumor/certainty ownership in a knowledge module
+
+Why third:
+
+- emergent drama depends on information moving differently than truth
+
+### Phase D: Anatomy + physiology foundation
+
+Build:
+
+- body-part model
+- needs/status progression
+- structured injury/wound outcomes
+
+Why fourth:
+
+- this unlocks deep combat, medicine, childbirth, equipment layering, and survival simulation
+
+### Phase E: Economy/ecology coupling
+
+Build:
+
+- regional resources
+- production/consumption chains
+- scarcity-driven profession and travel pressures
+
+Why fifth:
+
+- this is where the world starts producing large-scale emergent behavior without handcrafted events
+
+## Engine Reduction Checklist
+
+When touching `engine.py`, prefer to reduce these responsibilities over time:
+
+- direct event string assembly
+- profession/business rule ownership
+- region/settlement truth ownership
+- knowledge propagation details
+- anatomy/needs/combat internals
+- ad hoc inventories/economic balancing logic
+- raw dict event payload construction when a typed result object would work
+
+The engine should eventually read more like:
+
+1. advance time
+2. update environment/ecology
+3. update settlements/economy
+4. update actors/needs/goals
+5. resolve interactions/combat/law
+6. persist facts to history/records
+7. emit presentation-ready outputs
+
+That sequencing is the desired end state.
 
 ## Recommended Next Build Order
 

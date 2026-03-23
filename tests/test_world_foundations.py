@@ -1,4 +1,12 @@
-from simulation.history import Book, HistoryLedger
+from simulation.history import (
+    BirthRecord,
+    Book,
+    DeathRecord,
+    EmploymentRecord,
+    HistoryLedger,
+    MarriageRecord,
+    MigrationRecord,
+)
 from simulation.world_model import Building, Village, WorldAtlas
 
 
@@ -37,3 +45,62 @@ def test_history_books_are_owned_by_ledger():
 
     assert ledger.books == [book]
     assert ledger.get_book(book.id) is book
+
+
+def test_history_ledger_creates_typed_records_and_indexes_participants():
+    ledger = HistoryLedger(event_limit=10)
+
+    birth = ledger.record_birth(
+        child_id=10,
+        parent_ids=(1, 2),
+        child_name="Mira",
+        description="Mira was born.",
+        game_time=5,
+        location=(3, 4),
+        settlement_id="village_1",
+        region_id="region_1",
+    )
+    marriage = ledger.record_marriage(
+        spouse_ids=(1, 2),
+        description="Two villagers married.",
+        game_time=6,
+        location=(3, 4),
+    )
+    death = ledger.record_death(
+        deceased_id=2,
+        killer_id=99,
+        description="A villager died.",
+        game_time=7,
+        location=(5, 6),
+        cause_of_death="wolf attack",
+    )
+    job = ledger.record_employment_change(
+        worker_id=1,
+        profession="Farmer",
+        employment_action="hired",
+        description="A villager became a farmer.",
+        game_time=8,
+        location=(7, 8),
+        building_id="farm_1",
+    )
+    migration = ledger.record_migration(
+        traveler_id=3,
+        migration_kind="emigrated",
+        description="A villager left.",
+        game_time=9,
+        location=(9, 10),
+        origin_label="Oak Hollow",
+    )
+
+    assert isinstance(birth, BirthRecord)
+    assert isinstance(marriage, MarriageRecord)
+    assert isinstance(death, DeathRecord)
+    assert isinstance(job, EmploymentRecord)
+    assert isinstance(migration, MigrationRecord)
+
+    entity_one_events = ledger.get_events_for_entity(1)
+    assert [event.id for event in entity_one_events] == [birth.id, marriage.id, job.id]
+    assert ledger.get_events_by_type("npc_hired") == [job]
+    assert ledger.get_events_at_location((3, 4)) == [birth, marriage]
+    assert ledger.get_event(death.id) is death
+    assert death.metadata["cause_of_death"] == "wolf attack"

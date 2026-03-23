@@ -9,6 +9,7 @@ from data.animals import ANIMAL_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.tiles import TILE_DEFINITIONS
 from entities.tree import Tree
+from simulation.records import CensusSnapshot
 
 
 class CompletedWorkSubTaskCommand:
@@ -134,45 +135,21 @@ class WorkBuildingConversionSubTaskCommand(CompletedWorkSubTaskCommand):
 
 
 class WriteBookSubTaskCommand(CompletedWorkSubTaskCommand):
-    def __init__(self, book_factory):
-        self.book_factory = book_factory
-
     def execute(self, world, npc, work_building, sub_task_data: dict):
         events = list(npc.knowledge.known_events.values())
-        deaths = [e.description for e in events if e.type == "entity_death"]
-        births = [e.description for e in events if e.type == "npc_birth"]
-        crimes = [e.description for e in events if e.type == "crime_witnessed"]
-
         year = world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
-        book_content = f"The Chronicle of Year {year}\nRequired Reading for Citizens.\n\n"
-
-        if births:
-            book_content += "Births:\n" + "\n".join([f"- {d}" for d in births]) + "\n\n"
-        if deaths:
-            book_content += "Deaths:\n" + "\n".join([f"- {d}" for d in deaths]) + "\n\n"
-        if crimes:
-            book_content += "Criminal Activity:\n" + "\n".join([f"- {d}" for d in crimes]) + "\n\n"
-        if not any([births, deaths, crimes]):
-            book_content += "A year of tranquility and little note."
-
-        new_book = self.book_factory(
+        new_book = world.records.compile_chronicle(
             title=f"Year {year} Chronicle",
             author_id=npc.id,
             author_name=npc.name,
             year_written=year,
-            content=book_content,
-            book_type="chronicle",
-            referenced_event_ids=list(npc.knowledge.known_events.keys()),
+            events=events,
         )
-        world.books.append(new_book)
-        work_building.building_inventory[f"book_{new_book.id}"] = 1
+        world.records.register_book_item(new_book, work_building.building_inventory)
         world.add_message_to_chat_log(f"{npc.name} has written a new historical chronicle.")
 
 
 class WriteBiographySubTaskCommand(CompletedWorkSubTaskCommand):
-    def __init__(self, book_factory):
-        self.book_factory = book_factory
-
     def execute(self, world, npc, work_building, sub_task_data: dict):
         candidates = []
         for potential_subject in world.village_npcs + [world.player]:
@@ -187,58 +164,37 @@ class WriteBiographySubTaskCommand(CompletedWorkSubTaskCommand):
         subject_events = [e for e in npc.knowledge.known_events.values() if e.subject_id == subject.id]
 
         if len(subject_events) >= 1:
-            book_content = f"The Life of {subject.name}\n"
-            book_content += f"Title: {subject.social.title}\n\n"
-            book_content += "Known Deeds:\n"
-            for event in subject_events:
-                book_content += f"- {event.description}\n"
-
-            new_book = self.book_factory(
+            new_book = world.records.compile_biography(
                 title=f"Biography: {subject.name}",
                 author_id=npc.id,
                 author_name=npc.name,
                 year_written=world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-                content=book_content,
-                book_type="biography",
-                referenced_event_ids=[e.id for e in subject_events],
+                subject_name=subject.name,
+                subject_title=subject.social.title,
+                fame=subject.social.fame,
+                infamy=subject.social.infamy,
+                subject_events=subject_events,
             )
-            world.books.append(new_book)
-            work_building.building_inventory[f"book_{new_book.id}"] = 1
+            world.records.register_book_item(new_book, work_building.building_inventory)
             world.add_message_to_chat_log(f"{npc.name} has written a biography of {subject.name}.")
             return
 
-        reputation_summary = []
-        if subject.social.fame > 0:
-            reputation_summary.append(f"They are remembered for notable deeds (fame {subject.social.fame}).")
-        if subject.social.infamy > 0:
-            reputation_summary.append(f"They are also shadowed by infamy ({subject.social.infamy}).")
-        if not reputation_summary:
-            reputation_summary.append(f"Little is recorded about {subject.name}, but their story is still worth preserving.")
-
-        book_content = f"The Life of {subject.name}\n"
-        book_content += f"Title: {subject.social.title or 'Unknown'}\n\n"
-        book_content += "Known Deeds:\n"
-        for summary_line in reputation_summary:
-            book_content += f"- {summary_line}\n"
-
-        new_book = self.book_factory(
+        new_book = world.records.compile_biography(
             title=f"Biography: {subject.name}",
             author_id=npc.id,
             author_name=npc.name,
             year_written=world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4),
-            content=book_content,
-            book_type="biography",
-            referenced_event_ids=[],
+            subject_name=subject.name,
+            subject_title=subject.social.title,
+            fame=subject.social.fame,
+            infamy=subject.social.infamy,
+            subject_events=[],
         )
-        world.books.append(new_book)
-        work_building.building_inventory[f"book_{new_book.id}"] = 1
+        world.records.register_book_item(new_book, work_building.building_inventory)
         world.add_message_to_chat_log(f"{npc.name} has written a general biography of {subject.name}.")
 
 
 class CompileCensusSubTaskCommand(CompletedWorkSubTaskCommand):
-    def __init__(self, book_factory):
-        self.book_factory = book_factory
-
     def execute(self, world, npc, work_building, sub_task_data: dict):
         village = world._get_village_for_npc(npc)
         if village:
@@ -261,27 +217,27 @@ class CompileCensusSubTaskCommand(CompletedWorkSubTaskCommand):
             professions[profession] = professions.get(profession, 0) + 1
 
         year = world.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
-        report_content = f"Official Census Report - Year {year}\n\n"
-        report_content += f"Jurisdiction: {village.name if village and hasattr(village, 'name') else 'Unknown'}\n"
-        report_content += f"Total Population: {population}\n"
-        report_content += f"Total Village Wealth: {total_wealth} coins\n"
-        report_content += f"Average Income: {int(avg_wealth)} coins\n\n"
-        report_content += f"Economic Status:\n- Richest Citizen: {richest.name} ({richest.economic.money} coins)\n"
-        report_content += f"- Poorest Citizen: {poorest.name} ({poorest.economic.money} coins)\n\n"
-        report_content += "Employment Statistics:\n"
-        for profession, count in professions.items():
-            report_content += f"- {profession}: {count}\n"
-
-        new_book = self.book_factory(
+        snapshot = world.records.record_census_snapshot(
+            CensusSnapshot(
+                village_name=village.name if village and hasattr(village, "name") else "Unknown",
+                year=year,
+                population=population,
+                total_wealth=total_wealth,
+                average_wealth=int(avg_wealth),
+                richest_name=richest.name,
+                richest_wealth=richest.economic.money,
+                poorest_name=poorest.name,
+                poorest_wealth=poorest.economic.money,
+                profession_counts=professions,
+            )
+        )
+        new_book = world.records.compile_census_report(
             title=f"Census Report {year}",
             author_id=npc.id,
             author_name=npc.name,
-            year_written=year,
-            content=report_content,
-            book_type="census",
+            snapshot=snapshot,
         )
-        world.books.append(new_book)
-        work_building.building_inventory[f"book_{new_book.id}"] = 1
+        world.records.register_book_item(new_book, work_building.building_inventory)
         world.add_message_to_chat_log(f"{npc.name} has filed the official census.")
 
 
@@ -318,7 +274,7 @@ class DefaultProduceOutputSubTaskCommand(CompletedWorkSubTaskCommand):
         world._produce_sub_task_output(npc, work_building, sub_task_data)
 
 
-def create_completed_work_sub_task_commands(book_factory):
+def create_completed_work_sub_task_commands():
     return {
         "chop_trees": ChopTreesSubTaskCommand(),
         "butcher_carcass": ButcherCarcassSubTaskCommand(),
@@ -328,9 +284,9 @@ def create_completed_work_sub_task_commands(book_factory):
         "craft_furniture": WorkBuildingConversionSubTaskCommand("wooden_plank", 2, "wooden_chair", 1),
         "fetch_wheat": PurchaseFromSupplierSubTaskCommand("_find_nearest_farm", "wheat", 5, deposit_to_work_building=True, log_message="{npc} the Miller bought {quantity} wheat."),
         "fetch_flour": PurchaseFromSupplierSubTaskCommand("_find_nearest_mill", "flour", 5, deposit_to_work_building=True),
-        "write_book": WriteBookSubTaskCommand(book_factory),
-        "write_biography": WriteBiographySubTaskCommand(book_factory),
-        "compile_census": CompileCensusSubTaskCommand(book_factory),
+        "write_book": WriteBookSubTaskCommand(),
+        "write_biography": WriteBiographySubTaskCommand(),
+        "compile_census": CompileCensusSubTaskCommand(),
         "mill_flour": WorkBuildingConversionSubTaskCommand("wheat", 1, "flour", 1),
         "till_soil": FarmerTileTransitionSubTaskCommand(),
         "plant_seeds": FarmerTileTransitionSubTaskCommand(consume_output=True),

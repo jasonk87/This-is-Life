@@ -3,6 +3,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 from engine import World, NPC, Book, Event
 from config import DAY_LENGTH_TICKS
+from simulation.history import HistoryLedger
+from simulation.knowledge import KnowledgeSystem
+from simulation.records import ChronicleArchive
 
 class MockWorld(World):
     def __init__(self):
@@ -19,13 +22,17 @@ class MockWorld(World):
         self.player.social.infamy = 0
         self.player.knowledge.known_events = {}
         self.player.knowledge.known_books = set()
-        self.global_events = []
-        self.books = []
+        self.history = HistoryLedger()
+        self.records = ChronicleArchive(self.history)
+        self.knowledge_system = KnowledgeSystem(self.records)
+        self.global_events = self.history.events
+        self.books = self.records.books
         self.chunk_width = 1
         self.chunk_height = 1
         self._get_village_for_npc = MagicMock()
         # Mock LLM
         self._call_llm = MagicMock(return_value='{"title": "Life of Hero", "content": "A great story."}')
+        self.game_state = "PLAYING"
         self.book_reading_context = {}
 
 class TestKnowledgeSystem(unittest.TestCase):
@@ -44,7 +51,7 @@ class TestKnowledgeSystem(unittest.TestCase):
 
         # Create some events for the subject
         event1 = Event("combat_attack", "Hero fought Wolf", subject.id, 100)
-        self.world.global_events.append(event1)
+        self.world.history.add_record(event1)
         # The scribe must know about the event to write about it
         scribe.knowledge.known_events[event1.id] = event1
 
@@ -109,10 +116,10 @@ class TestKnowledgeSystem(unittest.TestCase):
     def test_player_reads_book_and_learns(self):
         # Setup book with an event
         event1 = Event("historical_event", "Ancient Battle", 999, 10)
-        self.world.global_events.append(event1)
+        self.world.history.add_record(event1)
 
         book = Book("History Book", 100, "Author", 200, "Content", "chronicle", referenced_event_ids=[event1.id])
-        self.world.books.append(book)
+        self.world.records.add_book(book)
 
         # Player reads book
         self.world.player_attempt_read_book(f"book_{book.id}")

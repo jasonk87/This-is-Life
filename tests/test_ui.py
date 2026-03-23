@@ -528,7 +528,7 @@ class TestDialogueStateRegression(unittest.TestCase):
         prompt = self.mock_call_llm.call_args.args[0]
         self.assertIn("the Bold", prompt)
         self.assertIn("defeated a beast", prompt)
-        self.assertEqual(self.world.chat_ui_history[-1], (npc_target.name, "I heard a remarkable tale."))
+        self.assertEqual(self.world.chat_ui_history[-1], ("Villager", "I heard a remarkable tale."))
 
     def test_family_display_name_prefers_relationship_for_placeholder_names(self):
         npc_target = engine.NPC(
@@ -540,6 +540,26 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.assertEqual(self.world.get_entity_display_name(npc_target), "Mother")
         self.assertEqual(self.world.get_entity_display_name(npc_target, include_relationship=True), "Mother")
+
+    def test_entity_display_name_appends_profession_title(self):
+        npc_target = engine.NPC(10, 10, name="Ada Graves")
+        npc_target.economic.profession = "Farmer"
+
+        self.assertEqual(self.world.get_entity_display_name(npc_target), "Ada Graves (Farmer)")
+        self.assertEqual(npc_target.get_display_name(viewer=self.world.player), "Ada Graves (Farmer)")
+
+    def test_family_display_name_keeps_relationship_and_adds_profession_title(self):
+        npc_target = engine.NPC(
+            10, 10,
+            name="Mother Family_9990",
+            family_ties={"relation_to_player": "mother"},
+            player_id=self.world.player.id,
+        )
+        npc_target.economic.profession = "Farmer"
+
+        self.assertEqual(self.world.get_entity_display_name(npc_target), "Mother (Farmer)")
+        self.assertEqual(self.world.get_entity_display_name(npc_target, include_relationship=True), "Mother (Farmer)")
+        self.assertEqual(npc_target.get_display_name(viewer=self.world.player, include_relationship=True), "Mother (Farmer)")
 
     def test_world_assigns_player_family_last_name_to_full_name(self):
         world = World(seed=11, player_first_name="Ada")
@@ -565,13 +585,14 @@ class TestDialogueStateRegression(unittest.TestCase):
 
     def test_continue_npc_dialogue_parses_fenced_json_without_dumping_payload(self):
         npc_target = engine.NPC(10, 10, name="Theo Fletcher")
+        npc_target.economic.profession = "Farmer"
         self.mock_call_llm.return_value = """```json
 {"response":"I'm doing alright, all things considered.","goal":"continue_conversation"}
 ```"""
 
         self.world.continue_npc_dialogue(npc_target, "how are you doing?")
 
-        self.assertEqual(self.world.chat_ui_history[-1], ("Theo Fletcher", "I'm doing alright, all things considered."))
+        self.assertEqual(self.world.chat_ui_history[-1], ("Theo Fletcher (Farmer)", "I'm doing alright, all things considered."))
 
     def test_start_npc_dialogue_rejects_placeholder_player_name_output(self):
         npc_target = engine.NPC(
@@ -580,14 +601,16 @@ class TestDialogueStateRegression(unittest.TestCase):
             family_ties={"relation_to_player": "sister"},
             player_id=self.world.player.id,
         )
+        npc_target.economic.profession = "Farmer"
         self.mock_call_llm.return_value = "Oh, [Player Name]! What are you doing out this late?"
 
         self.world.start_npc_dialogue(npc_target)
 
-        self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves", "Hey. What do you need?"))
+        self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves (Farmer)", "Hey. What do you need?"))
 
     def test_continue_npc_dialogue_rejects_placeholder_player_name_output(self):
         npc_target = engine.NPC(10, 10, name="Ada Graves")
+        npc_target.economic.profession = "Farmer"
         self.mock_call_llm.return_value = json.dumps({
             "response": "Of course, [Player Name].",
             "goal": "continue_conversation",
@@ -595,7 +618,7 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.world.continue_npc_dialogue(npc_target, "how are you?")
 
-        self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves", "I've been alright."))
+        self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves (Farmer)", "I've been alright."))
 
     def test_npc_conversation_logs_overheard_line_and_applies_social_goal(self):
         speaker = engine.NPC(10, 10, name="A")

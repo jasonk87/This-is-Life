@@ -100,7 +100,7 @@ KEY_EXAMINE = 'x'
 KEY_ESCAPE = 'escape'
 
 # Display
-TILESET_PATH = "assets/tileset.png"
+TILESET_PATH = "assets/dawnlike_combined.png"
 # TILE_SIZE and DOUBLE_TILE_SIZE are removed as they are duplicates
 
 # Colors

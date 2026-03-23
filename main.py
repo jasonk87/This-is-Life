@@ -6,7 +6,7 @@ from tcod_compat import tcod, libtcodpy
 import os
 import sys
 from engine import World
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, MAP_WIDTH, MAP_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT
+from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, MAP_WIDTH, MAP_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT, TILESET_PATH
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
@@ -497,7 +497,7 @@ def load_custom_tileset():
     try:
         from PIL import Image
         import numpy as np
-        img = Image.open("assets/dawnlike_combined.png").convert("RGBA")
+        img = Image.open(TILESET_PATH).convert("RGBA")
         arr = np.array(img)
 
         # Split into 16x16 tiles and map them starting at 0xE000

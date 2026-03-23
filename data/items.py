@@ -2,6 +2,7 @@
 This file defines the properties of all items in the game that can be
 found in inventories, used, or crafted.
 """
+from data.dawnlike import ITEM_SPRITES
 from data.tiles import COLORS
 
 # --- Item Definitions ---
@@ -10,7 +11,7 @@ ITEM_DEFINITIONS = {
     "raw_log": {
         "name": "Raw Log",
         "description": "A rough, unprocessed log directly from a felled tree.",
-        "char": 0xeb01,
+        "char": ITEM_SPRITES["raw_log"],
         "color": COLORS["saddlebrown"],
         "value": 2,
         "weight": 5,
@@ -20,7 +21,7 @@ ITEM_DEFINITIONS = {
     "stone_chunk": {
         "name": "Stone Chunk",
         "description": "A rough piece of stone, useful for basic construction.",
-        "char": 0xeb03,
+        "char": ITEM_SPRITES["stone_chunk"],
         "color": COLORS["grey"],
         "value": 1,
         "weight": 8,
@@ -30,7 +31,7 @@ ITEM_DEFINITIONS = {
     "medicinal_herb": {
         "name": "Medicinal Herb",
         "description": "A rare herb with potent healing properties.",
-        "char": 0xef10,
+        "char": ITEM_SPRITES["medicinal_herb"],
         "color": COLORS["light_green"],
         "value": 5,
         "weight": 0.1,
@@ -40,7 +41,7 @@ ITEM_DEFINITIONS = {
     "herb_generic": {
         "name": "Common Herb",
         "description": "A common herb, often used in simple remedies.",
-        "char": 0xef01,
+        "char": ITEM_SPRITES["herb_generic"],
         "color": COLORS["forest_fg"],
         "value": 3,
         "weight": 0.1,
@@ -50,7 +51,7 @@ ITEM_DEFINITIONS = {
     "wheat": {
         "name": "Wheat",
         "description": "Grains of wheat, can be milled into flour or used as animal feed.",
-        "char": 0xef02,
+        "char": ITEM_SPRITES["wheat"],
         "color": COLORS["khaki"],
         "value": 2,
         "weight": 0.5,
@@ -60,7 +61,7 @@ ITEM_DEFINITIONS = {
     "flour": {
         "name": "Flour",
         "description": "Fine powder ground from grain, used for baking.",
-        "char": 0xef03,
+        "char": ITEM_SPRITES["flour"],
         "color": (255, 255, 255),
         "value": 4,
         "weight": 0.4,
@@ -70,7 +71,7 @@ ITEM_DEFINITIONS = {
     "bread": {
         "name": "Bread",
         "description": "A loaf of bread.",
-        "char": 0xef04,
+        "char": ITEM_SPRITES["bread"],
         "color": COLORS["yellow_green"],
         "value": 8,
         "weight": 0.5,
@@ -87,7 +88,7 @@ ITEM_DEFINITIONS = {
     "iron_ore": {
         "name": "Iron Ore",
         "description": "A chunk of rock containing iron.",
-        "char": 0xeb04,
+        "char": ITEM_SPRITES["iron_ore"],
         "color": COLORS["dark_orange"],
         "value": 4,
         "weight": 10,
@@ -97,7 +98,7 @@ ITEM_DEFINITIONS = {
     "iron_ingot": {
         "name": "Iron Ingot",
         "description": "A bar of refined iron, ready for smithing.",
-        "char": 0xeb05,
+        "char": ITEM_SPRITES["iron_ingot"],
         "color": COLORS["silver"],
         "value": 15,
         "weight": 8,
@@ -112,7 +113,7 @@ ITEM_DEFINITIONS = {
     "coal": {
         "name": "Coal",
         "description": "A combustible black rock, used as fuel.",
-        "char": "c",
+        "char": ITEM_SPRITES["coal"],
         "color": COLORS["darkest_grey"],
         "value": 3,
         "weight": 4,
@@ -124,7 +125,7 @@ ITEM_DEFINITIONS = {
     "wooden_plank": {
         "name": "Wooden Plank",
         "description": "A processed wooden plank, ready for construction.",
-        "char": 0xeb02,
+        "char": ITEM_SPRITES["wooden_plank"],
         "color": COLORS["tan"],
         "value": 5,
         "weight": 2,
@@ -138,7 +139,7 @@ ITEM_DEFINITIONS = {
     "workbench": {
         "name": "Workbench",
         "description": "A sturdy bench for crafting items.",
-        "char": "W",
+        "char": ITEM_SPRITES["workbench"],
         "color": COLORS["dark_orange"],
         "value": 50,
         "weight": 20,
@@ -151,7 +152,7 @@ ITEM_DEFINITIONS = {
     "forge": {
         "name": "Forge",
         "description": "A hearth for heating metal.",
-        "char": "F",
+        "char": ITEM_SPRITES["forge"],
         "color": COLORS["dark_orange"],
         "value": 100,
         "weight": 100,
@@ -165,7 +166,7 @@ ITEM_DEFINITIONS = {
     "anvil": {
         "name": "Anvil",
         "description": "A heavy iron block for shaping metal.",
-        "char": "A",
+        "char": ITEM_SPRITES["anvil"],
         "color": COLORS["dark_slate_gray"],
         "value": 150,
         "weight": 150,
@@ -179,7 +180,7 @@ ITEM_DEFINITIONS = {
     "wooden_chair": {
         "name": "Wooden Chair",
         "description": "A simple wooden chair.",
-        "char": "h",
+        "char": ITEM_SPRITES["wooden_chair"],
         "color": COLORS["saddlebrown"],
         "value": 10,
         "weight": 5,
@@ -193,7 +194,7 @@ ITEM_DEFINITIONS = {
     "wooden_table": {
         "name": "Wooden Table",
         "description": "A sturdy wooden table.",
-        "char": "T",
+        "char": ITEM_SPRITES["wooden_table"],
         "color": COLORS["saddlebrown"],
         "value": 20,
         "weight": 10,
@@ -207,7 +208,7 @@ ITEM_DEFINITIONS = {
     "bed_simple": {
         "name": "Simple Bed",
         "description": "A simple bed with a straw mattress.",
-        "char": "B",
+        "char": ITEM_SPRITES["bed_simple"],
         "color": COLORS["tan"],
         "value": 30,
         "weight": 15,
@@ -222,7 +223,7 @@ ITEM_DEFINITIONS = {
     "lumber_processed": {
         "name": "Processed Lumber",
         "description": "Smooth, processed lumber, ready for fine construction.",
-        "char": "=",
+        "char": ITEM_SPRITES["lumber_processed"],
         "color": COLORS["burlywood"],
         "value": 8,
         "weight": 3,
@@ -232,7 +233,7 @@ ITEM_DEFINITIONS = {
     "wheat_seeds": {
         "name": "Wheat Seeds",
         "description": "Seeds for growing wheat.",
-        "char": 0xef0f,
+        "char": ITEM_SPRITES["wheat_seeds"],
         "color": COLORS["khaki"],
         "value": 1,
         "weight": 0.1,
@@ -244,7 +245,7 @@ ITEM_DEFINITIONS = {
     "axe_stone": {
         "name": "Stone Axe",
         "description": "A crudely made axe with a stone head. Good for chopping wood.",
-        "char": "/",
+        "char": ITEM_SPRITES["axe_stone"],
         "color": COLORS["dark_slate_gray"],
         "value": 25,
         "weight": 7,
@@ -268,7 +269,7 @@ ITEM_DEFINITIONS = {
     "broken_tool_handle": {
         "name": "Broken Tool Handle",
         "description": "The snapped wooden handle of a tool. Might be reusable.",
-        "char": "_",
+        "char": ITEM_SPRITES["broken_tool_handle"],
         "color": COLORS["dark_sepia"],
         "value": 1,
         "weight": 0.5,
@@ -278,7 +279,7 @@ ITEM_DEFINITIONS = {
     "lockpick": {
         "name": "Lockpick",
         "description": "A thin piece of metal used for picking locks. Fragile.",
-        "char": "~",
+        "char": ITEM_SPRITES["lockpick"],
         "color": COLORS["silver"],
         "value": 5,
         "weight": 0.1,
@@ -294,7 +295,7 @@ ITEM_DEFINITIONS = {
     "healing_salve": {
         "name": "Healing Salve",
         "description": "A simple paste that heals minor wounds.",
-        "char": 0xef0e,
+        "char": ITEM_SPRITES["healing_salve"],
         "color": COLORS["light_green"],
         "value": 15,
         "weight": 0.5,
@@ -310,7 +311,7 @@ ITEM_DEFINITIONS = {
     "unlit_torch": {
         "name": "Unlit Torch",
         "description": "A stick with oil-soaked rags, needs to be lit.",
-        "char": 0xed01,
+        "char": ITEM_SPRITES["unlit_torch"],
         "color": COLORS["dark_amber"],
         "value": 3,
         "weight": 1,
@@ -322,7 +323,7 @@ ITEM_DEFINITIONS = {
     "torch_lit": {
         "name": "Lit Torch",
         "description": "A burning torch, casting a flickering light.",
-        "char": 0xed02,
+        "char": ITEM_SPRITES["torch_lit"],
         "color": COLORS["flame"],
         "value": 3,
         "weight": 1,
@@ -341,7 +342,7 @@ ITEM_DEFINITIONS = {
     "burnt_out_torch": {
         "name": "Burnt Out Torch",
         "description": "The charred remains of a torch. Useless.",
-        "char": 0xed03,
+        "char": ITEM_SPRITES["burnt_out_torch"],
         "color": COLORS["darkest_grey"],
         "value": 0,
         "weight": 0.5,
@@ -351,7 +352,7 @@ ITEM_DEFINITIONS = {
     "rotten_food": {
         "name": "Rotten Food",
         "description": "A foul-smelling mass of decayed food. Do not eat.",
-        "char": "%",
+        "char": ITEM_SPRITES["rotten_food"],
         "color": (101, 67, 33), # Dark brown
         "value": 0,
         "weight": 0.5,
@@ -366,7 +367,7 @@ ITEM_DEFINITIONS = {
     "water_flask": {
         "name": "Water Flask",
         "description": "A simple flask filled with water. Refreshing.",
-        "char": "~",
+        "char": ITEM_SPRITES["water_flask"],
         "color": COLORS["light_blue"],
         "value": 5,
         "weight": 1,
@@ -382,7 +383,7 @@ ITEM_DEFINITIONS = {
     "apple": {
         "name": "Apple",
         "description": "A crisp, juicy apple.",
-        "char": 0xef0b,
+        "char": ITEM_SPRITES["apple"],
         "color": COLORS["red"],
         "value": 3,
         "weight": 0.3,
@@ -400,7 +401,7 @@ ITEM_DEFINITIONS = {
     "pear": {
         "name": "Pear",
         "description": "A sweet and soft pear.",
-        "char": 0xef0c,
+        "char": ITEM_SPRITES["pear"],
         "color": COLORS["yellow_green"],
         "value": 3,
         "weight": 0.3,
@@ -418,7 +419,7 @@ ITEM_DEFINITIONS = {
     "acorn": {
         "name": "Acorn",
         "description": "The nut of an oak tree. Edible in a pinch.",
-        "char": 0xef0d,
+        "char": ITEM_SPRITES["acorn"],
         "color": COLORS["dark_orange"],
         "value": 1,
         "weight": 0.1,
@@ -431,7 +432,7 @@ ITEM_DEFINITIONS = {
     "sapling": {
         "name": "Sapling",
         "description": "A young tree, ready for planting.",
-        "char": "y",
+        "char": ITEM_SPRITES["sapling"],
         "color": COLORS["yellow_green"],
         "value": 5,
         "weight": 0.5,
@@ -441,7 +442,7 @@ ITEM_DEFINITIONS = {
     "raw_venison": {
         "name": "Raw Venison",
         "description": "A cut of raw deer meat.",
-        "char": 0xef07,
+        "char": ITEM_SPRITES["raw_venison"],
         "color": COLORS["crimson"],
         "value": 8,
         "weight": 2,
@@ -455,7 +456,7 @@ ITEM_DEFINITIONS = {
     "raw_meat": {
         "name": "Raw Meat",
         "description": "A chunk of raw meat from an animal.",
-        "char": 0xef05,
+        "char": ITEM_SPRITES["raw_meat"],
         "color": COLORS["crimson"],
         "value": 5,
         "weight": 1,
@@ -469,7 +470,7 @@ ITEM_DEFINITIONS = {
     "cooked_meat": {
         "name": "Cooked Meat",
         "description": "Meat cooked over a fire. Savory and filling.",
-        "char": 0xef06,
+        "char": ITEM_SPRITES["cooked_meat"],
         "color": COLORS["saddlebrown"],
         "value": 10,
         "weight": 1,
@@ -490,7 +491,7 @@ ITEM_DEFINITIONS = {
     "smoked_meat": {
         "name": "Smoked Meat",
         "description": "Meat preserved by smoking. Lasts a long time.",
-        "char": "m",
+        "char": ITEM_SPRITES["smoked_meat"],
         "color": (139, 69, 19), # Darker brown
         "value": 15,
         "weight": 0.8,
@@ -507,7 +508,7 @@ ITEM_DEFINITIONS = {
     "animal_pelt": {
         "name": "Animal Pelt",
         "description": "The uncured hide of an animal, with fur intact.",
-        "char": 0xeb09,
+        "char": ITEM_SPRITES["animal_pelt"],
         "color": COLORS["saddlebrown"],
         "value": 10,
         "weight": 3,
@@ -517,7 +518,7 @@ ITEM_DEFINITIONS = {
     "tanned_leather": {
         "name": "Tanned Leather",
         "description": "Cured and treated animal hide, suitable for crafting.",
-        "char": "L",
+        "char": ITEM_SPRITES["tanned_leather"],
         "color": COLORS["dark_amber"],
         "value": 25,
         "weight": 2,
@@ -530,7 +531,7 @@ ITEM_DEFINITIONS = {
     "raw_mutton": {
         "name": "Raw Mutton",
         "description": "A cut of raw sheep meat.",
-        "char": 0xef08,
+        "char": ITEM_SPRITES["raw_mutton"],
         "color": COLORS["crimson"],
         "value": 6,
         "weight": 2,
@@ -544,7 +545,7 @@ ITEM_DEFINITIONS = {
     "raw_wool": {
         "name": "Raw Wool",
         "description": "A fluffy bundle of raw, unprocessed wool.",
-        "char": "u",
+        "char": ITEM_SPRITES["raw_wool"],
         "color": (255, 255, 240),
         "value": 10,
         "weight": 1,
@@ -554,7 +555,7 @@ ITEM_DEFINITIONS = {
     "rusty_sword": {
         "name": "Rusty Sword",
         "description": "A worn, but still somewhat sharp sword.",
-        "char": "|",
+        "char": ITEM_SPRITES["rusty_sword"],
         "color": COLORS["silver"],
         "value": 30,
         "weight": 4,
@@ -571,7 +572,7 @@ ITEM_DEFINITIONS = {
     "crude_spear": {
         "name": "Crude Spear",
         "description": "A sharpened log, barely a spear. Better than fists.",
-        "char": "/",
+        "char": ITEM_SPRITES["crude_spear"],
         "color": COLORS["dark_sepia"],
         "value": 15,
         "weight": 4,
@@ -592,7 +593,7 @@ ITEM_DEFINITIONS = {
     "short_bow": {
         "name": "Short Bow",
         "description": "A simple wooden short bow.",
-        "char": ")",
+        "char": ITEM_SPRITES["short_bow"],
         "color": COLORS["dark_sepia"],
         "value": 25,
         "weight": 2,
@@ -610,7 +611,7 @@ ITEM_DEFINITIONS = {
     "arrow": {
         "name": "Arrow",
         "description": "A standard arrow for a bow.",
-        "char": "-",
+        "char": ITEM_SPRITES["arrow"],
         "color": COLORS["light_sepia"],
         "value": 1,
         "weight": 0.1,
@@ -620,7 +621,7 @@ ITEM_DEFINITIONS = {
     "wooden_shield": {
         "name": "Wooden Shield",
         "description": "A simple shield made of wooden planks.",
-        "char": "[",
+        "char": ITEM_SPRITES["wooden_shield"],
         "color": COLORS["burlywood"],
         "value": 30,
         "weight": 6,
@@ -638,7 +639,7 @@ ITEM_DEFINITIONS = {
     "leather_jerkin": {
         "name": "Leather Jerkin",
         "description": "A tough leather vest offering basic protection.",
-        "char": "[",
+        "char": ITEM_SPRITES["leather_jerkin"],
         "color": COLORS["dark_amber"],
         "value": 40,
         "weight": 5,
@@ -653,7 +654,7 @@ ITEM_DEFINITIONS = {
     "iron_helmet": {
         "name": "Iron Helmet",
         "description": "A sturdy iron helmet.",
-        "char": "^",
+        "char": ITEM_SPRITES["iron_helmet"],
         "color": COLORS["dark_slate_gray"],
         "value": 35,
         "weight": 3,
@@ -671,7 +672,7 @@ ITEM_DEFINITIONS = {
     "stone_pickaxe": {
         "name": "Stone Pickaxe",
         "description": "A crude pickaxe for mining.",
-        "char": "p",
+        "char": ITEM_SPRITES["stone_pickaxe"],
         "color": COLORS["dark_slate_gray"],
         "value": 30,
         "weight": 8,
@@ -692,7 +693,7 @@ ITEM_DEFINITIONS = {
     "stone_hoe": {
         "name": "Stone Hoe",
         "description": "A crude hoe for tilling soil.",
-        "char": 0xed04,
+        "char": ITEM_SPRITES["stone_hoe"],
         "color": COLORS["dark_slate_gray"],
         "value": 20,
         "weight": 6,
@@ -711,7 +712,7 @@ ITEM_DEFINITIONS = {
     "iron_sword": {
         "name": "Iron Sword",
         "description": "A simple but effective iron sword.",
-        "char": "|",
+        "char": ITEM_SPRITES["iron_sword"],
         "color": COLORS["silver"],
         "value": 50,
         "weight": 5,
@@ -731,7 +732,7 @@ ITEM_DEFINITIONS = {
     "iron_breastplate": {
         "name": "Iron Breastplate",
         "description": "A sturdy breastplate made of iron.",
-        "char": "[",
+        "char": ITEM_SPRITES["iron_breastplate"],
         "color": COLORS["silver"],
         "value": 80,
         "weight": 15,
@@ -750,7 +751,7 @@ ITEM_DEFINITIONS = {
     "fur_cloak": {
         "name": "Fur Cloak",
         "description": "A thick cloak made of animal fur, providing excellent warmth.",
-        "char": "C",
+        "char": ITEM_SPRITES["fur_cloak"],
         "color": COLORS["dark_sepia"],
         "value": 60,
         "weight": 8,
@@ -769,7 +770,7 @@ ITEM_DEFINITIONS = {
     "fish": {
         "name": "Fish",
         "description": "A freshly caught fish.",
-        "char": "f",
+        "char": ITEM_SPRITES["fish"],
         "color": COLORS["silver"],
         "value": 5,
         "weight": 1,
@@ -782,7 +783,7 @@ ITEM_DEFINITIONS = {
     "knife_stone": {
         "name": "Stone Knife",
         "description": "A sharp piece of stone, useful for skinning and butchering.",
-        "char": "k",
+        "char": ITEM_SPRITES["knife_stone"],
         "color": COLORS["dark_slate_gray"],
         "value": 15,
         "weight": 1,
@@ -805,7 +806,7 @@ ITEM_DEFINITIONS = {
     "shears": {
         "name": "Shears",
         "description": "A tool for shearing wool from sheep.",
-        "char": "s",
+        "char": ITEM_SPRITES["shears"],
         "color": COLORS["silver"],
         "value": 40,
         "weight": 2,
@@ -823,7 +824,7 @@ ITEM_DEFINITIONS = {
     "loom": {
         "name": "Loom",
         "description": "A device for weaving thread into cloth.",
-        "char": "L",
+        "char": ITEM_SPRITES["loom"],
         "color": COLORS["saddlebrown"],
         "value": 75,
         "weight": 30,
@@ -837,7 +838,7 @@ ITEM_DEFINITIONS = {
     "cloth": {
         "name": "Cloth",
         "description": "A piece of woven cloth.",
-        "char": 0xeb08,
+        "char": ITEM_SPRITES["cloth"],
         "color": (220, 220, 220),
         "value": 25,
         "weight": 0.5,
@@ -851,7 +852,7 @@ ITEM_DEFINITIONS = {
     "cloth_tunic": {
         "name": "Cloth Tunic",
         "description": "A simple tunic made of woven cloth.",
-        "char": "t",
+        "char": ITEM_SPRITES["cloth_tunic"],
         "color": (220, 220, 220),
         "value": 50,
         "weight": 2,
@@ -871,7 +872,7 @@ ITEM_DEFINITIONS = {
     "fishing_rod": {
         "name": "Fishing Rod",
         "description": "A simple fishing rod for catching fish.",
-        "char": 0xed05,
+        "char": ITEM_SPRITES["fishing_rod"],
         "color": COLORS["dark_sepia"],
         "value": 20,
         "weight": 3,
@@ -889,7 +890,7 @@ ITEM_DEFINITIONS = {
     "raw_fish": {
         "name": "Raw Fish",
         "description": "A raw fish, freshly caught. Should be cooked.",
-        "char": 0xef09,
+        "char": ITEM_SPRITES["raw_fish"],
         "color": COLORS["silver"],
         "value": 4,
         "weight": 1,
@@ -906,7 +907,7 @@ ITEM_DEFINITIONS = {
     "cooked_fish": {
         "name": "Cooked Fish",
         "description": "A fish, cooked over a fire. A satisfying meal.",
-        "char": 0xef0a,
+        "char": ITEM_SPRITES["cooked_fish"],
         "color": COLORS["dark_orange"],
         "value": 8,
         "weight": 1,
@@ -927,7 +928,7 @@ ITEM_DEFINITIONS = {
     "smoked_fish": {
         "name": "Smoked Fish",
         "description": "Fish preserved by smoking.",
-        "char": "f",
+        "char": ITEM_SPRITES["smoked_fish"],
         "color": (139, 69, 19),
         "value": 12,
         "weight": 0.8,
@@ -944,7 +945,7 @@ ITEM_DEFINITIONS = {
     "cooked_venison": {
         "name": "Cooked Venison",
         "description": "Delicious roasted deer meat.",
-        "char": "m",
+        "char": ITEM_SPRITES["cooked_venison"],
         "color": COLORS["saddlebrown"],
         "value": 15,
         "weight": 2,
@@ -965,7 +966,7 @@ ITEM_DEFINITIONS = {
     "cooked_mutton": {
         "name": "Cooked Mutton",
         "description": "Hearty roasted sheep meat.",
-        "char": "m",
+        "char": ITEM_SPRITES["cooked_mutton"],
         "color": COLORS["saddlebrown"],
         "value": 12,
         "weight": 2,
@@ -986,7 +987,7 @@ ITEM_DEFINITIONS = {
     "book_census": {
         "name": "Census",
         "description": "A record of births and deaths in the village.",
-        "char": "B",
+        "char": ITEM_SPRITES["book_census"],
         "color": COLORS["dark_amber"],
         "value": 100,
         "weight": 2,
@@ -999,7 +1000,7 @@ ITEM_DEFINITIONS = {
     "book_chronicle": {
         "name": "Chronicle",
         "description": "A record of significant events in the village.",
-        "char": "B",
+        "char": ITEM_SPRITES["book_chronicle"],
         "color": COLORS["dark_amber"],
         "value": 100,
         "weight": 2,

@@ -13,6 +13,8 @@ from config import (
 from data.tiles import TILE_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
+from data.environment import WEATHER_DEFINITIONS
+from data.dawnlike import get_entity_sprite
 from entities.animal import Animal
 from engine import Player
 
@@ -40,7 +42,7 @@ TERRAIN_BACKGROUNDS = {
     "fire_trap_active": (88, 18, 12),
 }
 
-DISPLAY_CHARS = {
+_LEGACY_UNUSED_DISPLAY_CHARS = {
     "plains": ".",
     "forest": "Y",
     "road": "=",
@@ -95,9 +97,6 @@ def _get_tile_background(tile):
     return _dim_color(tile.color, 0.22)
 
 def _get_tile_char(tile):
-    tile_key = _get_tile_key(tile)
-    if tile_key in DISPLAY_CHARS:
-        return DISPLAY_CHARS[tile_key]
     if tile is None:
         return " "
     return chr(tile.char)
@@ -864,17 +863,21 @@ def draw(console, world, camera_x, camera_y):
         if is_visible(world, entity.x, entity.y) or is_visible(world, draw_x, draw_y):
             if 0 <= draw_x - camera_x < MAP_WIDTH and 0 <= draw_y - camera_y < MAP_HEIGHT:
                 fg_color, bg_color = _get_entity_style(entity)
+                entity_char = get_entity_sprite(entity)
                 console.print(x=draw_x - camera_x, y=draw_y - camera_y,
-                              string=chr(entity.char), fg=fg_color, bg=bg_color)
+                              string=chr(entity_char), fg=fg_color, bg=bg_color)
 
+    _apply_lighting_and_depth(console, world, camera_x, camera_y)
     player_screen_x = world.player.x - camera_x
     player_screen_y = world.player.y - camera_y
     if 0 <= player_screen_x < MAP_WIDTH and 0 <= player_screen_y < MAP_HEIGHT:
-        console.print(x=player_screen_x, y=player_screen_y, string="@", fg=(255, 248, 160), bg=(120, 55, 20))
-
-    _apply_lighting_and_depth(console, world, camera_x, camera_y)
-    if 0 <= player_screen_x < MAP_WIDTH and 0 <= player_screen_y < MAP_HEIGHT:
-        console.print(x=player_screen_x, y=player_screen_y, string="@", fg=(255, 248, 160), bg=(120, 55, 20))
+        console.print(
+            x=player_screen_x,
+            y=player_screen_y,
+            string=chr(get_entity_sprite(world.player)),
+            fg=(255, 248, 160),
+            bg=(120, 55, 20),
+        )
     _draw_entity_markers(console, world, camera_x, camera_y)
     _draw_world_markers(console, world, camera_x, camera_y)
 
@@ -980,13 +983,15 @@ def draw_weather_overlay(console, world, camera_x, camera_y):
     import random
 
     # Simple stateless particle effect using map coordinates hash
+    weather_def = WEATHER_DEFINITIONS.get(world.weather, {})
+    weather_char = weather_def.get("char", " ")
+    char = chr(weather_char) if isinstance(weather_char, int) else str(weather_char)
+
     if world.weather == "rain" or world.weather == "storm":
-        char = "'"
-        color = (100, 150, 255) if world.weather == "rain" else (150, 150, 200)
+        color = weather_def.get("color", (100, 150, 255) if world.weather == "rain" else (150, 150, 200))
         density = 0.1 if world.weather == "rain" else 0.3
     elif world.weather == "snow":
-        char = "*"
-        color = (255, 255, 255)
+        color = weather_def.get("color", (255, 255, 255))
         density = 0.05
     else:
         return

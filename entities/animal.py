@@ -1,8 +1,10 @@
 """
 This module defines the Animal class, a specialized subclass of NPC.
 """
+from data.dawnlike import get_animal_sprite
 from entities.base import NPC
 from config import DEFAULT_HEARING_RADIUS
+from simulation.careers import set_entity_profession
 
 class Animal(NPC):
     """
@@ -18,11 +20,11 @@ class Animal(NPC):
         self.social.family_ties = {"description": "animal"}
         self.schedule.home_building_id = None
         self.schedule.work_building_id = None
-        self.economic.profession = "Creature"
+        set_entity_profession(self, "Creature", reason="animal_spawn")
         self.economic.money = 0
         self.economic.npc_inventory = {}
 
-        self.char = 0xE500
+        self.char = get_animal_sprite(animal_type)
         self.color = (255, 255, 255)
 
         self.combat.is_hostile_to_player = False

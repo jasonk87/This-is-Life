@@ -1,10 +1,12 @@
 """
 This file defines the properties of all animals in the game.
 """
+from data.dawnlike import ANIMAL_SPRITES
+
 ANIMAL_DEFINITIONS = {
     "deer": {
         "name": "Deer",
-        "char": 0xe502,
+        "char": ANIMAL_SPRITES["deer"],
         "color": (205, 133, 63),
         "max_hp": 10,
         "behavior": "Wander-Flee",
@@ -38,7 +40,7 @@ ANIMAL_DEFINITIONS = {
     },
     "bear": {
         "name": "Bear",
-        "char": 0xe503,
+        "char": ANIMAL_SPRITES["bear"],
         "color": (139, 69, 19),
         "max_hp": 30,
         "behavior": "Wander-Aggressive",
@@ -65,7 +67,7 @@ ANIMAL_DEFINITIONS = {
     },
     "fish": {
         "name": "Fish",
-        "char": 0xe501,
+        "char": ANIMAL_SPRITES["fish"],
         "color": (0, 191, 255),
         "max_hp": 3,
         "behavior": "Wander-Water",
@@ -86,7 +88,7 @@ ANIMAL_DEFINITIONS = {
     },
     "wolf": {
         "name": "Wolf",
-        "char": "w",
+        "char": ANIMAL_SPRITES["wolf"],
         "color": (169, 169, 169),
         "max_hp": 15,
         "hostile": True,
@@ -113,7 +115,7 @@ ANIMAL_DEFINITIONS = {
     },
     "dire_wolf": {
         "name": "Dire Wolf",
-        "char": 0xe601,
+        "char": ANIMAL_SPRITES["dire_wolf"],
         "color": (105, 105, 105),
         "max_hp": 25,
         "hostile": True,
@@ -140,7 +142,7 @@ ANIMAL_DEFINITIONS = {
     },
     "sheep": {
         "name": "Sheep",
-        "char": "s",
+        "char": ANIMAL_SPRITES["sheep"],
         "color": (255, 255, 240),
         "max_hp": 8,
         "behavior": "Wander-Flee",
@@ -175,7 +177,7 @@ ANIMAL_DEFINITIONS = {
     },
     "fox": {
         "name": "Fox",
-        "char": 0xe303,
+        "char": ANIMAL_SPRITES["fox"],
         "color": (210, 105, 30),
         "max_hp": 8,
         "hostile": False,
@@ -198,7 +200,7 @@ ANIMAL_DEFINITIONS = {
     },
     "boar": {
         "name": "Boar",
-        "char": "b",
+        "char": ANIMAL_SPRITES["boar"],
         "color": (118, 85, 43),
         "max_hp": 12,
         "hostile": True,
@@ -220,7 +222,7 @@ ANIMAL_DEFINITIONS = {
     },
     "salmon": {
         "name": "Salmon",
-        "char": "S",
+        "char": ANIMAL_SPRITES["salmon"],
         "color": (250, 128, 114),
         "max_hp": 4,
         "behavior": "Wander-Water",
@@ -239,7 +241,7 @@ ANIMAL_DEFINITIONS = {
     },
     "trout": {
         "name": "Trout",
-        "char": "t",
+        "char": ANIMAL_SPRITES["trout"],
         "color": (135, 206, 250),
         "max_hp": 3,
         "behavior": "Wander-Water",
@@ -258,7 +260,7 @@ ANIMAL_DEFINITIONS = {
     },
     "rabbit": {
         "name": "Rabbit",
-        "char": "r",
+        "char": ANIMAL_SPRITES["rabbit"],
         "color": (139, 119, 101),
         "max_hp": 4,
         "behavior": "Wander-Flee",
@@ -281,7 +283,7 @@ ANIMAL_DEFINITIONS = {
     },
     "bison": {
         "name": "Bison",
-        "char": "O",
+        "char": ANIMAL_SPRITES["bison"],
         "color": (160, 82, 45),
         "max_hp": 40,
         "behavior": "Wander-Neutral",
@@ -307,7 +309,7 @@ ANIMAL_DEFINITIONS = {
     },
     "badger": {
         "name": "Badger",
-        "char": "a",
+        "char": ANIMAL_SPRITES["badger"],
         "color": (54, 54, 54),
         "max_hp": 15,
         "behavior": "Territorial",

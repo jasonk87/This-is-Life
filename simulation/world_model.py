@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from typing import Any
 import uuid
 
+from data.decorations import DECORATION_ITEM_DEFINITIONS
+from data.items import ITEM_DEFINITIONS
+from entities.items import Inventory
+
 
 class Building:
     def __init__(self, x, y, width, height, building_type="house", category="residential", global_chunk_x_start=0, global_chunk_y_start=0):
@@ -17,7 +21,7 @@ class Building:
         self.interior_decorated = False
         self.occupants = []
         self.residents = []
-        self.building_inventory = {}
+        self.building_inventory = Inventory()
         self.interaction_points = {}
         self.work_zone_tiles: dict[str, list[tuple[int, int]]] = {}
         self.global_origin_x = global_chunk_x_start + x
@@ -25,9 +29,15 @@ class Building:
         self.global_center_x = self.global_origin_x + width // 2
         self.global_center_y = self.global_origin_y + height // 2
         self.player_owned: bool = False
+        self.owner_id: int | None = None
         self.max_workers: int = 2
         self.region_id: str | None = None
         self.settlement_id: str | None = None
+
+    def __setattr__(self, name, value):
+        if name == "building_inventory" and not isinstance(value, Inventory):
+            value = Inventory(value or {})
+        super().__setattr__(name, value)
 
     @property
     def max_workers(self):
@@ -42,6 +52,170 @@ class Building:
             self.global_origin_x <= world_x < self.global_origin_x + self.width
             and self.global_origin_y <= world_y < self.global_origin_y + self.height
         )
+
+
+@dataclass
+class ConstructionBlueprint:
+    x: int
+    y: int
+    target_build: str
+    required_materials: dict[str, int]
+    source: str = "decoration"
+    tile_def_key: str | None = None
+    width: int = 1
+    height: int = 1
+    category: str = "player_construction"
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    deposited_inventory: Inventory = field(default_factory=Inventory)
+
+    def __post_init__(self):
+        if not isinstance(self.deposited_inventory, Inventory):
+            self.deposited_inventory = Inventory(self.deposited_inventory or {})
+        primary_material_key = next(iter(self.required_materials), None)
+        primary_material_def = ITEM_DEFINITIONS.get(primary_material_key, {})
+        fallback = DECORATION_ITEM_DEFINITIONS["rubble"]
+        self.char = primary_material_def.get("char", fallback["char"])
+        self.color = primary_material_def.get("color", fallback["color"])
+        self.name = f"{self.target_build.replace('_', ' ').title()} Construction Site"
+
+    def remaining_materials(self) -> dict[str, int]:
+        return {
+            item_key: max(0, int(required_qty) - self.deposited_inventory.get(item_key, 0))
+            for item_key, required_qty in self.required_materials.items()
+            if max(0, int(required_qty) - self.deposited_inventory.get(item_key, 0)) > 0
+        }
+
+    def needs_material(self, item_key: str) -> bool:
+        return self.deposited_inventory.get(item_key, 0) < int(self.required_materials.get(item_key, 0))
+
+    def deposit_item_reference(self, item_reference) -> bool:
+        if item_reference is None or not self.needs_material(item_reference.key):
+            return False
+        self.deposited_inventory.add_item_reference(item_reference)
+        return True
+
+    def is_complete(self) -> bool:
+        return not self.remaining_materials()
+
+
+@dataclass
+class HaulTask:
+    blueprint_id: str
+    item_key: str
+    destination_x: int
+    destination_y: int
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    assigned_entity_id: int | None = None
+    status: str = "open"
+
+
+@dataclass
+class EmploymentTask:
+    target_building_id: str
+    profession_role: str
+    daily_wage: int
+    poster_entity_id: int | None = None
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    assigned_entity_id: int | None = None
+    status: str = "open"
+
+
+class TownBoard:
+    def __init__(self):
+        self.haul_tasks: list[HaulTask] = []
+        self.employment_tasks: list[EmploymentTask] = []
+
+    def post_blueprint(self, blueprint: ConstructionBlueprint) -> None:
+        for item_key, remaining_qty in blueprint.remaining_materials().items():
+            for _ in range(max(0, int(remaining_qty))):
+                self.haul_tasks.append(
+                    HaulTask(
+                        blueprint_id=blueprint.id,
+                        item_key=item_key,
+                        destination_x=blueprint.x,
+                        destination_y=blueprint.y,
+                    )
+                )
+
+    def get_open_tasks(self, blueprint_id: str | None = None) -> list[HaulTask]:
+        tasks = [task for task in self.haul_tasks if task.status == "open"]
+        if blueprint_id is not None:
+            tasks = [task for task in tasks if task.blueprint_id == blueprint_id]
+        return tasks
+
+    def claim_task(self, task: HaulTask, entity_id: int) -> bool:
+        if task.status != "open":
+            return False
+        task.status = "claimed"
+        task.assigned_entity_id = entity_id
+        return True
+
+    def release_task(self, task_id: str) -> None:
+        for task in self.haul_tasks:
+            if task.id == task_id and task.status == "claimed":
+                task.status = "open"
+                task.assigned_entity_id = None
+                return
+
+    def complete_task(self, task_id: str) -> None:
+        for task in self.haul_tasks:
+            if task.id == task_id:
+                task.status = "complete"
+                task.assigned_entity_id = None
+                return
+
+    def remove_blueprint_tasks(self, blueprint_id: str) -> None:
+        self.haul_tasks = [task for task in self.haul_tasks if task.blueprint_id != blueprint_id]
+
+    def get_task(self, task_id: str | None) -> HaulTask | None:
+        if not task_id:
+            return None
+        return next((task for task in self.haul_tasks if task.id == task_id), None)
+
+    def post_employment(self, target_building_id: str, profession_role: str, daily_wage: int, *, poster_entity_id: int | None = None) -> EmploymentTask:
+        task = EmploymentTask(
+            target_building_id=target_building_id,
+            profession_role=profession_role,
+            daily_wage=max(1, int(daily_wage)),
+            poster_entity_id=poster_entity_id,
+        )
+        self.employment_tasks.append(task)
+        return task
+
+    def get_open_employment_tasks(self, target_building_id: str | None = None) -> list[EmploymentTask]:
+        tasks = [task for task in self.employment_tasks if task.status == "open"]
+        if target_building_id is not None:
+            tasks = [task for task in tasks if task.target_building_id == target_building_id]
+        return tasks
+
+    def get_employment_task(self, task_id: str | None) -> EmploymentTask | None:
+        if not task_id:
+            return None
+        return next((task for task in self.employment_tasks if task.id == task_id), None)
+
+    def claim_employment_task(self, task: EmploymentTask, entity_id: int) -> bool:
+        if task.status != "open":
+            return False
+        task.status = "claimed"
+        task.assigned_entity_id = entity_id
+        return True
+
+    def complete_employment_task(self, task_id: str) -> None:
+        for task in self.employment_tasks:
+            if task.id == task_id:
+                task.status = "complete"
+                task.assigned_entity_id = None
+                return
+
+    def release_employment_task(self, task_id: str) -> None:
+        for task in self.employment_tasks:
+            if task.id == task_id and task.status == "claimed":
+                task.status = "open"
+                task.assigned_entity_id = None
+                return
+
+    def remove_employment_task(self, task_id: str) -> None:
+        self.employment_tasks = [task for task in self.employment_tasks if task.id != task_id]
 
 
 class Village:
@@ -110,6 +284,8 @@ class Chunk:
         self.tiles = None
         self.is_generated = False
         self.is_terrain_generated = False
+        self.wildlife_generated = False
+        self.allow_wildlife_population = False
         self.village = None
         self.ruin = None
         self.region_id = region_id

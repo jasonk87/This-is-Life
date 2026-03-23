@@ -8,6 +8,7 @@ from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
 from data.animals import ANIMAL_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.tiles import TILE_DEFINITIONS
+from entities.items import roll_crafted_item_quality
 from entities.tree import Tree
 from simulation.records import CensusSnapshot
 
@@ -23,7 +24,7 @@ class ChopTreesSubTaskCommand(CompletedWorkSubTaskCommand):
     def execute(self, world, npc, work_building, sub_task_data: dict):
         tree_tile_obj = world.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
         if not (isinstance(tree_tile_obj, Tree) and tree_tile_obj.is_choppable):
-            return
+            return False
 
         original_tree_type = tree_tile_obj.tree_type
         yielded_resources = tree_tile_obj.chop()
@@ -39,13 +40,14 @@ class ChopTreesSubTaskCommand(CompletedWorkSubTaskCommand):
 
         if logs_collected > 0:
             npc.add_item("raw_log", logs_collected)
+        return True
 
 
 class ButcherCarcassSubTaskCommand(CompletedWorkSubTaskCommand):
     def execute(self, world, npc, work_building, sub_task_data: dict):
         target_tile_obj = world.get_tile_at(npc.sub_task_target_coords[0], npc.sub_task_target_coords[1])
         if not (target_tile_obj and target_tile_obj.name == "Animal Corpse"):
-            return
+            return False
 
         animal_type = target_tile_obj.properties.get("animal_type")
         if animal_type in ANIMAL_DEFINITIONS:
@@ -63,15 +65,21 @@ class ButcherCarcassSubTaskCommand(CompletedWorkSubTaskCommand):
 
         bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
         world._change_map_tile(npc.sub_task_target_coords, bones_def)
+        return True
 
 
 class AddItemToNpcInventorySubTaskCommand(CompletedWorkSubTaskCommand):
-    def __init__(self, item_key: str, quantity: int):
+    def __init__(self, item_key: str, quantity: int, *, crafted: bool = False):
         self.item_key = item_key
         self.quantity = quantity
+        self.crafted = crafted
 
     def execute(self, world, npc, work_building, sub_task_data: dict):
-        npc.add_item(self.item_key, self.quantity)
+        if self.crafted:
+            npc.craft_item(self.item_key, self.quantity)
+        else:
+            npc.add_item(self.item_key, self.quantity)
+        return True
 
 
 class PurchaseFromSupplierSubTaskCommand(CompletedWorkSubTaskCommand):
@@ -85,30 +93,31 @@ class PurchaseFromSupplierSubTaskCommand(CompletedWorkSubTaskCommand):
     def execute(self, world, npc, work_building, sub_task_data: dict):
         supplier = getattr(world, self.supplier_getter_name)(npc)
         if not supplier:
-            return
+            return False
 
         village = world._get_village_for_npc(npc)
         item_price = world.get_dynamic_price(self.item_key, village)
         total_cost = item_price * self.quantity
         if npc.economic.money < total_cost or supplier.building_inventory.get(self.item_key, 0) < self.quantity:
-            return
+            return False
 
-        supplier.building_inventory[self.item_key] -= self.quantity
+        moved_quantity = world._move_item_between_inventories(supplier.building_inventory, npc.economic.npc_inventory, self.item_key, self.quantity)
+        if moved_quantity < self.quantity:
+            return False
         npc.economic.money -= total_cost
         if self.deposit_to_work_building:
-            work_building.building_inventory[self.item_key] = work_building.building_inventory.get(self.item_key, 0) + self.quantity
-        else:
-            npc.add_item(self.item_key, self.quantity)
+            world._move_item_between_inventories(npc.economic.npc_inventory, work_building.building_inventory, self.item_key, self.quantity)
 
         if self.log_message:
             world.add_message_to_chat_log(self.log_message.format(npc=npc.name, quantity=self.quantity))
+        return True
 
 
 class FetchWoodSubTaskCommand(CompletedWorkSubTaskCommand):
     def execute(self, world, npc, work_building, sub_task_data: dict):
         lumber_mill = world.buildings_by_id.get(npc.sub_task_target_coords)
         if not (lumber_mill and lumber_mill.building_type == "lumber_mill"):
-            return
+            return False
 
         village = world._get_village_for_npc(npc)
         plank_price = world.get_dynamic_price("wooden_plank", village)
@@ -117,6 +126,8 @@ class FetchWoodSubTaskCommand(CompletedWorkSubTaskCommand):
             lumber_mill.building_inventory["wooden_plank"] -= planks_to_buy
             npc.economic.money -= plank_price * planks_to_buy
             work_building.building_inventory["wooden_plank"] = work_building.building_inventory.get("wooden_plank", 0) + planks_to_buy
+            return True
+        return False
 
 
 class WorkBuildingConversionSubTaskCommand(CompletedWorkSubTaskCommand):
@@ -128,10 +139,23 @@ class WorkBuildingConversionSubTaskCommand(CompletedWorkSubTaskCommand):
 
     def execute(self, world, npc, work_building, sub_task_data: dict):
         if work_building.building_inventory.get(self.consumed_item, 0) < self.consumed_amount:
-            return
+            return False
 
         work_building.building_inventory[self.consumed_item] -= self.consumed_amount
-        work_building.building_inventory[self.produced_item] = work_building.building_inventory.get(self.produced_item, 0) + self.produced_amount
+        if hasattr(work_building.building_inventory, "add_item"):
+            quality = roll_crafted_item_quality(
+                career_level=getattr(getattr(npc, "career", None), "level", 0),
+                work_performance=getattr(getattr(npc, "economic", None), "work_performance", 50),
+            )
+            work_building.building_inventory.add_item(
+                self.produced_item,
+                self.produced_amount,
+                quality=quality,
+                crafter_name=npc.name,
+            )
+        else:
+            work_building.building_inventory[self.produced_item] = work_building.building_inventory.get(self.produced_item, 0) + self.produced_amount
+        return True
 
 
 class WriteBookSubTaskCommand(CompletedWorkSubTaskCommand):
@@ -147,6 +171,7 @@ class WriteBookSubTaskCommand(CompletedWorkSubTaskCommand):
         )
         world.records.register_book_item(new_book, work_building.building_inventory)
         world.add_message_to_chat_log(f"{npc.name} has written a new historical chronicle.")
+        return True
 
 
 class WriteBiographySubTaskCommand(CompletedWorkSubTaskCommand):
@@ -177,7 +202,7 @@ class WriteBiographySubTaskCommand(CompletedWorkSubTaskCommand):
             )
             world.records.register_book_item(new_book, work_building.building_inventory)
             world.add_message_to_chat_log(f"{npc.name} has written a biography of {subject.name}.")
-            return
+            return True
 
         new_book = world.records.compile_biography(
             title=f"Biography: {subject.name}",
@@ -192,6 +217,7 @@ class WriteBiographySubTaskCommand(CompletedWorkSubTaskCommand):
         )
         world.records.register_book_item(new_book, work_building.building_inventory)
         world.add_message_to_chat_log(f"{npc.name} has written a general biography of {subject.name}.")
+        return True
 
 
 class CompileCensusSubTaskCommand(CompletedWorkSubTaskCommand):
@@ -239,6 +265,7 @@ class CompileCensusSubTaskCommand(CompletedWorkSubTaskCommand):
         )
         world.records.register_book_item(new_book, work_building.building_inventory)
         world.add_message_to_chat_log(f"{npc.name} has filed the official census.")
+        return True
 
 
 class FarmerTileTransitionSubTaskCommand(CompletedWorkSubTaskCommand):
@@ -252,26 +279,28 @@ class FarmerTileTransitionSubTaskCommand(CompletedWorkSubTaskCommand):
         expected_tile_name = TILE_DEFINITIONS.get(sub_task_data.get("target_tile_type_key"), {}).get("name")
 
         if not (target_tile_obj and original_tile_name == expected_tile_name):
-            return
+            return False
 
         if self.harvest_output:
             if not target_tile_obj.properties.get("is_harvestable"):
-                return
+                return False
             world._produce_sub_task_output(npc, work_building, sub_task_data, target_tile_obj=target_tile_obj)
             becomes_key = target_tile_obj.properties.get("becomes_on_harvest_key") or sub_task_data.get("becomes_tile_type_key")
         else:
             if self.consume_output and not world._produce_sub_task_output(npc, work_building, sub_task_data):
-                return
+                return False
             becomes_key = sub_task_data.get("becomes_tile_type_key")
 
         new_tile_def = TILE_DEFINITIONS.get(becomes_key)
         if new_tile_def:
             world._change_map_tile(npc.sub_task_target_coords, new_tile_def)
+            return True
+        return False
 
 
 class DefaultProduceOutputSubTaskCommand(CompletedWorkSubTaskCommand):
     def execute(self, world, npc, work_building, sub_task_data: dict):
-        world._produce_sub_task_output(npc, work_building, sub_task_data)
+        return world._produce_sub_task_output(npc, work_building, sub_task_data)
 
 
 def create_completed_work_sub_task_commands():

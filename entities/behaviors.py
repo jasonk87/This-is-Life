@@ -1,0 +1,483 @@
+"""Behavior strategy objects for animal AI."""
+from __future__ import annotations
+
+import math
+import random
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import Protocol
+
+from config import DAY_LENGTH_TICKS, WORLD_HEIGHT, WORLD_WIDTH
+from data.animals import ANIMAL_DEFINITIONS
+from data.decorations import DECORATION_ITEM_DEFINITIONS
+from data.tiles import TILE_DEFINITIONS
+
+
+class BaseBehavior(Protocol):
+    """Interface for composable animal AI behaviors."""
+
+    def take_turn(self, entity, world) -> bool:
+        """Run this behavior for one turn.
+
+        Returns ``True`` when the behavior consumed the entity's turn and the
+        caller should stop evaluating lower-priority behaviors.
+        """
+
+
+class NoOpBehavior:
+    def take_turn(self, entity, world) -> bool:
+        return False
+
+
+@dataclass
+class CompositeBehavior:
+    """Runs child behaviors in priority order."""
+
+    behaviors: list[BaseBehavior] = field(default_factory=list)
+
+    def take_turn(self, entity, world) -> bool:
+        for behavior in self.behaviors:
+            if behavior.take_turn(entity, world):
+                return True
+        return False
+
+
+class StarvationBehavior:
+    def take_turn(self, entity, world) -> bool:
+        if entity.physical.hunger < entity.physical.max_hunger * 0.95:
+            return False
+        if random.random() >= 0.1:
+            return False
+
+        entity.combat.hp -= 1
+        if entity.combat.hp > 0:
+            return False
+
+        world.log_event("entity_death", f"A {entity.name} died of starvation.", entity.id, location=(entity.x, entity.y))
+        world.handle_npc_death(entity)
+        return True
+
+
+class HerdingBehavior:
+    def take_turn(self, entity, world) -> bool:
+        if entity.combat.combat_behavior != "herd_defensive":
+            return False
+        if entity.schedule.current_task not in ["idle", "wandering"]:
+            return False
+
+        herd_members = [
+            other for other in world.get_entities_in_radius(entity.x, entity.y, 15)
+            if getattr(other, "animal_type", None) == entity.animal_type and other.id != entity.id
+        ]
+        if not herd_members:
+            return False
+
+        cx = sum(member.x for member in herd_members) // len(herd_members)
+        cy = sum(member.y for member in herd_members) // len(herd_members)
+        if math.sqrt((entity.x - cx) ** 2 + (entity.y - cy) ** 2) <= 5:
+            return False
+
+        cx += random.randint(-2, 2)
+        cy += random.randint(-2, 2)
+        path = world.calculate_path(entity.x, entity.y, cx, cy)
+        if not path:
+            return False
+
+        entity.schedule.current_path = path
+        entity.schedule.current_destination_coords = (cx, cy)
+        entity.schedule.current_task = "migrating_with_herd"
+        return False
+
+
+class PredatorBehavior:
+    def _find_nearest_prey(self, entity, world):
+        nearest_prey = None
+        min_dist_sq = float("inf")
+        prey_types = entity.animal_definition.get("prey", [])
+        for other_npc in world.npcs:
+            if other_npc.id == entity.id:
+                continue
+            if getattr(other_npc, "animal_type", None) not in prey_types:
+                continue
+            dist_sq = (entity.x - other_npc.x) ** 2 + (entity.y - other_npc.y) ** 2
+            if dist_sq < min_dist_sq and dist_sq < 20 ** 2:
+                min_dist_sq = dist_sq
+                nearest_prey = other_npc
+        return nearest_prey
+
+    def take_turn(self, entity, world) -> bool:
+        is_predator = "prey" in entity.animal_definition
+        is_hungry_predator = is_predator and entity.physical.hunger >= entity.physical.max_hunger * 0.7
+        if not (is_hungry_predator or entity.schedule.current_task in ["hunting", "eating_corpse"]):
+            return False
+
+        if entity.schedule.current_task != "hunting" and is_predator:
+            nearest_prey = self._find_nearest_prey(entity, world)
+            if nearest_prey:
+                entity.schedule.current_task = "hunting"
+                entity.task_target_entity_id = nearest_prey.id
+
+        if entity.schedule.current_task == "hunting":
+            prey = world._get_predator_target(entity)
+            if prey and not prey.physical.is_dead:
+                distance_to_prey = abs(entity.x - prey.x) + abs(entity.y - prey.y)
+                attack_range = getattr(entity, "attack_range", entity.combat.attack_range)
+                if distance_to_prey <= attack_range:
+                    if attack_range > 1:
+                        from engine import ProjectileEffect
+                        world.visual_effects.append(ProjectileEffect(
+                            start_x=entity.x,
+                            start_y=entity.y,
+                            end_x=prey.x,
+                            end_y=prey.y,
+                            char='*',
+                            color=(255, 0, 0),
+                        ))
+                    world.npc_attempt_attack_npc(entity, prey)
+                    entity.schedule.current_path = []
+                    entity.schedule.current_destination_coords = None
+                else:
+                    if not entity.schedule.current_path or entity.schedule.current_destination_coords != (prey.x, prey.y):
+                        path = world.calculate_path(entity.x, entity.y, prey.x, prey.y)
+                        if path:
+                            entity.schedule.current_path = path
+                            entity.schedule.current_destination_coords = (prey.x, prey.y)
+                return True
+
+            corpse_x, corpse_y = world._find_nearest_corpse(entity) if hasattr(world, "_find_nearest_corpse") else (None, None)
+            if corpse_x is not None:
+                entity.schedule.current_task = "eating_corpse"
+                entity.schedule.current_destination_coords = (corpse_x, corpse_y)
+                path = world.calculate_path(entity.x, entity.y, corpse_x, corpse_y)
+                if path:
+                    entity.schedule.current_path = path
+                else:
+                    entity.schedule.current_task = "idle"
+            else:
+                entity.schedule.current_task = "idle"
+            entity.task_target_entity_id = None
+            return True
+
+        if entity.schedule.current_task == "eating_corpse":
+            if entity.schedule.current_destination_coords and (entity.x, entity.y) == entity.schedule.current_destination_coords:
+                tile = world.get_tile_at(entity.x, entity.y)
+                if tile and tile.name == "Animal Corpse":
+                    entity.physical.hunger = 0
+                    world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} devours the carcass.")
+                    world._change_map_tile((entity.x, entity.y), DECORATION_ITEM_DEFINITIONS["bones"])
+                entity.schedule.current_task = "idle"
+                entity.schedule.current_destination_coords = None
+            elif not entity.schedule.current_path:
+                entity.schedule.current_task = "idle"
+            return True
+
+        return False
+
+
+class PackHunterBehavior(PredatorBehavior):
+    """Predator behavior for animals coordinated by pack or fearless traits."""
+
+
+class WanderFleeBehavior:
+    def take_turn(self, entity, world) -> bool:
+        flee_radius = 15
+        should_flee = False
+        threat = None
+        distance_to_player = math.sqrt((entity.x - world.player.x) ** 2 + (entity.y - world.player.y) ** 2)
+        if distance_to_player < flee_radius and not entity.animal_definition.get("fearless"):
+            should_flee = True
+            threat = world.player
+
+        if not should_flee:
+            for other_npc in world.npcs:
+                if other_npc.id == entity.id:
+                    continue
+                if getattr(other_npc, "animal_type", None) not in entity.animal_definition.get("predators", []):
+                    continue
+                distance_to_predator = math.sqrt((entity.x - other_npc.x) ** 2 + (entity.y - other_npc.y) ** 2)
+                if distance_to_predator < flee_radius:
+                    should_flee = True
+                    threat = other_npc
+                    break
+
+        if should_flee and threat:
+            if entity.schedule.current_task != "fleeing":
+                threat_name = world.get_entity_display_name(threat) if hasattr(threat, "name") else "player"
+                world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} spots {threat_name} and bolts!")
+                entity.schedule.current_task = "fleeing"
+
+            dx = entity.x - threat.x
+            dy = entity.y - threat.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 0:
+                flee_x = entity.x + int(dx / dist * flee_radius)
+                flee_y = entity.y + int(dy / dist * flee_radius)
+                flee_x = max(0, min(WORLD_WIDTH - 1, flee_x))
+                flee_y = max(0, min(WORLD_HEIGHT - 1, flee_y))
+                path = world.calculate_path(entity.x, entity.y, flee_x, flee_y)
+                if path:
+                    entity.schedule.current_path = path
+                    entity.schedule.current_destination_coords = (flee_x, flee_y)
+            return True
+
+        if entity.schedule.current_task == "fleeing":
+            entity.schedule.current_task = "idle"
+        return False
+
+
+class WanderAggressiveBehavior:
+    def take_turn(self, entity, world) -> bool:
+        return False
+
+
+class WanderWaterBehavior:
+    def take_turn(self, entity, world) -> bool:
+        return False
+
+
+class NeutralBehavior:
+    def take_turn(self, entity, world) -> bool:
+        dist_to_player = math.sqrt((entity.x - world.player.x) ** 2 + (entity.y - world.player.y) ** 2)
+        if dist_to_player < 3 and not entity.combat.is_hostile_to_player:
+            world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} feels threatened and becomes hostile!")
+            entity.combat.is_hostile_to_player = True
+        return False
+
+
+class TerritorialBehavior:
+    def take_turn(self, entity, world) -> bool:
+        if not entity.den_location:
+            entity.den_location = (entity.x, entity.y)
+
+        dist_to_den = math.sqrt((world.player.x - entity.den_location[0]) ** 2 + (world.player.y - entity.den_location[1]) ** 2)
+        if dist_to_den < 10 and not entity.combat.is_hostile_to_player:
+            world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} becomes aggressive as you approach its den!")
+            entity.combat.is_hostile_to_player = True
+        return False
+
+
+class GrazingBehavior:
+    def _finish_grazing(self, entity, world, tile) -> None:
+        entity.physical.hunger = max(0, entity.physical.hunger - 50)
+        world.add_message_to_chat_log(world.text.entity_grazes_on(entity, tile.name))
+        if tile.name == "Tall Grass":
+            world._change_map_tile((entity.x, entity.y), TILE_DEFINITIONS["plains"])
+        elif tile.name == "Growing Wheat":
+            world._change_map_tile((entity.x, entity.y), TILE_DEFINITIONS["tilled_soil"])
+        elif tile.name == "Flower":
+            world._change_map_tile((entity.x, entity.y), TILE_DEFINITIONS["plains"])
+        entity.schedule.current_task = "idle"
+
+    def _search_for_food(self, entity, world) -> bool:
+        food_sources = entity.animal_definition.get("food_sources", [])
+        search_radius = 10
+        for y in range(entity.y - search_radius, entity.y + search_radius + 1):
+            for x in range(entity.x - search_radius, entity.x + search_radius + 1):
+                if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
+                    continue
+                tile = world.get_tile_at(x, y)
+                if not tile or tile.name not in food_sources:
+                    continue
+                path = world.calculate_path(entity.x, entity.y, x, y)
+                if path:
+                    entity.schedule.current_path = path
+                    entity.schedule.current_destination_coords = (x, y)
+                    entity.schedule.current_task = "grazing"
+                    return True
+        return False
+
+    def take_turn(self, entity, world) -> bool:
+        if entity.animal_definition.get("diet_type") != "herbivore" or entity.physical.hunger < 30:
+            return False
+
+        if entity.schedule.current_task == "grazing" and entity.schedule.current_destination_coords == (entity.x, entity.y):
+            tile = world.get_tile_at(entity.x, entity.y)
+            if tile and tile.name in entity.animal_definition.get("food_sources", []):
+                self._finish_grazing(entity, world, tile)
+            else:
+                entity.schedule.current_task = "idle"
+            return entity.schedule.current_task == "grazing"
+
+        if entity.schedule.current_task != "grazing":
+            if self._search_for_food(entity, world):
+                return True
+        return entity.schedule.current_task == "grazing"
+
+
+class ReproductionBehavior:
+    def _is_night_time(self, world) -> bool:
+        current_time_in_day = world.game_time % DAY_LENGTH_TICKS
+        sleep_start_tick = DAY_LENGTH_TICKS * 0.85
+        sleep_end_tick = DAY_LENGTH_TICKS * 0.15
+        return current_time_in_day >= sleep_start_tick or current_time_in_day < sleep_end_tick
+
+    def take_turn(self, entity, world) -> bool:
+        if entity.is_pregnant:
+            entity.pregnancy_timer -= 1
+            if entity.pregnancy_timer > 0:
+                return False
+
+            entity.is_pregnant = False
+            spawn_x, spawn_y = world._find_best_adjacent_tile(entity.x, entity.y, entity)
+            if spawn_x is None:
+                entity.pregnancy_timer = 1
+                return False
+
+            baby = entity.__class__(
+                spawn_x,
+                spawn_y,
+                name=f"Baby {entity.animal_type}",
+                animal_type=entity.animal_type,
+                animal_definition=deepcopy(entity.animal_definition),
+            )
+            baby.combat.max_hp = max(1, entity.animal_definition.get("max_hp", 10) // 2)
+            baby.combat.hp = baby.combat.max_hp
+            baby.behavior = "Wander-Flee"
+            baby.gender = random.choice(["male", "female"])
+            world.npcs.append(baby)
+            world._mark_entity_positions_dirty()
+            world.add_message_to_chat_log(f"A baby {entity.animal_type} has been born!")
+            return False
+
+        if entity.behavior == "Follow-Owner" and entity.owner == world.player:
+            distance_to_player = math.sqrt((entity.x - world.player.x) ** 2 + (entity.y - world.player.y) ** 2)
+            if distance_to_player > 3 and not entity.schedule.current_path:
+                target_x, target_y = world._find_best_adjacent_tile(world.player.x, world.player.y, entity)
+                if target_x is not None:
+                    path = world.calculate_path(entity.x, entity.y, target_x, target_y)
+                    if path:
+                        entity.schedule.current_path = path
+                        entity.schedule.current_destination_coords = (target_x, target_y)
+                        entity.schedule.current_task = "following"
+                return True
+
+            if entity.den_location and (self._is_night_time(world) or entity.combat.hp < entity.combat.max_hp * 0.3) and entity.schedule.current_task not in ["sleeping", "returning_to_den"]:
+                den_x, den_y = entity.den_location
+                if (entity.x, entity.y) == (den_x, den_y):
+                    entity.schedule.current_task = "sleeping"
+                else:
+                    entity.schedule.current_task = "returning_to_den"
+                    path = world.calculate_path(entity.x, entity.y, den_x, den_y)
+                    if path:
+                        entity.schedule.current_path = path
+                        entity.schedule.current_destination_coords = (den_x, den_y)
+                    else:
+                        entity.schedule.current_task = "wandering"
+                return True
+
+            if entity.schedule.current_task == "returning_to_den" and entity.den_location and (entity.x, entity.y) == entity.den_location:
+                entity.schedule.current_task = "sleeping"
+                return True
+            return False
+
+        if not entity.animal_definition.get("can_mate"):
+            return False
+        if entity.animal_definition.get("mating_season") != world.seasons[world.current_season_index]:
+            return False
+        if entity.is_pregnant:
+            return False
+
+        if entity.schedule.current_task not in ["seeking_mate", "mating"]:
+            for other_npc in world.npcs:
+                if getattr(other_npc, "animal_type", None) != entity.animal_type or other_npc.id == entity.id:
+                    continue
+                if other_npc.gender == entity.gender or other_npc.is_pregnant:
+                    continue
+                distance_to_mate = math.sqrt((entity.x - other_npc.x) ** 2 + (entity.y - other_npc.y) ** 2)
+                if distance_to_mate < 20:
+                    entity.schedule.current_task = "seeking_mate"
+                    entity.task_target_entity_id = other_npc.id
+                    break
+
+        if entity.schedule.current_task != "seeking_mate" or not entity.task_target_entity_id:
+            return False
+
+        mate = next((candidate for candidate in world.npcs if candidate.id == entity.task_target_entity_id), None)
+        if not mate:
+            entity.schedule.current_task = "idle"
+            entity.task_target_entity_id = None
+            return False
+
+        distance_to_mate = math.sqrt((entity.x - mate.x) ** 2 + (entity.y - mate.y) ** 2)
+        if distance_to_mate <= 1:
+            if entity.gender == "female":
+                entity.is_pregnant = True
+                entity.pregnancy_timer = entity.animal_definition.get("gestation_period_days", 7) * DAY_LENGTH_TICKS
+                world.add_message_to_chat_log(f"A wild {entity.animal_type} has become pregnant.")
+            entity.schedule.current_task = "idle"
+            return True
+
+        target_x, target_y = world._find_best_adjacent_tile(mate.x, mate.y, entity)
+        if target_x is not None:
+            path = world.calculate_path(entity.x, entity.y, target_x, target_y)
+            if path:
+                entity.schedule.current_path = path
+                entity.schedule.current_destination_coords = (target_x, target_y)
+                return True
+        return False
+
+
+class RandomWanderBehavior:
+    def take_turn(self, entity, world) -> bool:
+        if entity.schedule.current_task not in ["idle", "wandering"] or entity.schedule.current_path:
+            return False
+
+        if entity.physical.hunger < entity.physical.max_hunger:
+            entity.physical.hunger += 1
+
+        if random.random() >= 0.2:
+            return False
+
+        dx, dy = random.choice([(0, 1), (0, -1), (1, 0), (-1, 0)])
+        potential_x, potential_y = entity.x + dx, entity.y + dy
+        target_tile = world.get_tile_at(potential_x, potential_y)
+        if not target_tile or not target_tile.passable:
+            return False
+        if entity.behavior == "Wander-Water" and target_tile.name not in ["Water", "Deep Water"]:
+            return False
+
+        entity.schedule.current_path = [(entity.x, entity.y), (potential_x, potential_y)]
+        entity.schedule.current_destination_coords = (potential_x, potential_y)
+        entity.schedule.current_task = "wandering"
+        return True
+
+
+class AnimalBehaviorController:
+    """High-level coordinator for shared animal systems plus mode behaviors."""
+
+    def __init__(self, definition: dict | None = None):
+        self.definition = definition or {}
+        self.starvation = StarvationBehavior()
+        self.herding = HerdingBehavior()
+        self.grazing = GrazingBehavior()
+        self.reproduction = ReproductionBehavior()
+        self.predator = PackHunterBehavior() if (self.definition.get("pack_animal") or self.definition.get("fearless")) else PredatorBehavior()
+        self.mode_behaviors = {
+            "Wander-Flee": WanderFleeBehavior(),
+            "Wander-Aggressive": WanderAggressiveBehavior(),
+            "Wander-Water": WanderWaterBehavior(),
+            "Wander-Neutral": NeutralBehavior(),
+            "Territorial": TerritorialBehavior(),
+            "Follow-Owner": NoOpBehavior(),
+        }
+        self.random_wander = RandomWanderBehavior()
+
+    def take_turn(self, entity, world) -> bool:
+        if self.starvation.take_turn(entity, world):
+            return True
+        self.herding.take_turn(entity, world)
+        if self.predator.take_turn(entity, world):
+            return True
+        mode_behavior = self.mode_behaviors.get(entity.behavior, NoOpBehavior())
+        if mode_behavior.take_turn(entity, world):
+            return True
+        if self.grazing.take_turn(entity, world):
+            return True
+        if self.reproduction.take_turn(entity, world):
+            return True
+        return self.random_wander.take_turn(entity, world)
+
+
+def create_behavior(definition: dict | None) -> BaseBehavior:
+    """Factory for assembling a composable animal brain from definition data."""
+    return AnimalBehaviorController(definition or {})

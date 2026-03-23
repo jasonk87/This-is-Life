@@ -516,6 +516,70 @@ class TestQuestSystem(unittest.TestCase):
         # Check that quest items were consumed
         self.assertFalse(self.world.player.has_item(quest_def["item_to_fetch_key"]), "Quest items should have been consumed.")
 
+    def test_static_fetch_quest_completion_grants_questing_experience(self):
+        from entities.base import NPC
+        from data.quests import QUEST_DEFINITIONS
+
+        quest_id = "fetch_herbs_01"
+        quest_def = QUEST_DEFINITIONS[quest_id]
+        npc = NPC(x=self.world.player.x + 1, y=self.world.player.y, name="Healer", player_id=self.world.player.id)
+        npc.economic.profession = "Healer"
+        self.world.village_npcs.append(npc)
+        self.world.player.knowledge.active_quests[quest_id] = {
+            "title": quest_def["title"], "description": quest_def["description"], "type": "fetch",
+            "quest_giver_id": npc.id, "item_to_fetch_key": quest_def["item_to_fetch_key"],
+            "item_fetch_count": quest_def["item_fetch_count"], "progress": 0,
+            "quest_giver_id_or_role": "Healer"
+        }
+        self.world.player.add_item(quest_def["item_to_fetch_key"], quest_def["item_fetch_count"])
+        starting_xp = self.world.player.skills.experience.get("questing", 0)
+
+        self.world.complete_quest(quest_id, npc)
+
+        self.assertGreater(self.world.player.skills.experience["questing"], starting_xp)
+
+
+class TestSkillProgressionHooks(unittest.TestCase):
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC", "personality": "test", "dialogue": ["Hi"],
+            "wealth_level": "average", "combat_behavior": "defensive", "base_attack_name": "fists"
+        })
+        self.world = World(seed=17)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_player_crafting_grants_crafting_experience(self):
+        self.world.player.add_item("stone_chunk", 2)
+        self.world.player.add_item("raw_log", 2)
+        starting_xp = self.world.player.skills.experience.get("crafting", 0)
+
+        self.world.craft_item("stone_hoe")
+
+        self.assertTrue(self.world.player.has_item("stone_hoe"))
+        self.assertGreater(self.world.player.skills.experience["crafting"], starting_xp)
+
+    def test_player_harvest_grants_farming_experience(self):
+        from data.tiles import TILE_DEFINITIONS
+
+        player = self.world.player
+        target_x, target_y = player.x + 1, player.y
+        chunk_x, chunk_y = target_x // config.CHUNK_SIZE, target_y // config.CHUNK_SIZE
+        local_x, local_y = target_x % config.CHUNK_SIZE, target_y % config.CHUNK_SIZE
+        wheat_def = TILE_DEFINITIONS["wheat_plant"]
+        self.world.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = engine.Tile(
+            wheat_def['char'], wheat_def['color'], wheat_def['passable'], wheat_def['name'], properties=wheat_def['properties'].copy()
+        )
+        starting_xp = self.world.player.skills.experience.get("farming", 0)
+
+        with patch('random.random', return_value=0.1):
+            self.world.player_attempt_harvest(target_x, target_y)
+
+        self.assertGreater(self.world.player.skills.experience["farming"], starting_xp)
+
 
 class TestLockpickChestLooting(unittest.TestCase):
     def setUp(self):

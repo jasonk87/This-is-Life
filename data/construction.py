@@ -10,7 +10,30 @@ CONSTRUCTION_RECIPES = {
         "tile_def_key": "wood_wall", # Placeholder or use a specific tile if needed, but it's a building
         "source": "building", # Assuming 'building' is valid or use 'decoration' with a placeholder
         "materials": {"raw_log": 40, "stone_chunk": 10},
+        "width": 7,
+        "height": 6,
+        "category": "civic_workplace",
         "description": "A place for healing and treatment."
+    },
+    "house": {
+        "name": "House",
+        "tile_def_key": "wood_wall",
+        "source": "building",
+        "materials": {"raw_log": 50},
+        "width": 7,
+        "height": 7,
+        "category": "residential",
+        "description": "A new home for villagers."
+    },
+    "farm": {
+        "name": "Farm",
+        "tile_def_key": "wood_wall",
+        "source": "building",
+        "materials": {"raw_log": 30, "stone_chunk": 10},
+        "width": 8,
+        "height": 6,
+        "category": "agricultural_workplace",
+        "description": "A farm to produce food."
     },
     "wood_wall": {
         "name": "Wooden Wall",

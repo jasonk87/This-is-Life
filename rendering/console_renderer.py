@@ -129,7 +129,7 @@ def _get_entity_marker(entity):
 def _get_visible_nearby_entities(world, limit=5):
     nearby = []
     for entity in itertools.chain(world.npcs, world.village_npcs):
-        if getattr(getattr(entity, "physical", None), "is_dead", False):
+        if getattr(getattr(entity, "physical", None), "is_dead", False) or getattr(entity, "is_sleeping", False):
             continue
         if not is_visible(world, entity.x, entity.y):
             continue
@@ -378,6 +378,8 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
 
 def _draw_entity_markers(console, world, camera_x, camera_y):
     for entity in itertools.chain(world.npcs, world.village_npcs):
+        if getattr(entity, "is_sleeping", False):
+            continue
         marker = _get_entity_marker(entity)
         if marker is None or not is_visible(world, entity.x, entity.y):
             continue
@@ -849,6 +851,8 @@ def draw(console, world, camera_x, camera_y):
     for entity in sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, 'render_order') else 0):
         if isinstance(entity, Player) and entity.state.is_riding:
             continue
+        if entity is not world.player and getattr(entity, "is_sleeping", False):
+            continue
 
         # Use render coordinates if available (for smooth movement), else fall back to logic coordinates
         r_x = getattr(entity, 'render_x', entity.x)
@@ -922,6 +926,18 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "QUEST_MENU":
         draw_quest_menu(console, world)
 
+    if world.game_state == "NOTICEBOARD_MENU":
+        draw_noticeboard_menu(console, world)
+
+    if world.game_state == "COMPANY_LEDGER_MENU":
+        draw_company_ledger_menu(console, world)
+
+    if world.game_state == "SOCIAL_MENU":
+        draw_social_menu(console, world)
+
+    if world.game_state == "GOVERNANCE_MENU":
+        draw_governance_menu(console, world)
+
     if world.game_state == "DIALOGUE" or world.chat_ui_active:
         draw_dialogue_menu(console, world)
 
@@ -951,6 +967,8 @@ def draw(console, world, camera_x, camera_y):
                 # Check for entities
                 entities_here = []
                 for entity in itertools.chain([world.player], world.all_npcs):
+                    if entity is not world.player and getattr(entity, "is_sleeping", False):
+                        continue
                     if entity.x == mouse_world_x and entity.y == mouse_world_y:
                         if hasattr(entity, "physical") and entity.physical.is_dead:
                             entities_here.append(f"Dead {entity.name}")
@@ -1179,6 +1197,303 @@ def draw_building_menu(console, world):
         if description:
             detail_y += 1
             console.print_box(x=details_x + 2, y=detail_y, width=details_width-4, height=5, string=description, fg=(200, 200, 200))
+
+def draw_noticeboard_menu(console, world):
+    """Draw the TownBoard hauling notices and player-claimed tasks."""
+    menu_width = 66
+    menu_height = 20
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Noticeboard", clear=True)
+
+    if world.noticeboard_menu_context.get("mode") == "post_job":
+        building = world._get_job_posting_building()
+        role_options = world._get_job_posting_role_options(building)
+        selected_role_index = world.noticeboard_menu_context.get("selected_role_index", 0)
+        selected_role = role_options[selected_role_index] if role_options else "No valid roles"
+        wage = world.get_job_posting_wage()
+        building_name = str(getattr(building, "building_type", "Unassigned")).replace("_", " ").title()
+
+        console.print(x=x + 2, y=y + 2, string="Post Job Listing", fg=(255, 255, 0))
+        console.print(x=x + 2, y=y + 4, string=f"Business: {building_name}"[: menu_width - 4], fg=(255, 255, 255))
+        console.print(x=x + 2, y=y + 5, string=f"Role: {selected_role}"[: menu_width - 4], fg=(0, 255, 255))
+        console.print(x=x + 2, y=y + 6, string=f"Daily Wage: {wage} coins"[: menu_width - 4], fg=(255, 255, 255))
+        console.print(
+            x=x + 2,
+            y=y + 8,
+            string="Up/Down role  Left/Right wage  Tab building  Enter post  Esc cancel"[: menu_width - 4],
+            fg=(180, 180, 180),
+        )
+
+        current_y = y + 10
+        console.print(x=x + 2, y=current_y, string="Available Roles:", fg=(255, 255, 0))
+        for index, role in enumerate(role_options[: menu_height - 13]):
+            color = (0, 255, 255) if index == selected_role_index else (255, 255, 255)
+            console.print(x=x + 4, y=current_y + 1 + index, string=role[: menu_width - 8], fg=color)
+        return
+
+    task_ids = world.noticeboard_menu_context.get("task_ids", [])
+    selected_index = world.noticeboard_menu_context.get("selected_task_index", 0)
+    if not task_ids:
+        console.print_box(x=x + 2, y=y + 2, width=menu_width - 4, height=menu_height - 6, string="No active notices.", fg=(180, 180, 180))
+        console.print(x=x + 2, y=y + menu_height - 2, string="P = Post Job", fg=(180, 180, 180))
+        return
+
+    display_height = menu_height - 4
+    scroll_offset = world.noticeboard_menu_context.get("scroll_offset", 0)
+    if selected_index < scroll_offset:
+        scroll_offset = selected_index
+    elif selected_index >= scroll_offset + display_height:
+        scroll_offset = selected_index - display_height + 1
+    world.noticeboard_menu_context["scroll_offset"] = scroll_offset
+
+    for i in range(display_height):
+        list_index = scroll_offset + i
+        if list_index >= len(task_ids):
+            break
+        notice_id = task_ids[list_index]
+        if notice_id.startswith("job:"):
+            job_task = world.town_board.get_employment_task(notice_id.split(":", 1)[1])
+            if job_task is None:
+                continue
+            building = world.buildings_by_id.get(job_task.target_building_id)
+            building_name = str(getattr(building, "building_type", "Unknown")).replace("_", " ")
+            line = f"JOB: {job_task.profession_role} @ {building_name} - {job_task.daily_wage}/day"
+            color = (0, 255, 255) if list_index == selected_index else (144, 220, 255)
+        else:
+            task = world.town_board.get_task(notice_id.split(":", 1)[1] if ":" in notice_id else notice_id)
+            if task is None:
+                continue
+            blueprint = world.blueprints_by_id.get(task.blueprint_id)
+            if blueprint is None:
+                continue
+            status = "Claimed" if task.assigned_entity_id == world.player.id else "Open"
+            line = f"HAUL: {task.item_key.replace('_', ' ')} -> {blueprint.target_build.replace('_', ' ')} @ ({task.destination_x},{task.destination_y}) [{status}]"
+            color = (0, 255, 255) if list_index == selected_index else ((255, 255, 255) if status == "Open" else (255, 215, 0))
+        console.print(x=x + 2, y=y + 2 + i, string=line[:menu_width - 4], fg=color)
+    console.print(x=x + 2, y=y + menu_height - 2, string="Enter = claim haul notice   P = Post Job"[: menu_width - 4], fg=(180, 180, 180))
+
+def draw_company_ledger_menu(console, world):
+    """Draw the ledger for a player-owned building."""
+    menu_width = 74
+    menu_height = 22
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Company Ledger", clear=True)
+
+    building = world.get_company_ledger_building()
+    if building is None:
+        console.print_box(
+            x=x + 2,
+            y=y + 2,
+            width=menu_width - 4,
+            height=menu_height - 4,
+            string="No owned property is currently linked to this ledger.",
+            fg=(180, 180, 180),
+        )
+        return
+
+    building_name = str(getattr(building, "building_type", "business")).replace("_", " ").title()
+    building_cash = world._get_trade_money_balance(building)
+    player_cash = world._get_trade_money_balance(world.player)
+    selected_action_index = world.company_ledger_menu_context.get("selected_action_index", 0)
+    amount_options = world.company_ledger_menu_context.get("amount_options", [1, 10, 50, 100])
+    amount = world.get_company_ledger_amount()
+
+    console.print(x=x + 2, y=y + 2, string=f"Property: {building_name}", fg=(255, 255, 0))
+    console.print(x=x + 2, y=y + 3, string=f"Company Cash: {building_cash} coins", fg=(255, 255, 255))
+    console.print(x=x + 2, y=y + 4, string=f"Your Wallet: {player_cash} coins", fg=(255, 255, 255))
+    console.print(
+        x=x + 2,
+        y=y + 5,
+        string=f"Transfer Amount: {amount}  (Left/Right to adjust)",
+        fg=(180, 180, 180),
+    )
+
+    action_labels = ["Deposit Funds", "Withdraw Funds"]
+    for index, label in enumerate(action_labels):
+        color = (0, 255, 255) if index == selected_action_index else (255, 255, 255)
+        console.print(x=x + 2, y=y + 7 + index, string=label, fg=color)
+
+    amount_label = " / ".join(
+        f"[{option}]" if option == amount else str(option)
+        for option in amount_options
+    )
+    console.print(x=x + 2, y=y + 10, string=f"Quick Amounts: {amount_label}"[: menu_width - 4], fg=(160, 160, 160))
+    console.print(x=x + 2, y=y + 12, string="Stock:", fg=(255, 255, 0))
+
+    stock = world.get_company_ledger_stock_snapshot(building)
+    if not stock:
+        console.print(x=x + 4, y=y + 13, string="No stock on hand.", fg=(180, 180, 180))
+    else:
+        max_rows = menu_height - 15
+        for row_index, (item_key, quantity) in enumerate(stock[:max_rows]):
+            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key.replace("_", " ").title())
+            console.print(
+                x=x + 4,
+                y=y + 13 + row_index,
+                string=f"- {item_name}: {quantity}"[: menu_width - 8],
+                fg=(255, 255, 255),
+            )
+
+def draw_social_menu(console, world):
+    """Draw the player social interaction menu for the selected NPC."""
+    menu_width = 74
+    menu_height = 24
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Social", clear=True)
+
+    npc = world.get_social_menu_target()
+    if npc is None:
+        console.print_box(
+            x=x + 2,
+            y=y + 2,
+            width=menu_width - 4,
+            height=menu_height - 4,
+            string="No social target is available.",
+            fg=(180, 180, 180),
+        )
+        return
+
+    attitude_label, attitude_score = world.get_social_attitude_label(npc)
+    profession = getattr(getattr(npc, "economic", None), "profession", "Unemployed") or "Unemployed"
+    mode = world.social_menu_context.get("mode", "root")
+    console.print(x=x + 2, y=y + 2, string=f"Name: {npc.name}", fg=(255, 255, 0))
+    console.print(x=x + 2, y=y + 3, string=f"Job: {profession}", fg=(220, 220, 220))
+    console.print(x=x + 2, y=y + 4, string=f"Attitude: {attitude_label} ({attitude_score:+d})", fg=(200, 255, 255))
+
+    if mode == "root":
+        console.print(x=x + 2, y=y + 6, string="Choose how you want to approach them:", fg=(180, 180, 180))
+        for index, label in enumerate(world.get_social_menu_actions()):
+            color = (0, 255, 255) if index == world.social_menu_context.get("selected_action_index", 0) else (255, 255, 255)
+            console.print(x=x + 4, y=y + 8 + index, string=label, fg=color)
+        console.print(
+            x=x + 2,
+            y=y + menu_height - 2,
+            string="Up/Down = select   Enter = confirm   Esc = close",
+            fg=(150, 150, 150),
+        )
+        return
+
+    if mode == "gift":
+        options = world.get_social_gift_options()
+        title = f"Give Gift   Wallet: {world.player.economic.money} coins"
+    else:
+        options = world.get_player_gossip_options()
+        title = "Share Gossip"
+    console.print(x=x + 2, y=y + 6, string=title[: menu_width - 4], fg=(180, 180, 180))
+
+    if not options:
+        empty_text = "You have nothing available to gift." if mode == "gift" else "You do not know any memories worth sharing."
+        console.print_box(
+            x=x + 2,
+            y=y + 8,
+            width=menu_width - 4,
+            height=menu_height - 12,
+            string=empty_text,
+            fg=(180, 180, 180),
+        )
+        console.print(
+            x=x + 2,
+            y=y + menu_height - 2,
+            string="Esc = back",
+            fg=(150, 150, 150),
+        )
+        return
+
+    selected_index = max(0, min(len(options) - 1, world.social_menu_context.get("selected_option_index", 0)))
+    display_height = menu_height - 10
+    scroll_offset = world.social_menu_context.get("scroll_offset", 0)
+    if selected_index < scroll_offset:
+        scroll_offset = selected_index
+    elif selected_index >= scroll_offset + display_height:
+        scroll_offset = selected_index - display_height + 1
+    world.social_menu_context["scroll_offset"] = scroll_offset
+
+    for row in range(display_height):
+        list_index = scroll_offset + row
+        if list_index >= len(options):
+            break
+        option = options[list_index]
+        if mode == "gift":
+            line = f"{option['label']}  (value {option.get('value', 0)})"
+        else:
+            headline = option.headline or option.event_type.replace("_", " ").title()
+            line = f"{headline}  [{option.importance_score}]"
+        color = (0, 255, 255) if list_index == selected_index else (255, 255, 255)
+        console.print(x=x + 2, y=y + 8 + row, string=line[: menu_width - 4], fg=color)
+
+    console.print(
+        x=x + 2,
+        y=y + menu_height - 2,
+        string="Up/Down = select   Enter = confirm   Esc = back",
+        fg=(150, 150, 150),
+    )
+
+def draw_governance_menu(console, world):
+    """Draw the Town Hall governance menu."""
+    menu_width = 78
+    menu_height = 25
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Governance", clear=True)
+
+    town_hall = world.get_town_hall_building()
+    treasury = world._get_trade_money_balance(town_hall) if town_hall is not None else 0
+    tax_rate = int(float(getattr(world.politics, "tax_rate", 0.10)) * 100)
+    console.print(x=x + 2, y=y + 2, string=f"Treasury: {treasury} coins", fg=(255, 255, 0))
+    console.print(x=x + 2, y=y + 3, string=f"Tax Rate: {tax_rate}%", fg=(220, 220, 220))
+    console.print(x=x + 2, y=y + 4, string=f"Mayor: {world.get_office_holder_name('Mayor')}", fg=(200, 255, 255))
+    console.print(x=x + 2, y=y + 5, string=f"Captain: {world.get_office_holder_name('Captain of the Guard')}", fg=(200, 255, 255))
+
+    ctx = world.governance_menu_context
+    mode = ctx.get("mode", "root")
+    if mode == "root":
+        actions = world.get_governance_actions()
+        for index, label in enumerate(actions):
+            color = (0, 255, 255) if index == ctx.get("selected_action_index", 0) else (255, 255, 255)
+            console.print(x=x + 4, y=y + 8 + index, string=label, fg=color)
+        console.print(
+            x=x + 2,
+            y=y + menu_height - 2,
+            string="Up/Down = select   Left/Right = adjust taxes   Enter = confirm   Esc = close",
+            fg=(150, 150, 150),
+        )
+        return
+
+    targets = world.get_governance_targets()
+    pending_action = ctx.get("pending_action", "Issue Order")
+    console.print(x=x + 2, y=y + 8, string=f"{pending_action}: choose a target", fg=(180, 180, 180))
+    if not targets:
+        console.print(x=x + 4, y=y + 10, string="No valid targets.", fg=(180, 180, 180))
+        return
+
+    selected_index = max(0, min(len(targets) - 1, ctx.get("selected_target_index", 0)))
+    display_height = menu_height - 12
+    scroll_offset = ctx.get("scroll_offset", 0)
+    if selected_index < scroll_offset:
+        scroll_offset = selected_index
+    elif selected_index >= scroll_offset + display_height:
+        scroll_offset = selected_index - display_height + 1
+    ctx["scroll_offset"] = scroll_offset
+
+    for row in range(display_height):
+        list_index = scroll_offset + row
+        if list_index >= len(targets):
+            break
+        target = targets[list_index]
+        profession = getattr(getattr(target, "economic", None), "profession", "Citizen") or "Citizen"
+        line = f"{target.name} (ID {target.id}) - {profession}"
+        color = (0, 255, 255) if list_index == selected_index else (255, 255, 255)
+        console.print(x=x + 2, y=y + 10 + row, string=line[: menu_width - 4], fg=color)
+
+    console.print(
+        x=x + 2,
+        y=y + menu_height - 2,
+        string="Up/Down = select   Enter = issue order   Esc = back",
+        fg=(150, 150, 150),
+    )
 
 def draw_info_menu(console, world):
     """Draws the player information menu (stats and inventory)."""

@@ -922,6 +922,12 @@ def draw(console, world, camera_x, camera_y):
     if world.game_state == "QUEST_MENU":
         draw_quest_menu(console, world)
 
+    if world.game_state == "NOTICEBOARD_MENU":
+        draw_noticeboard_menu(console, world)
+
+    if world.game_state == "COMPANY_LEDGER_MENU":
+        draw_company_ledger_menu(console, world)
+
     if world.game_state == "DIALOGUE" or world.chat_ui_active:
         draw_dialogue_menu(console, world)
 
@@ -1179,6 +1185,144 @@ def draw_building_menu(console, world):
         if description:
             detail_y += 1
             console.print_box(x=details_x + 2, y=detail_y, width=details_width-4, height=5, string=description, fg=(200, 200, 200))
+
+def draw_noticeboard_menu(console, world):
+    """Draw the TownBoard hauling notices and player-claimed tasks."""
+    menu_width = 66
+    menu_height = 20
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Noticeboard", clear=True)
+
+    if world.noticeboard_menu_context.get("mode") == "post_job":
+        building = world._get_job_posting_building()
+        role_options = world._get_job_posting_role_options(building)
+        selected_role_index = world.noticeboard_menu_context.get("selected_role_index", 0)
+        selected_role = role_options[selected_role_index] if role_options else "No valid roles"
+        wage = world.get_job_posting_wage()
+        building_name = str(getattr(building, "building_type", "Unassigned")).replace("_", " ").title()
+
+        console.print(x=x + 2, y=y + 2, string="Post Job Listing", fg=(255, 255, 0))
+        console.print(x=x + 2, y=y + 4, string=f"Business: {building_name}"[: menu_width - 4], fg=(255, 255, 255))
+        console.print(x=x + 2, y=y + 5, string=f"Role: {selected_role}"[: menu_width - 4], fg=(0, 255, 255))
+        console.print(x=x + 2, y=y + 6, string=f"Daily Wage: {wage} coins"[: menu_width - 4], fg=(255, 255, 255))
+        console.print(
+            x=x + 2,
+            y=y + 8,
+            string="Up/Down role  Left/Right wage  Tab building  Enter post  Esc cancel"[: menu_width - 4],
+            fg=(180, 180, 180),
+        )
+
+        current_y = y + 10
+        console.print(x=x + 2, y=current_y, string="Available Roles:", fg=(255, 255, 0))
+        for index, role in enumerate(role_options[: menu_height - 13]):
+            color = (0, 255, 255) if index == selected_role_index else (255, 255, 255)
+            console.print(x=x + 4, y=current_y + 1 + index, string=role[: menu_width - 8], fg=color)
+        return
+
+    task_ids = world.noticeboard_menu_context.get("task_ids", [])
+    selected_index = world.noticeboard_menu_context.get("selected_task_index", 0)
+    if not task_ids:
+        console.print_box(x=x + 2, y=y + 2, width=menu_width - 4, height=menu_height - 6, string="No active notices.", fg=(180, 180, 180))
+        console.print(x=x + 2, y=y + menu_height - 2, string="P = Post Job", fg=(180, 180, 180))
+        return
+
+    display_height = menu_height - 4
+    scroll_offset = world.noticeboard_menu_context.get("scroll_offset", 0)
+    if selected_index < scroll_offset:
+        scroll_offset = selected_index
+    elif selected_index >= scroll_offset + display_height:
+        scroll_offset = selected_index - display_height + 1
+    world.noticeboard_menu_context["scroll_offset"] = scroll_offset
+
+    for i in range(display_height):
+        list_index = scroll_offset + i
+        if list_index >= len(task_ids):
+            break
+        notice_id = task_ids[list_index]
+        if notice_id.startswith("job:"):
+            job_task = world.town_board.get_employment_task(notice_id.split(":", 1)[1])
+            if job_task is None:
+                continue
+            building = world.buildings_by_id.get(job_task.target_building_id)
+            building_name = str(getattr(building, "building_type", "Unknown")).replace("_", " ")
+            line = f"JOB: {job_task.profession_role} @ {building_name} - {job_task.daily_wage}/day"
+            color = (0, 255, 255) if list_index == selected_index else (144, 220, 255)
+        else:
+            task = world.town_board.get_task(notice_id.split(":", 1)[1] if ":" in notice_id else notice_id)
+            if task is None:
+                continue
+            blueprint = world.blueprints_by_id.get(task.blueprint_id)
+            if blueprint is None:
+                continue
+            status = "Claimed" if task.assigned_entity_id == world.player.id else "Open"
+            line = f"HAUL: {task.item_key.replace('_', ' ')} -> {blueprint.target_build.replace('_', ' ')} @ ({task.destination_x},{task.destination_y}) [{status}]"
+            color = (0, 255, 255) if list_index == selected_index else ((255, 255, 255) if status == "Open" else (255, 215, 0))
+        console.print(x=x + 2, y=y + 2 + i, string=line[:menu_width - 4], fg=color)
+    console.print(x=x + 2, y=y + menu_height - 2, string="Enter = claim haul notice   P = Post Job"[: menu_width - 4], fg=(180, 180, 180))
+
+def draw_company_ledger_menu(console, world):
+    """Draw the ledger for a player-owned building."""
+    menu_width = 74
+    menu_height = 22
+    x = (MAP_WIDTH - menu_width) // 2
+    y = (SCREEN_HEIGHT - menu_height) // 2
+    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Company Ledger", clear=True)
+
+    building = world.get_company_ledger_building()
+    if building is None:
+        console.print_box(
+            x=x + 2,
+            y=y + 2,
+            width=menu_width - 4,
+            height=menu_height - 4,
+            string="No owned property is currently linked to this ledger.",
+            fg=(180, 180, 180),
+        )
+        return
+
+    building_name = str(getattr(building, "building_type", "business")).replace("_", " ").title()
+    building_cash = world._get_trade_money_balance(building)
+    player_cash = world._get_trade_money_balance(world.player)
+    selected_action_index = world.company_ledger_menu_context.get("selected_action_index", 0)
+    amount_options = world.company_ledger_menu_context.get("amount_options", [1, 10, 50, 100])
+    amount = world.get_company_ledger_amount()
+
+    console.print(x=x + 2, y=y + 2, string=f"Property: {building_name}", fg=(255, 255, 0))
+    console.print(x=x + 2, y=y + 3, string=f"Company Cash: {building_cash} coins", fg=(255, 255, 255))
+    console.print(x=x + 2, y=y + 4, string=f"Your Wallet: {player_cash} coins", fg=(255, 255, 255))
+    console.print(
+        x=x + 2,
+        y=y + 5,
+        string=f"Transfer Amount: {amount}  (Left/Right to adjust)",
+        fg=(180, 180, 180),
+    )
+
+    action_labels = ["Deposit Funds", "Withdraw Funds"]
+    for index, label in enumerate(action_labels):
+        color = (0, 255, 255) if index == selected_action_index else (255, 255, 255)
+        console.print(x=x + 2, y=y + 7 + index, string=label, fg=color)
+
+    amount_label = " / ".join(
+        f"[{option}]" if option == amount else str(option)
+        for option in amount_options
+    )
+    console.print(x=x + 2, y=y + 10, string=f"Quick Amounts: {amount_label}"[: menu_width - 4], fg=(160, 160, 160))
+    console.print(x=x + 2, y=y + 12, string="Stock:", fg=(255, 255, 0))
+
+    stock = world.get_company_ledger_stock_snapshot(building)
+    if not stock:
+        console.print(x=x + 4, y=y + 13, string="No stock on hand.", fg=(180, 180, 180))
+    else:
+        max_rows = menu_height - 15
+        for row_index, (item_key, quantity) in enumerate(stock[:max_rows]):
+            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key.replace("_", " ").title())
+            console.print(
+                x=x + 4,
+                y=y + 13 + row_index,
+                string=f"- {item_name}: {quantity}"[: menu_width - 8],
+                fg=(255, 255, 255),
+            )
 
 def draw_info_menu(console, world):
     """Draws the player information menu (stats and inventory)."""

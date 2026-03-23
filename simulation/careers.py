@@ -152,12 +152,31 @@ def resolve_profession_for_building(building_type: str, coworker_roles: list[str
     return lead_role
 
 
+def get_roles_for_building(building_type: str) -> list[str]:
+    normalized_building = str(building_type or "").strip().lower()
+    if normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building:
+        return ["Merchant"]
+
+    lead_role, worker_role = BUILDING_ROLE_RULES.get(
+        normalized_building,
+        (normalized_building.replace("_", " ").title(), normalized_building.replace("_", " ").title()),
+    )
+    roles: list[str] = []
+    for role in (lead_role, worker_role):
+        if role not in roles:
+            roles.append(role)
+    return roles
+
+
 def set_entity_profession(entity, profession: str, reason: str = "", game_time: int | None = None):
     normalized = normalize_profession(profession)
     if hasattr(entity, "economic"):
         entity.economic.profession = normalized
     if hasattr(entity, "career"):
         entity.career.set_role(normalized, reason=reason, game_time=game_time)
+    ai_brain = getattr(entity, "ai_brain", None)
+    if ai_brain and hasattr(ai_brain, "assign_profession"):
+        ai_brain.assign_profession(normalized)
     return normalized
 
 

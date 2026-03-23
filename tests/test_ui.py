@@ -93,6 +93,96 @@ class TestMainInputHelpers(unittest.TestCase):
 
         world.player_attempt_build.assert_called_once_with("wood_wall", 3, 7)
 
+    def test_handle_noticeboard_menu_input_enter_claims_selected_task(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={"mode": "browse", "task_ids": ["haul:task_1"], "selected_task_index": 0, "scroll_offset": 0},
+            claim_noticeboard_task=unittest.mock.Mock(),
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        world.claim_noticeboard_task.assert_called_once_with("task_1")
+
+    def test_handle_noticeboard_menu_input_escape_returns_to_playing(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.ESCAPE)
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={"task_ids": [], "selected_task_index": 0, "scroll_offset": 0},
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        self.assertEqual(world.game_state, "PLAYING")
+
+    def test_handle_noticeboard_menu_input_p_opens_job_posting(self):
+        event = SimpleNamespace(sym=ord("p"))
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={"mode": "browse", "task_ids": [], "selected_task_index": 0, "scroll_offset": 0},
+            open_job_posting_menu=unittest.mock.Mock(),
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        world.open_job_posting_menu.assert_called_once_with()
+
+    def test_handle_noticeboard_post_job_input_return_posts_selected_role(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        building = object()
+        world = SimpleNamespace(
+            game_state="NOTICEBOARD_MENU",
+            noticeboard_menu_context={
+                "mode": "post_job",
+                "posting_building_id": "shop_1",
+                "selected_role_index": 1,
+                "selected_wage_index": 2,
+                "wage_options": [10, 15, 20],
+            },
+            _get_job_posting_building=unittest.mock.Mock(return_value=building),
+            _get_job_posting_role_options=unittest.mock.Mock(return_value=["Merchant", "Scribe"]),
+            _get_player_owned_buildings=unittest.mock.Mock(return_value=[building]),
+            get_job_posting_wage=unittest.mock.Mock(return_value=20),
+            post_employment_listing=unittest.mock.Mock(),
+        )
+
+        main.handle_noticeboard_menu_input(event, world)
+
+        world.post_employment_listing.assert_called_once_with(building, "Scribe", 20)
+
+    def test_handle_company_ledger_menu_input_return_executes_selected_transfer(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        building = object()
+        world = SimpleNamespace(
+            game_state="COMPANY_LEDGER_MENU",
+            company_ledger_menu_context={
+                "building_id": "shop_1",
+                "selected_action_index": 1,
+                "selected_amount_index": 2,
+                "amount_options": [1, 10, 50, 100],
+            },
+            get_company_ledger_building=unittest.mock.Mock(return_value=building),
+            get_company_ledger_amount=unittest.mock.Mock(return_value=50),
+            transfer_company_funds=unittest.mock.Mock(),
+            add_message_to_chat_log=unittest.mock.Mock(),
+        )
+
+        main.handle_company_ledger_menu_input(event, world)
+
+        world.transfer_company_funds.assert_called_once_with(building, 50, withdraw=True)
+
+    def test_handle_company_ledger_menu_input_escape_returns_to_playing(self):
+        event = SimpleNamespace(sym=tcod.event.KeySym.ESCAPE)
+        world = SimpleNamespace(
+            game_state="COMPANY_LEDGER_MENU",
+            company_ledger_menu_context={"selected_action_index": 0, "selected_amount_index": 0, "amount_options": [1, 10]},
+        )
+
+        main.handle_company_ledger_menu_input(event, world)
+
+        self.assertEqual(world.game_state, "PLAYING")
+
     def test_find_nearest_npc_prefers_closest_living_npc_within_range(self):
         world = SimpleNamespace(
             player=SimpleNamespace(x=0, y=0),
@@ -360,6 +450,114 @@ class TestMainInputHelpers(unittest.TestCase):
         self.assertFalse(world.interaction_context["active"])
         self.assertTrue(world.trade_ui_active)
         self.assertEqual(world.game_state, "TRADE_MENU")
+
+    def test_execute_interaction_opens_social_menu_for_talk_action(self):
+        npc = SimpleNamespace(name="Villager")
+        world = SimpleNamespace(
+            interaction_context={
+                "active": True,
+                "target_entities": [{"type": "npc", "data": npc, "name": "Villager"}],
+                "selected_entity_index": 0,
+                "available_actions": ["Talk"],
+                "selected_action_index": 0,
+                "x": 0,
+                "y": 0,
+            },
+            chat_ui_active=False,
+            trade_ui_active=False,
+            ui_requests=[],
+            game_state="PLAYING",
+            open_social_menu=unittest.mock.Mock(return_value=True),
+        )
+
+        took_turn = main.execute_interaction(world, context_handler=SimpleNamespace())
+
+        self.assertFalse(took_turn)
+        world.open_social_menu.assert_called_once_with(npc)
+        self.assertFalse(world.interaction_context["active"])
+
+    def test_execute_interaction_opens_governance_menu_for_govern_action(self):
+        building = SimpleNamespace(building_type="capital_hall")
+        world = SimpleNamespace(
+            interaction_context={
+                "active": True,
+                "target_entities": [{"type": "building", "data": building, "name": "capital_hall"}],
+                "selected_entity_index": 0,
+                "available_actions": ["Govern"],
+                "selected_action_index": 0,
+                "x": 0,
+                "y": 0,
+            },
+            chat_ui_active=False,
+            trade_ui_active=False,
+            ui_requests=[],
+            game_state="PLAYING",
+            open_governance_menu=unittest.mock.Mock(return_value=True),
+        )
+
+        took_turn = main.execute_interaction(world, context_handler=SimpleNamespace())
+
+        self.assertFalse(took_turn)
+        world.open_governance_menu.assert_called_once_with(building)
+        self.assertFalse(world.interaction_context["active"])
+
+    def test_handle_social_menu_input_entering_gift_mode_and_escape(self):
+        npc = SimpleNamespace(name="Villager")
+        world = SimpleNamespace(
+            social_menu_context={"mode": "root", "selected_action_index": 0, "selected_option_index": 0, "scroll_offset": 0},
+            get_social_menu_target=lambda: npc,
+            get_social_menu_actions=lambda: ["Give Gift", "Share Gossip", "Propose"],
+            close_social_menu=unittest.mock.Mock(),
+            player=SimpleNamespace(social=SimpleNamespace(family_ties={})),
+        )
+
+        main.handle_social_menu_input(SimpleNamespace(sym=tcod.event.KeySym.RETURN), world)
+        self.assertEqual(world.social_menu_context["mode"], "gift")
+
+        main.handle_social_menu_input(SimpleNamespace(sym=tcod.event.KeySym.ESCAPE), world)
+        self.assertEqual(world.social_menu_context["mode"], "root")
+
+    def test_handle_social_menu_input_propose_closes_on_acceptance(self):
+        npc = SimpleNamespace(id=7, name="Beloved")
+        world = SimpleNamespace(
+            social_menu_context={"mode": "root", "selected_action_index": 2, "selected_option_index": 0, "scroll_offset": 0},
+            get_social_menu_target=lambda: npc,
+            get_social_menu_actions=lambda: ["Give Gift", "Share Gossip", "Propose"],
+            player=SimpleNamespace(social=SimpleNamespace(family_ties={"partner_id": npc.id})),
+            player_propose_to_npc=unittest.mock.Mock(return_value=True),
+            close_social_menu=unittest.mock.Mock(),
+        )
+
+        main.handle_social_menu_input(SimpleNamespace(sym=tcod.event.KeySym.RETURN), world)
+
+        world.player_propose_to_npc.assert_called_once_with(npc)
+        world.close_social_menu.assert_called_once_with()
+
+    def test_handle_governance_menu_input_adjusts_taxes_from_root(self):
+        world = SimpleNamespace(
+            governance_menu_context={"mode": "root", "selected_action_index": 0, "selected_target_index": 0, "scroll_offset": 0},
+            get_governance_actions=lambda: ["Adjust Taxes", "Issue Bounty"],
+            adjust_city_tax_rate=unittest.mock.Mock(return_value=True),
+            close_governance_menu=unittest.mock.Mock(),
+        )
+
+        main.handle_governance_menu_input(SimpleNamespace(sym=tcod.event.KeySym.RIGHT), world)
+
+        world.adjust_city_tax_rate.assert_called_once_with(0.01)
+
+    def test_handle_governance_menu_input_issues_warrant_for_selected_target(self):
+        target = SimpleNamespace(id=9, name="Target")
+        world = SimpleNamespace(
+            governance_menu_context={"mode": "target_select", "selected_action_index": 1, "selected_target_index": 0, "scroll_offset": 0, "pending_action": "Issue Bounty"},
+            get_governance_targets=lambda: [target],
+            issue_political_warrant=unittest.mock.Mock(return_value=True),
+            close_governance_menu=unittest.mock.Mock(),
+        )
+
+        main.handle_governance_menu_input(SimpleNamespace(sym=tcod.event.KeySym.RETURN), world)
+
+        world.issue_political_warrant.assert_called_once_with("bounty", target.id)
+        self.assertEqual(world.governance_menu_context["mode"], "root")
 
     def test_handle_events_ignores_mouse_clicks_outside_playing_state(self):
         world = SimpleNamespace(

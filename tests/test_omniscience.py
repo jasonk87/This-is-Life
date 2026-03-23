@@ -2,11 +2,14 @@
 import unittest
 from unittest.mock import MagicMock
 from engine import World, NPC, Player, Event, DireWolf
+from simulation.history import HistoryLedger
 
 class MockWorld(World):
     def __init__(self):
         self.game_time = 0
-        self.global_events = []
+        self.history = HistoryLedger()
+        self.global_events = self.history.events
+        self.books = self.history.books
         self.player = MagicMock()
         self.player.id = 1
         self.player.social.reputation = {}

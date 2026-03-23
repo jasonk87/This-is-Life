@@ -213,6 +213,7 @@ ITEM_SPRITES = {
     "iron_sword": dawnlike(4, 208),
     "iron_breastplate": dawnlike(4, 98),
     "fur_cloak": dawnlike(4, 244),
+    "hooded_cowl": dawnlike(3, 244),
     "fish": dawnlike(1, 106),
     "knife_stone": dawnlike(1, 224),
     "shears": dawnlike(1, 188),

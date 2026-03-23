@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import engine
 from entities.base import NPC
 
@@ -136,11 +136,16 @@ class TestMedicalSystem(unittest.TestCase):
         # Advance timer
         healer.task_timer = 1
         world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL
-        world._update_npc_schedules()
+        with patch("entities.items.random.random", return_value=0.95):
+            world._update_npc_schedules()
 
         # 4. Should finish crafting, become idle, and have 1 salve
         self.assertEqual(healer.schedule.current_task, "idle")
         self.assertEqual(healer.economic.npc_inventory.get("healing_salve", 0), 1)
+        salve = healer.economic.npc_inventory.get_item_reference("healing_salve")
+        self.assertIsNotNone(salve)
+        self.assertEqual(salve.crafter_name, "Healer NPC")
+        self.assertEqual(salve.quality, "Fine")
 
 if __name__ == '__main__':
     unittest.main()

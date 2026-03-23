@@ -767,6 +767,27 @@ ITEM_DEFINITIONS = {
             "tanned_leather": 5,
         },
     },
+    "hooded_cowl": {
+        "name": "Hooded Cowl",
+        "description": "A deep hood and wrapped cowl that hides the wearer's face in shadow.",
+        "char": ITEM_SPRITES["hooded_cowl"],
+        "color": COLORS["dark_sepia"],
+        "value": 35,
+        "weight": 1,
+        "stackable": False,
+        "item_type_tags": ["armor", "head", "disguise"],
+        "equip_slot": "head",
+        "properties": {
+            "defense_bonus": 0,
+            "insulation": 2.0,
+            "max_durability": 30,
+            "conceals_identity": True,
+        },
+        "crafting_recipe": {
+            "cloth": 2,
+        },
+        "required_workstation": "loom",
+    },
     "fish": {
         "name": "Fish",
         "description": "A freshly caught fish.",

@@ -41,11 +41,21 @@ except ModuleNotFoundError:
         RIGHT = 3
 
     class _BaseEvent:
-        def __init__(self, **kwargs):
+        def __init__(self, *args, **kwargs):
             self.__dict__.update(kwargs)
 
+    for _letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        setattr(_KeySym, _letter, _letter)
+
     class _KeyDown(_BaseEvent):
-        pass
+        def __init__(self, scancode=0, sym=None, mod=0, repeat=False, **kwargs):
+            super().__init__(
+                scancode=scancode,
+                sym=sym,
+                mod=mod,
+                repeat=repeat,
+                **kwargs,
+            )
 
     class _Quit(_BaseEvent):
         pass

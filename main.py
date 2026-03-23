@@ -220,6 +220,87 @@ def handle_building_input(event: tcod.event.KeyDown, world: World):
         # Optionally close menu after build? Or keep open for multiple builds?
         # Let's keep it open for now, maybe they want to build a wall.
 
+def handle_noticeboard_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handles input when the player is viewing the noticeboard."""
+    ctx = world.noticeboard_menu_context
+    key_sym = getattr(event, "sym", None)
+    is_post_job_key = key_sym in (ord("p"), ord("P"))
+    if hasattr(tcod.event.KeySym, "p") and key_sym == tcod.event.KeySym.p:
+        is_post_job_key = True
+    if hasattr(tcod.event.KeySym, "P") and key_sym == tcod.event.KeySym.P:
+        is_post_job_key = True
+
+    if ctx.get("mode") == "post_job":
+        building = world._get_job_posting_building()
+        role_options = world._get_job_posting_role_options(building)
+        owned_buildings = world._get_player_owned_buildings()
+
+        if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.E):
+            world.open_noticeboard_menu()
+        elif event.sym == tcod.event.KeySym.UP and role_options:
+            ctx["selected_role_index"] = (ctx.get("selected_role_index", 0) - 1) % len(role_options)
+        elif event.sym == tcod.event.KeySym.DOWN and role_options:
+            ctx["selected_role_index"] = (ctx.get("selected_role_index", 0) + 1) % len(role_options)
+        elif event.sym == tcod.event.KeySym.LEFT and ctx.get("wage_options"):
+            ctx["selected_wage_index"] = (ctx.get("selected_wage_index", 0) - 1) % len(ctx["wage_options"])
+        elif event.sym == tcod.event.KeySym.RIGHT and ctx.get("wage_options"):
+            ctx["selected_wage_index"] = (ctx.get("selected_wage_index", 0) + 1) % len(ctx["wage_options"])
+        elif event.sym == tcod.event.KeySym.TAB and owned_buildings:
+            current_building = world._get_job_posting_building()
+            current_index = owned_buildings.index(current_building) if current_building in owned_buildings else 0
+            next_index = (current_index + 1) % len(owned_buildings)
+            ctx["posting_building_id"] = owned_buildings[next_index].id
+            ctx["selected_role_index"] = 0
+        elif event.sym == tcod.event.KeySym.RETURN and building and role_options:
+            selected_role = role_options[min(len(role_options) - 1, ctx.get("selected_role_index", 0))]
+            world.post_employment_listing(building, selected_role, world.get_job_posting_wage())
+        return
+
+    task_ids = ctx.get("task_ids", [])
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.E):
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.UP and task_ids:
+        ctx["selected_task_index"] = max(0, ctx.get("selected_task_index", 0) - 1)
+    elif event.sym == tcod.event.KeySym.DOWN and task_ids:
+        ctx["selected_task_index"] = min(len(task_ids) - 1, ctx.get("selected_task_index", 0) + 1)
+    elif is_post_job_key:
+        world.open_job_posting_menu()
+    elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx.get("selected_task_index", 0) < len(task_ids):
+        selected_notice = task_ids[ctx["selected_task_index"]]
+        if selected_notice.startswith("haul:"):
+            world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
+
+def handle_company_ledger_menu_input(event: tcod.event.KeyDown, world: World):
+    """Handle keyboard input for the company ledger menu."""
+    ctx = world.company_ledger_menu_context
+    actions = ["Deposit Funds", "Withdraw Funds"]
+    amount_options = ctx.get("amount_options", [1, 10, 50, 100])
+
+    if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.E):
+        world.game_state = "PLAYING"
+        return
+    if event.sym == tcod.event.KeySym.UP:
+        ctx["selected_action_index"] = (ctx.get("selected_action_index", 0) - 1) % len(actions)
+        return
+    if event.sym == tcod.event.KeySym.DOWN:
+        ctx["selected_action_index"] = (ctx.get("selected_action_index", 0) + 1) % len(actions)
+        return
+    if event.sym == tcod.event.KeySym.LEFT and amount_options:
+        ctx["selected_amount_index"] = (ctx.get("selected_amount_index", 0) - 1) % len(amount_options)
+        return
+    if event.sym == tcod.event.KeySym.RIGHT and amount_options:
+        ctx["selected_amount_index"] = (ctx.get("selected_amount_index", 0) + 1) % len(amount_options)
+        return
+    if event.sym == tcod.event.KeySym.RETURN:
+        building = world.get_company_ledger_building()
+        if building is None:
+            world.game_state = "PLAYING"
+            world.add_message_to_chat_log("This ledger is no longer available.")
+            return
+        amount = world.get_company_ledger_amount()
+        withdraw = ctx.get("selected_action_index", 0) == 1
+        world.transfer_company_funds(building, amount, withdraw=withdraw)
+
 def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
     """Handles input when the interaction menu is active. Returns True if action taken."""
     ctx = world.interaction_context
@@ -291,6 +372,10 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Trade": lambda: start_trade(world, entity_data),
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
         "Claim House": lambda: claim_house(world, entity_data),
+        "Buy Property": lambda: world.buy_property(entity_data),
+        "Company Ledger": lambda: world.open_company_ledger_menu(entity_data),
+        "Post Job": lambda: world.open_job_posting_menu(entity_data),
+        "Read Notices": lambda: world.open_noticeboard_menu(),
 
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
@@ -303,7 +388,7 @@ def execute_interaction(world: World, context_handler) -> bool:
     if selected_action in action_map:
         action_map[selected_action]()
 
-    if selected_action in ["Talk", "Trade", "Read", "Offer Mercenary Services"]:
+    if selected_action in ["Talk", "Trade", "Read", "Offer Mercenary Services", "Read Notices", "Company Ledger", "Post Job"]:
         ctx["active"] = False
 
     apply_ui_requests(world, context_handler)
@@ -312,7 +397,7 @@ def execute_interaction(world: World, context_handler) -> bool:
         ctx["active"] = False
 
     # Return True for actions that consume time
-    return selected_action not in ["Examine", "Talk", "Trade", "Read"]
+    return selected_action not in ["Examine", "Talk", "Trade", "Read", "Company Ledger", "Post Job"]
 
 def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'HELP_MENU' state."""
@@ -459,6 +544,8 @@ def claim_house(world, building):
     """Claims a house for the player."""
     if building.building_type == "house" and not building.player_owned and not building.residents:
         building.player_owned = True
+        if hasattr(building, "owner_id"):
+            building.owner_id = world.player.id
         world.add_message_to_chat_log(f"You have claimed this {building.building_type} as your own!")
     else:
         world.add_message_to_chat_log("You cannot claim this structure.")
@@ -732,6 +819,10 @@ def handle_events(world, context) -> bool:
                 handle_trade_menu_input(event, world)
             elif world.game_state == "QUEST_MENU":
                 handle_quest_menu_input(event, world)
+            elif world.game_state == "NOTICEBOARD_MENU":
+                handle_noticeboard_menu_input(event, world)
+            elif world.game_state == "COMPANY_LEDGER_MENU":
+                handle_company_ledger_menu_input(event, world)
             elif world.game_state == "HELP_MENU":
                 handle_help_menu_input(event, world)
             elif world.game_state == "INFO_MENU":

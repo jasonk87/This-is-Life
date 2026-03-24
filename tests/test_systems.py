@@ -12,6 +12,7 @@ import rendering.console_renderer as console_renderer
 from save_manager import save_game, load_game
 from data.items import ITEM_DEFINITIONS
 import config
+from simulation.systems import survival
 from tcod_compat import tcod
 import tile_types
 
@@ -45,7 +46,7 @@ class TestTemperatureSystem(unittest.TestCase):
         chunk = self.world.chunks[0][0]
         chunk.biome = "snow"
 
-        self.world._update_player_temperature()
+        survival.update_entity_temperature(self.world, self.world.player, update_world_ambient=True)
 
         from config import SEASON_TEMPERATURE_MODIFIERS, BIOME_TEMPERATURE_MODIFIERS, TIME_OF_DAY_TEMPERATURE_MODIFIERS
         expected_temp = (SEASON_TEMPERATURE_MODIFIERS["Winter"] +
@@ -58,7 +59,7 @@ class TestTemperatureSystem(unittest.TestCase):
         from tile_types import Tile
 
         # First, get temperature without any heat source
-        self.world._update_player_temperature()
+        survival.update_entity_temperature(self.world, self.world.player, update_world_ambient=True)
         initial_temp = self.world.ambient_temperature
 
         fire_pit_def = DECORATION_ITEM_DEFINITIONS["fire_pit_lit"]
@@ -69,7 +70,7 @@ class TestTemperatureSystem(unittest.TestCase):
         self.world.chunks[fire_y // config.CHUNK_SIZE][fire_x // config.CHUNK_SIZE].tiles[fire_y % config.CHUNK_SIZE][fire_x % config.CHUNK_SIZE] = fire_pit_tile
 
         # Rerun temperature update to capture heat source effect
-        self.world._update_player_temperature()
+        survival.update_entity_temperature(self.world, self.world.player, update_world_ambient=True)
         temp_with_fire = self.world.ambient_temperature
 
         self.assertGreater(temp_with_fire, initial_temp)
@@ -77,7 +78,7 @@ class TestTemperatureSystem(unittest.TestCase):
     def test_player_gets_wet_in_rain(self):
         self.world.weather = "rain"
         self.world.player.physical.is_sheltered = False
-        self.world._update_player_wetness()
+        survival.update_player_wetness(self.world)
         self.assertTrue(self.world.player.physical.is_wet)
         self.assertGreater(self.world.player.physical.wetness_timer, 0)
 
@@ -85,13 +86,13 @@ class TestTemperatureSystem(unittest.TestCase):
         player = self.world.player
         player.physical.temperature = 30 # Set a cold body temp
 
-        self.world._update_player_temperature()
+        survival.update_entity_temperature(self.world, self.world.player, update_world_ambient=True)
         temp_change_without_cloak = player.physical.temperature - 30
 
         player.equip_armor("fur_cloak")
         player.physical.temperature = 30 # Reset temp
 
-        self.world._update_player_temperature()
+        survival.update_entity_temperature(self.world, self.world.player, update_world_ambient=True)
         temp_change_with_cloak = player.physical.temperature - 30
 
         self.assertGreater(temp_change_with_cloak, temp_change_without_cloak)
@@ -102,7 +103,7 @@ class TestTemperatureSystem(unittest.TestCase):
         player.physical.temperature = 34.0 # Below freezing threshold
 
         # Update temperature to apply status effect
-        self.world._update_player_temperature()
+        survival.update_entity_temperature(self.world, self.world.player, update_world_ambient=True)
         self.assertIn("Freezing", player.physical.status_effects)
 
         from config import DAY_LENGTH_TICKS
@@ -110,7 +111,7 @@ class TestTemperatureSystem(unittest.TestCase):
 
         for i in range(ticks_for_damage + 1):
             self.world.game_time += 1
-            self.world._apply_temperature_effects(player)
+            survival.apply_temperature_effects(self.world, player, is_player=True)
 
         self.assertLess(player.combat.hp, initial_hp)
 
@@ -721,7 +722,7 @@ class TestFearSystem(unittest.TestCase):
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
 
         from unittest.mock import patch
-        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+        with patch.object(self.world, "_update_npc_fov"), patch("simulation.systems.survival.update_npc_survival"):
             # Mock threat detection because the FOV logic heavily depends on lighting and precise raycasting
             civilian.is_frightened = True
             civilian.threat_source_ids = [wolf1.id, wolf2.id]
@@ -801,7 +802,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 2. Execution
         from unittest.mock import patch
-        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+        with patch.object(self.world, "_update_npc_fov"), patch("simulation.systems.survival.update_npc_survival"):
             with patch.object(self.world, "calculate_path", return_value=[(guard1.x, guard1.y), (guard1.x+1, guard1.y)]):
                 guard1.is_frightened = True
                 guard1.threat_source_ids = [wolf1.id, wolf2.id]
@@ -838,7 +839,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 5. Execution (Second update)
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
-        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+        with patch.object(self.world, "_update_npc_fov"), patch("simulation.systems.survival.update_npc_survival"):
             self.world._update_npc_schedules()
 
         # 6. Assertion (Guards become hostile)
@@ -889,7 +890,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 2. Execution (Initial fear)
         from unittest.mock import patch
-        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+        with patch.object(self.world, "_update_npc_fov"), patch("simulation.systems.survival.update_npc_survival"):
             self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
             self.world._update_npc_schedules()
         self.assertNotEqual(civilian.schedule.current_task, "idle")
@@ -905,7 +906,7 @@ class TestFearSystem(unittest.TestCase):
 
         # 4. Execution (Calm down)
         self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
-        with patch.object(self.world, "_update_npc_fov"), patch.object(self.world, "_update_entity_temperature"), patch.object(self.world, "_apply_temperature_effects"):
+        with patch.object(self.world, "_update_npc_fov"), patch("simulation.systems.survival.update_npc_survival"):
             self.world._update_npc_schedules()
 
         # 5. Assertion

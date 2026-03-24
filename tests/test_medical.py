@@ -36,7 +36,7 @@ class TestMedicalSystem(unittest.TestCase):
 
         self.assertEqual(healer.schedule.current_task, "treating_patient")
         self.assertEqual(healer.task_target_entity_id, patient.id)
-        self.assertEqual(patient.schedule.current_task, "waiting_for_treatment")
+        self.assertEqual(patient.schedule.current_task, "resting_in_bed")
 
         healer.task_timer = 0 # Timer must be 0 for it to trigger the completion logic. Actually, if timer > 0 it decrements. If it is 0, it completes.
         world.game_time += engine.NPC_SCHEDULE_UPDATE_INTERVAL

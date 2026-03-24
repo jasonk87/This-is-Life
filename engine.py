@@ -106,9 +106,8 @@ from simulation.systems.survival import (
 from simulation.systems.medical import update_npc_medical_state
 from simulation.systems.perception import update_npc_sound_perception
 from simulation.systems.scheduling import (
-    run_npc_crime_reporting_policy,
-    run_npc_proactive_help_seeking_policy,
-    update_npc_daily_goal_policy,
+    run_npc_humanoid_scheduling_flow,
+    run_npc_traveling_merchant_policy,
 )
 from simulation.systems.tick import run_world_tick
 from simulation.systems.work import update_npc_work_sub_tasks
@@ -3405,84 +3404,8 @@ class World:
 
             update_npc_environmental_tasks_system(self, npc)
 
-
-            needs_based_action_taken = run_npc_proactive_help_seeking_policy(self, npc)
-
-            needs_based_action_taken = needs_based_action_taken or run_npc_crime_reporting_policy(self, npc)
-
-            # --- NPC Item Pickup Decision (Utility Based) ---
-            made_item_decision = False
-            if npc.knowledge.perceived_item_tiles and npc.schedule.current_task in ["idle", "wandering", "at_home", "at work"]:
-                best_item_score = 0
-                best_item_action = None
-
-                for item_x, item_y in npc.knowledge.perceived_item_tiles:
-                    if (item_x, item_y) in self.items_on_map and self.items_on_map[(item_x, item_y)]:
-                        item_key = next(iter(self.items_on_map[(item_x, item_y)]), None)
-                        if not item_key:
-                            continue
-                        item_def = ITEM_DEFINITIONS.get(item_key, {})
-
-                        # Calculate Utility Score
-                        score = 0
-
-                        # Factor 1: Value/Greed
-                        value = item_def.get("value", 1)
-                        greed_factor = 1.0
-                        if npc.social.personality == "Greedy": greed_factor = 2.0
-                        elif npc.social.personality == "Generous": greed_factor = 0.5
-                        score += value * greed_factor
-
-                        # Factor 2: Needs (Hunger)
-                        if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
-                            hunger_percent = npc.physical.hunger
-                            if hunger_percent > 50: # Only care if somewhat hungry
-                                score += (hunger_percent - 50) * 0.5 # Boost if hungry
-
-                        # Factor 3: Profession Relevance
-                        profession = npc.economic.profession.lower()
-                        item_name_lower = item_key.lower()
-                        if profession == "blacksmith" and ("ore" in item_name_lower or "ingot" in item_name_lower): score += 20
-                        if profession == "carpenter" and ("wood" in item_name_lower or "log" in item_name_lower): score += 20
-                        if profession == "fletcher" and ("feather" in item_name_lower or "arrow" in item_name_lower): score += 20
-                        if profession == "miller" and "wheat" in item_name_lower: score += 20
-                        if profession == "baker" and "flour" in item_name_lower: score += 20
-
-                        # Factor 4: Distance Cost
-                        dist = abs(npc.x - item_x) + abs(npc.y - item_y)
-                        score -= dist * 0.2 
-
-                        # Threshold
-                        if score > 5: # Minimum interest threshold
-                            if score > best_item_score:
-                                best_item_score = score
-                                best_item_action = {
-                                    "action": "pickup_item",
-                                    "target_coords": (item_x, item_y),
-                                    "item_key": item_key
-                                }
-
-                if best_item_action:
-                    npc.schedule.current_task = "task_going_to_pickup_item"
-                    npc.task_target_coords = best_item_action["target_coords"]
-                    npc.task_target_item_details = {"item_key": best_item_action["item_key"]}
-                    npc.schedule.current_path = []
-                    made_item_decision = True
-                    if random.random() < 0.1: # Occasional log
-                            self.add_message_to_chat_log(
-                                f"({self.get_entity_display_name(npc)} spots {best_item_action['item_key']} and decides to take it.)"
-                            )
-
-
             current_time_in_day = self.game_time % DAY_LENGTH_TICKS
-            time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
-
-            # Original scheduling logic starts here, only if no item pickup decision was made
-            if not made_item_decision and not needs_based_action_taken and npc.schedule.current_task in ["idle", "at_home", "at work", "idle_confused", "wandering"] and not npc.schedule.current_path:
-                current_time_in_day = self.game_time % DAY_LENGTH_TICKS
-                time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
-
-            update_npc_daily_goal_policy(self, npc, current_time_in_day)
+            run_npc_humanoid_scheduling_flow(self, npc, current_time_in_day)
 
         # --- Sheriff / Guard Hostility Check ---
         if npc.economic.profession in ["Sheriff", "Guard"] and not npc.combat.is_hostile_to_player:
@@ -3505,77 +3428,7 @@ class World:
             else:
                 update_npc_work_sub_tasks(self, npc)
 
-        # --- Traveling Merchant AI ---
-        if npc.economic.profession == "Traveling Merchant":
-            if npc.schedule.current_task == "traveling_to_village" and not npc.schedule.current_path:
-                # Find a new village to travel to
-                all_villages = []
-                for y_chunk in range(self.chunk_height):
-                    for x_chunk in range(self.chunk_width):
-                        chunk = self.chunks[y_chunk][x_chunk]
-                        if chunk.village:
-                            all_villages.append(chunk.village)
-
-                if len(all_villages) > 1:
-                    current_village = self._get_village_for_npc(npc)
-                    target_village = random.choice([v for v in all_villages if v != current_village])
-
-                    if target_village and target_village.buildings:
-                        target_building = random.choice(target_village.buildings)
-                        dest_x = target_building.global_center_x
-                        dest_y = target_building.global_center_y
-
-                        path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
-                        if path:
-                            npc.schedule.current_path = path
-                            npc.schedule.current_destination_coords = (dest_x, dest_y)
-                            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} is traveling to a new village.")
-            elif npc.schedule.current_task == "lingering_in_village":
-                if npc.leisure_timer > 0:
-                    npc.leisure_timer -= 1
-
-                    # Trade logic
-                    current_village = self._get_village_for_npc(npc, by_coords=True)
-                    if current_village and random.random() < 0.1: # 10% chance to trade each schedule update
-                        # Sell high-demand goods
-                        for item_key, quantity in list(npc.economic.npc_inventory.items()):
-                            if item_key == "money": continue
-                            demand = current_village.demand.get(item_key, 1)
-                            supply = current_village.supply.get(item_key, 1)
-                            if demand / supply > 1.5: # If demand is 50% higher than supply
-                                price = self.get_dynamic_price(item_key, current_village)
-                                npc.economic.npc_inventory[item_key] -= 1
-                                if npc.economic.npc_inventory[item_key] <= 0:
-                                    del npc.economic.npc_inventory[item_key]
-                                npc.economic.money += price
-                                current_village.supply[item_key] = current_village.supply.get(item_key, 0) + 1
-                                self.add_message_to_chat_log(
-                                    f"{self.get_entity_display_name(npc)} sold a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} to the village."
-                                )
-
-                        # Buy low-supply goods
-                        inventory_space = 20 - sum(v for k, v in npc.economic.npc_inventory.items() if k != "money")
-                        if inventory_space > 0:
-                            for item_key, quantity in list(current_village.supply.items()):
-                                if item_key == "money": continue
-                                demand = current_village.demand.get(item_key, 1)
-                                supply = current_village.supply.get(item_key, 1)
-                                if supply / demand > 1.5: # If supply is 50% higher than demand
-                                    price = self.get_dynamic_price(item_key, current_village)
-                                    if npc.economic.money >= price:
-                                        npc.economic.money -= price
-                                        npc.economic.npc_inventory[item_key] = npc.economic.npc_inventory.get(item_key, 0) + 1
-                                        current_village.supply[item_key] -= 1
-                                        if current_village.supply[item_key] <= 0:
-                                            del current_village.supply[item_key]
-                                        self.add_message_to_chat_log(
-                                            f"{self.get_entity_display_name(npc)} bought a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} from the village."
-                                        )
-                                        break # Only buy one item per trade check
-                else:
-                    npc.schedule.current_task = "traveling_to_village"
-            elif npc.schedule.current_task == "idle" and random.random() < 0.1:
-                 npc.schedule.current_task = "traveling_to_village"
+        run_npc_traveling_merchant_policy(self, npc)
 
 
         npc.schedule.game_time_last_updated = self.game_time
@@ -6649,6 +6502,15 @@ class World:
             if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
                  target_npc.combat.is_hostile_to_player = True
                  self.add_message_to_chat_log(f"{target_name} becomes hostile!")
+            if not target_npc.is_dead:
+                current_day = self.game_time // DAY_LENGTH_TICKS
+                target_npc.add_grudge(
+                    self.player.id,
+                    "attacked_me",
+                    severity=85,
+                    current_day=current_day,
+                    decay_days=12,
+                )
 
         except json.JSONDecodeError:
             self.add_message_to_chat_log(f"The outcome of your attack is unclear. (LLM Format Error: {response_str})")
@@ -7036,7 +6898,8 @@ class World:
 
         merchant_npc = self.trade_ui_npc_target
         merchant_reputation = merchant_npc.knowledge.get_reputation_towards(self.player)
-        if merchant_reputation <= -80:
+        merchant_distrust = merchant_npc.get_distrust_towards(self.player)
+        if merchant_reputation <= -80 or merchant_distrust >= 70:
             self.add_message_to_chat_log(f"{self.get_entity_display_name(merchant_npc)} refuses to trade with you.")
             self.trade_ui_active = False
             self.trade_ui_npc_target = None
@@ -11594,7 +11457,14 @@ class World:
             self.add_message_to_chat_log(dialogue) # Show the witness's verbal reaction
 
             if grudge_reason and isinstance(visible_criminal_id, int):
-                witness.add_grudge(criminal.id, grudge_reason)
+                current_day = self.game_time // DAY_LENGTH_TICKS
+                witness.add_grudge(
+                    visible_criminal_id,
+                    grudge_reason,
+                    severity=55,
+                    current_day=current_day,
+                    decay_days=8,
+                )
                 # Make this message conditional on the criminal being the player for clarity
                 if isinstance(criminal, Player):
                     self.add_message_to_chat_log(f"({self.get_entity_display_name(witness)} now holds a grudge against you: {grudge_reason})")

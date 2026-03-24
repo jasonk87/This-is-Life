@@ -590,6 +590,38 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertTrue(self.world.trade_ui_active)
         self.assertTrue(self.world.trade_ui_merchant_inventory_snapshot)
 
+    def test_trade_session_refuses_when_merchant_has_strong_grudge(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        merchant.add_grudge(self.world.player.id, "assaulted_me", severity=85, current_day=1)
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertFalse(self.world.trade_ui_active)
+        self.assertIn("refuses to trade", self.world.chat_log[-1])
+
+    def test_trade_session_allows_when_grudge_is_weak(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        merchant.add_grudge(self.world.player.id, "minor_argument", severity=25, current_day=1)
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertTrue(self.world.trade_ui_active)
+        self.assertTrue(self.world.trade_ui_merchant_inventory_snapshot)
+
     def test_give_gift_to_npc_transfers_item_reference_and_records_memory(self):
         npc = engine.NPC(1, 1, name="Recipient")
         self.world.player.add_item("iron_sword", 1)

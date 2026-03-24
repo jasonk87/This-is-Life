@@ -39,6 +39,19 @@ class MemoryEvent:
 
 
 @dataclass
+class GrudgeRecord:
+    """Structured suspicion/grudge state toward another entity."""
+
+    target_id: int
+    reason: str
+    severity: int = 35
+    created_day: int = 0
+    last_updated_day: int = 0
+    decay_days: int = 5
+    persistent: bool = False
+
+
+@dataclass
 class KnowledgeComponent:
     """Bounded structured knowledge used by both players and NPCs."""
 

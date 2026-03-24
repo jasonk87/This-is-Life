@@ -180,7 +180,10 @@ def run_npc_follower_catch_up_policy(world, npc) -> bool:
                 target_ticks = target.social.shared_experience_ticks.get(npc.id, 0)
                 target.social.shared_experience_ticks[npc.id] = target_ticks + 1
 
-    if dist > 4:
+    role = getattr(getattr(npc, "social", None), "follow_role", None)
+    catch_up_dist = 2 if role == "guard" else 4
+
+    if dist > catch_up_dist:
         if npc.schedule.current_task == "following_target" and npc.schedule.current_path:
             dest = npc.schedule.current_destination_coords
             if dest and abs(dest[0] - target.x) + abs(dest[1] - target.y) <= 2:
@@ -214,9 +217,11 @@ def run_npc_follower_envelope_policy(world, npc) -> bool:
         return False
 
     dist = abs(npc.x - target.x) + abs(npc.y - target.y)
+    role = getattr(getattr(npc, "social", None), "follow_role", None)
+    envelope_dist = 2 if role == "guard" else 4
 
     # If within envelope distance, we block daily goals but allow minimal movement if in the way
-    if dist <= 4:
+    if dist <= envelope_dist:
         _try_companion_conversation_trigger(world, npc, target)
 
         if npc.schedule.current_task not in {"idle", "wandering", "avoiding_crowding"}:
@@ -233,13 +238,36 @@ def run_npc_follower_envelope_policy(world, npc) -> bool:
                     return True
 
         if random.random() < 0.05 and npc.schedule.current_task != "avoiding_crowding":
+            threat = None
+            if role == "guard":
+                # Find the most threatening nearby entity to the target
+                nearby_targets = [
+                    entity for entity in [world.player, *world.village_npcs]
+                    if getattr(entity, "id", None) not in {npc.id, target.id}
+                    and not getattr(getattr(entity, "physical", None), "is_dead", False)
+                    and abs(target.x - entity.x) + abs(target.y - entity.y) <= 8
+                ]
+                assessed = [(entity, evaluate_social_reaction_stance(world, target, entity)) for entity in nearby_targets]
+                assessed = [item for item in assessed if item[1].stance in {"hostile", "fearful", "wary"}]
+                if assessed:
+                    def _stance_priority(stance: str) -> int:
+                        return {"hostile": 3, "fearful": 2, "wary": 1}.get(stance, 0)
+                    assessed.sort(key=lambda item: (_stance_priority(item[1].stance), item[1].threat_score), reverse=True)
+                    threat = assessed[0][0]
+
             candidates = [
                 (npc.x + dx, npc.y + dy)
                 for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0))
-                if abs((npc.x + dx) - target.x) + abs((npc.y + dy) - target.y) <= 4
+                if abs((npc.x + dx) - target.x) + abs((npc.y + dy) - target.y) <= envelope_dist
             ]
             if candidates:
-                dest = random.choice(candidates)
+                if threat:
+                    # Guard bias: pick the candidate closest to the threat, putting guard between target and threat
+                    candidates.sort(key=lambda pos: abs(pos[0] - threat.x) + abs(pos[1] - threat.y))
+                    dest = candidates[0]
+                else:
+                    dest = random.choice(candidates)
+
                 tile = world.get_tile_at(dest[0], dest[1])
                 if tile and getattr(tile, "passable", False):
                     npc.schedule.current_task = "wandering"
@@ -291,10 +319,20 @@ def run_npc_social_reaction_policy(world, npc) -> bool:
     """React to nearby visible social threats in an entity-agnostic way."""
     if npc.schedule.current_task not in ["idle", "wandering", "at_home", "at work"] or npc.schedule.current_path:
         return False
+
+    # Check if guarding someone
+    target_id = getattr(getattr(npc, "social", None), "follow_target_id", None)
+    role = getattr(getattr(npc, "social", None), "follow_role", None)
+    guarded_target = None
+    if target_id is not None and role == "guard":
+        guarded_target = world.get_entity_by_id(target_id)
+        if guarded_target and getattr(getattr(guarded_target, "physical", None), "is_dead", False):
+            guarded_target = None
+
     nearby_targets = [
         entity
         for entity in [world.player, *world.village_npcs]
-        if getattr(entity, "id", None) != npc.id
+        if getattr(entity, "id", None) not in {npc.id, getattr(guarded_target, "id", None)}
         and not getattr(getattr(entity, "physical", None), "is_dead", False)
         and abs(npc.x - entity.x) + abs(npc.y - entity.y) <= 6
     ]
@@ -304,9 +342,27 @@ def run_npc_social_reaction_policy(world, npc) -> bool:
     def _stance_priority(stance: str) -> int:
         return {"hostile": 3, "fearful": 2, "wary": 1}.get(stance, 0)
 
-    assessed = [(entity, evaluate_social_reaction_stance(world, npc, entity)) for entity in nearby_targets]
+    assessed = []
+    for entity in nearby_targets:
+        assessment = evaluate_social_reaction_stance(world, npc, entity)
+
+        # If guarding, also evaluate threat towards the guarded target
+        if guarded_target:
+            target_assessment = evaluate_social_reaction_stance(world, guarded_target, entity)
+            if _stance_priority(target_assessment.stance) > _stance_priority(assessment.stance):
+                # Upgrade guard's reaction to match the threat level towards their target
+                # A guard becomes hostile to anyone their target finds hostile, and wary of those their target fears/is wary of
+                if target_assessment.stance == "hostile":
+                    assessment.stance = "hostile"
+                elif target_assessment.stance in {"fearful", "wary"}:
+                    assessment.stance = "wary"
+                assessment.threat_score = max(assessment.threat_score, target_assessment.threat_score)
+
+        assessed.append((entity, assessment))
+
     assessed.sort(key=lambda item: (_stance_priority(item[1].stance), item[1].threat_score), reverse=True)
     target, assessment = assessed[0]
+
     if assessment.stance == "wary":
         _emit_social_signal(world, npc, target, assessment.stance)
         # Lightweight hesitation: consume this tick to make attention shifts legible.

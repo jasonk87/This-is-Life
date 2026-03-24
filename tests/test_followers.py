@@ -7,7 +7,8 @@ from config import DAY_LENGTH_TICKS
 from simulation.systems.scheduling import (
     run_npc_follower_catch_up_policy,
     run_npc_follower_envelope_policy,
-    run_npc_humanoid_scheduling_flow
+    run_npc_humanoid_scheduling_flow,
+    run_npc_social_reaction_policy
 )
 
 class TestFollowers(unittest.TestCase):
@@ -71,6 +72,7 @@ class TestFollowers(unittest.TestCase):
 
     def test_run_npc_follower_envelope_policy_overrides_daily_goals_and_keeps_idle(self):
         self.follower.social.follow_target_id = self.player.id
+        self.follower.social.follow_role = "accompany"
         self.follower.x = 8
         self.follower.y = 10
         self.follower.schedule.current_task = "idle"
@@ -79,6 +81,52 @@ class TestFollowers(unittest.TestCase):
 
         self.assertTrue(acted)
         self.assertIn(self.follower.schedule.current_task, {"idle", "wandering", "avoiding_crowding"})
+
+    def test_guard_role_has_tighter_envelope(self):
+        self.follower.social.follow_target_id = self.player.id
+        self.follower.social.follow_role = "guard"
+        # 3 tiles away is outside guard envelope (max 2) but inside accompany envelope (max 4)
+        self.follower.x = 7
+        self.follower.y = 10
+        self.follower.schedule.current_task = "idle"
+
+        # Envelope policy should return False because dist > 2, so it falls through to catch-up
+        acted_envelope = run_npc_follower_envelope_policy(self.world, self.follower)
+        self.assertFalse(acted_envelope)
+
+        # Catch up should trigger and move them closer
+        acted_catch_up = run_npc_follower_catch_up_policy(self.world, self.follower)
+        self.assertTrue(acted_catch_up)
+        self.assertEqual(self.follower.schedule.current_task, "following_target")
+
+    def test_guard_prioritizes_threat_positioning(self):
+        self.follower.social.follow_target_id = self.player.id
+        self.follower.social.follow_role = "guard"
+        self.follower.x = 9
+        self.follower.y = 10
+        self.follower.schedule.current_task = "idle"
+
+        threat = engine.NPC(x=12, y=10, name="Bandit")
+        self.world.village_npcs.append(threat)
+
+        # Mock evaluate_social_reaction_stance to return hostile for the threat to the target
+        def mock_stance(world, observer, t):
+            if observer == self.player and t == threat:
+                return SimpleNamespace(stance="hostile", threat_score=95.0)
+            return SimpleNamespace(stance="neutral", threat_score=0.0)
+
+        with patch("simulation.systems.scheduling.evaluate_social_reaction_stance", side_effect=mock_stance):
+
+            # Force wandering
+            with patch("random.random", return_value=0.01):
+                run_npc_follower_envelope_policy(self.world, self.follower)
+
+            # The guard should choose the candidate closest to the threat (11, 10 or similar)
+            # Target (player) is at 10,10. Guard is at 9,10. Envelope is 2.
+            # Guard should move to 11,10 to be between 10,10 and 12,10.
+            self.assertEqual(self.follower.schedule.current_task, "wandering")
+            self.assertTrue(self.follower.schedule.current_destination_coords[0] > 9,
+                            "Guard should move closer to the threat on the X axis")
 
     def test_follower_can_participate_in_gathering_when_near_target(self):
         self.follower.social.follow_target_id = self.player.id
@@ -139,3 +187,28 @@ class TestFollowers(unittest.TestCase):
 
              mock_threat.assert_called_once()
              mock_catchup.assert_not_called()
+
+    def test_guard_adopts_target_stance(self):
+        self.follower.social.follow_target_id = self.player.id
+        self.follower.social.follow_role = "guard"
+        self.follower.x = 9
+        self.follower.y = 10
+        self.follower.schedule.current_task = "idle"
+
+        threat = engine.NPC(x=12, y=10, name="Bandit")
+        self.world.village_npcs.append(threat)
+
+        # The guard is neutral towards the threat, but the player (target) is hostile
+        def mock_stance(world, observer, t):
+            if observer == self.player and t == threat:
+                return SimpleNamespace(stance="hostile", threat_score=95.0)
+            return SimpleNamespace(stance="neutral", threat_score=0.0)
+
+        with patch("simulation.systems.scheduling.evaluate_social_reaction_stance", side_effect=mock_stance):
+            # Guard should hold position when hostile towards a target that is close
+            # Let's mock safe spot to something so it can return True if it goes down that path
+            mock_building = SimpleNamespace(global_center_x=0, global_center_y=0)
+            with patch.object(self.world, "_find_nearest_tavern", return_value=mock_building):
+                # Guard should react because target is threatened
+                acted = run_npc_social_reaction_policy(self.world, self.follower)
+                self.assertTrue(acted)

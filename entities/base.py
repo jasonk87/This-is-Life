@@ -265,8 +265,7 @@ class NPC:
         if self.player_id:
             self._initialize_relationships(attitude_to_player, self.player_id)
 
-        self._legacy_task_state = NPCTaskState()
-        self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=self._legacy_task_state)
+        self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=NPCTaskState())
         self.den_location: tuple[int, int] | None = None
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []
@@ -275,7 +274,12 @@ class NPC:
 
     def _task_state_holder(self):
         ai_brain = getattr(self, "ai_brain", None)
-        return getattr(ai_brain, "task_state", None) or self._legacy_task_state
+        if ai_brain is None:
+            self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=NPCTaskState())
+            return self.ai_brain.task_state
+        if getattr(ai_brain, "task_state", None) is None:
+            ai_brain.task_state = NPCTaskState()
+        return ai_brain.task_state
 
     @property
     def task_target_item_details(self):
@@ -429,6 +433,15 @@ class NPC:
         self.social.grudges[target_id].append(reason)
         self.social.relationships[target_id] = self.social.relationships.get(target_id, 50) - 40
         self.social.relationships[target_id] = max(0, self.social.relationships[target_id])
+
+    def clear_work_sub_task_state(self, *, reset_sequence: bool = False) -> None:
+        """Reset structured sub-task progression state owned by ai_brain.task_state."""
+        self.current_sub_task = None
+        self.sub_task_target_coords = None
+        self.sub_task_zone_target = None
+        self.sub_task_timer = 0
+        if reset_sequence:
+            self.current_sub_task_sequence_index = 0
 
     def get_dialogue(self):
         """Returns the NPC's dialogue options."""

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from config import DAY_LENGTH_TICKS
 from data.professions import get_profession_data
+from simulation.systems.work import update_npc_work_sub_tasks
 
 
 @dataclass
@@ -53,7 +54,7 @@ class StructuredWorkBehavior(JobBehavior):
         self.profession_name = profession_name
 
     def take_turn(self, entity, world) -> bool:
-        return world._handle_npc_work_sub_tasks(entity)
+        return update_npc_work_sub_tasks(world, entity)
 
 
 class WoodcutterBehavior(StructuredWorkBehavior):
@@ -85,7 +86,7 @@ class SleepBehavior(JobBehavior):
 class HaulingBehavior(JobBehavior):
     profession_name = "Hauling"
 
-    FREE_TIME_TASKS = {"idle", "wandering", "at home", "idle_confused"}
+    FREE_TIME_TASKS = {"idle", "wandering", "at_home", "idle_confused"}
 
     def take_turn(self, entity, world) -> bool:
         current_task = getattr(getattr(entity, "schedule", None), "current_task", "") or ""
@@ -106,7 +107,7 @@ class HaulingBehavior(JobBehavior):
 
 class GossipBehavior(JobBehavior):
     profession_name = "Gossip"
-    ELIGIBLE_TASKS = {"idle", "wandering", "at home", "at work", "going to work", "going home", "looking_for_work"}
+    ELIGIBLE_TASKS = {"idle", "wandering", "at_home", "at work", "going_to_work", "going_home", "looking_for_work"}
 
     def take_turn(self, entity, world) -> bool:
         knowledge = getattr(entity, "knowledge", None)

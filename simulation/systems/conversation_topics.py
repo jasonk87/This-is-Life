@@ -16,6 +16,8 @@ class ConversationTopicChoice:
 def select_conversation_topic(world, speaker, listener, foundation_profile) -> ConversationTopicChoice:
     relationship = float(getattr(getattr(speaker, "social", None), "relationships", {}).get(getattr(listener, "id", None), 50))
     openness = float(getattr(foundation_profile, "openness", 0.5))
+    shared_ticks = getattr(getattr(speaker, "social", None), "shared_experience_ticks", {}).get(getattr(listener, "id", None), 0)
+    is_following = getattr(getattr(speaker, "social", None), "follow_target_id", None) == getattr(listener, "id", None)
 
     candidate_weights = {
         "greeting": 0.5 if relationship < 45 else 0.15,
@@ -39,6 +41,10 @@ def select_conversation_topic(world, speaker, listener, foundation_profile) -> C
     if _is_low_pressure_gathering_context(speaker):
         candidate_weights["reflection"] *= 1.8
         candidate_weights["gossip"] *= 1.6
+        candidate_weights["small_talk"] *= 1.2
+    if is_following or shared_ticks > 100:
+        candidate_weights["reflection"] *= 1.5
+        candidate_weights["gossip"] *= 1.2
         candidate_weights["small_talk"] *= 1.2
 
     topics = [topic for topic, weight in candidate_weights.items() if weight > 0]

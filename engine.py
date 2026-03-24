@@ -10222,6 +10222,8 @@ class World:
             return (f"I'm {self.get_entity_display_name(npc_target)}.", "continue_conversation")
         if any(word in text for word in ["follow me", "come with me"]):
             return ("Alright. Lead the way.", "follow_player")
+        if any(word in text for word in ["stop following", "wait here", "stay here"]):
+            return ("I'll wait here then.", "stop_following")
         if "trade" in text and npc_target.economic.profession in {"Merchant", "Miller", "Scribe", "Traveling Merchant"}:
             return ("Let's see what we can trade.", "start_trade")
         profile = evaluate_conversation_foundation(self, npc_target, self.player, max_distance=9999)
@@ -10321,6 +10323,10 @@ class World:
         elif goal == "end_conversation":
             speaker.conversation_partner_id = None
             listener.conversation_partner_id = None
+        elif goal == "follow_player":
+            speaker.social.follow_target_id = listener.id
+        elif goal == "stop_following":
+            speaker.social.follow_target_id = None
 
     def _update_entity_titles(self):
         """Periodically checks and updates titles for all entities based on fame/infamy."""

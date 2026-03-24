@@ -24,7 +24,7 @@ def select_conversation_topic(world, speaker, listener, foundation_profile) -> C
         "small_talk": 0.9,
         "gossip": 0.4 if _choose_incident_payload(world, speaker) else 0.0,
         "report_incident": 0.55 if _choose_incident_payload(world, speaker, min_confidence=0.7) else 0.0,
-        "reflection": 0.5 if _choose_reflection_payload(speaker) else 0.0,
+        "reflection": 0.5 if _choose_reflection_payload(speaker, listener) else 0.0,
         "ask_info": 0.25 if _choose_ask_info_payload(speaker, listener) else 0.0,
         "ask_favor": 0.2 if _choose_favor_payload(speaker) else 0.0,
     }
@@ -100,7 +100,7 @@ def _build_payload(world, speaker, listener, topic: str) -> dict:
     if topic in {"gossip", "report_incident"}:
         return _choose_incident_payload(world, speaker) or {}
     if topic == "reflection":
-        return _choose_reflection_payload(speaker) or {}
+        return _choose_reflection_payload(speaker, listener) or {}
     if topic == "ask_info":
         return _choose_ask_info_payload(speaker, listener) or {}
     if topic == "ask_favor":
@@ -138,11 +138,17 @@ def _choose_incident_payload(world, speaker, *, min_confidence: float = 0.35) ->
     }
 
 
-def _choose_reflection_payload(speaker) -> dict | None:
+def _choose_reflection_payload(speaker, listener) -> dict | None:
     known_memories = list(getattr(getattr(speaker, "knowledge", None), "known_memories", {}).values())
     if known_memories:
-        known_memories.sort(key=lambda memory: (getattr(memory, "importance_score", 0), getattr(memory, "timestamp", 0)), reverse=True)
-        memory = known_memories[0]
+        shared_memories = []
+        if listener:
+            listener_id = getattr(listener, "id", None)
+            shared_memories = [m for m in known_memories if getattr(m, "subject_id", None) == listener_id or getattr(m, "target_id", None) == listener_id]
+
+        pool = shared_memories if shared_memories else known_memories
+        pool.sort(key=lambda memory: (getattr(memory, "importance_score", 0), getattr(memory, "timestamp", 0)), reverse=True)
+        memory = pool[0]
         text = getattr(memory, "headline", None) or getattr(memory, "description", None) or getattr(memory, "event_type", "A difficult day.")
         return {"memory_id": getattr(memory, "id", None), "memory_text": str(text)}
     long_term = getattr(getattr(speaker, "knowledge", None), "long_term_memory", [])

@@ -176,6 +176,9 @@ def run_npc_follower_catch_up_policy(world, npc) -> bool:
         if not npc_hostile and not target_hostile:
             current_ticks = npc.social.shared_experience_ticks.get(target.id, 0)
             npc.social.shared_experience_ticks[target.id] = current_ticks + 1
+            if hasattr(target, "social"):
+                target_ticks = target.social.shared_experience_ticks.get(npc.id, 0)
+                target.social.shared_experience_ticks[npc.id] = target_ticks + 1
 
     if dist > 4:
         if npc.schedule.current_task == "following_target" and npc.schedule.current_path:
@@ -214,6 +217,8 @@ def run_npc_follower_envelope_policy(world, npc) -> bool:
 
     # If within envelope distance, we block daily goals but allow minimal movement if in the way
     if dist <= 4:
+        _try_companion_conversation_trigger(world, npc, target)
+
         if npc.schedule.current_task not in {"idle", "wandering", "avoiding_crowding"}:
             return False
 
@@ -244,6 +249,22 @@ def run_npc_follower_envelope_policy(world, npc) -> bool:
         return True
 
     return False
+
+
+def _try_companion_conversation_trigger(world, npc, target) -> None:
+    """Modestly bias conversation frequency for companions traveling/idling together."""
+    if getattr(npc, "conversation_partner_id", None) is not None:
+        return
+    if getattr(target, "conversation_partner_id", None) is not None:
+        return
+    if getattr(npc, "conversation_cooldown", 0) > 0 or getattr(target, "conversation_cooldown", 0) > 0:
+        return
+    if random.random() < 0.005:  # ~0.5% chance per tick when near
+        npc.conversation_partner_id = target.id
+        target.conversation_partner_id = npc.id
+        if hasattr(world, "game_time"):
+            npc.last_conversation_time = world.game_time
+            target.last_conversation_time = world.game_time
 
 
 def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> None:

@@ -6,6 +6,10 @@ import random
 from types import SimpleNamespace
 
 from config import DAY_LENGTH_TICKS, WORK_END_TIME_RATIO, WORK_START_TIME_RATIO
+from data.items import ITEM_DEFINITIONS
+from simulation.systems.economy import process_traveling_merchant_village_trade
+from simulation.systems.incidents import run_town_crier_broadcast
+from simulation.systems.social_reaction import evaluate_social_reaction_stance
 
 
 def run_npc_proactive_help_seeking_policy(world, npc) -> bool:
@@ -86,6 +90,309 @@ def run_npc_crime_reporting_policy(world, npc) -> bool:
     return True
 
 
+def run_npc_item_pickup_policy(world, npc) -> bool:
+    """Decide whether a humanoid should interrupt idle flow to pick up a perceived item."""
+    if not npc.knowledge.perceived_item_tiles or npc.schedule.current_task not in ["idle", "wandering", "at_home", "at work"]:
+        return False
+
+    best_item_score = 0
+    best_item_action = None
+
+    for item_x, item_y in npc.knowledge.perceived_item_tiles:
+        if (item_x, item_y) in world.items_on_map and world.items_on_map[(item_x, item_y)]:
+            item_key = next(iter(world.items_on_map[(item_x, item_y)]), None)
+            if not item_key:
+                continue
+            item_def = ITEM_DEFINITIONS.get(item_key, {})
+
+            score = 0
+
+            value = item_def.get("value", 1)
+            greed_factor = 1.0
+            if npc.social.personality == "Greedy":
+                greed_factor = 2.0
+            elif npc.social.personality == "Generous":
+                greed_factor = 0.5
+            score += value * greed_factor
+
+            if item_def.get("on_use", {}).get("reduces_hunger", 0) > 0:
+                hunger_percent = npc.physical.hunger
+                if hunger_percent > 50:
+                    score += (hunger_percent - 50) * 0.5
+
+            profession = npc.economic.profession.lower()
+            item_name_lower = item_key.lower()
+            if profession == "blacksmith" and ("ore" in item_name_lower or "ingot" in item_name_lower):
+                score += 20
+            if profession == "carpenter" and ("wood" in item_name_lower or "log" in item_name_lower):
+                score += 20
+            if profession == "fletcher" and ("feather" in item_name_lower or "arrow" in item_name_lower):
+                score += 20
+            if profession == "miller" and "wheat" in item_name_lower:
+                score += 20
+            if profession == "baker" and "flour" in item_name_lower:
+                score += 20
+
+            dist = abs(npc.x - item_x) + abs(npc.y - item_y)
+            score -= dist * 0.2
+
+            if score > 5 and score > best_item_score:
+                best_item_score = score
+                best_item_action = {
+                    "target_coords": (item_x, item_y),
+                    "item_key": item_key,
+                }
+
+    if not best_item_action:
+        return False
+
+    npc.schedule.current_task = "task_going_to_pickup_item"
+    npc.task_target_coords = best_item_action["target_coords"]
+    npc.task_target_item_details = {"item_key": best_item_action["item_key"]}
+    npc.schedule.current_path = []
+    if random.random() < 0.1:
+        world.add_message_to_chat_log(
+            f"({world.get_entity_display_name(npc)} spots {best_item_action['item_key']} and decides to take it.)"
+        )
+    return True
+
+
+def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> None:
+    """Run humanoid scheduling policies in their existing priority order."""
+    run_town_crier_broadcast(world, npc)
+    current_day = world.game_time // DAY_LENGTH_TICKS
+    if run_npc_grudge_suspicion_policy(world, npc, current_day):
+        return
+    if run_npc_social_reaction_policy(world, npc):
+        return
+    if run_npc_social_gathering_policy(world, npc):
+        return
+    run_npc_proactive_help_seeking_policy(world, npc)
+    run_npc_crime_reporting_policy(world, npc)
+    run_npc_item_pickup_policy(world, npc)
+    update_npc_daily_goal_policy(world, npc, current_time_in_day)
+
+
+def run_npc_social_reaction_policy(world, npc) -> bool:
+    """React to nearby visible social threats in an entity-agnostic way."""
+    if npc.schedule.current_task not in ["idle", "wandering", "at_home", "at work"] or npc.schedule.current_path:
+        return False
+    nearby_targets = [
+        entity
+        for entity in [world.player, *world.village_npcs]
+        if getattr(entity, "id", None) != npc.id
+        and not getattr(getattr(entity, "physical", None), "is_dead", False)
+        and abs(npc.x - entity.x) + abs(npc.y - entity.y) <= 6
+    ]
+    if not nearby_targets:
+        return False
+
+    def _stance_priority(stance: str) -> int:
+        return {"hostile": 3, "fearful": 2, "wary": 1}.get(stance, 0)
+
+    assessed = [(entity, evaluate_social_reaction_stance(world, npc, entity)) for entity in nearby_targets]
+    assessed.sort(key=lambda item: (_stance_priority(item[1].stance), item[1].threat_score), reverse=True)
+    target, assessment = assessed[0]
+    if assessment.stance == "wary":
+        _emit_social_signal(world, npc, target, assessment.stance)
+        # Lightweight hesitation: consume this tick to make attention shifts legible.
+        return True
+    if assessment.stance == "hostile":
+        _emit_social_signal(world, npc, target, assessment.stance)
+        if abs(npc.x - target.x) + abs(npc.y - target.y) <= 2:
+            # Tension pause: hold position briefly when close to the target.
+            return True
+    if assessment.stance not in {"fearful", "hostile"}:
+        return False
+
+    _emit_social_signal(world, npc, target, assessment.stance)
+    safe_spot = world.buildings_by_id.get(npc.schedule.home_building_id) or world._find_nearest_tavern(npc)
+    if not safe_spot:
+        return False
+    dest_x, dest_y = world._find_best_adjacent_tile(safe_spot.global_center_x, safe_spot.global_center_y, npc)
+    if dest_x is None:
+        dest_x, dest_y = safe_spot.global_center_x, safe_spot.global_center_y
+    path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+    if not path:
+        return False
+    npc.schedule.current_task = "avoiding_social_threat"
+    npc.task_target_entity_id = getattr(target, "id", None)
+    npc.schedule.current_path = path
+    npc.schedule.current_destination_coords = (dest_x, dest_y)
+    return True
+
+
+def run_npc_social_gathering_policy(world, npc) -> bool:
+    """Gather nearby NPCs around readable social focal points."""
+    if npc.schedule.current_task == "socializing_at_focal_point":
+        if npc.leisure_timer > 0:
+            npc.leisure_timer -= 1
+            if random.random() < 0.15:
+                world._start_npc_socialization(npc)
+            return True
+        npc.schedule.current_task = "idle"
+        npc.task_context_data = None
+        return False
+
+    if npc.schedule.current_task not in {"idle", "wandering", "at_home"} or npc.schedule.current_path:
+        return False
+    if random.random() >= 0.08:
+        return False
+    focal = _select_social_focal_point(world, npc)
+    if focal is None:
+        return False
+    dest = _select_gathering_slot(world, npc, focal["coords"])
+    if dest is None:
+        return False
+    path = world.calculate_path(npc.x, npc.y, dest[0], dest[1])
+    if not path:
+        return False
+    npc.schedule.current_task = "gathering_social"
+    npc.schedule.current_destination_coords = dest
+    npc.schedule.current_path = path
+    npc.task_context_data = {"social_context": "gathering", "focal_kind": focal["kind"], "focal_coords": focal["coords"]}
+    npc.leisure_timer = random.randint(40, 90)
+    return True
+
+
+def _select_social_focal_point(world, npc):
+    tavern = world._find_nearest_tavern(npc)
+    if tavern and abs(npc.x - tavern.global_center_x) + abs(npc.y - tavern.global_center_y) <= 24:
+        return {"kind": "tavern", "coords": (tavern.global_center_x, tavern.global_center_y)}
+    if npc.schedule.home_building_id:
+        home = world.buildings_by_id.get(npc.schedule.home_building_id)
+        if home:
+            return {"kind": "home", "coords": (home.global_center_x, home.global_center_y)}
+    village = world._get_village_for_npc(npc)
+    if village and village.interaction_points.get("town_square_center"):
+        return {"kind": "campfire", "coords": village.interaction_points["town_square_center"][0]}
+    return None
+
+
+def _select_gathering_slot(world, npc, focal_coords):
+    fx, fy = focal_coords
+    candidate_offsets = [(-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, -1), (-1, 1), (1, 1)]
+    occupied = {
+        (other.x, other.y)
+        for other in world.village_npcs
+        if not other.physical.is_dead and other.id != npc.id and other.schedule.current_task in {"gathering_social", "socializing_at_focal_point"}
+    }
+    for dx, dy in candidate_offsets:
+        x, y = fx + dx, fy + dy
+        if (x, y) in occupied:
+            continue
+        tile = world.get_tile_at(x, y)
+        if tile is None or not tile.passable:
+            continue
+        return (x, y)
+    return None
+
+
+def _emit_social_signal(world, npc, target, stance: str) -> None:
+    """Emit tiny observable social cues without introducing persistent state."""
+    if not hasattr(world, "add_message_to_chat_log"):
+        return
+    player = getattr(world, "player", None)
+    if player is None or getattr(player, "physical", None) is None or player.physical.is_dead:
+        return
+    distance_to_player = abs(npc.x - player.x) + abs(npc.y - player.y)
+    if distance_to_player > 10:
+        return
+    if stance == "wary":
+        world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} *glances uneasily* at {world.get_entity_display_name(target)}.")
+    elif stance == "fearful":
+        world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} *steps back* from {world.get_entity_display_name(target)}.")
+    elif stance == "hostile":
+        world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} *squares up* to {world.get_entity_display_name(target)}.")
+
+
+def run_npc_grudge_suspicion_policy(world, npc, current_day: int) -> bool:
+    """Apply grudge-driven suspicion behavior (avoidance/reporting) against known offenders."""
+    npc.decay_grudges(current_day)
+    player_id = getattr(getattr(world, "player", None), "id", None)
+    if player_id is None:
+        return False
+
+    grudge = npc.social.grudges.get(player_id)
+    if not grudge or getattr(grudge, "severity", 0) < 25:
+        return False
+
+    if npc.schedule.current_task in ["going_to_report_crime", "attacking_player", "combat_action_flee_from_player"]:
+        return False
+
+    player_visible = npc.id in world.npc_fov_maps and world.npc_fov_maps[npc.id][world.player.y, world.player.x]
+    if not player_visible:
+        return False
+
+    if grudge.severity >= 70:
+        sheriff_office = world._find_nearest_building_of_type(npc, "sheriff_office")
+        if sheriff_office:
+            npc.schedule.current_task = "going_to_report_crime"
+            npc.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
+            npc.schedule.current_path = []
+            return True
+        return False
+
+    safe_spot = world.buildings_by_id.get(npc.schedule.home_building_id) or world._find_nearest_tavern(npc)
+    if not safe_spot:
+        return False
+    dest_x, dest_y = world._find_best_adjacent_tile(safe_spot.global_center_x, safe_spot.global_center_y, npc)
+    if dest_x is None:
+        return False
+    path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+    if not path:
+        return False
+    npc.schedule.current_task = "avoiding_suspected_criminal"
+    npc.schedule.current_path = path
+    npc.schedule.current_destination_coords = (dest_x, dest_y)
+    return True
+
+
+def run_npc_traveling_merchant_policy(world, npc) -> None:
+    """Run schedule-time travel and village trading behavior for traveling merchants."""
+    if npc.economic.profession != "Traveling Merchant":
+        return
+
+    if npc.schedule.current_task == "traveling_to_village" and not npc.schedule.current_path:
+        all_villages = []
+        for y_chunk in range(world.chunk_height):
+            for x_chunk in range(world.chunk_width):
+                chunk = world.chunks[y_chunk][x_chunk]
+                if chunk.village:
+                    all_villages.append(chunk.village)
+
+        if len(all_villages) > 1:
+            current_village = world._get_village_for_npc(npc)
+            target_village = random.choice([v for v in all_villages if v != current_village])
+
+            if target_village and target_village.buildings:
+                target_building = random.choice(target_village.buildings)
+                dest_x = target_building.global_center_x
+                dest_y = target_building.global_center_y
+
+                path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                if path:
+                    npc.schedule.current_path = path
+                    npc.schedule.current_destination_coords = (dest_x, dest_y)
+                    current_village_id = getattr(current_village, "id", None) if current_village else None
+                    npc.travel.is_traveling = True
+                    npc.travel.origin_settlement_id = current_village_id
+                    npc.travel.destination_settlement_id = getattr(target_village, "id", None)
+                    npc.travel.eta_days = max(1, len(path) // max(1, DAY_LENGTH_TICKS // 4))
+                    world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} is traveling to a new village.")
+    elif npc.schedule.current_task == "lingering_in_village":
+        if npc.leisure_timer > 0:
+            npc.leisure_timer -= 1
+
+            current_village = world._get_village_for_npc(npc, by_coords=True)
+            if current_village and random.random() < 0.1:
+                process_traveling_merchant_village_trade(world, npc, current_village)
+        else:
+            npc.schedule.current_task = "traveling_to_village"
+    elif npc.schedule.current_task == "idle" and random.random() < 0.1:
+        npc.schedule.current_task = "traveling_to_village"
+
+
 def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
     """Apply branch-heavy daily goal selection and path assignment for one humanoid NPC."""
     new_task_label = None
@@ -133,7 +440,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                             destination_coords = dest_coords
                             npc.leisure_timer = random.randint(50, 100)
 
-    elif is_leisure_time and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", "going_home", "visiting_friend"]:
+    elif is_leisure_time and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", "going_home", "visiting_friend", "gathering_social", "socializing_at_focal_point"]:
         if npc.leisure_timer > 0:
             npc.leisure_timer -= 1
         elif random.random() < 0.05:

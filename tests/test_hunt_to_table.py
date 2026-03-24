@@ -5,6 +5,7 @@ from engine import World, NPC, Animal
 from config import NPC_SCHEDULE_UPDATE_INTERVAL, WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE
 from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
+from simulation.systems.work import update_npc_work_sub_tasks
 from tile_types import Tile
 import config
 
@@ -95,7 +96,7 @@ class TestHuntToTable(unittest.TestCase):
             self.world.buildings_by_id["dummy_lodge"] = dummy_lodge
 
             # Execute
-            self.world._handle_npc_work_sub_tasks(hunter)
+            update_npc_work_sub_tasks(self.world, hunter)
 
             # 5. Verify corpse removed and items added
             new_tile = self.world.get_tile_at(corpse_x, corpse_y)
@@ -110,7 +111,7 @@ class TestHuntToTable(unittest.TestCase):
         # So if we set it to 1, the loop runs, decrements to 0. The *next* call handles completion.
         # Let's run it one more time.
 
-        self.world._handle_npc_work_sub_tasks(hunter)
+        update_npc_work_sub_tasks(self.world, hunter)
 
         new_tile = self.world.get_tile_at(corpse_x, corpse_y)
         self.assertEqual(new_tile.name, "Bones")

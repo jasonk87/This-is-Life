@@ -15,6 +15,8 @@ from data.items import ITEM_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 import config
 from services.llm_gossip import AsyncLLMGossipService
+from simulation.systems import survival
+from simulation.systems.work import update_npc_work_sub_tasks
 from tcod_compat import tcod
 import tile_types
 from entities.items import Inventory, ItemReference
@@ -1085,7 +1087,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         with patch.object(self.world, "_find_nearest_building_of_type", return_value=None), \
              patch.object(self.world, "_get_village_for_npc", return_value=None), \
              patch("entities.items.random.random", return_value=0.5):
-            handled = self.world._handle_npc_work_sub_tasks(foreman)
+            handled = update_npc_work_sub_tasks(self.world, foreman)
 
         crafted_item = lumber_mill.building_inventory.get_item_reference("wooden_plank")
         self.assertTrue(handled)
@@ -1121,7 +1123,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertTrue(self.world.player.has_item("apple", 1))
         self.assertIn("gave you Apple", self.world.chat_log[-1])
 
-    def test_handle_npc_goal_give_item_supports_legacy_inventory_entries(self):
+    def test_handle_npc_goal_give_item_requires_component_inventory(self):
         world = object.__new__(engine.World)
         world.player = engine.Player(0, 0)
         world.chat_log = []
@@ -1138,9 +1140,9 @@ class TestWorldInteractionActions(unittest.TestCase):
 
         engine.World._handle_npc_goal(world, npc, "give_item", "")
 
-        self.assertTrue(world.player.has_item("apple", 1))
-        self.assertEqual(npc.inventory, [])
-        self.assertIn("gave you Apple", world.chat_log[-1])
+        self.assertFalse(world.player.has_item("apple", 1))
+        self.assertEqual(len(npc.inventory), 1)
+        self.assertIn("has nothing to give", world.chat_log[-1])
 
     def test_npc_inventory_uses_dict_compatible_wrapper(self):
         npc = engine.NPC(0, 0, name="Inventory NPC")
@@ -1334,7 +1336,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         worker.economic.profession = "Farmer"
         worker.schedule.work_building_id = "missing_farm"
 
-        handled = self.world._handle_npc_work_sub_tasks(worker)
+        handled = update_npc_work_sub_tasks(self.world, worker)
 
         self.assertTrue(handled)
         self.assertEqual(worker.schedule.current_task, "idle_confused")
@@ -1411,6 +1413,7 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         # 1. Create a freezing environment and an NPC
         self.world.current_season_index = 3 # Winter
         npc = NPC(x=self.world.player.x + 5, y=self.world.player.y, name="Test NPC")
+        npc.economic.profession = "Farmer"
         self.world.village_npcs.append(npc)
 
         # 2. Ensure a clear path and place a heat source
@@ -1445,7 +1448,7 @@ class TestNPCBehaviorSystem(unittest.TestCase):
 
         # 3. Manually update NPC temperature to freezing
         npc.physical.temperature = 34.0
-        self.world._update_npc_temperature(npc)
+        survival.update_entity_temperature(self.world, npc)
         self.assertIn("Freezing", npc.physical.status_effects)
 
         # 4. Advance time to ensure the schedule update runs
@@ -1464,7 +1467,7 @@ class TestNPCBehaviorSystem(unittest.TestCase):
 
     def test_npc_brain_consumes_food_from_inventory_and_resumes_work(self):
         npc = engine.NPC(x=self.world.player.x + 2, y=self.world.player.y, name="Hungry Worker")
-        npc.schedule.current_task = "Working (Farmer)"
+        npc.schedule.current_task = "at work"
         npc.physical.hunger = 80
         npc.economic.npc_inventory.add_item("apple", 1)
 
@@ -1472,12 +1475,12 @@ class TestNPCBehaviorSystem(unittest.TestCase):
 
         self.assertTrue(handled)
         self.assertLess(npc.physical.hunger, 80)
-        self.assertEqual(npc.schedule.current_task, "Working (Farmer)")
+        self.assertEqual(npc.schedule.current_task, "at work")
         self.assertEqual(npc.economic.npc_inventory.get("apple", 0), 0)
 
     def test_npc_brain_consumes_drink_from_inventory_and_resumes_work(self):
         npc = engine.NPC(x=self.world.player.x + 2, y=self.world.player.y, name="Thirsty Worker")
-        npc.schedule.current_task = "going to work"
+        npc.schedule.current_task = "going_to_work"
         npc.physical.thirst = 85
         npc.economic.npc_inventory.add_item("water_flask", 1)
 
@@ -1485,12 +1488,12 @@ class TestNPCBehaviorSystem(unittest.TestCase):
 
         self.assertTrue(handled)
         self.assertLess(npc.physical.thirst, 85)
-        self.assertEqual(npc.schedule.current_task, "going to work")
+        self.assertEqual(npc.schedule.current_task, "going_to_work")
         self.assertEqual(npc.economic.npc_inventory.get("water_flask", 0), 0)
 
     def test_npc_brain_seeks_water_when_desperate_without_drink(self):
         npc = engine.NPC(x=10, y=10, name="Desperate NPC")
-        npc.schedule.current_task = "Working (Blacksmith)"
+        npc.schedule.current_task = "at work"
         npc.physical.thirst = 95
 
         with patch.object(self.world, "_find_nearest_water_source", return_value=(12, 10)), \
@@ -1501,11 +1504,11 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(npc.schedule.current_task, "seeking_water")
         self.assertEqual(npc.schedule.current_destination_coords, (12, 10))
-        self.assertEqual(npc.schedule.previous_task, "Working (Blacksmith)")
+        self.assertEqual(npc.schedule.previous_task, "at work")
 
     def test_npc_brain_seeks_food_source_when_desperate_without_food(self):
         npc = engine.NPC(x=10, y=10, name="Starving NPC")
-        npc.schedule.current_task = "Working (Miller)"
+        npc.schedule.current_task = "at work"
         npc.physical.hunger = 95
         tavern = engine.Building(14, 9, 4, 4, building_type="tavern", category="commercial_workplace")
 
@@ -1516,7 +1519,7 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(npc.schedule.current_task, "seeking_food")
         self.assertEqual(npc.schedule.current_destination_coords, (tavern.global_center_x, tavern.global_center_y))
-        self.assertEqual(npc.schedule.previous_task, "Working (Miller)")
+        self.assertEqual(npc.schedule.previous_task, "at work")
 
 
 

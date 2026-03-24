@@ -590,6 +590,38 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertTrue(self.world.trade_ui_active)
         self.assertTrue(self.world.trade_ui_merchant_inventory_snapshot)
 
+    def test_trade_session_refuses_when_merchant_has_strong_grudge(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        merchant.add_grudge(self.world.player.id, "assaulted_me", severity=85, current_day=1)
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertFalse(self.world.trade_ui_active)
+        self.assertIn("refuses to trade", self.world.chat_log[-1])
+
+    def test_trade_session_allows_when_grudge_is_weak(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        merchant.add_grudge(self.world.player.id, "minor_argument", severity=25, current_day=1)
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertTrue(self.world.trade_ui_active)
+        self.assertTrue(self.world.trade_ui_merchant_inventory_snapshot)
+
     def test_give_gift_to_npc_transfers_item_reference_and_records_memory(self):
         npc = engine.NPC(1, 1, name="Recipient")
         self.world.player.add_item("iron_sword", 1)
@@ -616,6 +648,93 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertEqual(self.world.player.economic.money, 15)
         self.assertEqual(npc.economic.money, 10)
         self.assertGreater(npc.knowledge.get_reputation_towards(self.world.player), 0)
+
+    def test_player_attack_creates_harmful_incident_with_victim_and_witness_attribution(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        witness = engine.NPC(3, 2, name="Witness")
+        self.world.village_npcs.extend([victim, witness])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 2, "narrative_feedback": "A harsh blow lands."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[victim, witness])
+
+        self.world.player_attempt_attack(victim)
+
+        self.assertEqual(len(self.world.harmful_incidents), 1)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        self.assertEqual(incident.attacker_id, self.world.player.id)
+        self.assertEqual(incident.target_id, victim.id)
+        self.assertTrue(incident.target_survived)
+        self.assertIn(witness.id, incident.witness_ids)
+        self.assertNotIn(victim.id, incident.witness_ids)
+        self.assertIn(self.world.player.id, victim.social.grudges)
+
+        victim_view = victim.knowledge.known_harmful_incidents[incident.id]
+        witness_view = witness.knowledge.known_harmful_incidents[incident.id]
+        self.assertEqual(victim_view.attributed_attacker_id, self.world.player.id)
+        self.assertEqual(victim_view.basis, "victim_survived")
+        self.assertEqual(victim_view.confidence, 1.0)
+        self.assertEqual(witness_view.attributed_attacker_id, self.world.player.id)
+        self.assertEqual(witness_view.basis, "direct_witness")
+        self.assertAlmostEqual(witness_view.confidence, 0.95)
+
+    def test_player_attack_with_no_witness_and_no_survivor_stays_unattributed(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        observer = engine.NPC(6, 6, name="Observer")
+        victim.combat.hp = 1
+        self.world.village_npcs.extend([victim, observer])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 25, "narrative_feedback": "A fatal hit."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[])
+
+        self.world.player_attempt_attack(victim)
+
+        self.assertEqual(len(self.world.harmful_incidents), 1)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        self.assertFalse(incident.target_survived)
+        self.assertEqual(incident.witness_ids, [])
+        self.assertNotIn(incident.id, victim.knowledge.known_harmful_incidents)
+        self.assertNotIn(incident.id, observer.knowledge.known_harmful_incidents)
+
+    def test_teller_can_share_known_harmful_incident_as_secondhand_claim(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        witness = engine.NPC(3, 2, name="Witness")
+        listener = engine.NPC(4, 2, name="Listener")
+        self.world.village_npcs.extend([victim, witness, listener])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 2, "narrative_feedback": "A harsh blow lands."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[victim, witness])
+
+        self.world.player_attempt_attack(victim)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        witness_view = witness.knowledge.known_harmful_incidents[incident.id]
+
+        shared = self.world.share_harmful_incident_claim(witness, listener, incident.id)
+
+        self.assertTrue(shared)
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertTrue(listener_view.secondhand)
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertEqual(listener_view.told_by_id, witness.id)
+        self.assertLess(listener_view.confidence, witness_view.confidence)
+
+    def test_unwitnessed_incident_can_spread_via_actor_claim(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        listener = engine.NPC(6, 6, name="Listener")
+        victim.combat.hp = 1
+        self.world.village_npcs.extend([victim, listener])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 25, "narrative_feedback": "A fatal hit."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[])
+
+        self.world.player_attempt_attack(victim)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        self.assertNotIn(incident.id, listener.knowledge.known_harmful_incidents)
+
+        shared = self.world.share_harmful_incident_claim(self.world.player, listener, incident.id)
+
+        self.assertTrue(shared)
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertTrue(listener_view.secondhand)
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertEqual(listener_view.told_by_id, self.world.player.id)
+        self.assertLess(listener_view.confidence, 1.0)
+        self.assertEqual(listener_view.attributed_attacker_id, self.world.player.id)
 
     def test_share_player_memory_with_npc_copies_memory_event(self):
         npc = engine.NPC(1, 1, name="Listener")

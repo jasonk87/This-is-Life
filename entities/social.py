@@ -39,11 +39,25 @@ class MemoryEvent:
 
 
 @dataclass
+class GrudgeRecord:
+    """Structured suspicion/grudge state toward another entity."""
+
+    target_id: int
+    reason: str
+    severity: int = 35
+    created_day: int = 0
+    last_updated_day: int = 0
+    decay_days: int = 5
+    persistent: bool = False
+
+
+@dataclass
 class KnowledgeComponent:
     """Bounded structured knowledge used by both players and NPCs."""
 
     known_events: dict[str, Any] = field(default_factory=dict)
     known_memories: dict[str, MemoryEvent] = field(default_factory=dict)
+    known_harmful_incidents: dict[str, Any] = field(default_factory=dict)
     reacted_to_event_ids: set[str] = field(default_factory=set)
     discussed_event_ids: set[str] = field(default_factory=set)
     last_global_event_index_checked: int = -1

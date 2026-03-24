@@ -5,18 +5,24 @@ including NPCs and specialized creature types.
 import random
 import re
 from dataclasses import dataclass, field
+from typing import Any
 from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
 from data.dawnlike import ANIMAL_SPRITES, get_human_sprite
 from data.items import ITEM_DEFINITIONS
-from simulation.careers import CareerState, normalize_profession, set_entity_profession
+from entities.anatomy import Anatomy
+from entities.human_behaviors import NPCBrain, NPCTaskState
+from entities.items import EquipmentSlot, Inventory, ItemReference, roll_crafted_item_quality
+from entities.metabolism import MetabolismComponent
+from entities.social import AspirationComponent, AspirationType, KnowledgeComponent, TravelComponent
+from simulation.careers import CareerState, infer_career_level, normalize_profession, set_entity_profession
+from simulation.skills import SkillTracker
 
 PLACEHOLDER_FAMILY_NAME_RE = re.compile(r"^(Mother|Father|Brother|Sister)\s+Family_\d+$", re.IGNORECASE)
 
 @dataclass
 class CombatStats:
     """Stores combat-related attributes for an entity."""
-    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
-    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    anatomy: Anatomy = field(default_factory=Anatomy.humanoid)
     toughness: str = "average"
     is_hostile_to_player: bool = False
     combat_behavior: str = "defensive"
@@ -25,56 +31,103 @@ class CombatStats:
     attack_range: int = 1
     target_entity_id: int | None = None
     last_hit_part: str | None = None
+    defense_bonus: int = 0
+
+    @property
+    def body_parts_hp(self):
+        return self.anatomy.hp_proxy
+
+    @property
+    def body_parts_max_hp(self):
+        return self.anatomy.max_hp_proxy
 
     @property
     def max_hp(self):
-        return sum(self.body_parts_max_hp.values())
+        return self.anatomy.get_total_max_hp()
 
     @max_hp.setter
     def max_hp(self, value):
-        current_max = self.max_hp
-        if current_max == 0:
-            return
-        ratio = value / current_max
-        for part in self.body_parts_max_hp:
-            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
-        diff = value - sum(self.body_parts_max_hp.values())
-        if diff != 0:
-            self.body_parts_max_hp["torso"] += diff
+        self.anatomy.scale_total_max_hp(value)
 
     @property
     def hp(self):
-        return sum(self.body_parts_hp.values())
+        return self.anatomy.get_total_hp()
 
     @hp.setter
     def hp(self, value):
-        current_hp = self.hp
-        if value <= 0:
-            for part in self.body_parts_hp:
-                self.body_parts_hp[part] = 0
-            return
-        if value == self.max_hp:
-            self.body_parts_hp = self.body_parts_max_hp.copy()
-            return
-        ratio = value / current_hp if current_hp > 0 else 0
-        for part in self.body_parts_hp:
-            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
-        diff = value - sum(self.body_parts_hp.values())
-        if diff != 0:
-            self.body_parts_hp["torso"] += diff
+        self.anatomy.set_total_hp(value)
 
 @dataclass
 class PhysicalState:
     """Stores physical attributes and states for an entity."""
-    hunger: int = 0
-    max_hunger: int = 100
-    thirst: int = 0
-    max_thirst: int = 100
-    temperature: float = 37.0
-    base_temperature_resistance: float = 2.0
-    clothing_insulation: float = 0.0
+    metabolism: MetabolismComponent = field(default_factory=MetabolismComponent)
     status_effects: list[str] = field(default_factory=list)
     is_dead: bool = False
+    hunger_level_msg: str = ""
+    thirst_level_msg: str = ""
+    is_wet: bool = False
+    wetness_timer: int = 0
+    is_sheltered: bool = False
+    hearing_radius: int = DEFAULT_HEARING_RADIUS
+
+    @property
+    def hunger(self) -> int:
+        return self.metabolism.hunger
+
+    @hunger.setter
+    def hunger(self, value: int) -> None:
+        self.metabolism.hunger = value
+
+    @property
+    def max_hunger(self) -> int:
+        return self.metabolism.max_hunger
+
+    @max_hunger.setter
+    def max_hunger(self, value: int) -> None:
+        self.metabolism.max_hunger = value
+
+    @property
+    def thirst(self) -> int:
+        return self.metabolism.thirst
+
+    @thirst.setter
+    def thirst(self, value: int) -> None:
+        self.metabolism.thirst = value
+
+    @property
+    def max_thirst(self) -> int:
+        return self.metabolism.max_thirst
+
+    @max_thirst.setter
+    def max_thirst(self, value: int) -> None:
+        self.metabolism.max_thirst = value
+
+    @property
+    def temperature(self) -> float:
+        return self.metabolism.temperature
+
+    @temperature.setter
+    def temperature(self, value: float) -> None:
+        self.metabolism.temperature = value
+
+    @property
+    def base_temperature_resistance(self) -> float:
+        return self.metabolism.base_temperature_resistance
+
+    @base_temperature_resistance.setter
+    def base_temperature_resistance(self, value: float) -> None:
+        self.metabolism.base_temperature_resistance = value
+
+    @property
+    def clothing_insulation(self) -> float:
+        return self.metabolism.clothing_insulation
+
+    @clothing_insulation.setter
+    def clothing_insulation(self, value: float) -> None:
+        self.metabolism.clothing_insulation = value
+
+    def process_tick(self, **kwargs) -> None:
+        self.metabolism.process_tick(status_effects=self.status_effects, **kwargs)
 
 @dataclass
 class SocialState:
@@ -83,6 +136,8 @@ class SocialState:
     family_ties: dict = field(default_factory=lambda: {"description": "none"})
     relationships: dict = field(default_factory=dict)
     grudges: dict[int, list[str]] = field(default_factory=dict)
+    reputation: dict[str, int] = field(default_factory=dict)
+    social_skill: int = 5
     fame: int = 0
     infamy: int = 0
     title: str = ""
@@ -92,11 +147,38 @@ class EconomicState:
     """Stores economic attributes for an entity."""
     wealth_level: str = "average"
     money: int = 0
-    npc_inventory: dict = field(default_factory=dict)
+    npc_inventory: Inventory = field(default_factory=Inventory)
     profession: str = "unemployed"
     job_satisfaction: int = 50
     days_unemployed: int = 0
     work_performance: int = 50 # 0-100, tracks recent job performance
+    daily_wage: int = 0
+    active_contracts: dict = field(default_factory=dict)
+    pending_contract_offer: Any | None = None
+    bounty: int = 0
+    job_building_id: str | None = None
+    days_employed: int = 0
+
+    def __setattr__(self, name, value):
+        if name == "npc_inventory" and not isinstance(value, Inventory):
+            value = Inventory(value or {})
+        super().__setattr__(name, value)
+
+    @property
+    def inventory(self) -> Inventory:
+        return self.npc_inventory
+
+    @inventory.setter
+    def inventory(self, value) -> None:
+        self.npc_inventory = value
+
+    @property
+    def job_performance(self) -> int:
+        return self.work_performance
+
+    @job_performance.setter
+    def job_performance(self, value: int) -> None:
+        self.work_performance = int(value)
 
 @dataclass
 class Schedule:
@@ -115,21 +197,20 @@ class Schedule:
 @dataclass
 class Equipment:
     """Stores entity equipment."""
-    weapon: str | None = None
-    body: str | None = None
-    head: str | None = None
+    weapon: EquipmentSlot = field(default_factory=EquipmentSlot)
+    body: EquipmentSlot = field(default_factory=EquipmentSlot)
+    head: EquipmentSlot = field(default_factory=EquipmentSlot)
+    equipped_armor: dict[str, str | None] = field(default_factory=lambda: {"head": None, "body": None, "hands": None, "feet": None})
+    equipped_light_item_key: str | None = None
+    light_source_active_until_tick: int = -1
+    current_personal_light_radius: int = 0
 
-@dataclass
-class Knowledge:
-    """Stores entity knowledge and questing state."""
-    known_events: dict[str, 'Event'] = field(default_factory=dict)
-    reacted_to_event_ids: set[str] = field(default_factory=set)
-    discussed_event_ids: set[str] = field(default_factory=set)
-    last_global_event_index_checked: int = -1
-    help_needed: str | None = None
-    long_term_memory: list[str] = field(default_factory=list)
-    known_locations: dict[str, tuple[int, int]] = field(default_factory=dict)
-    perceived_item_tiles: list[tuple[int, int]] = field(default_factory=list)
+    def __setattr__(self, name, value):
+        if name in {"weapon", "body", "head"} and not isinstance(value, EquipmentSlot):
+            value = EquipmentSlot(value)
+        super().__setattr__(name, value)
+
+Knowledge = KnowledgeComponent
 
 class NPC:
     """
@@ -150,8 +231,15 @@ class NPC:
         self.player_id = player_id
         self.last_speech_time = 0
         self.original_char_before_sleep = self.char
+        self.original_color_before_sleep = self.color
         self.speech_volume: int = DEFAULT_SPEECH_VOLUME
         self.hearing_radius: int = DEFAULT_HEARING_RADIUS
+        self.is_sleeping = False
+        self.render_disabled = False
+        self.macro_x = x
+        self.macro_y = y
+        self._sleeping_ai_brain = None
+        self._sleeping_render_state: dict = {}
 
         # Conversation state
         self.conversation_partner_id: int | None = None
@@ -163,6 +251,9 @@ class NPC:
         self.economic, self.schedule = EconomicState(), Schedule()
         self.equipment, self.knowledge = Equipment(), Knowledge()
         self.career = CareerState()
+        self.skills = SkillTracker()
+        self.aspiration = AspirationComponent(aspiration_type=random.choice(list(AspirationType)))
+        self.travel = TravelComponent()
 
         self.social.personality = personality
         if isinstance(family_ties, str):
@@ -174,21 +265,127 @@ class NPC:
         if self.player_id:
             self._initialize_relationships(attitude_to_player, self.player_id)
 
-        self.task_target_item_details: dict | None = None
-        self.current_sub_task: str | None = None
-        self.sub_task_target_coords: tuple[int, int] | None = None
-        self.sub_task_timer, self.task_timer, self.leisure_timer = 0, 0, 0
-        self.sub_task_zone_target: str | None = None
-        self.current_sub_task_sequence_index: int = 0
-        self.woodcutter_search_radius: int = 15
-        self.task_target_entity_id: int | None = None
-        self.task_context: str | None = None
-        self.task_context_data: dict | str | None = None # Generic storage for task details
+        self._legacy_task_state = NPCTaskState()
+        self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=self._legacy_task_state)
         self.den_location: tuple[int, int] | None = None
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []
         self.defense_bonus = 0
         set_entity_profession(self, self.economic.profession, reason="spawn")
+
+    def _task_state_holder(self):
+        ai_brain = getattr(self, "ai_brain", None)
+        return getattr(ai_brain, "task_state", None) or self._legacy_task_state
+
+    @property
+    def task_target_item_details(self):
+        return self._task_state_holder().task_target_item_details
+
+    @task_target_item_details.setter
+    def task_target_item_details(self, value):
+        self._task_state_holder().task_target_item_details = value
+
+    @property
+    def current_sub_task(self):
+        return self._task_state_holder().current_sub_task
+
+    @current_sub_task.setter
+    def current_sub_task(self, value):
+        self._task_state_holder().current_sub_task = value
+
+    @property
+    def sub_task_target_coords(self):
+        return self._task_state_holder().sub_task_target_coords
+
+    @sub_task_target_coords.setter
+    def sub_task_target_coords(self, value):
+        self._task_state_holder().sub_task_target_coords = value
+
+    @property
+    def sub_task_timer(self):
+        return self._task_state_holder().sub_task_timer
+
+    @sub_task_timer.setter
+    def sub_task_timer(self, value):
+        self._task_state_holder().sub_task_timer = value
+
+    @property
+    def task_timer(self):
+        return self._task_state_holder().task_timer
+
+    @task_timer.setter
+    def task_timer(self, value):
+        self._task_state_holder().task_timer = value
+
+    @property
+    def leisure_timer(self):
+        return self._task_state_holder().leisure_timer
+
+    @leisure_timer.setter
+    def leisure_timer(self, value):
+        self._task_state_holder().leisure_timer = value
+
+    @property
+    def sub_task_zone_target(self):
+        return self._task_state_holder().sub_task_zone_target
+
+    @sub_task_zone_target.setter
+    def sub_task_zone_target(self, value):
+        self._task_state_holder().sub_task_zone_target = value
+
+    @property
+    def current_sub_task_sequence_index(self):
+        return self._task_state_holder().current_sub_task_sequence_index
+
+    @current_sub_task_sequence_index.setter
+    def current_sub_task_sequence_index(self, value):
+        self._task_state_holder().current_sub_task_sequence_index = value
+
+    @property
+    def woodcutter_search_radius(self):
+        ai_brain = getattr(self, "ai_brain", None)
+        if ai_brain and hasattr(ai_brain, "get_search_radius") and ai_brain.get_search_radius() is not None:
+            return ai_brain.get_search_radius()
+        return self._task_state_holder().woodcutter_search_radius
+
+    @woodcutter_search_radius.setter
+    def woodcutter_search_radius(self, value):
+        ai_brain = getattr(self, "ai_brain", None)
+        if ai_brain and hasattr(ai_brain, "get_search_radius") and ai_brain.get_search_radius() is not None:
+            ai_brain.set_search_radius(value)
+        self._task_state_holder().woodcutter_search_radius = value
+
+    @property
+    def task_target_entity_id(self):
+        return self._task_state_holder().task_target_entity_id
+
+    @task_target_entity_id.setter
+    def task_target_entity_id(self, value):
+        self._task_state_holder().task_target_entity_id = value
+
+    @property
+    def task_target_coords(self):
+        return self._task_state_holder().task_target_coords
+
+    @task_target_coords.setter
+    def task_target_coords(self, value):
+        self._task_state_holder().task_target_coords = value
+
+    @property
+    def task_context(self):
+        return self._task_state_holder().task_context
+
+    @task_context.setter
+    def task_context(self, value):
+        self._task_state_holder().task_context = value
+
+    @property
+    def task_context_data(self):
+        return self._task_state_holder().task_context_data
+
+    @task_context_data.setter
+    def task_context_data(self, value):
+        self._task_state_holder().task_context_data = value
 
     @property
     def is_dead(self) -> bool:
@@ -313,12 +510,13 @@ class NPC:
             base_name = relation_label
         else:
             base_name = raw_name or "Unknown"
+        relationship_base_name = base_name
 
         title_label = self.get_title_label()
         if title_label:
             base_name = f"{base_name} ({title_label})"
 
-        if include_relationship and relation_label and base_name != relation_label:
+        if include_relationship and relation_label and relationship_base_name != relation_label:
             return f"{base_name} [{relation_label}]"
         return base_name
 
@@ -326,34 +524,153 @@ class NPC:
         """Recalculates NPC stats based on equipped items."""
         self.physical.clothing_insulation = 0.0
         self.defense_bonus = 0
-        if self.equipment.body:
-            item_def = ITEM_DEFINITIONS.get(self.equipment.body)
-            if item_def and "properties" in item_def:
-                self.physical.clothing_insulation += item_def["properties"].get("insulation", 0.0)
-                self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
-        if self.equipment.head:
-            item_def = ITEM_DEFINITIONS.get(self.equipment.head)
+        for slot_name in ("body", "head"):
+            item = self.get_equipped_item_reference(slot_name)
+            if item is None:
+                continue
+            item_def = item.definition
             if item_def and "properties" in item_def:
                 self.physical.clothing_insulation += item_def["properties"].get("insulation", 0.0)
                 self.defense_bonus += item_def["properties"].get("defense_bonus", 0)
 
-    def add_item(self, item_key: str, quantity: int = 1):
+    def get_equipped_item_reference(self, slot_name: str) -> ItemReference | None:
+        slot = getattr(self.equipment, slot_name, None)
+        if slot is None or not slot:
+            return None
+        if getattr(slot, "item_reference", None) is not None:
+            return slot.item_reference
+        item_key = str(slot)
+        if not item_key:
+            return None
+        return self.economic.npc_inventory.get_item_reference(item_key) or ItemReference(item_key)
+
+    def is_identity_concealed(self) -> bool:
+        head_item = self.get_equipped_item_reference("head")
+        return bool(head_item and head_item.conceals_identity)
+
+    def unequip_item(self, slot_name: str, *, return_to_inventory: bool = True) -> ItemReference | None:
+        slot = getattr(self.equipment, slot_name, None)
+        if slot is None or not slot:
+            return None
+        item = slot.item_reference
+        if return_to_inventory and item is not None and not self.economic.npc_inventory.has_item_reference(item):
+            self.economic.npc_inventory.add_item_reference(item)
+        slot.clear()
+        self.recalculate_stats()
+        return item
+
+    def equip_item_reference(self, slot_name: str, item: ItemReference | None) -> bool:
+        if item is None:
+            return False
+        expected_slot = {"weapon": "main_hand", "body": "body", "head": "head"}.get(slot_name)
+        if expected_slot is None or item.equip_slot != expected_slot:
+            return False
+
+        slot = getattr(self.equipment, slot_name, None)
+        current_item = self.get_equipped_item_reference(slot_name)
+        if current_item is item and getattr(slot, "item_reference", None) is item:
+            return True
+
+        if self.economic.npc_inventory.has_item_reference(item):
+            self.economic.npc_inventory.extract_item_reference(item)
+        elif current_item is not item:
+            return False
+
+        self.unequip_item(slot_name)
+        slot.bind(item)
+        self.recalculate_stats()
+        return True
+
+    def evaluate_and_upgrade_equipment(self, *, minimum_upgrade_margin: float = 0.5) -> bool:
+        slot_candidates = {
+            "weapon": [],
+            "body": [],
+            "head": [],
+        }
+        expected_slots = {"weapon": "main_hand", "body": "body", "head": "head"}
+        for item in self.economic.npc_inventory.iter_item_references():
+            for slot_name, equip_slot in expected_slots.items():
+                if item.equip_slot == equip_slot:
+                    slot_candidates[slot_name].append(item)
+                    break
+
+        upgraded = False
+        for slot_name, candidates in slot_candidates.items():
+            current_item = self.get_equipped_item_reference(slot_name)
+            current_score = current_item.evaluate_utility() if current_item else 0.0
+            best_item = max(candidates, key=lambda candidate: candidate.evaluate_utility(), default=None)
+            if best_item is None:
+                continue
+            best_score = best_item.evaluate_utility()
+            required_margin = 0.0 if current_item is None else max(minimum_upgrade_margin, current_score * 0.1)
+            if best_score <= current_score + required_margin:
+                continue
+            if self.equip_item_reference(slot_name, best_item):
+                upgraded = True
+        return upgraded
+
+    def add_item(self, item_key: str, quantity: int = 1, *, quality: str = "Normal", crafter_name: str | None = None):
         """Adds an item to the NPC's inventory."""
-        current_quantity = self.economic.npc_inventory.get(item_key, 0)
-        self.economic.npc_inventory[item_key] = current_quantity + quantity
+        self.economic.npc_inventory.add_item(item_key, quantity, quality=quality, crafter_name=crafter_name)
+
+    def craft_item(self, item_key: str, quantity: int = 1):
+        """Add an authored crafted item to the NPC inventory with rolled quality."""
+        normalized_profession = normalize_profession(self.economic.profession)
+        if hasattr(self, "career") and self.career.current_role != normalized_profession:
+            self.career.set_role(normalized_profession)
+        career_level = max(
+            getattr(getattr(self, "career", None), "level", 0),
+            infer_career_level(normalized_profession),
+            self.skills.get_level("crafting"),
+        )
+        quality = roll_crafted_item_quality(career_level=career_level, work_performance=self.economic.work_performance)
+        self.add_item(item_key, quantity, quality=quality, crafter_name=self.name)
+        self.evaluate_and_upgrade_equipment()
+        self.skills.gain_experience("crafting", max(1, int(quantity)) * 4)
+        return quality
 
     def has_item(self, item_key: str, quantity: int = 1) -> bool:
         """Checks if the NPC has a sufficient quantity of an item."""
-        return self.economic.npc_inventory.get(item_key, 0) >= quantity
+        return self.economic.npc_inventory.has_item(item_key, quantity)
 
     def remove_item(self, item_key_to_remove: str, quantity: int = 1) -> bool:
         """Removes an item from the NPC's inventory. Returns True if successful."""
-        if self.has_item(item_key_to_remove, quantity):
-            self.economic.npc_inventory[item_key_to_remove] -= quantity
-            if self.economic.npc_inventory[item_key_to_remove] <= 0:
-                del self.economic.npc_inventory[item_key_to_remove]
-            return True
-        return False
+        return self.economic.npc_inventory.remove_item(item_key_to_remove, quantity)
+
+    def degrade_equipped_item(self, slot_name: str, amount: int = 1, world=None):
+        """Degrade an equipped item and clear the slot if it breaks."""
+        slot = getattr(self.equipment, slot_name, None)
+        item = self.get_equipped_item_reference(slot_name)
+        if item is None:
+            return {"degraded": False, "broke": False, "item_key": None, "replacement_key": None}
+
+        inventory = self.economic.npc_inventory
+        if inventory.has_item_reference(item):
+            result = inventory.degrade_item_reference(item, amount)
+        else:
+            broke = item.degrade(amount)
+            result = {
+                "degraded": True,
+                "broke": broke,
+                "item_key": item.key,
+                "replacement_key": None,
+                "current_durability": item.current_durability,
+            }
+            if broke:
+                result["item_name"] = item.name
+                if item.tool_type and "broken_tool_handle" in ITEM_DEFINITIONS:
+                    inventory.add_item("broken_tool_handle", 1)
+                    result["replacement_key"] = "broken_tool_handle"
+        if result.get("broke") and getattr(self.equipment, slot_name) == item.key:
+            self.unequip_item(slot_name, return_to_inventory=False)
+            if world:
+                item_name = result.get("item_name", item.key.replace("_", " ").title())
+                if result.get("replacement_key"):
+                    replacement_name = ITEM_DEFINITIONS[result["replacement_key"]]["name"]
+                    world.add_message_to_chat_log(f"{self.name}'s {item_name} broke into {replacement_name}!")
+                else:
+                    world.add_message_to_chat_log(f"{self.name}'s {item_name} broke!")
+        return result
 
     def take_damage(self, amount: int, world) -> bool:
         """
@@ -364,38 +681,39 @@ class NPC:
             return False
 
         total_defense_bonus = 0
+        body_blocks_damage = False
+        head_blocks_damage = False
         if self.equipment.body and self.equipment.body in ITEM_DEFINITIONS:
             armor_def = ITEM_DEFINITIONS[self.equipment.body]
-            total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
+            body_defense = armor_def.get("properties", {}).get("defense_bonus", 0)
+            total_defense_bonus += body_defense
+            body_blocks_damage = body_defense > 0
         if self.equipment.head and self.equipment.head in ITEM_DEFINITIONS:
             armor_def = ITEM_DEFINITIONS[self.equipment.head]
-            total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
+            head_defense = armor_def.get("properties", {}).get("defense_bonus", 0)
+            total_defense_bonus += head_defense
+            head_blocks_damage = head_defense > 0
 
         effective_damage = max(0, amount - total_defense_bonus)
+        blocked_damage = max(0, amount - effective_damage)
+
+        if blocked_damage > 0:
+            if body_blocks_damage:
+                self.degrade_equipped_item("body", amount=1, world=world)
+            if head_blocks_damage:
+                self.degrade_equipped_item("head", amount=1, world=world)
 
         remaining_damage = effective_damage
         import random
         if remaining_damage > 0:
             hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
             self.combat.last_hit_part = hit_part
-            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
-                self.combat.body_parts_hp[hit_part] -= remaining_damage
-                remaining_damage = 0
-            else:
-                remaining_damage -= self.combat.body_parts_hp[hit_part]
-                self.combat.body_parts_hp[hit_part] = 0
-                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
-                    if remaining_damage <= 0:
-                        break
-                    if self.combat.body_parts_hp[part] > 0:
-                        if self.combat.body_parts_hp[part] >= remaining_damage:
-                            self.combat.body_parts_hp[part] -= remaining_damage
-                            remaining_damage = 0
-                        else:
-                            remaining_damage -= self.combat.body_parts_hp[part]
-                            self.combat.body_parts_hp[part] = 0
+            self.combat.anatomy.apply_damage(hit_part, remaining_damage)
 
-            # Check for broken legs
+            for leg_name in ["left_leg", "right_leg"]:
+                if self.combat.anatomy.get_part(leg_name).hp <= 0:
+                    self.combat.anatomy.get_part(leg_name).ensure_status("broken")
+
             if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
                 if "broken_leg" not in self.physical.status_effects:
                     self.physical.status_effects.append("broken_leg")
@@ -418,19 +736,11 @@ class NPC:
         return False
 
 class DireWolf(NPC):
-    """
-    A specialized NPC subclass representing a Dire Wolf.
-    """
+    """Compatibility shim that now delegates construction to the data-driven Animal entity."""
+
     def __init__(self, x, y, name="Dire Wolf"):
-        super().__init__(x, y, name=name)
-        self.char, self.color = ANIMAL_SPRITES["dire_wolf"], (160, 160, 160)
-        self.combat = CombatStats(toughness="average",
-                                  is_hostile_to_player=True, combat_behavior="aggressive",
-                                  base_attack_name="bite", base_attack_damage_dice="1d6",
-                                  attack_range=1)
-        self.combat.max_hp = 15
-        self.combat.hp = 15
-        set_entity_profession(self, "Creature", reason="direwolf_spawn")
-        self.dialogue = ["*Growl*", "*Snarl*"]
-        self.speech_volume = 5
-        self.hearing_radius = DEFAULT_HEARING_RADIUS + 2
+        from data.animals import ANIMAL_DEFINITIONS
+        from entities.animal import Animal
+
+        animal = Animal(x, y, name=name, animal_type="dire_wolf", animal_definition=ANIMAL_DEFINITIONS.get("dire_wolf", {}))
+        self.__dict__ = animal.__dict__

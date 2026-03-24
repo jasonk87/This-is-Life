@@ -143,3 +143,10 @@ def update_player_needs(world, *, initial_setup: bool = False) -> None:
     else:
         player.physical.thirst_level_msg = ""
 
+
+def update_npc_survival(world, npc) -> None:
+    """Advance NPC thermal and metabolism state using shared component logic."""
+    update_entity_temperature(world, npc, update_world_ambient=False)
+    if npc.economic.profession != "Creature":
+        npc.physical.process_tick(hunger_delta=2, thirst_delta=3)
+    apply_temperature_effects(world, npc, is_player=False)

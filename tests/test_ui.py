@@ -836,7 +836,7 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.world._continue_npc_conversation(speaker, listener)
 
-        self.assertEqual(speaker.schedule.current_task, "going home")
+        self.assertEqual(speaker.schedule.current_task, "going_home")
         self.assertEqual(self.world.chat_log[-1], "You overhear A tell B: Come by later.")
 
     def test_distant_npc_conversation_uses_fallback_without_llm_task(self):

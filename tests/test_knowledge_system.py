@@ -6,6 +6,7 @@ from config import DAY_LENGTH_TICKS
 from simulation.history import HistoryLedger
 from simulation.knowledge import KnowledgeSystem
 from simulation.records import ChronicleArchive
+from simulation.systems.work import update_npc_work_sub_tasks
 
 class MockWorld(World):
     def __init__(self):
@@ -74,7 +75,7 @@ class TestKnowledgeSystem(unittest.TestCase):
 
         # Run the method
         # The logic sorts candidates by fame, so 'Hero' (fame 50) should be picked over Scribe (fame 0)
-        self.world._handle_npc_work_sub_tasks(scribe)
+        update_npc_work_sub_tasks(self.world, scribe)
 
         # Check if book was created
         self.assertEqual(len(self.world.books), 1)
@@ -102,7 +103,7 @@ class TestKnowledgeSystem(unittest.TestCase):
         scribe.x, scribe.y = 0, 0
         scribe.sub_task_timer = 0
 
-        self.world._handle_npc_work_sub_tasks(scribe)
+        update_npc_work_sub_tasks(self.world, scribe)
 
         self.assertEqual(len(self.world.books), 1)
         book = self.world.books[0]

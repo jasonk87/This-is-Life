@@ -143,3 +143,56 @@ def update_player_needs(world, *, initial_setup: bool = False) -> None:
     else:
         player.physical.thirst_level_msg = ""
 
+
+def update_npc_survival(world, npc) -> None:
+    """Advance NPC thermal and metabolism state using shared component logic."""
+    update_entity_temperature(world, npc, update_world_ambient=False)
+    if npc.economic.profession != "Creature":
+        npc.physical.process_tick(hunger_delta=2, thirst_delta=3)
+    apply_temperature_effects(world, npc, is_player=False)
+
+
+def update_npc_environmental_tasks(world, npc) -> None:
+    """Handle high-priority weather/temperature task transitions for one NPC."""
+    if "Freezing" in npc.physical.status_effects and npc.schedule.current_task != "seeking_warmth":
+        npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in ["idle", "wandering"] else "idle"
+        npc.schedule.current_task = "seeking_warmth"
+        heat_source_coords = world._find_nearest_heat_source(npc)
+        if heat_source_coords:
+            dest_x, dest_y = world._find_best_adjacent_tile(heat_source_coords[0], heat_source_coords[1], npc)
+            if dest_x is not None:
+                path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                if path:
+                    npc.schedule.current_path = path
+                    npc.schedule.current_destination_coords = (dest_x, dest_y)
+        else:
+            home_building = world.buildings_by_id.get(npc.schedule.home_building_id)
+            if home_building:
+                home_coords = (home_building.global_center_x, home_building.global_center_y)
+                path = world.calculate_path(npc.x, npc.y, home_coords[0], home_coords[1])
+                if path:
+                    npc.schedule.current_path = path
+                    npc.schedule.current_destination_coords = home_coords
+                    npc.schedule.current_task = "huddling_indoors"
+
+    is_bad_weather = world.weather in ["rain", "snow"]
+    npc_is_sheltered = world._check_for_shelter(npc.x, npc.y)
+
+    if is_bad_weather and not npc_is_sheltered and npc.schedule.current_task != "seeking_shelter":
+        npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in ["idle", "wandering"] else "idle"
+        npc.schedule.current_task = "seeking_shelter"
+        shelter_building = world.buildings_by_id.get(npc.schedule.home_building_id)
+        if not shelter_building:
+            shelter_building = world._find_nearest_tavern(npc)
+
+        if shelter_building:
+            shelter_coords = (shelter_building.global_center_x, shelter_building.global_center_y)
+            path = world.calculate_path(npc.x, npc.y, shelter_coords[0], shelter_coords[1])
+            if path:
+                npc.schedule.current_path = path
+                npc.schedule.current_destination_coords = shelter_coords
+    elif not is_bad_weather and npc.schedule.current_task == "seeking_shelter":
+        npc.schedule.current_task = npc.schedule.previous_task or "idle"
+        npc.schedule.previous_task = None
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None

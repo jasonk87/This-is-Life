@@ -13,7 +13,7 @@ from entities.anatomy import Anatomy
 from entities.human_behaviors import NPCBrain, NPCTaskState
 from entities.items import EquipmentSlot, Inventory, ItemReference, roll_crafted_item_quality
 from entities.metabolism import MetabolismComponent
-from entities.social import AspirationComponent, AspirationType, KnowledgeComponent, TravelComponent
+from entities.social import AspirationComponent, AspirationType, GrudgeRecord, KnowledgeComponent, LocalOpinionRecord, TravelComponent
 from simulation.careers import CareerState, infer_career_level, normalize_profession, set_entity_profession
 from simulation.skills import SkillTracker
 
@@ -133,9 +133,11 @@ class PhysicalState:
 class SocialState:
     """Stores social and reputational attributes for an entity."""
     personality: str = "normal"
+    is_town_crier: bool = False
     family_ties: dict = field(default_factory=lambda: {"description": "none"})
     relationships: dict = field(default_factory=dict)
-    grudges: dict[int, list[str]] = field(default_factory=dict)
+    grudges: dict[int, GrudgeRecord] = field(default_factory=dict)
+    local_opinions: dict[int, LocalOpinionRecord] = field(default_factory=dict)
     reputation: dict[str, int] = field(default_factory=dict)
     social_skill: int = 5
     fame: int = 0
@@ -424,15 +426,93 @@ class NPC:
             return "friendly"
         return "warm"
 
-    def add_grudge(self, target_id: int, reason: str):
+    def add_grudge(
+        self,
+        target_id: int,
+        reason: str,
+        *,
+        severity: int = 35,
+        current_day: int = 0,
+        decay_days: int = 5,
+        persistent: bool = False,
+    ):
         """
         Adds a grudge against a target entity, significantly lowering the relationship score.
         """
-        if target_id not in self.social.grudges:
-            self.social.grudges[target_id] = []
-        self.social.grudges[target_id].append(reason)
+        existing = self.social.grudges.get(target_id)
+        bounded_severity = max(1, min(100, int(severity)))
+        if existing and isinstance(existing, GrudgeRecord):
+            existing.reason = reason or existing.reason
+            existing.severity = max(existing.severity, bounded_severity)
+            existing.last_updated_day = current_day
+            existing.decay_days = decay_days
+            existing.persistent = existing.persistent or persistent
+        else:
+            self.social.grudges[target_id] = GrudgeRecord(
+                target_id=target_id,
+                reason=reason,
+                severity=bounded_severity,
+                created_day=current_day,
+                last_updated_day=current_day,
+                decay_days=decay_days,
+                persistent=persistent,
+            )
         self.social.relationships[target_id] = self.social.relationships.get(target_id, 50) - 40
         self.social.relationships[target_id] = max(0, self.social.relationships[target_id])
+
+    def decay_grudges(self, current_day: int) -> None:
+        """Decay non-persistent grudges over time and clear expired entries."""
+        to_remove: list[int] = []
+        for target_id, record in list(self.social.grudges.items()):
+            if not isinstance(record, GrudgeRecord):
+                continue
+            if record.persistent:
+                continue
+            days_passed = max(0, current_day - record.last_updated_day)
+            if days_passed <= 0:
+                continue
+            record.severity = max(0, record.severity - days_passed)
+            record.last_updated_day = current_day
+            if record.severity <= 0 or (current_day - record.created_day) >= record.decay_days:
+                to_remove.append(target_id)
+        for target_id in to_remove:
+            self.social.grudges.pop(target_id, None)
+
+    def get_grudge_severity_towards(self, target_id: int | None) -> int:
+        """Return normalized grudge severity toward a target."""
+        if target_id is None:
+            return 0
+        entry = self.social.grudges.get(target_id)
+        if isinstance(entry, GrudgeRecord):
+            return max(0, min(100, int(entry.severity)))
+        if isinstance(entry, list):
+            return min(100, 20 * len(entry))
+        return 0
+
+    def get_distrust_towards(self, target) -> int:
+        """Compute a simple distrust score from relationship and grudge state."""
+        target_id = getattr(target, "id", None)
+        relationship_score = self.social.relationships.get(target_id, 50)
+        relationship_distrust = max(0, 50 - relationship_score)
+        grudge_distrust = self.get_grudge_severity_towards(target_id)
+        return max(relationship_distrust, grudge_distrust)
+
+    def set_local_opinion(self, target_id: int, score: float, *, current_day: int, evidence_count: int) -> None:
+        self.social.local_opinions[target_id] = LocalOpinionRecord(
+            target_id=target_id,
+            score=max(-100.0, min(100.0, float(score))),
+            evidence_count=max(0, int(evidence_count)),
+            last_updated_day=max(0, int(current_day)),
+        )
+
+    def get_local_opinion_towards(self, target) -> float:
+        target_id = getattr(target, "id", None)
+        if target_id is None:
+            return 0.0
+        record = self.social.local_opinions.get(target_id)
+        if isinstance(record, LocalOpinionRecord):
+            return float(record.score)
+        return 0.0
 
     def clear_work_sub_task_state(self, *, reset_sequence: bool = False) -> None:
         """Reset structured sub-task progression state owned by ai_brain.task_state."""

@@ -17,6 +17,7 @@ import config
 from services.llm_gossip import AsyncLLMGossipService
 from simulation.systems import survival
 from simulation.systems.work import update_npc_work_sub_tasks
+from simulation.systems.scheduling import run_npc_traveling_merchant_policy
 from tcod_compat import tcod
 import tile_types
 from entities.items import Inventory, ItemReference
@@ -590,6 +591,38 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertTrue(self.world.trade_ui_active)
         self.assertTrue(self.world.trade_ui_merchant_inventory_snapshot)
 
+    def test_trade_session_refuses_when_merchant_has_strong_grudge(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        merchant.add_grudge(self.world.player.id, "assaulted_me", severity=85, current_day=1)
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertFalse(self.world.trade_ui_active)
+        self.assertIn("refuses to trade", self.world.chat_log[-1])
+
+    def test_trade_session_allows_when_grudge_is_weak(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        merchant.add_grudge(self.world.player.id, "minor_argument", severity=25, current_day=1)
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+        self.world.buildings_by_id = {"shop_1": shop}
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertTrue(self.world.trade_ui_active)
+        self.assertTrue(self.world.trade_ui_merchant_inventory_snapshot)
+
     def test_give_gift_to_npc_transfers_item_reference_and_records_memory(self):
         npc = engine.NPC(1, 1, name="Recipient")
         self.world.player.add_item("iron_sword", 1)
@@ -616,6 +649,658 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertEqual(self.world.player.economic.money, 15)
         self.assertEqual(npc.economic.money, 10)
         self.assertGreater(npc.knowledge.get_reputation_towards(self.world.player), 0)
+
+    def test_player_attack_creates_harmful_incident_with_victim_and_witness_attribution(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        witness = engine.NPC(3, 2, name="Witness")
+        self.world.village_npcs.extend([victim, witness])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 2, "narrative_feedback": "A harsh blow lands."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[victim, witness])
+
+        self.world.player_attempt_attack(victim)
+
+        self.assertEqual(len(self.world.harmful_incidents), 1)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        self.assertEqual(incident.attacker_id, self.world.player.id)
+        self.assertEqual(incident.target_id, victim.id)
+        self.assertTrue(incident.target_survived)
+        self.assertIn(witness.id, incident.witness_ids)
+        self.assertNotIn(victim.id, incident.witness_ids)
+        self.assertIn(self.world.player.id, victim.social.grudges)
+
+        victim_view = victim.knowledge.known_harmful_incidents[incident.id]
+        witness_view = witness.knowledge.known_harmful_incidents[incident.id]
+        self.assertEqual(victim_view.attributed_attacker_id, self.world.player.id)
+        self.assertEqual(victim_view.basis, "victim_survived")
+        self.assertEqual(victim_view.confidence, 1.0)
+        self.assertEqual(witness_view.attributed_attacker_id, self.world.player.id)
+        self.assertEqual(witness_view.basis, "direct_witness")
+        self.assertAlmostEqual(witness_view.confidence, 0.95)
+
+    def test_player_attack_with_no_witness_and_no_survivor_stays_unattributed(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        observer = engine.NPC(6, 6, name="Observer")
+        victim.combat.hp = 1
+        self.world.village_npcs.extend([victim, observer])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 25, "narrative_feedback": "A fatal hit."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[])
+
+        self.world.player_attempt_attack(victim)
+
+        self.assertEqual(len(self.world.harmful_incidents), 1)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        self.assertFalse(incident.target_survived)
+        self.assertEqual(incident.witness_ids, [])
+        self.assertNotIn(incident.id, victim.knowledge.known_harmful_incidents)
+        self.assertNotIn(incident.id, observer.knowledge.known_harmful_incidents)
+
+    def test_teller_can_share_known_harmful_incident_as_secondhand_claim(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        witness = engine.NPC(3, 2, name="Witness")
+        listener = engine.NPC(4, 2, name="Listener")
+        self.world.village_npcs.extend([victim, witness, listener])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 2, "narrative_feedback": "A harsh blow lands."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[victim, witness])
+
+        self.world.player_attempt_attack(victim)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        witness_view = witness.knowledge.known_harmful_incidents[incident.id]
+
+        shared = self.world.share_harmful_incident_claim(witness, listener, incident.id)
+
+        self.assertTrue(shared)
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertTrue(listener_view.secondhand)
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertEqual(listener_view.told_by_id, witness.id)
+        self.assertLess(listener_view.confidence, witness_view.confidence)
+
+    def test_unwitnessed_incident_can_spread_via_actor_claim(self):
+        victim = engine.NPC(2, 2, name="Victim")
+        listener = engine.NPC(6, 6, name="Listener")
+        victim.combat.hp = 1
+        self.world.village_npcs.extend([victim, listener])
+        self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 25, "narrative_feedback": "A fatal hit."}))
+        self.world._get_witnesses_to_action = MagicMock(return_value=[])
+
+        self.world.player_attempt_attack(victim)
+        incident = next(iter(self.world.harmful_incidents.values()))
+        self.assertNotIn(incident.id, listener.knowledge.known_harmful_incidents)
+
+        shared = self.world.share_harmful_incident_claim(self.world.player, listener, incident.id)
+
+        self.assertTrue(shared)
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertTrue(listener_view.secondhand)
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertEqual(listener_view.told_by_id, self.world.player.id)
+        self.assertLess(listener_view.confidence, 1.0)
+        self.assertEqual(listener_view.attributed_attacker_id, self.world.player.id)
+
+    def test_npc_gossip_shares_incident_claim_between_speaker_and_listener(self):
+        speaker = engine.NPC(1, 1, name="Speaker")
+        listener = engine.NPC(1, 2, name="Listener")
+        self.world.village_npcs.extend([speaker, listener])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=5,
+            target_survived=True,
+            witness_ids=[speaker.id],
+        )
+        engine.record_incident_attribution(speaker, incident, attacker_id=self.world.player.id, confidence=0.95, basis="direct_witness")
+
+        shared = self.world.propagate_npc_harmful_incident_gossip(speaker, listener, overhear_radius=0)
+
+        self.assertTrue(shared)
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertTrue(listener_view.secondhand)
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertLess(listener_view.confidence, 0.95)
+
+    def test_npc_gossip_can_be_overheard_with_lower_confidence(self):
+        speaker = engine.NPC(1, 1, name="Speaker")
+        listener = engine.NPC(1, 2, name="Listener")
+        overhearer = engine.NPC(2, 1, name="Overhearer")
+        far_npc = engine.NPC(10, 10, name="Far")
+        self.world.village_npcs.extend([speaker, listener, overhearer, far_npc])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=5,
+            target_survived=True,
+            witness_ids=[speaker.id],
+        )
+        engine.record_incident_attribution(speaker, incident, attacker_id=self.world.player.id, confidence=0.95, basis="direct_witness")
+
+        self.world.propagate_npc_harmful_incident_gossip(speaker, listener, overhear_radius=2)
+
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        overheard_view = overhearer.knowledge.known_harmful_incidents[incident.id]
+        self.assertEqual(overheard_view.basis, "overheard_claim")
+        self.assertTrue(overheard_view.secondhand)
+        self.assertLess(overheard_view.confidence, listener_view.confidence)
+        self.assertNotIn(incident.id, far_npc.knowledge.known_harmful_incidents)
+
+    def test_gossip_does_not_override_stronger_direct_knowledge(self):
+        speaker = engine.NPC(1, 1, name="Speaker")
+        listener = engine.NPC(1, 2, name="Listener")
+        self.world.village_npcs.extend([speaker, listener])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=4,
+            target_survived=True,
+            witness_ids=[listener.id, speaker.id],
+        )
+        engine.record_incident_attribution(speaker, incident, attacker_id=self.world.player.id, confidence=0.7, basis="direct_witness")
+        engine.record_incident_attribution(listener, incident, attacker_id=self.world.player.id, confidence=0.95, basis="direct_witness")
+
+        shared = self.world.propagate_npc_harmful_incident_gossip(speaker, listener, overhear_radius=0)
+
+        self.assertFalse(shared)
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertEqual(listener_view.basis, "direct_witness")
+        self.assertAlmostEqual(listener_view.confidence, 0.95)
+
+    def test_gossip_claims_feed_distrust_social_consequences(self):
+        speaker = engine.NPC(1, 1, name="Speaker")
+        merchant_listener = engine.NPC(1, 2, name="Merchant")
+        merchant_listener.economic.profession = "Merchant"
+        merchant_listener.social.relationships[speaker.id] = 90
+        self.world.village_npcs.extend([speaker, merchant_listener])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=speaker.id,
+            location=(1, 1),
+            severity=6,
+            target_survived=True,
+            witness_ids=[speaker.id],
+        )
+        engine.record_incident_attribution(speaker, incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+
+        self.world.propagate_npc_harmful_incident_gossip(speaker, merchant_listener, overhear_radius=0)
+
+        self.assertIn(self.world.player.id, merchant_listener.social.grudges)
+        self.assertGreater(merchant_listener.get_distrust_towards(self.world.player), 0)
+
+    def test_local_opinion_weights_direct_witness_more_than_overheard(self):
+        victim = engine.NPC(5, 5, name="Victim")
+        speaker = engine.NPC(1, 1, name="Speaker")
+        listener = engine.NPC(1, 2, name="Listener")
+        overhearer = engine.NPC(2, 1, name="Overhearer")
+        self.world.village_npcs.extend([victim, speaker, listener, overhearer])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=victim.id,
+            location=(1, 1),
+            severity=20,
+            target_survived=True,
+            witness_ids=[speaker.id],
+        )
+        engine.record_incident_attribution(speaker, incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+
+        self.world.propagate_npc_harmful_incident_gossip(speaker, listener, overhear_radius=2)
+        speaker_score = self.world.refresh_local_incident_opinion(speaker, self.world.player.id)
+        listener_score = self.world.refresh_local_incident_opinion(listener, self.world.player.id)
+        overhearer_score = self.world.refresh_local_incident_opinion(overhearer, self.world.player.id)
+
+        self.assertLess(speaker_score, listener_score)
+        self.assertLess(listener_score, overhearer_score)
+        self.assertLess(overhearer_score, 0)
+
+    def test_hidden_unattributed_incident_does_not_affect_uninformed_npc_opinion(self):
+        victim = engine.NPC(5, 5, name="Victim")
+        observer = engine.NPC(6, 6, name="Observer")
+        self.world.village_npcs.extend([victim, observer])
+        engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=victim.id,
+            location=(5, 5),
+            severity=12,
+            target_survived=False,
+            witness_ids=[],
+        )
+
+        score = self.world.refresh_local_incident_opinion(observer, self.world.player.id)
+
+        self.assertEqual(score, 0.0)
+
+    def test_local_opinion_supports_heroic_interpretation_against_creature_targets(self):
+        creature = engine.NPC(4, 4, name="Dire Threat")
+        creature.economic.profession = "Creature"
+        creature.combat.is_hostile_to_player = True
+        observer = engine.NPC(3, 3, name="Observer")
+        self.world.village_npcs.extend([creature, observer])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=creature.id,
+            location=(4, 4),
+            severity=15,
+            target_survived=False,
+            witness_ids=[observer.id],
+        )
+        engine.record_incident_attribution(observer, incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+
+        score = self.world.refresh_local_incident_opinion(observer, self.world.player.id)
+
+        self.assertGreater(score, 0)
+
+    def test_trade_refusal_can_be_driven_by_negative_local_opinion(self):
+        merchant = engine.NPC(0, 0, name="Merchant")
+        victim = engine.NPC(1, 0, name="Victim")
+        merchant.economic.profession = "Merchant"
+        merchant.schedule.work_building_id = "shop_1"
+        shop = SimpleNamespace(building_type="general_store", building_inventory={"bread": 2, "money": 50})
+        self.world.buildings_by_id = {"shop_1": shop}
+        self.world.village_npcs.extend([merchant, victim])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=victim.id,
+            location=(0, 0),
+            severity=80,
+            target_survived=True,
+            witness_ids=[merchant.id],
+        )
+        engine.record_incident_attribution(merchant, incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+        self.world.trade_ui_active = True
+        self.world.trade_ui_npc_target = merchant
+
+        with patch.object(self.world, "_get_village_for_npc", return_value=SimpleNamespace(supply={"bread": 5}, demand={"bread": 5})):
+            self.world.initialize_trade_session()
+
+        self.assertFalse(self.world.trade_ui_active)
+        self.assertIn("refuses to trade", self.world.chat_log[-1])
+
+    def test_town_crier_broadcast_selects_strong_known_incident_and_spreads_it(self):
+        crier = engine.NPC(1, 1, name="Crier")
+        crier.social.is_town_crier = True
+        listener = engine.NPC(2, 1, name="Listener")
+        self.world.village_npcs.extend([crier, listener])
+        weak_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=3,
+            target_survived=True,
+            witness_ids=[crier.id],
+        )
+        strong_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=20,
+            target_survived=True,
+            witness_ids=[crier.id],
+        )
+        engine.record_incident_attribution(crier, weak_incident, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+        engine.record_incident_attribution(crier, strong_incident, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+
+        self.world._run_humanoid_schedule_logic(crier)
+
+        self.assertIn(strong_incident.id, listener.knowledge.known_harmful_incidents)
+        self.assertNotIn(weak_incident.id, listener.knowledge.known_harmful_incidents)
+        listener_view = listener.knowledge.known_harmful_incidents[strong_incident.id]
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertLess(listener_view.confidence, 0.9)
+
+    def test_town_crier_broadcast_creates_overheard_lower_confidence(self):
+        crier = engine.NPC(1, 1, name="Crier")
+        crier.social.is_town_crier = True
+        listener = engine.NPC(2, 1, name="Listener")
+        overhearer = engine.NPC(3, 1, name="Overhearer")
+        self.world.village_npcs.extend([crier, listener, overhearer])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=10,
+            target_survived=True,
+            witness_ids=[crier.id],
+        )
+        engine.record_incident_attribution(crier, incident, attacker_id=self.world.player.id, confidence=0.95, basis="direct_witness")
+
+        self.world._run_humanoid_schedule_logic(crier)
+
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        overheard_view = overhearer.knowledge.known_harmful_incidents[incident.id]
+        self.assertEqual(listener_view.basis, "secondhand_claim")
+        self.assertEqual(overheard_view.basis, "overheard_claim")
+        self.assertLess(overheard_view.confidence, listener_view.confidence)
+
+    def test_town_crier_broadcast_does_not_override_stronger_direct_knowledge(self):
+        crier = engine.NPC(1, 1, name="Crier")
+        crier.social.is_town_crier = True
+        listener = engine.NPC(2, 1, name="Listener")
+        self.world.village_npcs.extend([crier, listener])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=10,
+            target_survived=True,
+            witness_ids=[crier.id, listener.id],
+        )
+        engine.record_incident_attribution(crier, incident, attacker_id=self.world.player.id, confidence=0.8, basis="direct_witness")
+        engine.record_incident_attribution(listener, incident, attacker_id=self.world.player.id, confidence=0.95, basis="direct_witness")
+
+        self.world._run_humanoid_schedule_logic(crier)
+
+        listener_view = listener.knowledge.known_harmful_incidents[incident.id]
+        self.assertEqual(listener_view.basis, "direct_witness")
+        self.assertAlmostEqual(listener_view.confidence, 0.95)
+
+    def test_town_crier_broadcast_affects_local_opinion(self):
+        crier = engine.NPC(1, 1, name="Crier")
+        crier.social.is_town_crier = True
+        listener = engine.NPC(2, 1, name="Listener")
+        self.world.village_npcs.extend([crier, listener])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=listener.id,
+            location=(1, 1),
+            severity=16,
+            target_survived=True,
+            witness_ids=[crier.id],
+        )
+        engine.record_incident_attribution(crier, incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+
+        self.world._run_humanoid_schedule_logic(crier)
+        opinion = self.world.refresh_local_incident_opinion(listener, self.world.player.id)
+
+        self.assertLess(opinion, 0)
+
+    def test_merchant_role_prefers_road_danger_incident_for_sharing(self):
+        merchant = engine.NPC(1, 1, name="Merchant")
+        merchant.economic.profession = "Traveling Merchant"
+        listener = engine.NPC(2, 1, name="Listener")
+        civilian = engine.NPC(6, 6, name="Civilian")
+        creature = engine.NPC(7, 7, name="Creature")
+        creature.economic.profession = "Creature"
+        creature.combat.is_hostile_to_player = True
+        self.world.village_npcs.extend([merchant, listener, civilian, creature])
+        road_danger = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=creature.id,
+            location=(1, 1),
+            severity=8,
+            target_survived=False,
+            witness_ids=[merchant.id],
+        )
+        less_relevant = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=civilian.id,
+            location=(1, 1),
+            severity=8,
+            target_survived=True,
+            witness_ids=[merchant.id],
+        )
+        engine.record_incident_attribution(merchant, road_danger, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+        engine.record_incident_attribution(merchant, less_relevant, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+
+        self.world.propagate_npc_harmful_incident_gossip(merchant, listener, overhear_radius=0)
+
+        self.assertIn(road_danger.id, listener.knowledge.known_harmful_incidents)
+        self.assertNotIn(less_relevant.id, listener.knowledge.known_harmful_incidents)
+
+    def test_guard_role_prefers_crime_incident_for_sharing(self):
+        guard = engine.NPC(1, 1, name="Guard")
+        guard.economic.profession = "Guard"
+        listener = engine.NPC(2, 1, name="Listener")
+        civilian = engine.NPC(6, 6, name="Civilian")
+        creature = engine.NPC(7, 7, name="Creature")
+        creature.economic.profession = "Creature"
+        creature.combat.is_hostile_to_player = True
+        self.world.village_npcs.extend([guard, listener, civilian, creature])
+        crime_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=civilian.id,
+            location=(1, 1),
+            severity=7,
+            target_survived=True,
+            witness_ids=[guard.id],
+        )
+        creature_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=creature.id,
+            location=(1, 1),
+            severity=12,
+            target_survived=False,
+            witness_ids=[guard.id],
+        )
+        engine.record_incident_attribution(guard, crime_incident, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+        engine.record_incident_attribution(guard, creature_incident, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+
+        self.world.propagate_npc_harmful_incident_gossip(guard, listener, overhear_radius=0)
+
+        self.assertIn(crime_incident.id, listener.knowledge.known_harmful_incidents)
+        self.assertNotIn(creature_incident.id, listener.knowledge.known_harmful_incidents)
+
+    def test_town_crier_role_prefers_high_severity_and_high_confidence(self):
+        crier = engine.NPC(1, 1, name="Crier")
+        crier.social.is_town_crier = True
+        listener = engine.NPC(2, 1, name="Listener")
+        civilian = engine.NPC(6, 6, name="Civilian")
+        self.world.village_npcs.extend([crier, listener, civilian])
+        strong_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=civilian.id,
+            location=(1, 1),
+            severity=20,
+            target_survived=True,
+            witness_ids=[crier.id],
+        )
+        weak_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=civilian.id,
+            location=(1, 1),
+            severity=4,
+            target_survived=True,
+            witness_ids=[crier.id],
+        )
+        engine.record_incident_attribution(crier, strong_incident, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+        engine.record_incident_attribution(crier, weak_incident, attacker_id=self.world.player.id, confidence=0.9, basis="direct_witness")
+
+        self.world._run_humanoid_schedule_logic(crier)
+
+        self.assertIn(strong_incident.id, listener.knowledge.known_harmful_incidents)
+        self.assertNotIn(weak_incident.id, listener.knowledge.known_harmful_incidents)
+
+    def test_social_reaction_stance_changes_with_negative_local_opinion(self):
+        observer = engine.NPC(1, 1, name="Observer")
+        target = engine.NPC(2, 1, name="Target")
+        neutral_target = engine.NPC(3, 1, name="Neutral")
+        victim = engine.NPC(4, 1, name="Victim")
+        self.world.village_npcs.extend([observer, target, neutral_target, victim])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=target.id,
+            target_id=victim.id,
+            location=(1, 1),
+            severity=22,
+            target_survived=True,
+            witness_ids=[observer.id],
+        )
+        engine.record_incident_attribution(observer, incident, attacker_id=target.id, confidence=1.0, basis="direct_witness")
+
+        negative_assessment = self.world.evaluate_social_reaction_stance(observer, target)
+        neutral_assessment = self.world.evaluate_social_reaction_stance(observer, neutral_target)
+
+        self.assertIn(negative_assessment.stance, {"wary", "fearful", "hostile"})
+        self.assertEqual(neutral_assessment.stance, "neutral")
+
+    def test_visible_weapon_increases_social_reaction_threat(self):
+        observer = engine.NPC(1, 1, name="Observer")
+        target = engine.NPC(2, 1, name="Target")
+        observer.social.relationships[target.id] = 5
+        self.world.village_npcs.extend([observer, target])
+
+        baseline = self.world.evaluate_social_reaction_stance(observer, target)
+        target.add_item("iron_sword", 1)
+        target.equip_item_reference("weapon", target.economic.npc_inventory.get_item_reference("iron_sword"))
+        armed = self.world.evaluate_social_reaction_stance(observer, target)
+
+        self.assertGreater(armed.threat_score, baseline.threat_score)
+        self.assertIn(armed.stance, {"wary", "fearful", "hostile"})
+
+    def test_social_reaction_logic_is_entity_agnostic_for_player_and_npc_targets(self):
+        observer_npc_target = engine.NPC(1, 1, name="Observer A")
+        observer_player_target = engine.NPC(1, 2, name="Observer B")
+        npc_target = engine.NPC(2, 1, name="NPC Target")
+        victim = engine.NPC(3, 1, name="Victim")
+        self.world.village_npcs.extend([observer_npc_target, observer_player_target, npc_target, victim])
+        npc_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=npc_target.id,
+            target_id=victim.id,
+            location=(1, 1),
+            severity=16,
+            target_survived=True,
+            witness_ids=[observer_npc_target.id],
+        )
+        player_incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=victim.id,
+            location=(1, 1),
+            severity=16,
+            target_survived=True,
+            witness_ids=[observer_player_target.id],
+        )
+        engine.record_incident_attribution(observer_npc_target, npc_incident, attacker_id=npc_target.id, confidence=1.0, basis="direct_witness")
+        engine.record_incident_attribution(observer_player_target, player_incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+
+        npc_assessment = self.world.evaluate_social_reaction_stance(observer_npc_target, npc_target)
+        player_assessment = self.world.evaluate_social_reaction_stance(observer_player_target, self.world.player)
+
+        self.assertEqual(npc_assessment.stance, player_assessment.stance)
+
+    def test_social_reaction_can_trigger_avoidance_behavior(self):
+        observer = engine.NPC(5, 5, name="Observer")
+        threatening_npc = engine.NPC(6, 5, name="Threat")
+        home = engine.Building(8, 8, 4, 4, "house", global_chunk_x_start=0, global_chunk_y_start=0)
+        self.world.buildings_by_id[home.id] = home
+        observer.schedule.home_building_id = home.id
+        observer.social.relationships[threatening_npc.id] = 0
+        threatening_npc.add_item("iron_sword", 1)
+        threatening_npc.equip_item_reference("weapon", threatening_npc.economic.npc_inventory.get_item_reference("iron_sword"))
+        self.world.village_npcs.extend([observer, threatening_npc])
+
+        self.world._run_humanoid_schedule_logic(observer)
+
+        self.assertEqual(observer.schedule.current_task, "avoiding_social_threat")
+        self.assertEqual(observer.task_target_entity_id, threatening_npc.id)
+
+    def test_direct_knowledge_yields_stronger_reaction_than_overheard(self):
+        attacker = engine.NPC(2, 1, name="Attacker")
+        victim = engine.NPC(3, 1, name="Victim")
+        direct_observer = engine.NPC(1, 1, name="Direct")
+        overheard_observer = engine.NPC(1, 2, name="Overheard")
+        self.world.village_npcs.extend([attacker, victim, direct_observer, overheard_observer])
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=attacker.id,
+            target_id=victim.id,
+            location=(1, 1),
+            severity=14,
+            target_survived=True,
+            witness_ids=[direct_observer.id],
+        )
+        engine.record_incident_attribution(direct_observer, incident, attacker_id=attacker.id, confidence=1.0, basis="direct_witness")
+        engine.record_incident_attribution(overheard_observer, incident, attacker_id=attacker.id, confidence=0.45, basis="overheard_claim")
+
+        direct_assessment = self.world.evaluate_social_reaction_stance(direct_observer, attacker)
+        overheard_assessment = self.world.evaluate_social_reaction_stance(overheard_observer, attacker)
+
+        self.assertGreater(direct_assessment.threat_score, overheard_assessment.threat_score)
+
+    def test_traveling_merchant_sets_minimal_travel_state_when_departing(self):
+        merchant = engine.NPC(0, 0, name="Traveler")
+        merchant.economic.profession = "Traveling Merchant"
+        merchant.schedule.current_task = "traveling_to_village"
+        merchant.schedule.current_path = []
+        current_village = SimpleNamespace(id="origin", buildings=[SimpleNamespace(global_center_x=0, global_center_y=0)])
+        target_building = SimpleNamespace(global_center_x=8, global_center_y=8)
+        target_village = SimpleNamespace(id="destination", buildings=[target_building])
+        self.world.chunk_height = 1
+        self.world.chunk_width = 2
+        self.world.chunks = [[SimpleNamespace(village=current_village), SimpleNamespace(village=target_village)]]
+        self.world._get_village_for_npc = MagicMock(return_value=current_village)
+        self.world.calculate_path = MagicMock(return_value=[(1, 1), (2, 2), (3, 3), (4, 4)])
+
+        with patch("simulation.systems.scheduling.random.choice", side_effect=[target_village, target_building]):
+            run_npc_traveling_merchant_policy(self.world, merchant)
+
+        self.assertTrue(merchant.travel.is_traveling)
+        self.assertEqual(merchant.travel.origin_settlement_id, "origin")
+        self.assertEqual(merchant.travel.destination_settlement_id, "destination")
+        self.assertGreaterEqual(merchant.travel.eta_days, 1)
+
+    def test_merchant_arrival_shares_carried_incident_into_destination_only(self):
+        merchant = engine.NPC(1, 1, name="Traveler")
+        merchant.economic.profession = "Traveling Merchant"
+        destination_listener = engine.NPC(2, 1, name="Destination Listener")
+        destination_overhearer = engine.NPC(3, 1, name="Destination Overhearer")
+        origin_npc = engine.NPC(10, 10, name="Origin NPC")
+        other_town_npc = engine.NPC(20, 20, name="Other Town NPC")
+        self.world.village_npcs.extend([merchant, destination_listener, destination_overhearer, origin_npc, other_town_npc])
+        origin_village = SimpleNamespace(id="origin")
+        destination_village = SimpleNamespace(id="destination")
+        other_village = SimpleNamespace(id="other")
+        incident = engine.create_harmful_incident(
+            self.world,
+            attacker_id=self.world.player.id,
+            target_id=origin_npc.id,
+            location=(1, 1),
+            severity=18,
+            target_survived=True,
+            witness_ids=[merchant.id],
+        )
+        engine.record_incident_attribution(merchant, incident, attacker_id=self.world.player.id, confidence=1.0, basis="direct_witness")
+
+        village_lookup = {
+            merchant.id: destination_village,
+            destination_listener.id: destination_village,
+            destination_overhearer.id: destination_village,
+            origin_npc.id: origin_village,
+            other_town_npc.id: other_village,
+        }
+        self.world._get_village_for_npc = MagicMock(side_effect=lambda npc, by_coords=False: village_lookup.get(npc.id))
+
+        shared = engine.run_traveler_arrival_incident_sharing(self.world, merchant, destination_village, max_shares=1)
+
+        self.assertEqual(shared, 1)
+        self.assertIn(incident.id, destination_listener.knowledge.known_harmful_incidents)
+        self.assertIn(incident.id, destination_overhearer.knowledge.known_harmful_incidents)
+        self.assertNotIn(incident.id, origin_npc.knowledge.known_harmful_incidents)
+        self.assertNotIn(incident.id, other_town_npc.knowledge.known_harmful_incidents)
+        direct_conf = merchant.knowledge.known_harmful_incidents[incident.id].confidence
+        destination_conf = destination_listener.knowledge.known_harmful_incidents[incident.id].confidence
+        self.assertLess(destination_conf, direct_conf)
+        destination_opinion = self.world.refresh_local_incident_opinion(destination_listener, self.world.player.id)
+        self.assertLess(destination_opinion, 0)
 
     def test_share_player_memory_with_npc_copies_memory_event(self):
         npc = engine.NPC(1, 1, name="Listener")

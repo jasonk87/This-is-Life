@@ -26,6 +26,7 @@ class WorldGenerator:
         self.width = width
         self.height = height
         self.seed = seed
+        self.random = random.Random(seed)
         self.noise = tcod.noise.Noise(
             dimensions=2,
             algorithm=tcod.noise.Algorithm.SIMPLEX,
@@ -36,6 +37,7 @@ class WorldGenerator:
             seed=seed,
         )
         self.elevation_map = self._generate_noise_map()
+        self.village_coords = self._select_village_coords()
 
     def __getstate__(self):
         """Exclude tcod noise objects from pickled save data."""
@@ -63,6 +65,34 @@ class WorldGenerator:
                 noise_map[y, x] = self.noise[x * NOISE_SCALE, y * NOISE_SCALE].item()
         return noise_map
 
+    def _select_village_coords(self) -> set[tuple[int, int]]:
+        candidates = [
+            (x, y)
+            for y in range(self.height)
+            for x in range(self.width)
+            if self.get_biome_at(x, y) == "plains"
+            and 1 <= x < self.width - 1
+            and 1 <= y < self.height - 1
+        ]
+        self.random.shuffle(candidates)
+        target_count = min(4, max(3, len(candidates)))
+        selected: list[tuple[int, int]] = []
+        min_spacing = max(3, min(self.width, self.height) // 3)
+
+        def is_far_enough(candidate: tuple[int, int], spacing: int) -> bool:
+            return all(abs(candidate[0] - other[0]) + abs(candidate[1] - other[1]) >= spacing for other in selected)
+
+        spacing = min_spacing
+        while spacing >= 1 and len(selected) < target_count:
+            selected.clear()
+            for candidate in candidates:
+                if is_far_enough(candidate, spacing):
+                    selected.append(candidate)
+                if len(selected) >= target_count:
+                    break
+            spacing -= 1
+        return set(selected[:target_count])
+
     def get_biome_at(self, x, y):
         """Determines the biome for a given CHUNK coordinate based on elevation."""
         elevation = self.elevation_map[y, x]
@@ -78,12 +108,14 @@ class WorldGenerator:
 
     def get_poi_at(self, x, y, biome):
         """Determines if a POI should be placed at a chunk coordinate."""
+        if (x, y) in self.village_coords:
+            return "village"
         if biome == "plains":
-            if random.random() < POI_DENSITY:
-                return "village"
-            if random.random() < POI_DENSITY / 4:
+            coord_rng = random.Random((self.seed, x, y))
+            if coord_rng.random() < POI_DENSITY / 8:
                 return "ruin"
         elif biome == "mountain":
-            if random.random() < POI_DENSITY / 3:
+            coord_rng = random.Random((self.seed, x, y, "mountain"))
+            if coord_rng.random() < POI_DENSITY / 3:
                 return "ruin"
         return None

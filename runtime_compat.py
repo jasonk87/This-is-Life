@@ -127,5 +127,5 @@ except ModuleNotFoundError:
 
 try:
     from google import genai  # type: ignore
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     genai = _build_genai_fallback()

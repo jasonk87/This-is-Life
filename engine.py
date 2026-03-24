@@ -10221,7 +10221,17 @@ class World:
         if any(word in text for word in ["who are you", "your name", "name?"]):
             return (f"I'm {self.get_entity_display_name(npc_target)}.", "continue_conversation")
         if any(word in text for word in ["follow me", "come with me"]):
-            return ("Alright. Lead the way.", "follow_player")
+            from simulation.systems.conversation_foundation import evaluate_service_request
+            if evaluate_service_request(self, self.player, npc_target, "accompany") == "accept":
+                return ("Alright. Lead the way.", "start_accompany")
+            return ("I have my own things to do.", "end_conversation")
+
+        if any(word in text for word in ["guard me", "protect me", "escort me"]):
+            from simulation.systems.conversation_foundation import evaluate_service_request
+            if evaluate_service_request(self, self.player, npc_target, "guard") == "accept":
+                return ("I've got your back.", "start_guard")
+            return ("I'm no bodyguard.", "end_conversation")
+
         if any(word in text for word in ["stop following", "wait here", "stay here"]):
             return ("I'll wait here then.", "stop_following")
         if "trade" in text and npc_target.economic.profession in {"Merchant", "Miller", "Scribe", "Traveling Merchant"}:
@@ -10323,10 +10333,15 @@ class World:
         elif goal == "end_conversation":
             speaker.conversation_partner_id = None
             listener.conversation_partner_id = None
-        elif goal == "follow_player":
+        elif goal == "start_accompany":
             speaker.social.follow_target_id = listener.id
+            speaker.social.follow_role = "accompany"
+        elif goal == "start_guard":
+            speaker.social.follow_target_id = listener.id
+            speaker.social.follow_role = "guard"
         elif goal == "stop_following":
             speaker.social.follow_target_id = None
+            speaker.social.follow_role = None
 
     def _update_entity_titles(self):
         """Periodically checks and updates titles for all entities based on fame/infamy."""

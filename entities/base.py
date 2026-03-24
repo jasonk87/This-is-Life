@@ -141,6 +141,7 @@ class SocialState:
     reputation: dict[str, int] = field(default_factory=dict)
     shared_experience_ticks: dict[int, int] = field(default_factory=dict)
     follow_target_id: int | None = None
+    follow_role: str | None = None
     social_skill: int = 5
     fame: int = 0
     infamy: int = 0

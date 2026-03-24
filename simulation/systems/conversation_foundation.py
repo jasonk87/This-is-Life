@@ -16,6 +16,59 @@ class ConversationFoundationProfile:
     outcome_weights: dict[str, float]
 
 
+def try_recruit_entity(world, requester, target, role: str) -> bool:
+    """Helper to evaluate and immediately apply a service request."""
+    if evaluate_service_request(world, requester, target, role) == "accept":
+        target.social.follow_target_id = requester.id
+        target.social.follow_role = role
+        return True
+    return False
+
+def evaluate_service_request(world, requester, target, role: str) -> str:
+    """Evaluate whether an entity will accept a service request from a requester."""
+    if requester is None or target is None:
+        return "refuse"
+    if getattr(getattr(target, "physical", None), "is_dead", False):
+        return "refuse"
+
+    # Avoid accepting if already following someone else
+    current_target = getattr(getattr(target, "social", None), "follow_target_id", None)
+    if current_target is not None and current_target != getattr(requester, "id", None):
+        return "refuse"
+
+    # Target evaluates requester
+    profile = evaluate_conversation_foundation(world, target, requester, max_distance=999)
+    if profile.stance in {"hostile", "fearful"}:
+        return "refuse"
+
+    relationship = float(getattr(getattr(target, "social", None), "relationships", {}).get(getattr(requester, "id", None), 50))
+    distrust = float(getattr(target, "get_distrust_towards", lambda _r: 0)(requester))
+    profession = str(getattr(getattr(target, "economic", None), "profession", "")).lower()
+
+    if role == "guard":
+        if distrust > 15:
+            return "refuse"
+
+        # Guards/mercenaries are more willing to escort
+        if profession in {"guard", "sheriff", "mercenary", "deputy"}:
+            if relationship < 30 or profile.openness < 0.4:
+                return "refuse"
+        else:
+            if relationship < 65 or profile.openness < 0.6:
+                return "refuse"
+
+        return "accept"
+
+    if role == "accompany":
+        if distrust > 25:
+            return "refuse"
+        if relationship < 40 or profile.openness < 0.4:
+            return "refuse"
+        return "accept"
+
+    return "refuse"
+
+
 def evaluate_conversation_foundation(world, speaker, listener, *, max_distance: int = 2) -> ConversationFoundationProfile:
     """Compute conversation startability + stance/tone/openness + outcome weights."""
     if speaker is None or listener is None:

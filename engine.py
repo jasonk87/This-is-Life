@@ -2092,7 +2092,7 @@ class World:
                 fov_map = self.npc_fov_maps[npc.id]
                 visible_npcs = [
                     other_npc for other_npc in self.npcs + self.village_npcs
-                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[other_npc.y, other_npc.x]
+                    if other_npc.id != npc.id and not other_npc.physical.is_dead and 0 <= other_npc.x < WORLD_WIDTH and 0 <= other_npc.y < WORLD_HEIGHT and fov_map[int(other_npc.y), int(other_npc.x)]
                 ]
                 # Expanded threat detection for Hunters and others
                 visible_threats = [
@@ -2131,7 +2131,7 @@ class World:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
 
 
-                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[threat.y, threat.x]:
+                        if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[int(threat.y), int(threat.x)]:
                             threats_still_visible = True
                             break
                 if threats_still_visible:

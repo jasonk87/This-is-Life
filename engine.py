@@ -1890,9 +1890,9 @@ class World:
         """Evaluate structured conversation stance/tone/openness and start conditions."""
         return evaluate_conversation_foundation(self, speaker, listener)
 
-    def select_conversation_topic(self, speaker, listener, foundation_profile):
+    def select_conversation_topic(self, speaker, listener, foundation_profile, group_listeners=None):
         """Select structured conversation topic/content from simulation state."""
-        return select_conversation_topic(self, speaker, listener, foundation_profile)
+        return select_conversation_topic(self, speaker, listener, foundation_profile, group_listeners=group_listeners)
 
     def player_propose_to_npc(self, npc: NPC | None) -> bool:
         if npc is None or npc.physical.is_dead:
@@ -6407,22 +6407,43 @@ class World:
                     npc.conversation_partner_id = None
 
     def _continue_npc_conversation(self, speaker, listener):
+        group_participants = [speaker, listener]
+        for p in self.village_npcs:
+            if p.id in (speaker.id, listener.id) or p.physical.is_dead:
+                continue
+
+            if getattr(p.combat, "is_hostile_to_player", False) or getattr(p, "is_frightened", False):
+                continue
+            if p.schedule.current_task in {"fleeing_from_player", "avoiding_social_threat", "combat_action_flee_from_player", "attacking_player", "going_to_report_crime", "seeking_healer", "resting_in_bed"}:
+                continue
+
+            if p.conversation_partner_id in (speaker.id, listener.id):
+                group_participants.append(p)
+            elif abs(p.x - speaker.x) + abs(p.y - speaker.y) <= 3:
+                is_following = getattr(getattr(p, "social", None), "follow_target_id", None) in (speaker.id, listener.id)
+                if is_following or (p.schedule.current_task in {"idle", "gathering_social", "socializing_at_focal_point"} and random.random() < 0.2):
+                    group_participants.append(p)
+            if len(group_participants) >= 4:
+                break
+
+        other_participants = [p for p in group_participants if p.id != speaker.id]
+
         profile = self.evaluate_conversation_foundation(speaker, listener)
         if not profile.can_start:
-            speaker.conversation_partner_id = None
-            listener.conversation_partner_id = None
-            speaker.current_conversation = []
-            listener.current_conversation = []
+            for p in group_participants:
+                if p.conversation_partner_id == speaker.id or p.conversation_partner_id == listener.id or p.id in (speaker.id, listener.id):
+                    p.conversation_partner_id = None
+                    p.current_conversation = []
             return
+
         if len(speaker.current_conversation) >= 6:
             if self._can_player_overhear(speaker):
-                self.add_message_to_chat_log(f"You overhear {self.get_entity_display_name(speaker)} and {self.get_entity_display_name(listener)} wrap up their conversation.")
-            speaker.conversation_partner_id = None
-            listener.conversation_partner_id = None
-            speaker.current_conversation = []
-            listener.current_conversation = []
-            speaker.conversation_cooldown = random.randint(100, 200)
-            listener.conversation_cooldown = random.randint(100, 200)
+                self.add_message_to_chat_log(f"You overhear {self.get_entity_display_name(speaker)} and the group wrap up their conversation.")
+            for p in group_participants:
+                if p.conversation_partner_id == speaker.id or p.conversation_partner_id == listener.id or p.id in (speaker.id, listener.id):
+                    p.conversation_partner_id = None
+                    p.current_conversation = []
+                    p.conversation_cooldown = random.randint(100, 200)
             return
 
         event_summary = "the weather"
@@ -6434,15 +6455,29 @@ class World:
         task_key = ("npc_conversation", speaker.id, listener.id)
         if not self._is_npc_llm_relevant_to_player(speaker, listener):
             self._cancel_background_llm_task(task_key)
-            spoken_line, goal = self._fallback_npc_social_line(speaker, listener)
-            speaker.current_conversation.append(f"{speaker.name}: {spoken_line}")
-            listener.current_conversation.append(f"{speaker.name}: {spoken_line}")
-            self.propagate_npc_harmful_incident_gossip(speaker, listener)
+            spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants)
+
+            line_formatted = f"{speaker.name}: {spoken_line}"
+            speaker.current_conversation.append(line_formatted)
+            for p in other_participants:
+                p.current_conversation = list(speaker.current_conversation)
+                self.propagate_npc_harmful_incident_gossip(speaker, p)
+
             self._handle_npc_social_goal(speaker, listener, goal)
+
             speaker.last_conversation_time = self.game_time
-            listener.last_conversation_time = self.game_time
-            listener.conversation_partner_id = speaker.id
-            speaker.conversation_partner_id = listener.id
+            if other_participants:
+                speaker.conversation_partner_id = random.choice(other_participants).id
+            else:
+                speaker.conversation_partner_id = listener.id
+
+            for p in other_participants:
+                p.last_conversation_time = self.game_time
+                possible_targets = [g for g in group_participants if g.id != p.id]
+                if possible_targets and random.random() < 0.5:
+                    p.conversation_partner_id = random.choice(possible_targets).id
+                else:
+                    p.conversation_partner_id = speaker.id
             return
 
         dialogue = self._poll_background_llm_task(task_key)
@@ -6460,21 +6495,33 @@ class World:
                     spoken_line = dialogue.strip()
 
             if not spoken_line:
-                spoken_line, goal = self._fallback_npc_social_line(speaker, listener)
+                spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants)
 
             if self._can_player_overhear(speaker):
                 self.add_message_to_chat_log(
                     f"You overhear {self.get_entity_display_name(speaker)} tell {self.get_entity_display_name(listener)}: {spoken_line}"
                 )
-            speaker.current_conversation.append(f"{speaker.name}: {spoken_line}")
-            listener.current_conversation.append(f"{speaker.name}: {spoken_line}")
-            self.propagate_npc_harmful_incident_gossip(speaker, listener)
+            line_formatted = f"{speaker.name}: {spoken_line}"
+            speaker.current_conversation.append(line_formatted)
+            for p in other_participants:
+                p.current_conversation = list(speaker.current_conversation)
+                self.propagate_npc_harmful_incident_gossip(speaker, p)
+
             self._handle_npc_social_goal(speaker, listener, goal)
 
             speaker.last_conversation_time = self.game_time
-            listener.last_conversation_time = self.game_time
-            listener.conversation_partner_id = speaker.id
-            speaker.conversation_partner_id = listener.id
+            if other_participants:
+                speaker.conversation_partner_id = random.choice(other_participants).id
+            else:
+                speaker.conversation_partner_id = listener.id
+
+            for p in other_participants:
+                p.last_conversation_time = self.game_time
+                possible_targets = [g for g in group_participants if g.id != p.id]
+                if possible_targets and random.random() < 0.5:
+                    p.conversation_partner_id = random.choice(possible_targets).id
+                else:
+                    p.conversation_partner_id = speaker.id
             return
 
         prompt = LLM_PROMPTS["npc_npc_conversation"].format(
@@ -10263,20 +10310,20 @@ class World:
             return goal
         return choose_structured_conversation_outcome(profile, self)
 
-    def _resolve_conversation_topic(self, speaker, listener, profile):
+    def _resolve_conversation_topic(self, speaker, listener, profile, group_listeners=None):
         """Select and apply a structured conversation topic payload."""
-        topic_choice = self.select_conversation_topic(speaker, listener, profile)
-        line, goal = apply_conversation_topic(self, speaker, listener, topic_choice)
+        topic_choice = self.select_conversation_topic(speaker, listener, profile, group_listeners=group_listeners)
+        line, goal = apply_conversation_topic(self, speaker, listener, topic_choice, group_listeners=group_listeners)
         return line, (goal or topic_choice.goal or "continue_conversation"), topic_choice
 
-    def _fallback_npc_social_line(self, speaker, listener) -> tuple[str, str]:
+    def _fallback_npc_social_line(self, speaker, listener, group_listeners=None) -> tuple[str, str]:
         profile = self.evaluate_conversation_foundation(speaker, listener)
         if not profile.can_start:
             if profile.stance in {"fearful", "hostile"}:
                 return ("I'd rather keep my distance.", "end_conversation")
             return ("Now isn't a good time.", "end_conversation")
 
-        line, topic_goal, _topic_choice = self._resolve_conversation_topic(speaker, listener, profile)
+        line, topic_goal, _topic_choice = self._resolve_conversation_topic(speaker, listener, profile, group_listeners=group_listeners)
         if topic_goal not in {"continue_conversation", "end_conversation", "go_to_work", "go_home", "socialize"}:
             topic_goal = "continue_conversation"
         if topic_goal != "continue_conversation":

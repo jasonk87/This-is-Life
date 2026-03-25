@@ -13,11 +13,33 @@ class ConversationTopicChoice:
     goal: str
 
 
-def select_conversation_topic(world, speaker, listener, foundation_profile) -> ConversationTopicChoice:
-    relationship = float(getattr(getattr(speaker, "social", None), "relationships", {}).get(getattr(listener, "id", None), 50))
+def select_conversation_topic(world, speaker, listener, foundation_profile, group_listeners=None) -> ConversationTopicChoice:
+    group_listeners = group_listeners or []
+    all_listeners = [listener] + [g for g in group_listeners if getattr(g, "id", None) != getattr(listener, "id", None)]
+
+    base_relationship = float(getattr(getattr(speaker, "social", None), "relationships", {}).get(getattr(listener, "id", None), 50))
+    relationship = base_relationship
+    base_shared_ticks = getattr(getattr(speaker, "social", None), "shared_experience_ticks", {}).get(getattr(listener, "id", None), 0)
+    shared_ticks = base_shared_ticks
+    is_following = False
+
+    for g in all_listeners:
+        g_id = getattr(g, "id", None)
+        if g_id is None:
+            continue
+        rel = float(getattr(getattr(speaker, "social", None), "relationships", {}).get(g_id, 50))
+        if rel > relationship:
+            relationship = relationship + (rel - relationship) * 0.2
+
+        ticks = getattr(getattr(speaker, "social", None), "shared_experience_ticks", {}).get(g_id, 0)
+        if ticks > shared_ticks:
+            shared_ticks = int(shared_ticks + (ticks - shared_ticks) * 0.2)
+
+        if getattr(getattr(speaker, "social", None), "follow_target_id", None) == g_id or \
+           getattr(getattr(g, "social", None), "follow_target_id", None) == getattr(speaker, "id", None):
+            is_following = True
+
     openness = float(getattr(foundation_profile, "openness", 0.5))
-    shared_ticks = getattr(getattr(speaker, "social", None), "shared_experience_ticks", {}).get(getattr(listener, "id", None), 0)
-    is_following = getattr(getattr(speaker, "social", None), "follow_target_id", None) == getattr(listener, "id", None)
 
     candidate_weights = {
         "greeting": 0.5 if relationship < 45 else 0.15,
@@ -55,7 +77,10 @@ def select_conversation_topic(world, speaker, listener, foundation_profile) -> C
     return ConversationTopicChoice(topic, _build_payload(world, speaker, listener, topic), _goal_for_topic(topic))
 
 
-def apply_conversation_topic(world, speaker, listener, choice: ConversationTopicChoice) -> tuple[str, str]:
+def apply_conversation_topic(world, speaker, listener, choice: ConversationTopicChoice, group_listeners=None) -> tuple[str, str]:
+    group_listeners = group_listeners or []
+    all_listeners = [listener] + [g for g in group_listeners if getattr(g, "id", None) != getattr(listener, "id", None)]
+
     topic = choice.topic_type
     payload = choice.payload or {}
     if topic == "greeting":
@@ -64,18 +89,20 @@ def apply_conversation_topic(world, speaker, listener, choice: ConversationTopic
         subject = payload.get("kind", "the day")
         return (f"Strange {subject}, isn't it?", "continue_conversation")
     if topic in {"gossip", "report_incident"} and payload.get("incident_id"):
-        world.propagate_npc_harmful_incident_gossip(speaker, listener)
+        for g in all_listeners:
+            world.propagate_npc_harmful_incident_gossip(speaker, g)
         return ("Have you heard what happened recently?", "continue_conversation")
     if topic == "reflection":
         memory = payload.get("memory_text", "I've been thinking about old times.")
-        listener_memory = getattr(getattr(listener, "knowledge", None), "long_term_memory", None)
-        if isinstance(listener_memory, list):
-            listener_memory.append(f"Heard from {speaker.name}: {memory}")
-            if len(listener_memory) > 50:
-                del listener_memory[:-50]
         relationships = getattr(getattr(speaker, "social", None), "relationships", {})
-        if getattr(listener, "id", None) is not None:
-            relationships[listener.id] = min(100, relationships.get(listener.id, 50) + 2)
+        for g in all_listeners:
+            listener_memory = getattr(getattr(g, "knowledge", None), "long_term_memory", None)
+            if isinstance(listener_memory, list):
+                listener_memory.append(f"Heard from {speaker.name}: {memory}")
+                if len(listener_memory) > 50:
+                    del listener_memory[:-50]
+            if getattr(g, "id", None) is not None:
+                relationships[g.id] = min(100, relationships.get(g.id, 50) + 2)
         return (memory, "continue_conversation")
     if topic == "ask_info":
         location_name = payload.get("location_name")

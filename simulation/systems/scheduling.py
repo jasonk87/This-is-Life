@@ -312,7 +312,60 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
     run_npc_item_pickup_policy(world, npc)
     if run_npc_follower_envelope_policy(world, npc):
         return
+    if run_npc_mobile_conversation_policy(world, npc):
+        return
     update_npc_daily_goal_policy(world, npc, current_time_in_day)
+
+
+def run_npc_mobile_conversation_policy(world, npc) -> bool:
+    """Allow active conversations to gently continue while moving, without fixed destinations."""
+    if npc.schedule.current_task == "mobile_conversation_follow":
+        if not getattr(npc.schedule, "current_path", None):
+            npc.schedule.current_task = "idle"
+
+    partner_id = getattr(npc, "conversation_partner_id", None)
+    if partner_id is None:
+        return False
+
+    partner = world.get_entity_by_id(partner_id)
+    if partner is None or getattr(getattr(partner, "physical", None), "is_dead", False):
+        return False
+
+    dist = abs(npc.x - partner.x) + abs(npc.y - partner.y)
+
+    if dist > 6:
+        return False
+
+    if dist > 2:
+        if npc.schedule.current_task in {"idle", "wandering", "socializing", "avoiding_crowding", "gathering_social", "socializing_at_focal_point", "mobile_conversation_follow"}:
+            rel = getattr(getattr(npc, "social", None), "relationships", {}).get(partner_id, 50)
+            shared = getattr(getattr(npc, "social", None), "shared_experience_ticks", {}).get(partner_id, 0)
+
+            is_companion = getattr(getattr(npc, "social", None), "follow_target_id", None) == partner_id or \
+                           getattr(getattr(partner, "social", None), "follow_target_id", None) == npc.id
+
+            keep_up_chance = 0.5
+            if is_companion:
+                keep_up_chance = 0.9
+            elif rel > 60 or shared > 50:
+                keep_up_chance = 0.8
+
+            context = getattr(npc, "task_context_data", None)
+            if isinstance(context, dict) and context.get("social_context") == "gathering":
+                keep_up_chance = min(1.0, keep_up_chance * 1.2)
+
+            if random.random() < keep_up_chance:
+                dest_x, dest_y = world._find_best_adjacent_tile(partner.x, partner.y, npc)
+                if dest_x is not None:
+                    if not npc.schedule.current_path or getattr(npc.schedule, "current_destination_coords", None) != (dest_x, dest_y):
+                        path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                        if path:
+                            npc.schedule.current_task = "mobile_conversation_follow"
+                            npc.schedule.current_path = path
+                            npc.schedule.current_destination_coords = (dest_x, dest_y)
+                            return True
+
+    return False
 
 
 def run_npc_social_reaction_policy(world, npc) -> bool:

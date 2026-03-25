@@ -1886,9 +1886,9 @@ class World:
         """Entity-agnostic social reaction stance evaluation."""
         return evaluate_social_reaction_stance(self, observer, target)
 
-    def evaluate_conversation_foundation(self, speaker, listener):
+    def evaluate_conversation_foundation(self, speaker, listener, max_distance=2):
         """Evaluate structured conversation stance/tone/openness and start conditions."""
-        return evaluate_conversation_foundation(self, speaker, listener)
+        return evaluate_conversation_foundation(self, speaker, listener, max_distance=max_distance)
 
     def select_conversation_topic(self, speaker, listener, foundation_profile, group_listeners=None):
         """Select structured conversation topic/content from simulation state."""
@@ -2738,6 +2738,8 @@ class World:
                         if npc.knowledge.known_events:
                             self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.")
 
+                    elif npc.schedule.current_task == "mobile_conversation_follow":
+                        npc.schedule.current_task = "idle"
                     elif npc.schedule.current_task == "socializing" and npc.task_target_entity_id:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
@@ -6428,7 +6430,7 @@ class World:
 
         other_participants = [p for p in group_participants if p.id != speaker.id]
 
-        profile = self.evaluate_conversation_foundation(speaker, listener)
+        profile = self.evaluate_conversation_foundation(speaker, listener, max_distance=6)
         if not profile.can_start:
             for p in group_participants:
                 if p.conversation_partner_id == speaker.id or p.conversation_partner_id == listener.id or p.id in (speaker.id, listener.id):
@@ -6455,7 +6457,7 @@ class World:
         task_key = ("npc_conversation", speaker.id, listener.id)
         if not self._is_npc_llm_relevant_to_player(speaker, listener):
             self._cancel_background_llm_task(task_key)
-            spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants)
+            spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants, max_distance=6)
 
             line_formatted = f"{speaker.name}: {spoken_line}"
             speaker.current_conversation.append(line_formatted)
@@ -6495,7 +6497,7 @@ class World:
                     spoken_line = dialogue.strip()
 
             if not spoken_line:
-                spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants)
+                spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants, max_distance=6)
 
             if self._can_player_overhear(speaker):
                 self.add_message_to_chat_log(
@@ -10316,8 +10318,8 @@ class World:
         line, goal = apply_conversation_topic(self, speaker, listener, topic_choice, group_listeners=group_listeners)
         return line, (goal or topic_choice.goal or "continue_conversation"), topic_choice
 
-    def _fallback_npc_social_line(self, speaker, listener, group_listeners=None) -> tuple[str, str]:
-        profile = self.evaluate_conversation_foundation(speaker, listener)
+    def _fallback_npc_social_line(self, speaker, listener, group_listeners=None, max_distance=2) -> tuple[str, str]:
+        profile = self.evaluate_conversation_foundation(speaker, listener, max_distance=max_distance)
         if not profile.can_start:
             if profile.stance in {"fearful", "hostile"}:
                 return ("I'd rather keep my distance.", "end_conversation")

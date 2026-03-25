@@ -184,5 +184,48 @@ class TestSocialImpact(unittest.TestCase):
         self.assertLess(assessment.threat_score, 95.0)
         self.assertEqual(assessment.stance, "fearful") # 94 is fearful (>=70, <95)
 
+    def test_presence_reduces_conversation_openness(self):
+        from simulation.systems.conversation_foundation import evaluate_conversation_foundation
+
+        # Setup coordinates so they are within conversation distance
+        self.worker.x, self.worker.y = 10, 10
+        self.unemployed.x, self.unemployed.y = 10, 11
+
+        # Empty radius (no one else around)
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.worker, self.unemployed])
+        baseline_profile = evaluate_conversation_foundation(self.world, self.worker, self.unemployed)
+
+        # Introduce a high-presence entity nearby
+        self.boss.economic.profession = "Sheriff" # High presence
+        self.boss.x, self.boss.y = 12, 12 # Nearby but not participating
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.worker, self.unemployed, self.boss])
+
+        presence_profile = evaluate_conversation_foundation(self.world, self.worker, self.unemployed)
+
+        # Openness should be reduced
+        self.assertLess(presence_profile.openness, baseline_profile.openness)
+        # Tone should shift from neutral/warm to guarded/respectful
+        if baseline_profile.tone in {"neutral", "warm"} and presence_profile.openness < 0.7:
+            self.assertIn(presence_profile.tone, {"guarded", "respectful"})
+
+    def test_presence_does_not_override_strong_relationship(self):
+        from simulation.systems.conversation_foundation import evaluate_conversation_foundation
+
+        self.worker.x, self.worker.y = 10, 10
+        self.unemployed.x, self.unemployed.y = 10, 11
+
+        # Force a very strong relationship
+        self.worker.social.relationships[self.unemployed.id] = 100
+
+        # Introduce a high-presence entity nearby
+        self.boss.economic.profession = "Sheriff"
+        self.boss.x, self.boss.y = 12, 12
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.worker, self.unemployed, self.boss])
+
+        profile = evaluate_conversation_foundation(self.world, self.worker, self.unemployed)
+
+        # Openness should still be relatively high despite presence reduction
+        self.assertGreater(profile.openness, 0.5)
+
 if __name__ == '__main__':
     unittest.main()

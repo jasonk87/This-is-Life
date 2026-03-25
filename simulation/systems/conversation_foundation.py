@@ -83,6 +83,33 @@ def evaluate_conversation_foundation(world, speaker, listener, *, max_distance: 
     relationship = float(getattr(getattr(speaker, "social", None), "relationships", {}).get(getattr(listener, "id", None), 50))
     openness = _openness_from_stance_and_relationship(assessment.stance, relationship)
     tone = _tone_from_stance(assessment.stance)
+
+    # Apply presence-based openness/tone bias
+    from simulation.systems.social_reaction import _calculate_presence_score
+    max_presence = 0.0
+    if hasattr(world, "get_entities_in_radius"):
+        nearby = world.get_entities_in_radius(getattr(speaker, "x", 0), getattr(speaker, "y", 0), 8)
+        speaker_id = getattr(speaker, "id", None)
+        listener_id = getattr(listener, "id", None)
+        for entity in nearby:
+            entity_id = getattr(entity, "id", None)
+            if entity_id in {speaker_id, listener_id}:
+                continue
+            presence = _calculate_presence_score(world, entity)
+            if presence > max_presence:
+                max_presence = presence
+
+    if max_presence > 0:
+        presence_factor = max(0.0, min(max_presence / 100.0, 0.3))
+        openness *= (1.0 - presence_factor)
+
+        # Bias tone lightly if openness is reduced enough and not already strongly emotional
+        if max_presence >= 15.0 and openness < 0.7:
+            if tone == "warm":
+                tone = "respectful"
+            elif tone == "neutral":
+                tone = "guarded"
+
     weights = _outcome_weights_for_stance(assessment.stance, openness, relationship)
     can_start = assessment.stance != "hostile" or openness >= 0.55
     reason = "ok" if can_start else "hostile_closed"

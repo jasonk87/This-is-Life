@@ -48,11 +48,14 @@ def select_conversation_topic(world, speaker, listener, foundation_profile, grou
 
     openness = float(getattr(foundation_profile, "openness", 0.5))
 
+    has_incident_gossip = _choose_incident_payload(world, speaker) is not None
+    has_incident_report = _choose_incident_payload(world, speaker, min_confidence=0.7) is not None
+
     candidate_weights = {
         "greeting": 0.5 if relationship < 45 else 0.15,
         "small_talk": 0.9,
-        "gossip": 0.4 if _choose_incident_payload(world, speaker) else 0.0,
-        "report_incident": 0.55 if _choose_incident_payload(world, speaker, min_confidence=0.7) else 0.0,
+        "gossip": 0.4 if has_incident_gossip else 0.0,
+        "report_incident": 0.55 if has_incident_report else 0.0,
         "reflection": 0.5 if _choose_reflection_payload(world, speaker, listener) else 0.0,
         "ask_info": 0.25 if _choose_ask_info_payload(speaker, listener) else 0.0,
         "ask_favor": 0.2 if _choose_favor_payload(speaker) else 0.0,
@@ -80,6 +83,15 @@ def select_conversation_topic(world, speaker, listener, foundation_profile, grou
         if topic in candidate_weights:
             candidate_weights[topic] += topic_bias
 
+    # Apply explicit topic momentum
+    context_data = getattr(speaker, "task_context_data", None)
+    if isinstance(context_data, dict):
+        current_topic = context_data.get("current_topic")
+        if current_topic in candidate_weights:
+            momentum_bonus = 2.0 if current_topic == "reflection" else 0.5
+            if current_topic == "small_talk": momentum_bonus = 0.2
+            candidate_weights[current_topic] += momentum_bonus
+
     topics = [topic for topic, weight in candidate_weights.items() if weight > 0]
     weights = [candidate_weights[topic] for topic in topics]
     if not topics:
@@ -104,6 +116,13 @@ def apply_conversation_topic(world, speaker, listener, choice: ConversationTopic
                 if not hasattr(knowledge, "discussed_event_ids"):
                     knowledge.discussed_event_ids = set()
                 knowledge.discussed_event_ids.add(event_id)
+
+    # Save current topic to speaker context for momentum
+    if hasattr(speaker, "task_context_data"):
+        context = getattr(speaker, "task_context_data", None)
+        if not isinstance(context, dict):
+            speaker.task_context_data = {}
+        speaker.task_context_data["current_topic"] = topic
 
     if topic == "greeting":
         return (f"Good to see you, {listener.name}.", "continue_conversation")
@@ -295,8 +314,26 @@ def _get_fresh_knowledge_bias(world, speaker, all_listeners) -> dict[str, float]
                 severity = float(getattr(incident, "severity", 0.0))
                 confidence = float(getattr(attribution, "confidence", 0.0))
 
+                # Determine relevance and prestige
+                relevance_multiplier = 1.0
+                incident_target = getattr(incident, "target_id", None)
+                incident_attacker = getattr(incident, "attacker_id", None)
+
+                # Personal relevance
+                participant_ids = {getattr(p, "id", None) for p in participants if getattr(p, "id", None) is not None}
+                if incident_target in participant_ids or incident_attacker in participant_ids:
+                    relevance_multiplier += 1.5
+
+                # Local relevance
+                loc = getattr(incident, "location", None)
+                speaker_loc = (getattr(speaker, "x", 0), getattr(speaker, "y", 0))
+                if loc and hasattr(speaker, "x") and hasattr(speaker, "y"):
+                    dist_sq = (loc[0] - speaker_loc[0])**2 + (loc[1] - speaker_loc[1])**2
+                    if dist_sq < 400:  # Roughly within 20 tiles
+                        relevance_multiplier += 0.5
+
                 # Base score from severity and confidence
-                score = (severity / 50.0) * confidence * (1.0 - (age / freshness_threshold))
+                score = (severity / 50.0) * confidence * (1.0 - (age / freshness_threshold)) * relevance_multiplier
 
                 if confidence >= 0.7:
                     bias["report_incident"] = max(bias["report_incident"], score * 2.0)
@@ -316,7 +353,16 @@ def _get_fresh_knowledge_bias(world, speaker, all_listeners) -> dict[str, float]
             age = current_time - memory_time
             if age < freshness_threshold:
                 importance = float(getattr(memory, "importance_score", 0.0))
-                score = (importance / 50.0) * (1.0 - (age / freshness_threshold))
+                relevance_multiplier = 1.0
+
+                # Personal relevance
+                participant_ids = {getattr(p, "id", None) for p in participants if getattr(p, "id", None) is not None}
+                mem_subject = getattr(memory, "subject_id", None)
+                mem_target = getattr(memory, "target_id", None)
+                if mem_subject in participant_ids or mem_target in participant_ids:
+                    relevance_multiplier += 1.5
+
+                score = (importance / 50.0) * (1.0 - (age / freshness_threshold)) * relevance_multiplier
                 bias["reflection"] = max(bias["reflection"], score * 1.5)
 
     return bias

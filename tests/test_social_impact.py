@@ -134,5 +134,55 @@ class TestSocialImpact(unittest.TestCase):
         self.assertEqual(self.unemployed.schedule.current_task, "applying_for_job")
         self.assertEqual(self.unemployed.schedule.current_destination_coords, (self.mill.global_center_x, self.mill.global_center_y))
 
+    def test_presence_increases_caution_but_not_hostility(self):
+        from simulation.systems.social_reaction import evaluate_social_reaction_stance
+
+        # Baseline evaluation
+        baseline_assessment = evaluate_social_reaction_stance(self.world, self.worker, self.boss)
+
+        # High-presence evaluation (change profession to high-status)
+        self.boss.economic.profession = "Sheriff"
+        high_presence_assessment = evaluate_social_reaction_stance(self.world, self.worker, self.boss)
+
+        # Threat score should increase relative to baseline due to presence
+        self.assertGreater(high_presence_assessment.threat_score, baseline_assessment.threat_score)
+
+        # Threat score should not be hostile
+        self.assertLess(high_presence_assessment.threat_score, 95.0)
+
+    def test_guarded_figure_biases_stance(self):
+        from simulation.systems.social_reaction import evaluate_social_reaction_stance
+
+        baseline_assessment = evaluate_social_reaction_stance(self.world, self.worker, self.unemployed)
+
+        # Make the boss guard the unemployed NPC
+        self.boss.social.follow_target_id = self.unemployed.id
+        self.boss.social.follow_role = "guard"
+        self.boss.x, self.boss.y = self.unemployed.x, self.unemployed.y
+
+        # We need world.get_entities_in_radius to work and return the boss
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.boss])
+
+        guarded_assessment = evaluate_social_reaction_stance(self.world, self.worker, self.unemployed)
+
+        # The presence of a guard should increase the perceived threat/caution score
+        self.assertGreater(guarded_assessment.threat_score, baseline_assessment.threat_score)
+        self.assertLess(guarded_assessment.threat_score, 95.0)
+
+    def test_presence_alone_does_not_force_hostility(self):
+        from simulation.systems.social_reaction import evaluate_social_reaction_stance
+
+        # Force baseline threat just below hostile
+        self.worker.get_distrust_towards = MagicMock(return_value=94.0)
+
+        # Make boss a Sheriff (high presence)
+        self.boss.economic.profession = "Sheriff"
+
+        assessment = evaluate_social_reaction_stance(self.world, self.worker, self.boss)
+
+        # Even with high presence, it shouldn't cross 95 if base threat was < 95
+        self.assertLess(assessment.threat_score, 95.0)
+        self.assertEqual(assessment.stance, "fearful") # 94 is fearful (>=70, <95)
+
 if __name__ == '__main__':
     unittest.main()

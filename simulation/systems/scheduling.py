@@ -9,7 +9,53 @@ from config import DAY_LENGTH_TICKS, WORK_END_TIME_RATIO, WORK_START_TIME_RATIO
 from data.items import ITEM_DEFINITIONS
 from simulation.systems.economy import process_traveling_merchant_village_trade
 from simulation.systems.incidents import run_town_crier_broadcast
-from simulation.systems.social_reaction import evaluate_social_reaction_stance
+from simulation.systems.social_reaction import evaluate_social_reaction_stance, _calculate_presence_score
+
+
+def run_npc_presence_micro_reactions(world, npc) -> bool:
+    """Subtle, non-disruptive reactions (facing/pausing) to high-presence nearby entities."""
+    if not hasattr(npc, "task_context_data") or not isinstance(npc.task_context_data, dict):
+        npc.task_context_data = {}
+
+    last_reaction = npc.task_context_data.get("last_presence_reaction_tick", 0)
+
+    # Cooldown check: 20-50 ticks to prevent spam/jitter
+    if world.game_time < last_reaction + 35: # Use a fixed average or random baseline
+        return False
+
+    # Only react if in a low-priority, non-critical state
+    if npc.schedule.current_task not in {"idle", "wandering", "socializing", "gathering_social", "at_home"}:
+        return False
+
+    max_presence = 0.0
+    target_entity = None
+
+    if hasattr(world, "get_entities_in_radius"):
+        nearby = world.get_entities_in_radius(npc.x, npc.y, 8)
+        for entity in nearby:
+            if entity.id == npc.id:
+                continue
+            presence = _calculate_presence_score(world, entity)
+            if presence > max_presence:
+                max_presence = presence
+                target_entity = entity
+
+    if max_presence >= 15.0 and target_entity:
+        # Prevent everyone reacting simultaneously (staggering)
+        if random.random() < 0.3:
+            npc.task_context_data["last_presence_reaction_tick"] = world.game_time
+
+            # 1. Brief Pause (1-3 ticks)
+            # We don't clear the path, we just set a pause timer
+            npc.task_context_data["pause_until_tick"] = world.game_time + random.randint(1, 3)
+
+            # 2. Facing Adjustment (conceptual, stores the target they are looking at)
+            npc.task_context_data["look_target_id"] = target_entity.id
+            npc.task_context_data["look_duration_ticks"] = random.randint(3, 8)
+
+            return True
+
+    return False
 
 
 def run_npc_proactive_help_seeking_policy(world, npc) -> bool:
@@ -298,6 +344,9 @@ def _try_companion_conversation_trigger(world, npc, target) -> None:
 def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> None:
     """Run humanoid scheduling policies in their existing priority order."""
     run_town_crier_broadcast(world, npc)
+
+    # Check for micro-reactions (like facing/pausing) to nearby presence
+    run_npc_presence_micro_reactions(world, npc)
     current_day = world.game_time // DAY_LENGTH_TICKS
     if run_npc_grudge_suspicion_policy(world, npc, current_day):
         return

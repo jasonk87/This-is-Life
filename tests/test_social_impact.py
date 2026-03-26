@@ -227,5 +227,55 @@ class TestSocialImpact(unittest.TestCase):
         # Openness should still be relatively high despite presence reduction
         self.assertGreater(profile.openness, 0.5)
 
+    def test_presence_triggers_micro_reaction_pause(self):
+        from simulation.systems.scheduling import run_npc_presence_micro_reactions
+
+        self.worker.x, self.worker.y = 10, 10
+        self.worker.schedule.current_task = "idle"
+        self.world.game_time = 100 # Bypass cooldown
+
+        self.boss.economic.profession = "Sheriff" # High presence
+        self.boss.x, self.boss.y = 12, 12
+
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.boss])
+
+        # Force the random check to pass
+        with patch('random.random', return_value=0.0):
+            result = run_npc_presence_micro_reactions(self.world, self.worker)
+
+        self.assertTrue(result)
+        self.assertIn("pause_until_tick", self.worker.task_context_data)
+        self.assertGreater(self.worker.task_context_data["pause_until_tick"], self.world.game_time)
+
+    def test_presence_micro_reaction_cooldown_prevents_spam(self):
+        from simulation.systems.scheduling import run_npc_presence_micro_reactions
+
+        self.worker.x, self.worker.y = 10, 10
+        self.worker.schedule.current_task = "idle"
+        self.world.game_time = 100
+
+        self.boss.economic.profession = "Sheriff"
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.boss])
+
+        # First trigger
+        with patch('random.random', return_value=0.0):
+            run_npc_presence_micro_reactions(self.world, self.worker)
+
+        # Try again immediately
+        result = run_npc_presence_micro_reactions(self.world, self.worker)
+        self.assertFalse(result) # Should fail due to cooldown
+
+    def test_presence_micro_reaction_does_not_interrupt_critical_tasks(self):
+        from simulation.systems.scheduling import run_npc_presence_micro_reactions
+
+        self.worker.schedule.current_task = "fleeing_from_player"
+        self.boss.economic.profession = "Sheriff"
+        self.world.get_entities_in_radius = MagicMock(return_value=[self.boss])
+
+        with patch('random.random', return_value=0.0):
+            result = run_npc_presence_micro_reactions(self.world, self.worker)
+
+        self.assertFalse(result) # Should not pause or react while fleeing
+
 if __name__ == '__main__':
     unittest.main()

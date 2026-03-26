@@ -54,8 +54,14 @@ ROOM_ARCHETYPES = {
 BUILDING_ARCHETYPES = {
     "shack": BuildingArchetype("shack", "residential", (16, 25), ["shared_sleeping"], [], ["poor"]),
     "house": BuildingArchetype("house", "residential", (36, 49), ["bedroom", "dining"], ["storage"], ["middle"]),
+    "common_house": BuildingArchetype("common_house", "residential", (25, 49), ["shared_sleeping"], ["dining", "storage"], ["middle"]),
+    "large_house": BuildingArchetype("large_house", "residential", (49, 81), ["bedroom", "bedroom", "dining"], ["storage", "office"], ["rich"]),
     "tavern": BuildingArchetype("tavern", "commercial", (49, 100), ["tavern_floor"], ["storage", "bedroom"], ["middle"]),
     "city_hall": BuildingArchetype("city_hall", "civic", (49, 81), ["office", "dining"], ["storage"], ["rich"]),
+    "guard_post": BuildingArchetype("guard_post", "civic", (25, 49), ["office"], ["storage"], ["middle"]),
+    "barracks": BuildingArchetype("barracks", "civic", (36, 64), ["shared_sleeping", "storage"], [], ["middle"]),
+    "storage_building": BuildingArchetype("storage_building", "industrial", (25, 49), ["storage"], [], ["poor"]),
+    "lumber_shed": BuildingArchetype("lumber_shed", "industrial", (25, 49), ["workshop"], ["storage"], ["poor"]),
     "carpenter_shop": BuildingArchetype("carpenter_shop", "industrial", (36, 64), ["workshop"], ["storage"], ["middle"]),
     "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"])
 }

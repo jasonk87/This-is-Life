@@ -75,3 +75,32 @@ def test_extensibility_test():
     assert gen_building.footprint == (0, 0, 4, 4)
     assert len(gen_building.rooms) > 0
     assert gen_building.rooms[0].room_type == "bedroom"
+
+def test_new_archetypes_generate_valid_layouts():
+    # Test a few newly added archetypes
+    guard_post = generate_building("guard_post", 0, 0, 6, 6)
+    assert any(r.room_type == "office" for r in guard_post.rooms)
+
+    lumber_shed = generate_building("lumber_shed", 0, 0, 7, 7)
+    assert any(r.room_type == "workshop" for r in lumber_shed.rooms)
+
+    barracks = generate_building("barracks", 0, 0, 8, 8)
+    assert any(r.room_type == "shared_sleeping" for r in barracks.rooms)
+    assert any(r.room_type == "storage" for r in barracks.rooms)
+
+def test_determinism():
+    # Generation must remain deterministic for same inputs
+    building_a = generate_building("large_house", 0, 0, 10, 10)
+    building_b = generate_building("large_house", 0, 0, 10, 10)
+
+    assert [(r.x, r.y, r.w, r.h, r.room_type) for r in building_a.rooms] == [(r.x, r.y, r.w, r.h, r.room_type) for r in building_b.rooms]
+    assert building_a.placed_furniture == building_b.placed_furniture
+
+def test_furniture_appears_in_expected_room_types():
+    gen_building = generate_building("lumber_shed", 0, 0, 6, 6)
+    # lumber_shed has a workshop, which requires workbench and storage
+    has_workbench = any(role == "workbench" for _, _, role in gen_building.placed_furniture)
+    has_storage = any(role == "storage" for _, _, role in gen_building.placed_furniture)
+
+    assert has_workbench, "Workbench should be placed in a workshop"
+    assert has_storage, "Storage should be placed in a workshop"

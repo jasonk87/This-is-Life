@@ -8675,6 +8675,9 @@ class World:
                 elif item_type == "dresser": item_type = "chest_wooden"
                 elif item_type == "counter": item_type = "wooden_table"
                 elif item_type == "desk": item_type = "wooden_table"
+                elif item_type == "shelf": item_type = "wall_shelf"
+                elif item_type == "fireplace": item_type = "fire_pit_simple"
+                elif item_type == "workbench": item_type = "workbench"
 
                 decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
                 if decoration_tile_def:

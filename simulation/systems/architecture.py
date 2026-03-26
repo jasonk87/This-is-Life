@@ -120,7 +120,14 @@ def _is_corner(x: int, y: int, rx: int, ry: int, rw: int, rh: int) -> bool:
            (x == rx + rw - 1 and y == ry) or \
            (x == rx + rw - 1 and y == ry + rh - 1)
 
-def place_furniture(room: Room, occupied_tiles: set) -> List[Tuple[int, int, str]]:
+def _get_wealth_tier(tags: List[str]) -> str:
+    if "poor" in tags:
+        return "low"
+    if "rich" in tags:
+        return "high"
+    return "mid"
+
+def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid") -> List[Tuple[int, int, str]]:
     placed = []
     archetype = ROOM_ARCHETYPES.get(room.room_type)
     if not archetype:
@@ -136,7 +143,14 @@ def place_furniture(room: Room, occupied_tiles: set) -> List[Tuple[int, int, str
     for dx, dy in inner_doors:
         occupied_tiles.add((dx, dy))
 
-    all_roles_to_place = archetype.required_furniture_roles + archetype.optional_furniture_roles
+    optional_furniture = archetype.optional_furniture_roles.copy()
+    if wealth_tier == "low":
+        optional_furniture = optional_furniture[:1] if optional_furniture else []
+    elif wealth_tier == "mid":
+        optional_furniture = optional_furniture[:len(optional_furniture) // 2 + 1]
+    # high: place all optional
+
+    all_roles_to_place = archetype.required_furniture_roles + optional_furniture
 
     for role_id in all_roles_to_place:
         role = FURNITURE_ROLES.get(role_id)
@@ -176,7 +190,10 @@ def place_furniture(room: Room, occupied_tiles: set) -> List[Tuple[int, int, str
                             dist = abs(px - x) + abs(py - y)
                             if dist < min_dist:
                                 min_dist = dist
-                    if min_dist < 3:
+
+                    if wealth_tier == "high" and min_dist < 4:
+                        score += 20 - min_dist
+                    elif wealth_tier != "high" and min_dist < 3:
                         score += 15 - min_dist
                     else:
                         score += 1 # allow fallback
@@ -185,6 +202,13 @@ def place_furniture(room: Room, occupied_tiles: set) -> List[Tuple[int, int, str
                         score += 1
 
                 if score > 0:
+                    # Minor coordinate-based deterministic tie-breaker or scatter
+                    tie_breaker = ((x * 7 + y * 3) % 5) / 10.0
+                    if wealth_tier == "low":
+                        score -= tie_breaker # slightly looser
+                    elif wealth_tier == "high":
+                        score += tie_breaker # slightly different tie-breaker behavior
+
                     candidates.append((score, x, y))
 
         if candidates:
@@ -206,6 +230,19 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     if not archetype:
         return GeneratedBuilding((x, y, w, h), [], [])
 
+    # Determine wealth tier
+    wealth_tier = _get_wealth_tier(archetype.tags)
+
+    # Filter optional rooms by wealth tier
+    optional_rooms = archetype.optional_room_types.copy()
+    if wealth_tier == "low":
+        optional_rooms = [] # Skip optional rooms
+    elif wealth_tier == "mid":
+        optional_rooms = optional_rooms[:max(1, len(optional_rooms) // 2)]
+    # high: try to fit all optional rooms
+
+    all_rooms_to_place = archetype.room_types + optional_rooms
+
     # Partition into Rooms
     rooms = []
     available_space = [(x, y, w, h)]
@@ -213,7 +250,7 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     # Simple BSP-like generation prioritizing required rooms
     # We should make sure we only attempt to place required rooms if possible,
     # and not use up all the space with tiny fragments for optional rooms.
-    for i, r_type in enumerate(archetype.room_types + archetype.optional_room_types):
+    for i, r_type in enumerate(all_rooms_to_place):
         room_arch = ROOM_ARCHETYPES.get(r_type)
         if not room_arch:
             continue
@@ -240,14 +277,22 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
             # We want to make sure the remaining space can actually fit another room if we need one
             split_w, split_h = sw, sh
 
+            # Determine split ratio based on wealth
+            split_ratio = 0.5
+            if wealth_tier == "low":
+                # Deterministic uneven split based on coordinates
+                split_ratio = 0.4 if (sx + sy) % 2 == 0 else 0.6
+            elif wealth_tier == "high":
+                split_ratio = 0.5 # Strictly balanced
+
             if sw >= sh and sw >= 6:
                 # Split vertically
-                split_w = max(3, int(sw * 0.5))
+                split_w = max(3, int(sw * split_ratio))
                 if split_w * sh < room_arch.min_size:
                     split_w = min(sw, max(3, int(room_arch.min_size / max(1, sh)) + 1))
             elif sh > sw and sh >= 6:
                 # Split horizontally
-                split_h = max(3, int(sh * 0.5))
+                split_h = max(3, int(sh * split_ratio))
                 if sw * split_h < room_arch.min_size:
                     split_h = min(sh, max(3, int(room_arch.min_size / max(1, sw)) + 1))
 
@@ -270,7 +315,7 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     occupied_tiles = set()
 
     for room in rooms:
-        placed_furniture.extend(place_furniture(room, occupied_tiles))
+        placed_furniture.extend(place_furniture(room, occupied_tiles, wealth_tier))
 
     # Generate Anchors
     anchors = []

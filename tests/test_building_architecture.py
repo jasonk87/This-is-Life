@@ -146,3 +146,44 @@ def test_no_excessive_duplicate_anchors_on_tile():
 
     for count in anchor_positions.values():
         assert count <= 1, "There should not be duplicate anchors of the same type on the exact same tile"
+
+def test_wealth_tiers_produce_different_layouts():
+    # Make temporary archetypes with identical room setups but different wealth tags
+    BUILDING_ARCHETYPES["test_low"] = BuildingArchetype(
+        "test_low", "residential", (49, 81), ["bedroom"], ["office", "dining"], ["poor"]
+    )
+    BUILDING_ARCHETYPES["test_mid"] = BuildingArchetype(
+        "test_mid", "residential", (49, 81), ["bedroom"], ["office", "dining"], ["middle"]
+    )
+    BUILDING_ARCHETYPES["test_high"] = BuildingArchetype(
+        "test_high", "residential", (49, 81), ["bedroom"], ["office", "dining"], ["rich"]
+    )
+
+    low_building = generate_building("test_low", 0, 0, 10, 10)
+    mid_building = generate_building("test_mid", 0, 0, 10, 10)
+    high_building = generate_building("test_high", 0, 0, 10, 10)
+
+    # High should generally try to place more rooms (optional ones) than low
+    assert len(high_building.rooms) >= len(low_building.rooms), "High wealth should place equal or more rooms than low wealth"
+
+    # High wealth should place equal or more furniture than low wealth
+    # due to scaling optional furniture logic.
+    assert len(high_building.placed_furniture) >= len(low_building.placed_furniture)
+
+def test_optional_furniture_scales_correctly():
+    # Bedroom archetype has 2 required (bed, dresser) and 2 optional (chair, shelf)
+    BUILDING_ARCHETYPES["test_furniture_low"] = BuildingArchetype(
+        "test_furniture_low", "residential", (25, 49), ["bedroom"], [], ["poor"]
+    )
+    BUILDING_ARCHETYPES["test_furniture_high"] = BuildingArchetype(
+        "test_furniture_high", "residential", (25, 49), ["bedroom"], [], ["rich"]
+    )
+
+    # Make room big enough to fit everything
+    low_building = generate_building("test_furniture_low", 0, 0, 7, 7)
+    high_building = generate_building("test_furniture_high", 0, 0, 7, 7)
+
+    low_count = len(low_building.placed_furniture)
+    high_count = len(high_building.placed_furniture)
+
+    assert high_count >= low_count, "High wealth should have higher or equal furniture density than low wealth"

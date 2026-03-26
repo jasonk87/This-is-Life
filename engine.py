@@ -8657,6 +8657,65 @@ class World:
                 self._submit_background_llm_task(task_key, prompt)
 
     def decorate_building_interior(self, building: Building, chunk: Chunk):
+        from simulation.systems.architecture import BUILDING_ARCHETYPES, generate_building
+
+        # Fast path if new architecture system supports this building type
+        if building.building_type in BUILDING_ARCHETYPES:
+            generated = generate_building(
+                building.building_type,
+                building.x, building.y,
+                building.width, building.height
+            )
+            for furn_x, furn_y, furn_role in generated.placed_furniture:
+                item_type = furn_role
+                if item_type == "bed": item_type = "bed_simple"
+                elif item_type == "chair": item_type = "wooden_chair"
+                elif item_type == "table": item_type = "wooden_table"
+                elif item_type == "storage": item_type = "chest_wooden"
+                elif item_type == "dresser": item_type = "chest_wooden"
+                elif item_type == "counter": item_type = "wooden_table"
+                elif item_type == "desk": item_type = "wooden_table"
+
+                decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
+                if decoration_tile_def:
+                    if 0 <= furn_x < WORLD_WIDTH and 0 <= furn_y < WORLD_HEIGHT:
+                        global_x = building.global_origin_x + (furn_x - building.x)
+                        global_y = building.global_origin_y + (furn_y - building.y)
+
+                        target_chunk_x = global_x // CHUNK_SIZE
+                        target_chunk_y = global_y // CHUNK_SIZE
+
+                        # Only place tiles that belong in the chunk we're currently decorating
+                        # Note: `chunk` parameter represents the primary chunk the building falls into,
+                        # but just to be safe if `decorate_building_interior` is meant to populate
+                        # just this chunk... wait, the engine passes the building's origin chunk in `_generate_chunk_macro`.
+                        # Let's ensure we find the right chunk from the world if it spans across.
+
+                        # To keep it robust within `decorate_building_interior` where `chunk` is passed in:
+                        current_chunk_x = chunk.tiles[0][0].__dict__.get("x", 0) # Fallback if we can't find coords
+                        # Actually we can just write to self.chunks directly to avoid boundary bugs
+                        if 0 <= target_chunk_x < self.chunk_width and 0 <= target_chunk_y < self.chunk_height:
+                            target_chunk = self.chunks[target_chunk_y][target_chunk_x]
+
+                            local_x = global_x % CHUNK_SIZE
+                            local_y = global_y % CHUNK_SIZE
+
+                            target_chunk.tiles[local_y][local_x] = Tile(
+                                char=decoration_tile_def["char"],
+                                color=decoration_tile_def["color"],
+                                passable=decoration_tile_def["passable"],
+                                name=decoration_tile_def.get("name", item_type),
+                                properties=decoration_tile_def.get("properties", {})
+                            )
+
+                            interaction_hint = decoration_tile_def.get("properties", {}).get("interaction_hint")
+                            if interaction_hint == "sleep":
+                                if "sleep_spot" not in building.interaction_points:
+                                    building.interaction_points["sleep_spot"] = (global_x, global_y)
+
+            building.interior_decorated = True
+            return
+
         decoration_data = {'decorations': []}
         # if building.building_type == 'house':
         #     decoration_data['decorations'].append({'type': 'bed_simple', 'x': 1, 'y': 1})

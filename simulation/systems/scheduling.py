@@ -695,6 +695,9 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
         if npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != "going_to_work":
             dest_coords_temp = world._get_building_global_center_coords(npc.schedule.work_building_id)
             if dest_coords_temp:
+                work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
+                if work_building_obj:
+                    dest_coords_temp = work_building_obj.get_anchor_coordinates(["work", "service"], dest_coords_temp)
                 new_task_label = "going_to_work"
                 destination_coords = dest_coords_temp
         elif npc.schedule.work_building_id and is_at_work:
@@ -791,6 +794,8 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
         home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
         if home_building_obj:
             sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
+            if not sleep_spot_coords:
+                sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep")
             if is_at_home:
                 if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords:
                     npc.schedule.current_task = "sleeping"
@@ -811,6 +816,9 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
     elif npc.schedule.home_building_id and not is_at_home and npc.schedule.current_task not in ["going_home", "going_home_to_sleep", "sleeping"]:
         dest_coords_temp = world._get_building_global_center_coords(npc.schedule.home_building_id)
         if dest_coords_temp:
+            home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
+            if home_building_obj:
+                dest_coords_temp = home_building_obj.get_anchor_coordinates("sleep", dest_coords_temp)
             new_task_label = "going_home"
             destination_coords = dest_coords_temp
 

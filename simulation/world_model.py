@@ -54,6 +54,19 @@ class Building:
             and self.global_origin_y <= world_y < self.global_origin_y + self.height
         )
 
+    def get_anchor_coordinates(self, anchor_types: list[str] | str, fallback_coords: tuple[int, int] | None = None) -> tuple[int, int] | None:
+        """Returns the global coordinates of an anchor matching any of the requested types, or the fallback coordinates if none is found."""
+        if isinstance(anchor_types, str):
+            anchor_types = [anchor_types]
+
+        for anchor in self.anchors:
+            if anchor.get("type") in anchor_types:
+                x = anchor.get("x")
+                y = anchor.get("y")
+                if x is not None and y is not None:
+                    return x, y
+        return fallback_coords
+
 
 @dataclass
 class ConstructionBlueprint:

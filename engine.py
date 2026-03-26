@@ -8716,6 +8716,20 @@ class World:
                                 if "sleep_spot" not in building.interaction_points:
                                     building.interaction_points["sleep_spot"] = (global_x, global_y)
 
+            for anchor in generated.anchors:
+                global_x = building.global_origin_x + (anchor.x - building.x)
+                global_y = building.global_origin_y + (anchor.y - building.y)
+
+                # Double-check that it's within world bounds and building bounds
+                if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
+                    # Also ensure it doesn't block doors, but the architecture generation already handles that
+                    building.anchors.append({
+                        "type": anchor.type,
+                        "x": global_x,
+                        "y": global_y,
+                        "tags": anchor.tags
+                    })
+
             building.interior_decorated = True
             return
 

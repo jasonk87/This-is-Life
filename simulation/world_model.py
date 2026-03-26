@@ -33,6 +33,7 @@ class Building:
         self.max_workers: int = 2
         self.region_id: str | None = None
         self.settlement_id: str | None = None
+        self.anchors: list[dict[str, Any]] = []
 
     def __setattr__(self, name, value):
         if name == "building_inventory" and not isinstance(value, Inventory):

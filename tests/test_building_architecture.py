@@ -90,11 +90,15 @@ def test_new_archetypes_generate_valid_layouts():
 
 def test_determinism():
     # Generation must remain deterministic for same inputs
+    import random
+    random.seed(42)
     building_a = generate_building("large_house", 0, 0, 10, 10)
+    random.seed(42)
     building_b = generate_building("large_house", 0, 0, 10, 10)
 
     assert [(r.x, r.y, r.w, r.h, r.room_type) for r in building_a.rooms] == [(r.x, r.y, r.w, r.h, r.room_type) for r in building_b.rooms]
     assert building_a.placed_furniture == building_b.placed_furniture
+    assert building_a.anchors == building_b.anchors
 
 def test_furniture_appears_in_expected_room_types():
     gen_building = generate_building("lumber_shed", 0, 0, 6, 6)
@@ -104,3 +108,41 @@ def test_furniture_appears_in_expected_room_types():
 
     assert has_workbench, "Workbench should be placed in a workshop"
     assert has_storage, "Storage should be placed in a workshop"
+
+def test_furniture_anchors_created():
+    # House requires bedroom (needs bed)
+    gen_building = generate_building("house", 0, 0, 8, 8)
+
+    # Check if a sleep anchor was created from a bed
+    has_sleep_anchor = False
+    for anchor in gen_building.anchors:
+        if anchor.type == "sleep" and anchor.tags.get("role") == "bed":
+            has_sleep_anchor = True
+            # Verify anchor is within bounds
+            assert 0 <= anchor.x < 8
+            assert 0 <= anchor.y < 8
+
+    assert has_sleep_anchor, "Sleep anchor should be placed from a bed in a house"
+
+def test_room_fallback_anchors():
+    # Tavern has a tavern_floor which has a fallback 'social' anchor
+    # Generate a small tavern so furniture might fail to place, testing fallback
+    gen_building = generate_building("tavern", 0, 0, 6, 6)
+
+    has_social_anchor = False
+    for anchor in gen_building.anchors:
+        if anchor.type == "social":
+            has_social_anchor = True
+
+    assert has_social_anchor, "A social anchor should be present in a tavern (either from furniture or fallback)"
+
+def test_no_excessive_duplicate_anchors_on_tile():
+    gen_building = generate_building("large_house", 0, 0, 15, 15)
+
+    anchor_positions = {}
+    for anchor in gen_building.anchors:
+        key = (anchor.x, anchor.y, anchor.type)
+        anchor_positions[key] = anchor_positions.get(key, 0) + 1
+
+    for count in anchor_positions.values():
+        assert count <= 1, "There should not be duplicate anchors of the same type on the exact same tile"

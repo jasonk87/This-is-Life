@@ -66,6 +66,25 @@ BUILDING_ARCHETYPES = {
     "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"])
 }
 
+FURNITURE_ANCHORS = {
+    "bed": "sleep",
+    "chair": "eat", # social could also fit, but eat is common. Let's make sure it handles both or pick one primary. Let's stick to the prompt's suggestions if possible.
+    "table": "eat",
+    "workbench": "work",
+    "desk": "work",
+    "storage": "storage",
+    "counter": "social",
+    "fireplace": "social"
+}
+
+ROOM_FALLBACK_ANCHORS = {
+    "shared_sleeping": "sleep",
+    "tavern_floor": "social",
+    "dining": "eat",
+    "workshop": "work",
+    "clinic_room": "service"
+}
+
 @dataclass
 class Room:
     x: int
@@ -75,10 +94,18 @@ class Room:
     room_type: str
 
 @dataclass
+class FunctionalAnchor:
+    type: str
+    x: int
+    y: int
+    tags: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
 class GeneratedBuilding:
     footprint: Tuple[int, int, int, int]  # x, y, w, h
     rooms: List[Room]
     placed_furniture: List[Tuple[int, int, str]]  # (x, y, role_id)
+    anchors: List[FunctionalAnchor] = field(default_factory=list)
 
 def _is_occupied(x: int, y: int, occupied_tiles: set) -> bool:
     return (x, y) in occupied_tiles
@@ -245,4 +272,52 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     for room in rooms:
         placed_furniture.extend(place_furniture(room, occupied_tiles))
 
-    return GeneratedBuilding((x, y, w, h), rooms, placed_furniture)
+    # Generate Anchors
+    anchors = []
+    anchors_per_room_instance: Dict[Tuple[int, int, int, int], set[str]] = {(r.x, r.y, r.w, r.h): set() for r in rooms}
+    anchor_tile_counts: Dict[Tuple[int, int], Dict[str, int]] = {}
+
+    for furn_x, furn_y, role_id in placed_furniture:
+        anchor_type = FURNITURE_ANCHORS.get(role_id)
+        if not anchor_type:
+            continue
+
+        # Find which room this furniture is in
+        parent_room = None
+        for r in rooms:
+            if r.x <= furn_x < r.x + r.w and r.y <= furn_y < r.y + r.h:
+                parent_room = r
+                break
+
+        # Prevent excessive duplicate anchors of the same type on the same tile
+        tile_pos = (furn_x, furn_y)
+        if tile_pos not in anchor_tile_counts:
+            anchor_tile_counts[tile_pos] = {}
+
+        if anchor_tile_counts[tile_pos].get(anchor_type, 0) < 1: # Max 1 per type per tile
+            tags = {"role": role_id}
+            if parent_room:
+                tags["room_type"] = parent_room.room_type
+                anchors_per_room_instance[(parent_room.x, parent_room.y, parent_room.w, parent_room.h)].add(anchor_type)
+
+            anchors.append(FunctionalAnchor(type=anchor_type, x=furn_x, y=furn_y, tags=tags))
+            anchor_tile_counts[tile_pos][anchor_type] = anchor_tile_counts[tile_pos].get(anchor_type, 0) + 1
+
+    # Fallback Anchors for rooms
+    for room in rooms:
+        fallback_type = ROOM_FALLBACK_ANCHORS.get(room.room_type)
+        if not fallback_type:
+            continue
+
+        room_instance_key = (room.x, room.y, room.w, room.h)
+        if fallback_type not in anchors_per_room_instance[room_instance_key]:
+            # No furniture anchor of this type in this room, place a fallback at the center
+            center_x = room.x + room.w // 2
+            center_y = room.y + room.h // 2
+
+            # Simple bounds check just in case, though center should be inside
+            if room.x <= center_x < room.x + room.w and room.y <= center_y < room.y + room.h:
+                tags = {"room_type": room.room_type, "fallback": "true"}
+                anchors.append(FunctionalAnchor(type=fallback_type, x=center_x, y=center_y, tags=tags))
+
+    return GeneratedBuilding((x, y, w, h), rooms, placed_furniture, anchors)

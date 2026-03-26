@@ -5,9 +5,14 @@ from config import DAY_LENGTH_TICKS
 from entities.base import NPC
 from unittest.mock import MagicMock
 
+class MockTile:
+    def __init__(self, passable=True):
+        self.passable = passable
+
 class MockWorld:
     def __init__(self):
         self.buildings_by_id = {}
+        self.entity_positions = {}
 
     def _get_building_global_center_coords(self, building_id):
         building = self.buildings_by_id.get(building_id)
@@ -20,6 +25,9 @@ class MockWorld:
 
     def calculate_path(self, start_x, start_y, end_x, end_y):
         return [(start_x, start_y), (end_x, end_y)]
+
+    def get_tile_at(self, x, y):
+        return MockTile(passable=True)
 
 class TestArchitectureAnchors(unittest.TestCase):
     def setUp(self):
@@ -66,9 +74,50 @@ class TestArchitectureAnchors(unittest.TestCase):
 
         update_npc_daily_goal_policy(self.world, self.npc, current_time_in_day)
 
-        # Should prefer the sleep anchor
+        # Should prefer the sleep anchor (could be slightly refined if the tile is occupied, but here it's empty and passable)
         self.assertEqual(self.npc.schedule.current_task, "going_to_bed")
         self.assertEqual(self.npc.schedule.current_destination_coords, (2, 3))
+
+    def test_anchor_target_refinement(self):
+        # Anchor is at (2, 3) but let's say it's occupied
+        self.home.anchors = [{"type": "sleep", "x": 2, "y": 3}]
+        self.npc.x = 5
+        self.npc.y = 5
+
+        self.world.entity_positions[(2, 3)] = 999  # Occupied by some entity ID 999
+
+        # Simulate night time (hour 23)
+        current_time_in_day = int(DAY_LENGTH_TICKS * 0.95)
+
+        update_npc_daily_goal_policy(self.world, self.npc, current_time_in_day)
+
+        self.assertEqual(self.npc.schedule.current_task, "going_to_bed")
+        # The exact anchor is occupied, so the refined coords should be an adjacent tile.
+        # Since all adjacent are empty and passable in MockWorld, it should pick one like (2, 2) or (3, 3) etc.
+        # The important thing is it's NOT (2, 3) anymore, but within radius 1 of it.
+        dest_x, dest_y = self.npc.schedule.current_destination_coords
+        self.assertNotEqual((dest_x, dest_y), (2, 3))
+        self.assertTrue(abs(dest_x - 2) <= 1 and abs(dest_y - 3) <= 1)
+
+    def test_anchor_target_refinement_ignores_self(self):
+        # Anchor is at (2, 3) and the NPC is already standing on it
+        self.home.anchors = [{"type": "sleep", "x": 2, "y": 3}]
+        self.npc.x = 2
+        self.npc.y = 3
+
+        # Update center to (2, 3) so that `is_at_home` becomes True
+        self.home.global_center_x = 2
+        self.home.global_center_y = 3
+
+        self.world.entity_positions[(2, 3)] = self.npc.id  # Occupied by the NPC themselves
+
+        # Simulate night time
+        current_time_in_day = int(DAY_LENGTH_TICKS * 0.95)
+
+        update_npc_daily_goal_policy(self.world, self.npc, current_time_in_day)
+
+        # Since `is_at_home` is True, and `(npc.x, npc.y) == sleep_spot_coords`, the task should be "sleeping"
+        self.assertEqual(self.npc.schedule.current_task, "sleeping")
 
     def test_work_behavior_prefers_work_anchor(self):
         self.workplace.anchors = [{"type": "work", "x": 22, "y": 23}]

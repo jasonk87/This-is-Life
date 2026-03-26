@@ -3715,7 +3715,7 @@ class World:
                 anchor_types = ["work", "service"]
                 anchor_coords = work_building.get_anchor_coordinates(anchor_types, None)
                 if anchor_coords:
-                    return anchor_coords
+                    return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
 
             # For other zones (like Woodcutter's log_pile_area), use pre-defined coordinates
             zone_coords_list = work_building.work_zone_tiles.get(target_zone_tag)
@@ -3727,7 +3727,7 @@ class World:
                 # Fallback to work/service anchors if no zone coordinates defined
                 anchor_coords = work_building.get_anchor_coordinates(["work", "service"], None)
                 if anchor_coords:
-                    return anchor_coords
+                    return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
 
                 # self.add_message_to_chat_log(f"Warning: No coordinates defined for work zone '{target_zone_tag}' in building {work_building.id} for {npc.name}.")
                 return None

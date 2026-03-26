@@ -67,6 +67,37 @@ class Building:
                     return x, y
         return fallback_coords
 
+    def refine_anchor_coordinates(self, world, start_x: int, start_y: int, radius: int = 1, requesting_entity=None) -> tuple[int, int] | None:
+        """Finds a walkable, unoccupied tile near the given coordinates."""
+        # Check exactly on the tile first if it's perfectly fine
+        tile = world.get_tile_at(start_x, start_y)
+        if tile and getattr(tile, "passable", False):
+            occupant_id = getattr(world, "entity_positions", {}).get((start_x, start_y))
+            if occupant_id is None or (requesting_entity and occupant_id == requesting_entity.id):
+                return start_x, start_y
+
+        candidates = []
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = start_x + dx, start_y + dy
+                if not self.contains_global_coords(nx, ny):
+                    continue
+                tile = world.get_tile_at(nx, ny)
+                if tile and getattr(tile, "passable", False):
+                    occupant_id = getattr(world, "entity_positions", {}).get((nx, ny))
+                    is_occupied = occupant_id is not None and (not requesting_entity or occupant_id != requesting_entity.id)
+                    # Prioritize unoccupied tiles, then distance
+                    score = (10 if not is_occupied else 0) - (abs(dx) + abs(dy))
+                    candidates.append((score, nx, ny))
+
+        if candidates:
+            candidates.sort(key=lambda c: c[0], reverse=True)
+            return candidates[0][1], candidates[0][2]
+
+        return start_x, start_y
+
 
 @dataclass
 class ConstructionBlueprint:

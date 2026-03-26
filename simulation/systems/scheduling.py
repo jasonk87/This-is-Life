@@ -697,7 +697,9 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             if dest_coords_temp:
                 work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
                 if work_building_obj:
-                    dest_coords_temp = work_building_obj.get_anchor_coordinates(["work", "service"], dest_coords_temp)
+                    work_anchor = work_building_obj.get_anchor_coordinates(["work", "service"])
+                    if work_anchor:
+                        dest_coords_temp = work_building_obj.refine_anchor_coordinates(world, work_anchor[0], work_anchor[1], requesting_entity=npc)
                 new_task_label = "going_to_work"
                 destination_coords = dest_coords_temp
         elif npc.schedule.work_building_id and is_at_work:
@@ -796,6 +798,8 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
             if not sleep_spot_coords:
                 sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep")
+                if sleep_spot_coords:
+                    sleep_spot_coords = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
             if is_at_home:
                 if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords:
                     npc.schedule.current_task = "sleeping"
@@ -818,7 +822,9 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
         if dest_coords_temp:
             home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
             if home_building_obj:
-                dest_coords_temp = home_building_obj.get_anchor_coordinates("sleep", dest_coords_temp)
+                sleep_anchor = home_building_obj.get_anchor_coordinates("sleep")
+                if sleep_anchor:
+                    dest_coords_temp = home_building_obj.refine_anchor_coordinates(world, sleep_anchor[0], sleep_anchor[1], requesting_entity=npc)
             new_task_label = "going_home"
             destination_coords = dest_coords_temp
 

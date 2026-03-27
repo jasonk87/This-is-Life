@@ -4,13 +4,14 @@ representing different types of trees in the game world.
 """
 import random
 from tile_types import Tile
+from data.dawnlike import TREE_SPRITES
 from data.tiles import COLORS
 
 class Tree(Tile):
     """A base class for trees in the game."""
     def __init__(self, x, y, tree_type="oak"):
         super().__init__(
-            char='T',
+            char=TREE_SPRITES["tree_generic"],
             color=COLORS["forest_fg"],
             passable=False,
             name=f"{tree_type.capitalize()} Tree",
@@ -45,7 +46,7 @@ class OakTree(Tree):
     """Represents an oak tree."""
     def __init__(self, x, y):
         super().__init__(x, y, "oak")
-        self.char = ord('O')
+        self.char = TREE_SPRITES["oak_tree"]
         self.color = (0, 100, 0)
         self.resource_yield = {"raw_log": 3, "acorn": 1}
 
@@ -53,7 +54,7 @@ class AppleTree(Tree):
     """Represents an apple tree."""
     def __init__(self, x, y):
         super().__init__(x, y, "apple")
-        self.char = ord('A')
+        self.char = TREE_SPRITES["apple_tree"]
         self.color = (0, 150, 0)
         self.resource_yield = {"raw_log": 2, "apple": 2}
 
@@ -61,6 +62,6 @@ class PearTree(Tree):
     """Represents a pear tree."""
     def __init__(self, x, y):
         super().__init__(x, y, "pear")
-        self.char = ord('P')
+        self.char = TREE_SPRITES["pear_tree"]
         self.color = (0, 120, 0)
         self.resource_yield = {"raw_log": 2, "pear": 2}

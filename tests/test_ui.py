@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import json
 import math
 import uuid
+import numpy as np
 
 import engine
 from engine import World
@@ -16,6 +17,13 @@ from tcod_compat import tcod
 import tile_types
 
 class TestMainInputHelpers(unittest.TestCase):
+    def test_normalize_player_first_name_keeps_short_clean_input(self):
+        self.assertEqual(main.normalize_player_first_name("  Ada  "), "Ada")
+
+    def test_normalize_player_first_name_falls_back_for_empty_or_invalid_input(self):
+        self.assertEqual(main.normalize_player_first_name("  "), "Player")
+        self.assertEqual(main.normalize_player_first_name("1234!!!"), "Player")
+
     def test_open_interaction_menu_skips_entities_without_actions(self):
         world = SimpleNamespace(
             interaction_context={},
@@ -211,6 +219,7 @@ class TestMainInputHelpers(unittest.TestCase):
             trade_ui_active=True,
             trade_ui_npc_target=object(),
             needs_text_input=False,
+            interaction_context={"active": True},
         )
 
         main.apply_ui_requests(world, context_handler)
@@ -221,6 +230,7 @@ class TestMainInputHelpers(unittest.TestCase):
         self.assertTrue(world.chat_ui_active)
         self.assertFalse(world.trade_ui_active)
         self.assertIsNone(world.trade_ui_npc_target)
+        self.assertFalse(world.interaction_context["active"])
         context_handler.start_text_input.assert_called_once_with()
         context_handler.stop_text_input.assert_not_called()
         self.assertEqual(world.ui_requests, [])
@@ -251,6 +261,58 @@ class TestMainInputHelpers(unittest.TestCase):
         context_handler.stop_text_input.assert_called_once_with()
         context_handler.start_text_input.assert_not_called()
         self.assertEqual(world.ui_requests, [])
+
+    def test_handle_events_prioritizes_dialogue_over_stale_interaction_menu(self):
+        world = SimpleNamespace(
+            game_state="DIALOGUE",
+            chat_ui_active=True,
+            chat_ui_input_line="",
+            interaction_context={"active": True},
+            player=SimpleNamespace(state=SimpleNamespace(current_path=[])),
+            ui_requests=[],
+        )
+        context = SimpleNamespace(convert_event=lambda event: event)
+        original_get = tcod.event.get
+        original_handle_dialogue_input = main.handle_dialogue_input
+        original_handle_interaction_input = main.handle_interaction_input
+        try:
+            tcod.event.get = lambda: [tcod.event.KeyDown(0, tcod.event.KeySym.A, 0)]
+            main.handle_dialogue_input = unittest.mock.Mock()
+            main.handle_interaction_input = unittest.mock.Mock(return_value=False)
+
+            main.handle_events(world, context)
+
+            main.handle_dialogue_input.assert_called_once()
+            main.handle_interaction_input.assert_not_called()
+        finally:
+            tcod.event.get = original_get
+            main.handle_dialogue_input = original_handle_dialogue_input
+            main.handle_interaction_input = original_handle_interaction_input
+
+    def test_dialogue_submit_passes_required_prompt_fields_to_continue(self):
+        npc = SimpleNamespace(
+            name="Villager",
+            x=3,
+            y=4,
+            attitude_to_player="friendly",
+            social=SimpleNamespace(personality="calm", relationships={}),
+            knowledge=SimpleNamespace(long_term_memory=[]),
+            schedule=SimpleNamespace(current_task="idle"),
+        )
+        world = SimpleNamespace(
+            chat_ui_input_line="hello there",
+            chat_ui_target_npc=npc,
+            chat_ui_history=[],
+            request_close_dialogue=unittest.mock.Mock(),
+            continue_npc_dialogue=unittest.mock.Mock(),
+            ui_requests=[],
+        )
+        event = tcod.event.KeyDown(0, tcod.event.KeySym.RETURN, 0)
+
+        main.handle_dialogue_input(event, world, SimpleNamespace())
+
+        world.continue_npc_dialogue.assert_called_once_with(npc, "hello there")
+        self.assertEqual(world.chat_ui_input_line, "")
 
     def test_world_goal_start_trade_emits_ui_request_instead_of_mutating_ui_state(self):
         world = object.__new__(engine.World)
@@ -385,6 +447,24 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
         self.assertIn("*", rendered)
 
 
+class TestConsoleRendererLighting(unittest.TestCase):
+    def test_apply_lighting_and_depth_respects_console_buffer_bounds(self):
+        console = SimpleNamespace(
+            width=65,
+            height=40,
+            fg=np.zeros((40, 65, 3), dtype=np.uint8),
+            bg=np.zeros((40, 65, 3), dtype=np.uint8),
+        )
+        world = SimpleNamespace(
+            player=SimpleNamespace(x=1, y=1),
+            current_light_level_name="DAY",
+            get_tile_at=lambda x, y: SimpleNamespace(blocks_fov=True),
+        )
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._apply_lighting_and_depth(console, world, 0, 0)
+
+
 
 class TestDialogueStateRegression(unittest.TestCase):
     def setUp(self):
@@ -407,6 +487,10 @@ class TestDialogueStateRegression(unittest.TestCase):
         listener.social.personality = "reserved"
         speaker.social.relationships[listener.id] = 77
         speaker.knowledge.known_events["storm"] = SimpleNamespace(description="A storm rolled in.")
+        self.world.player.x = 10
+        self.world.player.y = 10
+        self.world.player.physical = SimpleNamespace(hearing_radius=12)
+        speaker.speech_volume = 12
         self.mock_call_llm.return_value = "Nice weather we're having."
 
         self.world._continue_npc_conversation(speaker, listener)
@@ -444,7 +528,150 @@ class TestDialogueStateRegression(unittest.TestCase):
         prompt = self.mock_call_llm.call_args.args[0]
         self.assertIn("the Bold", prompt)
         self.assertIn("defeated a beast", prompt)
-        self.assertEqual(self.world.chat_ui_history[-1], (npc_target.name, "I heard a remarkable tale."))
+        self.assertEqual(self.world.chat_ui_history[-1], ("Villager", "I heard a remarkable tale."))
+
+    def test_family_display_name_prefers_relationship_for_placeholder_names(self):
+        npc_target = engine.NPC(
+            10, 10,
+            name="Mother Family_9990",
+            family_ties={"relation_to_player": "mother"},
+            player_id=self.world.player.id,
+        )
+
+        self.assertEqual(self.world.get_entity_display_name(npc_target), "Mother")
+        self.assertEqual(self.world.get_entity_display_name(npc_target, include_relationship=True), "Mother")
+
+    def test_entity_display_name_appends_profession_title(self):
+        npc_target = engine.NPC(10, 10, name="Ada Graves")
+        npc_target.economic.profession = "Farmer"
+
+        self.assertEqual(self.world.get_entity_display_name(npc_target), "Ada Graves (Farmer)")
+        self.assertEqual(npc_target.get_display_name(viewer=self.world.player), "Ada Graves (Farmer)")
+
+    def test_family_display_name_keeps_relationship_and_adds_profession_title(self):
+        npc_target = engine.NPC(
+            10, 10,
+            name="Mother Family_9990",
+            family_ties={"relation_to_player": "mother"},
+            player_id=self.world.player.id,
+        )
+        npc_target.economic.profession = "Farmer"
+
+        self.assertEqual(self.world.get_entity_display_name(npc_target), "Mother (Farmer)")
+        self.assertEqual(self.world.get_entity_display_name(npc_target, include_relationship=True), "Mother (Farmer)")
+        self.assertEqual(npc_target.get_display_name(viewer=self.world.player, include_relationship=True), "Mother (Farmer)")
+
+    def test_world_assigns_player_family_last_name_to_full_name(self):
+        world = World(seed=11, player_first_name="Ada")
+
+        self.assertTrue(world.player.name.startswith("Ada "))
+        self.assertEqual(world.player.name.split()[-1], world.player.social.family_ties["last_name"])
+
+    def test_start_npc_dialogue_fallback_uses_relationship_context(self):
+        npc_target = engine.NPC(
+            10, 10,
+            name="Mother Family_9990",
+            family_ties={"relation_to_player": "mother"},
+            player_id=self.world.player.id,
+        )
+        self.mock_call_llm.return_value = ""
+
+        self.world.start_npc_dialogue(npc_target)
+
+        prompt = self.mock_call_llm.call_args.args[0]
+        self.assertIn("You are the player's mother.", prompt)
+        self.assertEqual(self.world.chat_ui_history[-1][0], "Mother")
+        self.assertIn("fed", self.world.chat_ui_history[-1][1].lower())
+
+    def test_continue_npc_dialogue_parses_fenced_json_without_dumping_payload(self):
+        npc_target = engine.NPC(10, 10, name="Theo Fletcher")
+        npc_target.economic.profession = "Farmer"
+        self.mock_call_llm.return_value = """```json
+{"response":"I'm doing alright, all things considered.","goal":"continue_conversation"}
+```"""
+
+        self.world.continue_npc_dialogue(npc_target, "how are you doing?")
+
+        self.assertEqual(self.world.chat_ui_history[-1], ("Theo Fletcher (Farmer)", "I'm doing alright, all things considered."))
+
+    def test_start_npc_dialogue_rejects_placeholder_player_name_output(self):
+        npc_target = engine.NPC(
+            10, 10,
+            name="Ada Graves",
+            family_ties={"relation_to_player": "sister"},
+            player_id=self.world.player.id,
+        )
+        npc_target.economic.profession = "Farmer"
+        self.mock_call_llm.return_value = "Oh, [Player Name]! What are you doing out this late?"
+
+        self.world.start_npc_dialogue(npc_target)
+
+        self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves (Farmer)", "Hey. What do you need?"))
+
+    def test_continue_npc_dialogue_rejects_placeholder_player_name_output(self):
+        npc_target = engine.NPC(10, 10, name="Ada Graves")
+        npc_target.economic.profession = "Farmer"
+        self.mock_call_llm.return_value = json.dumps({
+            "response": "Of course, [Player Name].",
+            "goal": "continue_conversation",
+        })
+
+        self.world.continue_npc_dialogue(npc_target, "how are you?")
+
+        self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves (Farmer)", "I've been alright."))
+
+    def test_npc_conversation_logs_overheard_line_and_applies_social_goal(self):
+        speaker = engine.NPC(10, 10, name="A")
+        listener = engine.NPC(11, 10, name="B")
+        speaker.schedule.home_building_id = "home_1"
+        self.world.buildings_by_id["home_1"] = SimpleNamespace(global_center_x=4, global_center_y=5)
+        self.world.player.x = 10
+        self.world.player.y = 10
+        self.world.player.physical = SimpleNamespace(hearing_radius=12)
+        speaker.speech_volume = 12
+
+        task_key = ("npc_conversation", speaker.id, listener.id)
+        future = unittest.mock.Mock()
+        future.done.return_value = True
+        future.result.return_value = json.dumps({"response": "Come by later.", "goal": "go_home"})
+        self.world._background_llm_tasks[task_key] = future
+
+        self.world._continue_npc_conversation(speaker, listener)
+
+        self.assertEqual(speaker.schedule.current_task, "going home")
+        self.assertEqual(self.world.chat_log[-1], "You overhear A tell B: Come by later.")
+
+    def test_distant_npc_conversation_uses_fallback_without_llm_task(self):
+        speaker = engine.NPC(40, 40, name="A")
+        listener = engine.NPC(41, 40, name="B")
+        self.world.player.x = 0
+        self.world.player.y = 0
+        self.world.player.physical = SimpleNamespace(hearing_radius=3)
+        speaker.speech_volume = 3
+        listener.speech_volume = 3
+        prior_log_count = len(self.world.chat_log)
+
+        self.world._continue_npc_conversation(speaker, listener)
+
+        self.assertFalse(self.world._background_llm_tasks)
+        self.assertTrue(speaker.current_conversation)
+        self.assertEqual(len(self.world.chat_log), prior_log_count)
+
+    def test_distant_ambient_speech_does_not_submit_llm_task(self):
+        npc = engine.NPC(30, 30, name="Far Villager")
+        npc.last_speech_time = 0
+        npc.speech_volume = 3
+        self.world.npcs = [npc]
+        self.world.village_npcs = []
+        self.world.player.x = 0
+        self.world.player.y = 0
+        self.world.player.physical = SimpleNamespace(hearing_radius=3)
+
+        with patch("engine.time.time", return_value=100.0), \
+             patch("engine.random.randint", return_value=10):
+            self.world._handle_npc_speech()
+
+        self.assertFalse(self.world._background_llm_tasks)
 
     def test_update_entity_titles_writes_social_title(self):
         npc = engine.NPC(10, 10, name="Legend")
@@ -453,6 +680,7 @@ class TestDialogueStateRegression(unittest.TestCase):
         self.world.game_time = 100
         self.mock_call_llm.return_value = json.dumps({"title": "the Bold"})
 
+        self.world._update_entity_titles()
         self.world._update_entity_titles()
 
         self.assertEqual(npc.social.title, "the Bold")

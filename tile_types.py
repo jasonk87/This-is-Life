@@ -1,7 +1,7 @@
 class Tile:
     """The Tile class now stores a character, a color tuple, and a name."""
     def __init__(self, char, color, passable, name, properties=None):
-        self.char = ord(char)
+        self.char = char if isinstance(char, int) else ord(char)
         self.color = color
         self.passable = passable
         self.name = name

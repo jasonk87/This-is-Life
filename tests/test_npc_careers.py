@@ -4,6 +4,13 @@ from unittest.mock import MagicMock, patch
 from entities.base import NPC
 from engine import Building, Village, World, Player
 from config import DAY_LENGTH_TICKS
+from simulation.careers import (
+    entity_has_any_profession,
+    entity_has_capability,
+    entity_has_profession,
+    resolve_profession_for_building,
+    set_entity_profession,
+)
 
 # Create a dummy World class that bypasses heavy initialization
 class MockWorld(World):
@@ -52,7 +59,7 @@ class TestNPCProfessionDynamics(unittest.TestCase):
 
         # Create an NPC who works there
         self.npc = NPC(x=15, y=15, name="Worker NPC")
-        self.npc.economic.profession = "Tavern Keeper"
+        set_entity_profession(self.npc, "Tavern Keeper")
         self.npc.schedule.work_building_id = self.tavern.id
         self.npc.economic.job_satisfaction = 50
 
@@ -84,12 +91,12 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         # only affects schedule/assignment, not physical presence.
 
         # Check if message was logged
-        quit_msg = f"{self.npc.name} has quit their job as a Tavern Keeper due to low satisfaction."
+        quit_msg = f"{self.npc.get_display_name(viewer=self.world.player)} has quit their job as a Tavern Keeper due to low satisfaction."
         self.world.add_message_to_chat_log.assert_any_call(quit_msg)
 
     def test_npc_finds_new_job(self):
         # Start with an unemployed NPC
-        self.npc.economic.profession = "Unemployed"
+        set_entity_profession(self.npc, "Unemployed")
         self.npc.schedule.work_building_id = None
 
         # Ensure vacancy logic (based on schedule ID, not occupants)
@@ -106,7 +113,7 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         # self.assertIn(self.npc, self.tavern.occupants) # Removed assertion: hiring doesn't teleport NPC
         self.assertEqual(self.npc.economic.job_satisfaction, 70) # Honeymoon reset
 
-        hire_msg = f"{self.npc.name} has been hired as a Tavern Keeper."
+        hire_msg = f"{self.npc.get_display_name(viewer=self.world.player)} has been hired as a Tavern Keeper."
         self.world.add_message_to_chat_log.assert_any_call(hire_msg)
 
     def test_npc_does_not_quit_if_satisfied(self):
@@ -116,6 +123,19 @@ class TestNPCProfessionDynamics(unittest.TestCase):
 
         self.assertEqual(self.npc.economic.profession, "Tavern Keeper")
         # self.assertIn(self.npc, self.tavern.occupants) # Removed assertion: unrelated to career logic
+
+    def test_resolve_profession_for_building_supports_lead_and_worker_roles(self):
+        self.assertEqual(resolve_profession_for_building("lumber_mill", []), "Lumber Mill Foreman")
+        self.assertEqual(
+            resolve_profession_for_building("lumber_mill", ["Lumber Mill Foreman"]),
+            "Woodcutter",
+        )
+
+    def test_profession_capabilities_are_queryable(self):
+        set_entity_profession(self.npc, "Merchant")
+        self.assertTrue(entity_has_capability(self.npc, "trade"))
+        self.assertTrue(entity_has_profession(self.npc, "Merchant"))
+        self.assertTrue(entity_has_any_profession(self.npc, ["Merchant", "Scribe"]))
 
 if __name__ == '__main__':
     unittest.main()

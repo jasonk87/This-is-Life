@@ -2,11 +2,16 @@
 import math
 import random
 import itertools
+import re
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from runtime_compat import genai, np, requests
 from tcod_compat import tcod, libtcodpy
 import time
 import pickle
 import os
+from typing import Any
 from entities.base import NPC, DireWolf # Added DireWolf
 from entities.animal import Animal
 from data.animals import ANIMAL_DEFINITIONS
@@ -50,12 +55,25 @@ from tile_types import Tile as BaseTileType
 from data.quests import QUEST_DEFINITIONS # Import quest definitions
 from data.environment import WEATHER_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
+from data.dawnlike import get_animal_sprite, get_human_sprite
 from ui_requests import (
     close_dialogue_request,
     close_trade_request,
     open_dialogue_request,
     open_trade_request,
 )
+from presentation.text_formatter import WorldTextFormatter
+from simulation.careers import (
+    CareerState,
+    entity_has_any_profession,
+    entity_has_capability,
+    entity_has_profession,
+    normalize_profession,
+    resolve_profession_for_building,
+    set_entity_profession,
+)
+from simulation.history import Book, Event, HistoryLedger
+from simulation.world_model import Building, Chunk, Ruin, Village, WorldAtlas
 from work_subtasks import (
     CompletedWorkSubTaskCommand,
     DefaultProduceOutputSubTaskCommand,
@@ -64,6 +82,13 @@ from work_subtasks import (
 from world_generation import WorldGenerator
 
 VILLAGE_BUILDING_PROJECTS = {
+    "clinic": {
+        "cost": {"raw_log": 40, "stone_chunk": 10},
+        "width": 7,
+        "height": 6,
+        "category": "civic_workplace",
+        "description": "A place for healing and treatment."
+    },
     "house": {
         "cost": {"raw_log": 50},
         "width": 7,
@@ -80,13 +105,25 @@ VILLAGE_BUILDING_PROJECTS = {
     }
 }
 
-TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
-
 import json
-import uuid
 
-if GOOGLE_API_KEY:
+if GOOGLE_API_KEY and hasattr(genai, "configure"):
     genai.configure(api_key=GOOGLE_API_KEY)
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
+
+FAMILY_LAST_NAMES = [
+    "Hart", "Miller", "Bennett", "Rowan", "Turner", "Hale", "Mercer", "Wilder",
+    "Graves", "Sawyer", "Fletcher", "Briar",
+]
+FAMILY_FIRST_NAMES = {
+    "male": ["Elias", "Jonah", "Caleb", "Owen", "Silas", "Theo", "Nathan", "Micah"],
+    "female": ["Elara", "Mara", "Nora", "Clara", "Tessa", "Lena", "Iris", "Ada"],
+}
+PLACEHOLDER_FAMILY_NAME_RE = re.compile(r"^(Mother|Father|Brother|Sister)\s+Family_\d+$", re.IGNORECASE)
+BACKGROUND_LLM_PENDING = object()
 
 class Quest:
     """A class to represent an active quest."""
@@ -103,30 +140,6 @@ class Quest:
         # For 'kill' quests
         self.target_name_prefix: str | None = None
         self.required_kills: int = 0
-
-class Book:
-    """A class to represent a book written by a Scribe."""
-    def __init__(self, title: str, author_id: int, author_name: str, year_written: int, content: str, book_type: str = "chronicle", referenced_event_ids: list[str] = None):
-        self.id = str(uuid.uuid4())
-        self.title = title
-        self.author_id = author_id
-        self.author_name = author_name
-        self.year_written = year_written
-        self.content = content
-        self.book_type = book_type # e.g., "chronicle", "census", "biography"
-        self.referenced_event_ids = referenced_event_ids if referenced_event_ids else []
-
-class Event:
-    """A class to represent a significant event that occurs in the world."""
-    def __init__(self, event_type: str, description: str, subject_id: int, game_time: int, target_id: int | None = None, location: tuple[int, int] | None = None):
-        self.id = str(uuid.uuid4())
-        self.type = event_type  # e.g., "combat_attack", "npc_death", "item_craft"
-        self.description = description
-        self.subject_id = subject_id  # The ID of the entity performing the action
-        self.target_id = target_id    # The ID of the entity being acted upon (optional)
-        self.location = location      # Where the event happened (optional)
-        self.timestamp = game_time  # Use game ticks for consistency
-        self.public_knowledge = False # Tracks if this event was witnessed or has become public
 
 class VisualEffect:
     """Base class for engine-side visual effect state."""
@@ -182,83 +195,6 @@ class ProjectileEffect(VisualEffect):
 
 COMPLETED_WORK_SUB_TASK_COMMANDS: dict[str, CompletedWorkSubTaskCommand] = create_completed_work_sub_task_commands(Book)
 
-
-
-class Building:
-    def __init__(self, x, y, width, height, building_type="house", category="residential", global_chunk_x_start=0, global_chunk_y_start=0):
-        self.id = str(uuid.uuid4()) # Unique ID for the building
-        self.x = x # Local x within chunk
-        self.y = y # Local y within chunk
-        self.width = width
-        self.height = height
-        self.building_type = building_type
-        self.category = category
-        self.interior_decorated = False
-        self.occupants = [] # General list of NPCs associated (e.g. workers)
-        self.residents = []
-        self.building_inventory = {}
-        self.interaction_points = {}
-        # Work zones: keys are zone_tags (e.g., "log_pile_area"), values are lists of global (x,y) coordinates
-        self.work_zone_tiles: dict[str, list[tuple[int, int]]] = {}
-
-        # Store global origin of the building (top-left tile)
-        self.global_origin_x = global_chunk_x_start + x
-        self.global_origin_y = global_chunk_y_start + y
-
-        # Global coordinates of the building's center
-        self.global_center_x = self.global_origin_x + width // 2
-        self.global_center_y = self.global_origin_y + height // 2
-        self.player_owned: bool = False # New attribute for player housing
-        self.max_workers: int = 2 # Default capacity, updated during generation
-
-    @property
-    def max_workers(self):
-        return getattr(self, "_max_workers", 2)
-
-    @max_workers.setter
-    def max_workers(self, value):
-        self._max_workers = value
-
-    def contains_global_coords(self, world_x: int, world_y: int) -> bool:
-        """Checks if the given global world coordinates are within this building's footprint."""
-        return (self.global_origin_x <= world_x < self.global_origin_x + self.width and
-                self.global_origin_y <= world_y < self.global_origin_y + self.height)
-
-class Village:
-    def __init__(self):
-        self.id = str(uuid.uuid4())
-        self.buildings = []
-        self.lore = "No lore generated yet."
-        self.interaction_points = {} # E.g., {"well": [(x1,y1), (x2,y2)], "town_square_center": (x,y)}
-        self.supply = {}  # item_key: count
-        self.demand = {}  # item_key: count
-        self.local_events = [] # List of Event objects specific to this village location
-        self.known_events = {} # Event ID -> Event object (knowledge spread)
-        self.construction_projects = [] # List of active construction projects
-        self.village_relationships = {} # other_village_id: score (-100 to 100)
-        self.at_war_with = set() # Set of other_village_id
-        self.population_cache = 0
-
-    def add_building(self, building: Building):
-        self.buildings.append(building)
-
-class Ruin:
-    def __init__(self):
-        self.lore = "The origins of this place are lost to time."
-
-from dataclasses import dataclass, field
-from typing import Any
-
-class Chunk:
-    def __init__(self, biome, poi_type=None):
-        self.biome = biome
-        self.poi_type = poi_type
-        self.tiles = None
-        self.is_generated = False # Tracks if macro data (villages/NPCs) is generated
-        self.is_terrain_generated = False # Tracks if tiles/visuals are generated
-        self.village = None # To store Village object if POI is a village
-        self.ruin = None # To store Ruin object if POI is a ruin
-
 @dataclass
 class PlayerPhysicalState:
     hunger: int = 0
@@ -278,9 +214,47 @@ class PlayerPhysicalState:
 
 @dataclass
 class PlayerCombatStats:
-    max_hp: int = 30
-    hp: int = 30
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
     defense_bonus: int = 0
+    last_hit_part: str | None = None
+
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
 
 @dataclass
 class PlayerSocialState:
@@ -331,7 +305,7 @@ class PlayerState:
     riding_animal_id: int | None = None
     last_dx: int = 0
     last_dy: int = -1
-    original_char: int = ord('@')
+    original_char: int = 0xE000
     current_path: list[tuple[int, int]] = field(default_factory=list)
     move_cooldown: int = 0
 
@@ -342,7 +316,9 @@ class Player:
         self.y = y
         self.render_x = float(x)
         self.render_y = float(y)
-        self.char = ord('@')
+        self.name = "Player"
+        self.first_name = "Player"
+        self.char = get_human_sprite(is_player=True)
         self.color = COLORS["player_fg"]
         self.id = id(self)  # Simple unique ID for player
 
@@ -354,17 +330,72 @@ class Player:
         self.equipment = PlayerEquipment()
         self.knowledge = PlayerKnowledge()
         self.state = PlayerState()
+        self.career = CareerState()
 
         self.state.original_char = self.char
         self.combat.hp = self.combat.max_hp
+        set_entity_profession(self, self.economic.profession, reason="spawn")
+
+    def get_relationship_to(self, viewer) -> str | None:
+        return None
+
+    def get_relationship_label(self, viewer) -> str:
+        return ""
+
+    def get_title_label(self) -> str:
+        profession = str(getattr(getattr(self, "economic", None), "profession", "") or "").strip()
+        if self.career.current_role != normalize_profession(profession):
+            self.career.set_role(profession)
+        title = self.career.display_title()
+        if title:
+            return title
+        if profession and profession not in {"Unemployed", "Creature", "unemployed"}:
+            return profession
+        return ""
+
+    def get_display_name(self, viewer=None, include_relationship: bool = False) -> str:
+        if viewer and getattr(viewer, "id", None) == self.id:
+            return "You"
+
+        base_name = str(getattr(self, "name", "Player")).replace("_", " ").strip() or "Player"
+        title_label = self.get_title_label()
+        if title_label:
+            return f"{base_name} ({title_label})"
+        return base_name
 
 
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
         effective_damage = max(0, amount - self.combat.defense_bonus)
-        self.combat.hp -= effective_damage
-        if self.combat.hp < 0:
-            self.combat.hp = 0
+
+        remaining_damage = effective_damage
+        if remaining_damage > 0:
+            import random
+            hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            self.combat.last_hit_part = hit_part
+            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
+                self.combat.body_parts_hp[hit_part] -= remaining_damage
+                remaining_damage = 0
+            else:
+                remaining_damage -= self.combat.body_parts_hp[hit_part]
+                self.combat.body_parts_hp[hit_part] = 0
+                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
+                    if remaining_damage <= 0:
+                        break
+                    if self.combat.body_parts_hp[part] > 0:
+                        if self.combat.body_parts_hp[part] >= remaining_damage:
+                            self.combat.body_parts_hp[part] -= remaining_damage
+                            remaining_damage = 0
+                        else:
+                            remaining_damage -= self.combat.body_parts_hp[part]
+                            self.combat.body_parts_hp[part] = 0
+
+            # Check for broken legs
+            if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
+                if "broken_leg" not in self.physical.status_effects:
+                    self.physical.status_effects.append("broken_leg")
+                    if world:
+                        world.add_message_to_chat_log("Your leg is broken!")
 
         world_ref = world if world else getattr(self, 'world_ref', None)
 
@@ -529,20 +560,29 @@ class World:
         return itertools.chain(self.village_npcs, self.npcs)
 
     """World class now uses a generator for a more complex map."""
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, player_first_name: str | None = None):
         if seed is not None:
             random.seed(seed)
         self.chat_log = [] # Stores chat messages
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
+        if player_first_name:
+            chosen_name = player_first_name.strip()
+            if chosen_name:
+                self.player.first_name = chosen_name
+                self.player.name = chosen_name
         self.player.world_ref = self
+        self.text = WorldTextFormatter(self)
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height, seed=seed)
+        self.atlas = WorldAtlas()
+        self.history = HistoryLedger(event_limit=200)
         self.chunks = self._initialize_chunks()
         self.npcs = []
         self.village_npcs = []
-        self.villages = [] # List of all Village objects in the world
-        self.buildings_by_id = {}
+        self.villages = self.atlas.villages
+        self.buildings_by_id = self.atlas.buildings_by_id
+        self.regions_by_id = self.atlas.regions_by_id
         self.mouse_x = 0
         self.mouse_y = 0
         self.game_state = "PLAYING"
@@ -550,6 +590,9 @@ class World:
         self.game_time = 0
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
         self.needs_text_input = False
+        self._llm_warning_issued = False
+        self._background_llm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="world-llm")
+        self._background_llm_tasks = {}
 
         # Season and Temperature
         self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
@@ -644,8 +687,8 @@ class World:
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
 
         # Gossip and Event System
-        self.global_events: list[Event] = []
-        self.books: list[Book] = []
+        self.global_events = self.history.events
+        self.books = self.history.books
 
         # Visual Effects
         self.visual_effects: list[VisualEffect] = []
@@ -874,7 +917,11 @@ class World:
         entity.physical.temperature += temp_diff * change_rate
 
         # 3. Apply Effects
-        entity.physical.status_effects.clear()
+        if "Freezing" in entity.physical.status_effects:
+            entity.physical.status_effects.remove("Freezing")
+        if "Overheating" in entity.physical.status_effects:
+            entity.physical.status_effects.remove("Overheating")
+
         if entity.physical.temperature < 35.0:
             entity.physical.status_effects.append("Freezing")
         elif entity.physical.temperature > 38.5:
@@ -934,7 +981,7 @@ class World:
         if new_season_index != self.current_season_index:
             self.current_season_index = new_season_index
             season_name = self.seasons[self.current_season_index]
-            self.add_message_to_chat_log(f"The season has changed to {season_name}.")
+            self.add_message_to_chat_log(self.text.season_changed(season_name))
 
     def _update_player_temperature(self):
         """Wrapper to call the generic entity temperature update for the player."""
@@ -1094,7 +1141,7 @@ class World:
             needs_strict_fov = True
 
         # Do they need to look for items on the ground frequently?
-        if not needs_strict_fov and npc.economic.profession in ["Guard", "Sheriff"]:
+        if not needs_strict_fov and entity_has_any_profession(npc, ["Guard", "Sheriff"]):
             needs_strict_fov = True
 
         # During tests, or if we force it for fear checks
@@ -1446,7 +1493,7 @@ class World:
                     self._reset_npc_path_blocking(npc)
                     # Destination reached, process arrival based on task
                     if npc.economic.profession == "Traveling Merchant" and npc.schedule.current_task == "traveling_to_village":
-                        self.add_message_to_chat_log(f"{npc.name} has arrived at a village.")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has arrived at a village.")
                         npc.schedule.current_task = "lingering_in_village"
                         npc.leisure_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS)
 
@@ -1476,7 +1523,9 @@ class World:
                                         gossip_recipient.knowledge.known_events[event_id] = event_obj
                                         events_shared += 1
                                 if events_shared > 0:
-                                    self.add_message_to_chat_log(f"{npc.name} shared news from afar with {gossip_recipient.name}.")
+                                    self.add_message_to_chat_log(
+                                        f"{self.get_entity_display_name(npc)} shared news from afar with {self.get_entity_display_name(gossip_recipient)}."
+                                    )
 
                         # Clear old events but keep some "news" to carry
                         # Actually, better to clear all and relearn local news to carry to next village
@@ -1539,17 +1588,21 @@ class World:
                              if current_workers < target_building.max_workers:
                                  self._assign_job(npc, target_building)
                                  npc.schedule.current_task = "at work"
-                                 self.add_message_to_chat_log(f"{npc.name} got the job at the {target_building.building_type.replace('_', ' ')} thanks to your tip!")
+                                 self.add_message_to_chat_log(
+                                     f"{self.get_entity_display_name(npc)} got the job at the {target_building.building_type.replace('_', ' ')} thanks to your tip!"
+                                 )
                                  npc.social.relationships[self.player.id] = min(100, npc.social.relationships.get(self.player.id, 50) + 20)
                              else:
-                                 self.add_message_to_chat_log(f"{npc.name} was told there are no vacancies at the {target_building.building_type.replace('_', ' ')}.")
+                                 self.add_message_to_chat_log(
+                                     f"{self.get_entity_display_name(npc)} was told there are no vacancies at the {target_building.building_type.replace('_', ' ')}."
+                                 )
                                  npc.schedule.current_task = "idle"
                         else:
                             npc.schedule.current_task = "idle"
 
                     elif npc.schedule.current_task == "greeting_player":
                         # Successfully reached the player, initiate dialogue
-                        self.add_message_to_chat_log(f"{npc.name} says hello!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} says hello!")
                         self.start_npc_dialogue(npc)
                         self.request_open_dialogue(npc)
                         npc.schedule.current_task = "idle"
@@ -1565,7 +1618,9 @@ class World:
                             if relationship_score > 70: # High relationship needed
                                 npc.social.family_ties["partner_id"] = partner.id
                                 partner.social.family_ties["partner_id"] = npc.id
-                                self.add_message_to_chat_log(f"{npc.name} and {partner.name} are now married!")
+                                self.add_message_to_chat_log(
+                                    f"{self.get_entity_display_name(npc)} and {self.get_entity_display_name(partner)} are now married!"
+                                )
                                 self.log_event(
                                     event_type="npc_marriage",
                                     description=f"{npc.name} and {partner.name} were married.",
@@ -1580,14 +1635,18 @@ class World:
                                         if old_home and npc in old_home.residents:
                                             old_home.residents.remove(npc)
 
-                                    new_home = self.buildings_by_id.get(partner.schedule.home_building_id)
-                                    if new_home:
-                                        new_home.residents.append(npc)
-                                        npc.schedule.home_building_id = partner.schedule.home_building_id
-                                        self.add_message_to_chat_log(f"{npc.name} has moved in with {partner.name}.")
+                                        new_home = self.buildings_by_id.get(partner.schedule.home_building_id)
+                                        if new_home:
+                                            new_home.residents.append(npc)
+                                            npc.schedule.home_building_id = partner.schedule.home_building_id
+                                            self.add_message_to_chat_log(
+                                                f"{self.get_entity_display_name(npc)} has moved in with {self.get_entity_display_name(partner)}."
+                                            )
 
                             else:
-                                self.add_message_to_chat_log(f"{npc.name} proposed to {partner.name}, but was rejected.")
+                                self.add_message_to_chat_log(
+                                    f"{self.get_entity_display_name(npc)} proposed to {self.get_entity_display_name(partner)}, but was rejected."
+                                )
                         npc.schedule.current_task = "idle"
                     elif npc.schedule.current_task == "going to work":
                         npc.schedule.current_task = "at work"
@@ -1877,11 +1936,15 @@ class World:
                     # "Breakup" or fallout logic
                     if current_rel > 70 and random.random() < 0.05: # 5% chance for friends to fight
                         change = -20
-                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} had a falling out.")
+                        self.add_message_to_chat_log(
+                            f"{self.get_entity_display_name(npc)} and {self.get_entity_display_name(other_npc)} had a falling out."
+                        )
                     # "Making up" logic
                     elif current_rel < 30 and random.random() < 0.05: # 5% chance for enemies to make up
                         change = 20
-                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} seem to be getting along better.")
+                        self.add_message_to_chat_log(
+                            f"{self.get_entity_display_name(npc)} and {self.get_entity_display_name(other_npc)} seem to be getting along better."
+                        )
                     else:
                         # General random fluctuation based on compatibility
                         change = random.randint(-5, 5) + compatibility
@@ -1896,27 +1959,29 @@ class World:
                         del npc.social.family_ties["partner_id"]
                         if "partner_id" in other_npc.social.family_ties:
                             del other_npc.social.family_ties["partner_id"]
-                        self.add_message_to_chat_log(f"{npc.name} and {other_npc.name} have broken up.")
+                        self.add_message_to_chat_log(
+                            f"{self.get_entity_display_name(npc)} and {self.get_entity_display_name(other_npc)} have broken up."
+                        )
 
                         # Move out logic (simplified: if living together, one leaves)
                         if npc.schedule.home_building_id and npc.schedule.home_building_id == other_npc.schedule.home_building_id:
-                             # Remove npc from current home residents
-                             old_home = self.buildings_by_id.get(npc.schedule.home_building_id)
-                             if old_home and npc in old_home.residents:
-                                 old_home.residents.remove(npc)
+                            # Remove npc from current home residents
+                            old_home = self.buildings_by_id.get(npc.schedule.home_building_id)
+                            if old_home and npc in old_home.residents:
+                                old_home.residents.remove(npc)
 
-                             npc.schedule.home_building_id = None # Become homeless momentarily
-                             self.add_message_to_chat_log(f"{npc.name} has moved out.")
+                            npc.schedule.home_building_id = None # Become homeless momentarily
+                            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has moved out.")
 
-                             # Try to find a new vacant home
-                             village = self._get_village_for_npc(npc)
-                             if village:
-                                 vacant_homes = [b for b in village.buildings if b.category == "residential" and not b.residents]
-                                 if vacant_homes:
-                                     new_home = random.choice(vacant_homes)
-                                     npc.schedule.home_building_id = new_home.id
-                                     new_home.residents.append(npc)
-                                     self.add_message_to_chat_log(f"{npc.name} has found a new home.")
+                            # Try to find a new vacant home
+                            village = self._get_village_for_npc(npc)
+                            if village:
+                                vacant_homes = [b for b in village.buildings if b.category == "residential" and not b.residents]
+                                if vacant_homes:
+                                    new_home = random.choice(vacant_homes)
+                                    npc.schedule.home_building_id = new_home.id
+                                    new_home.residents.append(npc)
+                                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has found a new home.")
 
     def _update_npc_schedules(self):
         """
@@ -1928,6 +1993,171 @@ class World:
         for npc in self.all_npcs:
             if npc.physical.is_dead:
                 continue
+
+            # HIGH PRIORITY OVERRIDE
+            if "broken_leg" in npc.physical.status_effects:
+                if not hasattr(npc, 'original_speed'):
+                    npc.original_speed = getattr(npc, 'speed', 1)
+                npc.speed = max(0.5, getattr(npc, 'original_speed', 1) / 2.0)
+
+                if npc.schedule.current_task not in ["seeking_healer", "waiting_for_treatment", "resting_in_bed"]:
+                    npc.schedule.current_task = "seeking_healer"
+
+                    # Try to find a clinic
+                    clinic = self._find_nearest_building_of_type(npc, "clinic")
+                    if clinic:
+                        dest_x, dest_y = clinic.global_center_x, clinic.global_center_y
+                        npc.schedule.current_destination_coords = (dest_x, dest_y)
+                        path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                        if path:
+                            npc.schedule.current_path = path
+                        else:
+                            npc.schedule.current_task = "waiting_for_treatment"
+                            npc.schedule.current_path = []
+                    elif npc.schedule.home_building_id:
+                        home = self.buildings_by_id.get(npc.schedule.home_building_id)
+                        if home:
+                            npc.schedule.current_destination_coords = (home.global_center_x, home.global_center_y)
+                            path = self.calculate_path(npc.x, npc.y, home.global_center_x, home.global_center_y)
+                            if path:
+                                npc.schedule.current_path = path
+                            else:
+                                npc.schedule.current_task = "resting_in_bed"
+                                npc.schedule.current_path = []
+                    else:
+                        npc.schedule.current_task = "resting_in_bed"
+                        npc.schedule.current_path = []
+
+            # Check arrival at clinic
+            if npc.schedule.current_task == "seeking_healer":
+                if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                    if npc.schedule.current_destination_coords:
+                        if abs(npc.x - npc.schedule.current_destination_coords[0]) + abs(npc.y - npc.schedule.current_destination_coords[1]) <= 3:
+                            npc.schedule.current_task = "waiting_for_treatment"
+                            npc.schedule.current_path = []
+                            npc.schedule.current_destination_coords = None
+
+            # --- HEALER AI ---
+            if npc.economic.profession == "Healer":
+                if npc.schedule.current_task not in ["treating_patient", "foraging_for_herbs", "crafting_medical_supplies"]:
+                    # Look for injured NPCs nearby
+                    patients = [p for p in self.all_npcs if not p.physical.is_dead and "broken_leg" in p.physical.status_effects]
+                    if patients:
+                        closest_patient = min(patients, key=lambda p: abs(npc.x - p.x) + abs(npc.y - p.y))
+                        if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) < 15:
+                            npc.schedule.current_task = "treating_patient"
+                            npc.task_target_entity_id = closest_patient.id
+                            npc.task_timer = 20 # 20 ticks to treat
+                            npc.schedule.current_path = []
+
+                            # Move to patient if not adjacent
+                            if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) > 1:
+                                path = self.calculate_path(npc.x, npc.y, closest_patient.x, closest_patient.y)
+                                if path:
+                                    npc.schedule.current_path = path
+                    else:
+                        # No patients, check inventory for salves
+                        salves_count = npc.economic.npc_inventory.get("healing_salve", 0)
+
+                        if salves_count < 5:
+                            herbs_count = npc.economic.npc_inventory.get("medicinal_herb", 0)
+
+                            if herbs_count < 2:
+                                npc.schedule.current_task = "foraging_for_herbs"
+                                # Find wilderness/forest
+                                # Random point 10-20 tiles away to simulate foraging
+                                angle = random.uniform(0, 2 * math.pi)
+                                dist = random.uniform(10, 20)
+                                target_x = max(0, min(WORLD_WIDTH - 1, int(npc.x + math.cos(angle) * dist)))
+                                target_y = max(0, min(WORLD_HEIGHT - 1, int(npc.y + math.sin(angle) * dist)))
+                                npc.schedule.current_destination_coords = (target_x, target_y)
+                                path = self.calculate_path(npc.x, npc.y, target_x, target_y)
+                                if path:
+                                    npc.schedule.current_path = path
+                                else:
+                                    npc.schedule.current_task = "idle" # Try again later
+                            else:
+                                npc.schedule.current_task = "crafting_medical_supplies"
+                                # Move to clinic alchemy station
+                                clinic = self._find_nearest_building_of_type(npc, "clinic")
+                                if clinic and "alchemy_station" in clinic.work_zone_tiles and clinic.work_zone_tiles["alchemy_station"]:
+                                    dest = clinic.work_zone_tiles["alchemy_station"][0]
+                                    npc.schedule.current_destination_coords = dest
+                                    if (npc.x, npc.y) != dest:
+                                        path = self.calculate_path(npc.x, npc.y, dest[0], dest[1])
+                                        if path:
+                                            npc.schedule.current_path = path
+                                        else:
+                                            npc.schedule.current_task = "idle"
+                                else:
+                                    # Stand still and craft if no clinic
+                                    npc.task_timer = 5
+                                    npc.schedule.current_destination_coords = (npc.x, npc.y)
+
+            # Keep these outside the "if npc.schedule.current_task not in..." block, so they can process!
+            # Oh wait, they need to be processed even if they are in those tasks!
+            if npc.economic.profession == "Healer":
+                if npc.schedule.current_task == "foraging_for_herbs":
+                    if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                        # Arrived at foraging spot
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} foraged some medicinal herbs.")
+                        amt = random.randint(2, 4); npc.economic.npc_inventory["medicinal_herb"] = npc.economic.npc_inventory.get("medicinal_herb", 0) + amt
+                        npc.schedule.current_task = "idle"
+                        npc.schedule.current_destination_coords = None
+
+                elif npc.schedule.current_task == "crafting_medical_supplies":
+                    if npc.schedule.current_destination_coords and (npc.x, npc.y) == npc.schedule.current_destination_coords:
+                        if not hasattr(npc, "task_timer") or npc.task_timer <= 0:
+                            npc.task_timer = 5
+
+                        npc.task_timer -= 1
+                        if npc.task_timer <= 0:
+                            if npc.economic.npc_inventory.get("medicinal_herb", 0) >= 2:
+                                npc.economic.npc_inventory["medicinal_herb"] -= 2
+                                if npc.economic.npc_inventory["medicinal_herb"] <= 0: del npc.economic.npc_inventory["medicinal_herb"]
+                                npc.economic.npc_inventory["healing_salve"] = npc.economic.npc_inventory.get("healing_salve", 0) + 1
+                                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} crafted a healing salve.")
+                            npc.schedule.current_task = "idle"
+                            npc.schedule.current_destination_coords = None
+
+            if npc.schedule.current_task == "treating_patient":
+                patient = self.get_entity_by_id(npc.task_target_entity_id)
+                if not patient or patient.physical.is_dead or "broken_leg" not in patient.physical.status_effects:
+                    npc.schedule.current_task = "idle"
+                    npc.task_target_entity_id = None
+                else:
+                    if abs(npc.x - patient.x) + abs(npc.y - patient.y) <= 1:
+                        if npc.task_timer > 0:
+                            npc.task_timer -= 1
+                        else:
+                            # Treatment complete
+                            patient.physical.status_effects.remove("broken_leg")
+                            # Restore HP
+                            if patient.combat.body_parts_hp.get("left_leg", 0) <= 0:
+                                patient.combat.body_parts_hp["left_leg"] = max(1, patient.combat.body_parts_max_hp.get("left_leg", 5))
+                            if patient.combat.body_parts_hp.get("right_leg", 0) <= 0:
+                                patient.combat.body_parts_hp["right_leg"] = max(1, patient.combat.body_parts_max_hp.get("right_leg", 5))
+
+                            # Economy hook
+                            if patient.economic.money >= 10:
+                                patient.economic.money -= 10
+                                npc.economic.money += 10
+                            elif npc.economic.npc_inventory.get("healing_salve", 0) >= 1:
+                                npc.economic.npc_inventory["healing_salve"] -= 1
+                                if npc.economic.npc_inventory["healing_salve"] <= 0: del npc.economic.npc_inventory["healing_salve"]
+
+                            self.add_message_to_chat_log(
+                                f"{self.get_entity_display_name(npc)} successfully treats {self.get_entity_display_name(patient)}'s broken leg."
+                            )
+                            npc.schedule.current_task = "idle"
+                            patient.schedule.current_task = "idle"
+                            patient.speed = getattr(patient, 'original_speed', 1) # Ensure speed goes back to normal if stored
+                    else:
+                        # Move closer
+                        if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
+                            path = self.calculate_path(npc.x, npc.y, patient.x, patient.y)
+                            if path:
+                                npc.schedule.current_path = path
 
             # --- Real-time Logic (Runs every tick or frequently) ---
             if npc.combat.is_hostile_to_player:
@@ -1958,7 +2188,9 @@ class World:
                                 npc.schedule.current_task = "investigating_sound"
                                 npc.schedule.current_destination_coords = (sound["x"], sound["y"])
                                 npc.schedule.current_path = []
-                                self.add_message_to_chat_log(f"{npc.name} heard a {sound_type} and looks towards it.")
+                                self.add_message_to_chat_log(
+                                    f"{self.get_entity_display_name(npc)} heard a {sound_type} and looks towards it."
+                                )
                                 heard_compelling_sound = True
                                 break
 
@@ -2038,7 +2270,7 @@ class World:
                         continue # Skip normal scheduling if in faction combat
 
             # --- VILLAGE DEFENDERS ---
-            if npc.economic.profession in ["Guard", "Sheriff", "Militia"]:
+            if entity_has_any_profession(npc, ["Guard", "Sheriff", "Militia"]):
                 if npc.id in self.npc_fov_maps:
                     fov_map = self.npc_fov_maps[npc.id]
                     visible_raiders = [
@@ -2055,7 +2287,7 @@ class World:
                             npc.schedule.current_path = []
                         else:
                             if npc.schedule.current_task != "defending_village":
-                                self.add_message_to_chat_log(f"{npc.name} spots a raider and charges!")
+                                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} spots a raider and charges!")
                             path = self.calculate_path(npc.x, npc.y, nearest_raider.x, nearest_raider.y)
                             if path:
                                 npc.schedule.current_path = path
@@ -2107,7 +2339,7 @@ class World:
                      if not npc.is_frightened: # Using is_frightened as generic "threat state"
                         npc.is_frightened = True
                         npc.threat_source_ids = [threat.id for threat in visible_threats]
-                        self.add_message_to_chat_log(f"Hunter {npc.name} spots a threat and prepares to warn the village!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} spots a threat and prepares to warn the village!")
                         # Create event
                         threat_desc = f"{len(visible_threats)} threats" if len(visible_threats) > 1 else "a threat"
                         self.log_event("threat_detected", f"Hunter {npc.name} spotted {threat_desc} nearby.", npc.id, location=(npc.x, npc.y))
@@ -2117,7 +2349,7 @@ class World:
                     if not npc.is_frightened:
                         npc.is_frightened = True
                         npc.threat_source_ids = [threat.id for threat in visible_threats]
-                        self.add_message_to_chat_log(f"{npc.name} sees threats and is terrified!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} sees threats and is terrified!")
                         npc.schedule.current_path = []
 
             if npc.is_frightened:
@@ -2160,15 +2392,15 @@ class World:
                                 npc.threat_source_ids = []
                                 npc.schedule.current_task = "idle"
 
-                    elif npc.economic.profession in ["Guard", "Sheriff"]:
+                    elif entity_has_any_profession(npc, ["Guard", "Sheriff"]):
                         if npc.schedule.current_task == "alerting_guards" and (not npc.schedule.current_path or len(npc.schedule.current_path) <= 1):
-                            self.add_message_to_chat_log(f"{npc.name} raises the alarm about the threat!")
+                            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} raises the alarm about the threat!")
                             npc.combat.is_hostile_to_player = True
                             for other_npc in self.village_npcs:
-                                if other_npc.id != npc.id and other_npc.economic.profession in ["Guard", "Sheriff"]:
+                                if other_npc.id != npc.id and entity_has_any_profession(other_npc, ["Guard", "Sheriff"]):
                                     if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) <= 15:
                                         other_npc.combat.is_hostile_to_player = True
-                                        self.add_message_to_chat_log(f"{other_npc.name} hears the alarm and prepares for battle!")
+                                        self.add_message_to_chat_log(f"{self.get_entity_display_name(other_npc)} hears the alarm and prepares for battle!")
                         elif npc.schedule.current_task != "alerting_guards":
                             npc.schedule.current_task = "alerting_guards"
                             npc_village = self._get_village_for_npc(npc)
@@ -2196,7 +2428,7 @@ class World:
                     npc.threat_source_ids = []
                     npc.schedule.current_task = "idle"
                     npc.schedule.current_path = []
-                    self.add_message_to_chat_log(f"{npc.name} calms down as the threat is gone.")
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} calms down as the threat is gone.")
                 continue
 
             # --- Animal Behavior (Predator & Prey) ---
@@ -2305,7 +2537,7 @@ class World:
                             tile = self.get_tile_at(npc.x, npc.y)
                             if tile and tile.name == "Animal Corpse":
                                 npc.physical.hunger = 0
-                                self.add_message_to_chat_log(f"The {npc.name} devours the carcass.")
+                                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} devours the carcass.")
                                 # Replace corpse with bones
                                 bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
                                 self._change_map_tile((npc.x, npc.y), bones_def)
@@ -2336,7 +2568,8 @@ class World:
 
                 if should_flee and threat:
                     if npc.schedule.current_task != "fleeing":
-                        self.add_message_to_chat_log(f"The {npc.name} spots the {threat.name if hasattr(threat, 'name') else 'player'} and bolts!")
+                        threat_name = self.get_entity_display_name(threat) if hasattr(threat, "name") else "player"
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} spots {threat_name} and bolts!")
                         npc.schedule.current_task = "fleeing"
 
                     dx = npc.x - threat.x
@@ -2363,13 +2596,13 @@ class World:
 
                     dist_to_den = math.sqrt((self.player.x - npc.den_location[0])**2 + (self.player.y - npc.den_location[1])**2)
                     if dist_to_den < 10 and not npc.combat.is_hostile_to_player:
-                        self.add_message_to_chat_log(f"The {npc.name} becomes aggressive as you approach its den!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} becomes aggressive as you approach its den!")
                         npc.combat.is_hostile_to_player = True
 
                 elif npc.behavior == "Wander-Neutral":
                     dist_to_player = math.sqrt((npc.x - self.player.x)**2 + (npc.y - self.player.y)**2)
                     if dist_to_player < 3 and not npc.combat.is_hostile_to_player:
-                        self.add_message_to_chat_log(f"The {npc.name} feels threatened and becomes hostile!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} feels threatened and becomes hostile!")
                         npc.combat.is_hostile_to_player = True
 
                 # 4. OTHER BEHAVIORS (Lower Priority)
@@ -2381,7 +2614,7 @@ class World:
                          food_sources = animal_def.get("food_sources", [])
                          if tile and tile.name in food_sources:
                              npc.physical.hunger = max(0, npc.physical.hunger - 50)
-                             self.add_message_to_chat_log(f"The {npc.name} grazes on {tile.name}.")
+                             self.add_message_to_chat_log(self.text.entity_grazes_on(npc, tile.name))
                              # Degrade tile
                              if tile.name == "Tall Grass":
                                  plains_def = TILE_DEFINITIONS["plains"]
@@ -2426,7 +2659,7 @@ class World:
                         spawn_x, spawn_y = self._find_best_adjacent_tile(npc.x, npc.y, npc)
                         if spawn_x is not None:
                             new_animal = Animal(spawn_x, spawn_y, name=f"Baby {npc.animal_type}", animal_type=npc.animal_type)
-                            new_animal.char = ord(animal_def.get("char", 'a').lower())
+                            char_val = animal_def.get("char", get_animal_sprite(None)); new_animal.char = char_val if isinstance(char_val, int) else ord(str(char_val).lower())
                             new_animal.color = animal_def.get("color")
                             new_animal.combat.max_hp = animal_def.get("max_hp", 10) // 2
                             new_animal.combat.hp = new_animal.combat.max_hp
@@ -2455,8 +2688,6 @@ class World:
                         den_x, den_y = npc.den_location
                         if (npc.x, npc.y) == (den_x, den_y):
                             npc.schedule.current_task = "sleeping"
-                            npc.original_char_before_sleep = npc.char
-                            npc.char = ord('z')
                         else:
                             npc.schedule.current_task = "returning_to_den"
                             path = self.calculate_path(npc.x, npc.y, den_x, den_y)
@@ -2470,8 +2701,6 @@ class World:
                     elif npc.schedule.current_task == "returning_to_den":
                         if npc.den_location and (npc.x, npc.y) == npc.den_location:
                              npc.schedule.current_task = "sleeping"
-                             npc.original_char_before_sleep = npc.char
-                             npc.char = ord('z')
 
                 elif animal_def.get("can_mate") and animal_def.get("mating_season") == self.seasons[self.current_season_index] and not npc.is_pregnant:
                     if npc.schedule.current_task not in ["seeking_mate", "mating"]:
@@ -2516,7 +2745,7 @@ class World:
                              food_sources = animal_def.get("food_sources", [])
                              if tile and tile.name in food_sources:
                                  npc.physical.hunger = max(0, npc.physical.hunger - 50)
-                                 self.add_message_to_chat_log(f"The {npc.name} grazes on {tile.name}.")
+                                 self.add_message_to_chat_log(self.text.entity_grazes_on(npc, tile.name))
                                  # Degrade tile (e.g. Tall Grass -> Plains)
                                  if tile.name == "Tall Grass":
                                      plains_def = TILE_DEFINITIONS["plains"]
@@ -2680,7 +2909,7 @@ class World:
                     if npc.task_target_coords:
                         # Check if at the sheriff's office
                         if (npc.x, npc.y) == npc.task_target_coords:
-                            self.add_message_to_chat_log(f"{npc.name} reports your crimes to the authorities!")
+                            self.add_message_to_chat_log(self.text.entity_reports_your_crimes(npc))
                             self.player.economic.bounty += 50 # Example bounty increase
                             self.add_message_to_chat_log(f"Your bounty has increased by 50. Total bounty: {self.player.economic.bounty}.")
                             npc.schedule.current_task = "idle" # Or return to previous task
@@ -2872,7 +3101,9 @@ class World:
                         npc.schedule.current_path = []
                         made_item_decision = True
                         if random.random() < 0.1: # Occasional log
-                            self.add_message_to_chat_log(f"({npc.name} spots {best_item_action['item_key']} and decides to take it.)")
+                                self.add_message_to_chat_log(
+                                    f"({self.get_entity_display_name(npc)} spots {best_item_action['item_key']} and decides to take it.)"
+                                )
 
 
                 # Original scheduling logic starts here, only if no item pickup decision was made
@@ -2936,10 +3167,8 @@ class World:
                             if dest_coords_temp:
                                 new_task_label = "going to work"
                                 destination_coords = dest_coords_temp
-                                if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
                         elif npc.schedule.work_building_id and is_at_work:
                              npc.schedule.current_task = f"Working ({npc.economic.profession})" if npc.economic.profession != "Unemployed" else "At Work (Idle)"
-                             if hasattr(npc, 'original_char_before_sleep'): npc.char = npc.original_char_before_sleep
 
                         # Unemployed Behavior: Look for work during "work hours"
                         elif npc.economic.profession.lower() == "unemployed" and npc.schedule.current_task != "looking_for_work":
@@ -3068,8 +3297,6 @@ class World:
                             if is_at_home: # Already at home
                                 if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords: # At the bed
                                     npc.schedule.current_task = "sleeping"
-                                    npc.original_char_before_sleep = npc.char
-                                    npc.char = ord('z')
                                 elif sleep_spot_coords and (npc.x, npc.y) != sleep_spot_coords: # At home, but not at bed
                                     new_task_label = "going to bed"
                                     destination_coords = sleep_spot_coords
@@ -3077,8 +3304,6 @@ class World:
                                     # Fallback if sleep_spot not recorded but bed exists (should not happen if decoration works)
                                     # For now, just mark as sleeping if at home center and bed exists broadly.
                                     npc.schedule.current_task = "sleeping"
-                                    npc.original_char_before_sleep = npc.char
-                                    npc.char = ord('z')
                                 # else: npc stays "at home" if no bed / no specific sleep spot
                             else: # Not at home, but it's night -> go to bed if possible, else home center
                                 if sleep_spot_coords:
@@ -3100,8 +3325,6 @@ class World:
                     # Wake up logic: If sleeping and it's no longer night
                     if npc.schedule.current_task == "sleeping" and not is_night_time:
                         npc.schedule.current_task = "at home" # Or "idle"
-                        if hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'): # only restore if actually 'z'
-                             npc.char = npc.original_char_before_sleep
                         # self.add_message_to_chat_log(f"{npc.name} woke up.")
 
                     # New marriage seeking logic
@@ -3194,7 +3417,7 @@ class World:
                 if self.player.economic.bounty >= 100: # Bounty threshold for arrest
                     # Check if player is visible to the Sheriff/Guard
                     if npc.id in self.npc_fov_maps and self.npc_fov_maps[npc.id][self.player.y, self.player.x]:
-                        self.add_message_to_chat_log(f"{npc.name} spots you and moves to arrest you for your crimes!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} spots you and moves to arrest you for your crimes!")
                         npc.combat.is_hostile_to_player = True
                         # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
 
@@ -3205,10 +3428,6 @@ class World:
                 # Sub-task logic is now the primary driver of production.
                 # The old _handle_npc_production is removed.
                 self._handle_npc_work_sub_tasks(npc)
-
-            if npc.schedule.current_task != "sleeping" and hasattr(npc, 'original_char_before_sleep') and npc.char == ord('z'):
-                if hasattr(npc, 'original_char_before_sleep'): # Ensure it exists before trying to access
-                    npc.char = npc.original_char_before_sleep
 
             # --- Traveling Merchant AI ---
             if npc.economic.profession == "Traveling Merchant":
@@ -3234,7 +3453,7 @@ class World:
                             if path:
                                 npc.schedule.current_path = path
                                 npc.schedule.current_destination_coords = (dest_x, dest_y)
-                                self.add_message_to_chat_log(f"{npc.name} is traveling to a new village.")
+                                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} is traveling to a new village.")
                 elif npc.schedule.current_task == "lingering_in_village":
                     if npc.leisure_timer > 0:
                         npc.leisure_timer -= 1
@@ -3254,7 +3473,9 @@ class World:
                                         del npc.economic.npc_inventory[item_key]
                                     npc.economic.money += price
                                     current_village.supply[item_key] = current_village.supply.get(item_key, 0) + 1
-                                    self.add_message_to_chat_log(f"{npc.name} sold a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} to the village.")
+                                    self.add_message_to_chat_log(
+                                        f"{self.get_entity_display_name(npc)} sold a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} to the village."
+                                    )
 
                             # Buy low-supply goods
                             inventory_space = 20 - sum(v for k, v in npc.economic.npc_inventory.items() if k != "money")
@@ -3271,7 +3492,9 @@ class World:
                                             current_village.supply[item_key] -= 1
                                             if current_village.supply[item_key] <= 0:
                                                 del current_village.supply[item_key]
-                                            self.add_message_to_chat_log(f"{npc.name} bought a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} from the village.")
+                                            self.add_message_to_chat_log(
+                                                f"{self.get_entity_display_name(npc)} bought a {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)} from the village."
+                                            )
                                             break # Only buy one item per trade check
                     else:
                         npc.schedule.current_task = "traveling_to_village"
@@ -3840,7 +4063,7 @@ class World:
 
         # --- ARREST LOGIC ---
         if npc.economic.profession in ["Sheriff", "Guard"] and self.player.economic.bounty >= 100 and not self.player.state.is_jailed:
-            self.add_message_to_chat_log(f"{npc.name} apprehends you! You are under arrest.")
+            self.add_message_to_chat_log(self.text.entity_apprehends_you(npc))
             self.serve_jail_time()
             npc.combat.is_hostile_to_player = False
             npc.schedule.current_task = "idle"
@@ -3889,9 +4112,13 @@ class World:
              # Crit check (Natural 20)
              if d20_roll == 20: 
                  total_damage *= 2
-                 self.add_message_to_chat_log(f"CRITICAL HIT! {npc.name} strikes you perfectly with their {weapon_name}!")
+                 self.add_message_to_chat_log(f"CRITICAL HIT! {self.get_entity_display_name(npc)} strikes you perfectly with their {weapon_name}!")
              
+             hp_before = player.combat.hp
+             statuses_before = set(player.physical.status_effects)
              actual_damage = player.take_damage(total_damage, world=self)
+             new_statuses = set(player.physical.status_effects) - statuses_before
+             self._broadcast_combat_memory(npc, player, weapon_name, hp_before - player.combat.hp, new_statuses)
              
              self.log_event(
                 event_type="combat_attack",
@@ -3901,7 +4128,7 @@ class World:
                 location=(npc.x, npc.y)
              )
              
-             self.add_message_to_chat_log(f"{npc.name} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.combat.hp}/{player.combat.max_hp})")
+             self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.combat.hp}/{player.combat.max_hp})")
 
              if player.combat.hp <= 0:
                 self.add_message_to_chat_log("You have been defeated!")
@@ -3917,7 +4144,7 @@ class World:
         else:
             # Miss
             miss_desc = "dodged" if d20_roll > 10 else "blocked"
-            self.add_message_to_chat_log(f"{npc.name} swings their {weapon_name} but you {miss_desc} it!")
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} swings their {weapon_name} but you {miss_desc} it!")
 
     def npc_attempt_attack_npc(self, attacker: NPC, target: NPC):
         """Handles an NPC's attempt to attack another NPC."""
@@ -3931,7 +4158,7 @@ class World:
         can_player_see = self.player_fov_map[attacker.x, attacker.y] or self.player_fov_map[target.x, target.y]
 
         if can_player_see:
-            self.add_message_to_chat_log(f"The {attacker.name} attacks the {target.name} for {damage} damage!")
+            self.add_message_to_chat_log(self.text.entity_attacks(attacker, target, damage))
 
         self.log_event(
             event_type="combat_attack",
@@ -3941,11 +4168,15 @@ class World:
             location=(attacker.x, attacker.y)
         )
 
+        hp_before = target.combat.hp
+        statuses_before = set(target.physical.status_effects)
         was_killed = target.take_damage(damage, self)
+        new_statuses = set(target.physical.status_effects) - statuses_before
+        self._broadcast_combat_memory(attacker, target, "attack", hp_before - target.combat.hp, new_statuses)
 
         if was_killed:
             if can_player_see:
-                self.add_message_to_chat_log(f"The {target.name} has been killed by the {attacker.name}!")
+                self.add_message_to_chat_log(f"{self.get_entity_display_name(target)} has been killed by {self.get_entity_display_name(attacker)}!")
             self.handle_npc_death(target, killer_id=attacker.id)
             if self._is_predator(attacker):
                 attacker.physical.hunger = 0
@@ -4140,10 +4371,11 @@ class World:
 
     def complete_contract_delivery(self, contract_id: str, turn_in_npc: NPC):
         """Handles player attempting to turn in a contract delivery."""
+        turn_in_name = self.get_entity_display_name(turn_in_npc)
         if contract_id not in self.player.economic.active_contracts:
             self.add_message_to_chat_log("Error: Contract not found or already completed.")
             if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
-                 self.chat_ui_history.append((turn_in_npc.name, "Hmm, I don't recall that arrangement."))
+                 self.chat_ui_history.append((turn_in_name, "Hmm, I don't recall that arrangement."))
             return
 
         contract = self.player.economic.active_contracts[contract_id]
@@ -4151,7 +4383,7 @@ class World:
         if contract.get("turn_in_npc_id") != turn_in_npc.id: # Check against NPC's actual ID
             self.add_message_to_chat_log("This is not the right person for this delivery.")
             if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
-                 self.chat_ui_history.append((turn_in_npc.name, "Are you sure you have that for me?"))
+                 self.chat_ui_history.append((turn_in_name, "Are you sure you have that for me?"))
             return
 
         item_key = contract["item_key"]
@@ -4171,7 +4403,7 @@ class World:
             # Add to chat UI history if chat is active with this NPC
             if self.chat_ui_active and self.chat_ui_target_npc == turn_in_npc:
                 self.chat_ui_history.append(("System", completion_msg))
-                self.chat_ui_history.append((turn_in_npc.name, f"Excellent work! Here's your {contract['reward']} coins."))
+                self.chat_ui_history.append((turn_in_name, f"Excellent work! Here's your {contract['reward']} coins."))
                 if len(self.chat_ui_history) > self.chat_ui_max_history:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
                 self.chat_ui_scroll_offset = 0
@@ -4198,7 +4430,7 @@ class World:
         # 3. Add NPCs
         for npc in self.all_npcs:
             if npc.x == x and npc.y == y and not npc.is_dead:
-                entities.append({"type": "npc", "data": npc, "name": npc.name})
+                entities.append({"type": "npc", "data": npc, "name": self.get_entity_display_name(npc, include_relationship=True)})
 
         # 4. Add Buildings
         building = self.get_building_at(x,y)
@@ -4247,12 +4479,12 @@ class World:
                 actions.append("Attack")
             else: # It's a humanoid NPC
                 actions.extend(["Talk", "Attack"])
-                if entity_data.economic.profession in TRADE_CAPABLE_PROFESSIONS:
+                if entity_has_capability(entity_data, "trade"):
                     actions.append("Trade")
 
                 # Check if this NPC is an official in a warring village
                 village = self._get_village_for_npc(entity_data)
-                if village and village.at_war_with and entity_data.economic.profession in ["Mayor", "Sheriff", "Guard"]:
+                if village and village.at_war_with and entity_has_any_profession(entity_data, ["Mayor", "Sheriff", "Guard"]):
                     actions.append("Offer Mercenary Services")
 
         elif entity_type == "item":
@@ -4515,9 +4747,10 @@ class World:
 
     def player_attempt_mercenary_contract(self, npc: NPC):
         """Handles the player attempting to offer mercenary services to a warring village."""
+        npc_display_name = self.get_entity_display_name(npc)
         village = self._get_village_for_npc(npc)
         if not village or not village.at_war_with:
-            self.add_message_to_chat_log(f"{npc.name} tells you they have no need for mercenaries right now.")
+            self.add_message_to_chat_log(f"{npc_display_name} tells you they have no need for mercenaries right now.")
             return
 
         enemy_village_id = list(village.at_war_with)[0] # Just grab the first one for simplicity
@@ -4525,16 +4758,16 @@ class World:
         # Check if already on a contract
         contract_id = f"merc_contract_{enemy_village_id}"
         if contract_id in self.player.knowledge.active_quests:
-            self.add_message_to_chat_log(f"{npc.name} says: 'You already have a contract! Go defeat our enemies!'")
+            self.add_message_to_chat_log(f"{npc_display_name} says: 'You already have a contract! Go defeat our enemies!'")
             return
 
-        self.add_message_to_chat_log(f"{npc.name} looks you up and down.")
+        self.add_message_to_chat_log(f"{npc_display_name} looks you up and down.")
 
         if self.player.combat.max_hp < 20 and self.player.social.fame < 50:
-            self.add_message_to_chat_log(f"{npc.name} scoffs. 'You don't look tough enough to help us in the war.'")
+            self.add_message_to_chat_log(f"{npc_display_name} scoffs. 'You don't look tough enough to help us in the war.'")
             return
 
-        self.add_message_to_chat_log(f"{npc.name} says: 'We are at war. If you defeat 3 raiders or enemy guards, we will pay you 100 gold.'")
+        self.add_message_to_chat_log(f"{npc_display_name} says: 'We are at war. If you defeat 3 raiders or enemy guards, we will pay you 100 gold.'")
 
         # Add dynamic quest
         self.player.knowledge.active_quests[contract_id] = {
@@ -4613,8 +4846,9 @@ class World:
             return
 
         animal_def = ANIMAL_DEFINITIONS.get(animal_npc.animal_type)
+        animal_name = self.get_entity_display_name(animal_npc)
         if not animal_def or not animal_def.get("tameable"):
-            self.add_message_to_chat_log(f"The {animal_npc.name} is not interested in being fed.")
+            self.add_message_to_chat_log(f"{animal_name} is not interested in being fed.")
             return
 
         food_item_key = animal_def.get("favorite_food")
@@ -4623,21 +4857,21 @@ class World:
 
         if not self.player.has_item(food_item_key):
             food_name = ITEM_DEFINITIONS.get(food_item_key, {}).get("name", food_item_key)
-            self.add_message_to_chat_log(f"You need a {food_name} to feed the {animal_npc.name}.")
+            self.add_message_to_chat_log(f"You need a {food_name} to feed {animal_name}.")
             return
 
         self.player.remove_item(food_item_key, 1)
         food_name = ITEM_DEFINITIONS.get(food_item_key, {}).get("name", food_item_key)
-        self.add_message_to_chat_log(f"You offer a {food_name} to the {animal_npc.name}.")
+        self.add_message_to_chat_log(f"You offer a {food_name} to {animal_name}.")
 
         if random.random() < taming_chance:
             animal_npc.is_tame = True
             animal_npc.owner = self.player
-            self.add_message_to_chat_log(f"The {animal_npc.name} seems to trust you now!")
+            self.add_message_to_chat_log(f"{animal_name} seems to trust you now!")
             # Change behavior to follow owner
             animal_npc.behavior = "Follow-Owner"
         else:
-            self.add_message_to_chat_log(f"The {animal_npc.name} ate the {food_name} but is still wary of you.")
+            self.add_message_to_chat_log(f"{animal_name} ate the {food_name} but is still wary of you.")
 
     def player_attempt_ride_animal(self, animal_npc: Animal):
         """Handles the player's attempt to ride an animal."""
@@ -4645,9 +4879,10 @@ class World:
             self.add_message_to_chat_log("You are already riding something.")
             return
 
+        animal_name = self.get_entity_display_name(animal_npc)
         animal_def = ANIMAL_DEFINITIONS.get(animal_npc.animal_type)
         if not (animal_def and animal_def.get("rideable") and animal_npc.is_tame and animal_npc.owner == self.player):
-            self.add_message_to_chat_log(f"You can't ride the {animal_npc.name}.")
+            self.add_message_to_chat_log(f"You can't ride {animal_name}.")
             return
 
         self.player.state.is_riding = True
@@ -4659,7 +4894,7 @@ class World:
         self._update_entity_position(self.player, animal_npc.x, animal_npc.y)
         self._update_player_fov() # Update FOV from new position
 
-        self.add_message_to_chat_log(f"You mount the {animal_npc.name}.")
+        self.add_message_to_chat_log(f"You mount {animal_name}.")
         # The animal should stop its current path when mounted
         animal_npc.schedule.current_path = []
         animal_npc.schedule.current_destination_coords = None
@@ -4670,13 +4905,14 @@ class World:
             self.add_message_to_chat_log("You can't shear that.")
             return
 
+        animal_name = self.get_entity_display_name(animal_npc)
         animal_def = ANIMAL_DEFINITIONS[animal_npc.animal_type]
         shearable_def = animal_def["shearable"]
         regrowth_days = shearable_def["regrowth_days"]
         days_since_shorn = (self.game_time - animal_npc.last_shorn_time) // DAY_LENGTH_TICKS
 
         if days_since_shorn < regrowth_days:
-            self.add_message_to_chat_log(f"The {animal_npc.name} is not woolly enough to be shorn yet.")
+            self.add_message_to_chat_log(f"{animal_name} is not woolly enough to be shorn yet.")
             return
 
         # Check for shears tool
@@ -4694,10 +4930,10 @@ class World:
             item_yield_key = shearable_def["item_yield"]
             self.player.add_item(item_yield_key, quantity)
             item_name = ITEM_DEFINITIONS.get(item_yield_key, {}).get("name", item_yield_key)
-            self.add_message_to_chat_log(f"You shear the {animal_npc.name} and get {quantity}x {item_name}.")
+            self.add_message_to_chat_log(f"You shear {animal_name} and get {quantity}x {item_name}.")
             animal_npc.last_shorn_time = self.game_time
         else:
-            self.add_message_to_chat_log(f"You attempt to shear the {animal_npc.name}, but get no wool.")
+            self.add_message_to_chat_log(f"You attempt to shear {animal_name}, but get no wool.")
 
     def player_attempt_dismount(self, animal_npc: Animal):
         """Handles the player's attempt to dismount an animal."""
@@ -4722,7 +4958,7 @@ class World:
         self._update_entity_position(self.player, dismount_x, dismount_y)
         self._update_player_fov()
 
-        self.add_message_to_chat_log(f"You dismount the {animal_npc.name}.")
+        self.add_message_to_chat_log(f"You dismount {self.get_entity_display_name(animal_npc)}.")
 
         if isinstance(target_tile, Tree) and target_tile.is_choppable:
             original_tree_type = target_tile.tree_type
@@ -4807,7 +5043,6 @@ class World:
             interaction_hint = target_tile.properties.get("interaction_hint")
             if interaction_hint == "sit":
                 self.player.state.is_sitting = True
-                self.player.char = ord('s') # Example sitting character
                 self.player.state.sitting_on_object_at = (target_x, target_y)
                 self.add_message_to_chat_log(f"You sit down on the {target_tile.name}.")
             else:
@@ -4822,7 +5057,6 @@ class World:
         """Handles the player standing up."""
         if self.player.state.is_sitting:
             self.player.state.is_sitting = False
-            self.player.char = self.player.state.original_char
             self.add_message_to_chat_log("You stand up.")
             self.player.state.sitting_on_object_at = None
         # No message if not sitting, or handled by caller
@@ -4870,6 +5104,7 @@ class World:
             self.add_message_to_chat_log("No one specific to persuade.")
             return
 
+        npc_display_name = self.get_entity_display_name(npc_target)
         player_rep = self.player.social.reputation
         prompt = LLM_PROMPTS["npc_persuasion_check"].format(
             npc_name=npc_target.name,
@@ -4883,7 +5118,7 @@ class World:
 
         response_str = self._call_llm(prompt)
         if not response_str:
-            self.add_message_to_chat_log(f"{npc_target.name} doesn't seem to react to your attempt.")
+            self.add_message_to_chat_log(f"{npc_display_name} doesn't seem to react to your attempt.")
             return
 
         try:
@@ -4893,10 +5128,10 @@ class World:
             new_attitude = response_json.get("new_attitude_to_player", npc_target.attitude_to_player)
 
             # Add NPC's reaction dialogue to chat UI history
-            self.chat_ui_history.append((npc_target.name, reaction_dialogue))
+            self.chat_ui_history.append((npc_display_name, reaction_dialogue))
 
             if new_attitude != npc_target.attitude_to_player:
-                attitude_msg = f"({npc_target.name}'s attitude towards you is now '{new_attitude}')"
+                attitude_msg = f"({npc_display_name}'s attitude towards you is now '{new_attitude}')"
                 self.chat_ui_history.append(("System", attitude_msg))
                 # Also log to main game log for now, as attitude change is significant
                 self.add_message_to_chat_log(attitude_msg)
@@ -4918,7 +5153,7 @@ class World:
                 self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
             self.chat_ui_scroll_offset = 0
         except json.JSONDecodeError:
-            self.add_message_to_chat_log(f"{npc_target.name} gives a non-committal grunt. (LLM Format Error)")
+            self.add_message_to_chat_log(f"{npc_display_name} gives a non-committal grunt. (LLM Format Error)")
 
     def _handle_npc_conversations(self):
         conversing_npcs = [npc for npc in self.village_npcs if npc.conversation_partner_id is not None]
@@ -4932,7 +5167,8 @@ class World:
 
     def _continue_npc_conversation(self, speaker, listener):
         if len(speaker.current_conversation) >= 6:
-            self.add_message_to_chat_log(f"The conversation between {speaker.name} and {listener.name} ends.")
+            if self._can_player_overhear(speaker):
+                self.add_message_to_chat_log(f"You overhear {self.get_entity_display_name(speaker)} and {self.get_entity_display_name(listener)} wrap up their conversation.")
             speaker.conversation_partner_id = None
             listener.conversation_partner_id = None
             speaker.current_conversation = []
@@ -4947,27 +5183,63 @@ class World:
             event_summary = event.description
 
         history = "\n".join(speaker.current_conversation)
+        task_key = ("npc_conversation", speaker.id, listener.id)
+        if not self._is_npc_llm_relevant_to_player(speaker, listener):
+            self._cancel_background_llm_task(task_key)
+            spoken_line, goal = self._fallback_npc_social_line(speaker, listener)
+            speaker.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            listener.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            self._handle_npc_social_goal(speaker, listener, goal)
+            speaker.last_conversation_time = self.game_time
+            listener.last_conversation_time = self.game_time
+            listener.conversation_partner_id = speaker.id
+            speaker.conversation_partner_id = listener.id
+            return
+
+        dialogue = self._poll_background_llm_task(task_key)
+        if dialogue is BACKGROUND_LLM_PENDING:
+            return
+        if dialogue is not None:
+            spoken_line = ""
+            goal = "continue_conversation"
+            if dialogue:
+                response_json = self._parse_llm_json_object(dialogue)
+                if response_json is not None:
+                    spoken_line = response_json.get("response", "").strip()
+                    goal = response_json.get("goal", "continue_conversation")
+                else:
+                    spoken_line = dialogue.strip()
+
+            if not spoken_line:
+                spoken_line, goal = self._fallback_npc_social_line(speaker, listener)
+
+            if self._can_player_overhear(speaker):
+                self.add_message_to_chat_log(
+                    f"You overhear {self.get_entity_display_name(speaker)} tell {self.get_entity_display_name(listener)}: {spoken_line}"
+                )
+            speaker.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            listener.current_conversation.append(f"{speaker.name}: {spoken_line}")
+            self._handle_npc_social_goal(speaker, listener, goal)
+
+            speaker.last_conversation_time = self.game_time
+            listener.last_conversation_time = self.game_time
+            listener.conversation_partner_id = speaker.id
+            speaker.conversation_partner_id = listener.id
+            return
+
         prompt = LLM_PROMPTS["npc_npc_conversation"].format(
             speaker_name=speaker.name,
             speaker_personality=speaker.social.personality,
             speaker_attitude_to_listener=speaker.social.relationships.get(listener.id, 50),
             listener_name=listener.name,
             listener_personality=listener.social.personality,
+            listener_relationship_to_speaker=listener.social.relationships.get(speaker.id, 50),
+            speaker_current_task=speaker.schedule.current_task,
+            listener_current_task=listener.schedule.current_task,
             event_summary=event_summary,
             conversation_history=history
         )
-        dialogue = self._call_llm(prompt)
-        if dialogue:
-            self.add_message_to_chat_log(f"{speaker.name} to {listener.name}: {dialogue}")
-            speaker.current_conversation.append(f"{speaker.name}: {dialogue}")
-            listener.current_conversation.append(f"{speaker.name}: {dialogue}")
-
-        speaker.last_conversation_time = self.game_time
-        listener.last_conversation_time = self.game_time
-
-        # Swap speaker and listener for the next turn
-        listener.conversation_partner_id = speaker.id
-        speaker.conversation_partner_id = listener.id
+        self._submit_background_llm_task(task_key, prompt)
 
     def _start_npc_socialization(self, npc: NPC):
         if npc.conversation_cooldown > 0:
@@ -4989,16 +5261,19 @@ class World:
         npc.last_conversation_time = self.game_time
         partner.last_conversation_time = self.game_time
 
-        # For now, let's just log that a conversation has started.
-        self.add_message_to_chat_log(f"{npc.name} and {partner.name} start a conversation.")
+        if self._can_player_overhear(npc):
+            self.add_message_to_chat_log(
+                f"You overhear {self.get_entity_display_name(npc)} and {self.get_entity_display_name(partner)} start talking."
+            )
 
     def player_attempt_attack(self, target_npc: NPC):
         if not target_npc:
             self.add_message_to_chat_log("No target selected for attack.")
             return
 
+        target_name = self.get_entity_display_name(target_npc)
         if target_npc.is_dead:
-            self.add_message_to_chat_log(f"{target_npc.name} is already defeated.")
+            self.add_message_to_chat_log(f"{target_name} is already defeated.")
             return
 
         player_weapon_name = "Fists"
@@ -5029,7 +5304,7 @@ class World:
             self.add_message_to_chat_log("Your attack seems to have no effect (LLM Comms Error).")
             if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
                 target_npc.combat.is_hostile_to_player = True
-                self.add_message_to_chat_log(f"{target_npc.name} becomes hostile due to your aggression!")
+                self.add_message_to_chat_log(f"{target_name} becomes hostile due to your aggression!")
             return
 
         try:
@@ -5049,26 +5324,30 @@ class World:
                     target_id=target_npc.id,
                     location=(self.player.x, self.player.y)
                 )
+                hp_before = target_npc.combat.hp
+                statuses_before = set(target_npc.physical.status_effects)
                 target_npc.take_damage(damage_dealt, self)
+                new_statuses = set(target_npc.physical.status_effects) - statuses_before
+                self._broadcast_combat_memory(self.player, target_npc, weapon_name, hp_before - target_npc.combat.hp, new_statuses)
                 if target_npc.is_dead:
                     self.handle_npc_death(target_npc, killer_id=self.player.id)
             elif hit and damage_dealt <= 0: # A hit that does no damage
-                self.add_message_to_chat_log(f"Your attack hits but glances off {target_npc.name} harmlessly!")
+                self.add_message_to_chat_log(f"Your attack hits but glances off {target_name} harmlessly!")
 
             if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
                  target_npc.combat.is_hostile_to_player = True
-                 self.add_message_to_chat_log(f"{target_npc.name} becomes hostile!")
+                 self.add_message_to_chat_log(f"{target_name} becomes hostile!")
 
         except json.JSONDecodeError:
             self.add_message_to_chat_log(f"The outcome of your attack is unclear. (LLM Format Error: {response_str})")
             self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=8, source_entity_id=self.player.id) # Still emit
             if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
-                target_npc.combat.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
+                target_npc.combat.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_name} is angered by your confusing actions!")
         except ValueError:
             self.add_message_to_chat_log(f"The LLM provided an invalid damage amount: {response_json.get('damage_dealt') if 'response_json' in locals() else 'Unknown'}")
             self.emit_sound(self.player.x, self.player.y, "combat_attack", volume=8, source_entity_id=self.player.id) # Still emit
             if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
-                target_npc.combat.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_npc.name} is angered by your confusing actions!")
+                target_npc.combat.is_hostile_to_player = True; self.add_message_to_chat_log(f"{target_name} is angered by your confusing actions!")
 
         # --- Witness Handling ---
         # After any attack attempt, check for witnesses to the crime of assault.
@@ -5109,7 +5388,8 @@ class World:
         # self.add_message_to_chat_log(f"Debug: {npc.name} has {reason}.")
 
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
-        self.add_message_to_chat_log(f"{dead_npc.name} has died!")
+        dead_npc_name = self.get_entity_display_name(dead_npc)
+        self.add_message_to_chat_log(self.text.entity_died(dead_npc))
 
         if killer_id == self.player.id:
             for quest_id, quest_data in self.player.knowledge.active_quests.items():
@@ -5137,7 +5417,7 @@ class World:
                     if isinstance(killer, Player):
                         self.add_message_to_chat_log(f"You gain fame for slaying a dangerous beast!")
                     else:
-                        self.add_message_to_chat_log(f"{killer.name} gains fame for slaying a beast!")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(killer)} gains fame for slaying a beast!")
 
                 # Infamy for murder (killing non-combatants/civilians)
                 # Simplified check: if victim was not a creature/monster and not hostile
@@ -5152,7 +5432,7 @@ class World:
                          if isinstance(killer, Player):
                              self.add_message_to_chat_log("Your infamy increases for this public act of violence.")
                          else:
-                             self.add_message_to_chat_log(f"{killer.name}'s infamy increases.")
+                             self.add_message_to_chat_log(f"{self.get_entity_display_name(killer)}'s infamy increases.")
 
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
@@ -5178,7 +5458,7 @@ class World:
                     )
                     corpse_placed_on_map = True
 
-        if not corpse_placed_on_map: self.add_message_to_chat_log(f"(Could not place corpse for {dead_npc.name} on map)")
+        if not corpse_placed_on_map: self.add_message_to_chat_log(f"(Could not place corpse for {dead_npc_name} on map)")
 
         self._remove_npc_from_world(dead_npc, reason="died")
 
@@ -5215,9 +5495,9 @@ class World:
                         items_dropped_messages.append(f"1x {item_name} (equipped)")
 
             if items_dropped_messages:
-                self.add_message_to_chat_log(f"{dead_npc.name} dropped: {', '.join(items_dropped_messages)}.")
+                self.add_message_to_chat_log(f"{dead_npc_name} dropped: {', '.join(items_dropped_messages)}.")
             else:
-                self.add_message_to_chat_log(f"{dead_npc.name} dropped nothing of note.")
+                self.add_message_to_chat_log(f"{dead_npc_name} dropped nothing of note.")
 
         # After death, emit a sound if appropriate (e.g. a shout or thud)
         # For now, let's assume death itself is not a loud sound unless it's a dramatic one.
@@ -5439,7 +5719,7 @@ class World:
                     else:
                         self.add_message_to_chat_log("Error: Could not remove item from inventory.")
                 else:
-                    self.add_message_to_chat_log(f"{merchant_npc.name} doesn't have enough money to buy that.")
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(merchant_npc)} doesn't have enough money to buy that.")
             else:
                 self.add_message_to_chat_log("Error: You don't have that item to sell (inventory mismatch).")
 
@@ -5462,7 +5742,7 @@ class World:
                 else:
                     self.add_message_to_chat_log("You don't have enough money for that.")
             else:
-                self.add_message_to_chat_log(f"Error: {merchant_npc.name} doesn't have that item in stock (inventory mismatch).")
+                self.add_message_to_chat_log(f"Error: {self.get_entity_display_name(merchant_npc)} doesn't have that item in stock (inventory mismatch).")
 
 
     def player_attempt_toggle_door(self, target_x: int, target_y: int) -> bool:
@@ -5524,11 +5804,14 @@ class World:
         # ---
 
         relationship_score = npc_target.social.relationships.get(self.player.id, 50)
+        npc_display_name = self.get_entity_display_name(npc_target)
+        relationship_context = self._describe_relationship_for_prompt(npc_target)
 
         prompt = LLM_PROMPTS["npc_conversation_greeting"].format(
-            npc_name=npc_target.name,
+            npc_name=npc_display_name,
             npc_personality=npc_target.social.personality,
             npc_attitude=npc_target.attitude_to_player,
+            npc_relationship_to_player=relationship_context,
             relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
@@ -5540,16 +5823,16 @@ class World:
             npc_help_needed=npc_target.knowledge.help_needed
         )
         greeting = self._call_llm(prompt)
-        if not greeting:
-            greeting = f"Hello. (LLM failed to provide greeting)"
+        if self._llm_output_is_empty(greeting) or self._contains_placeholder_player_reference(greeting):
+            greeting = self._fallback_dialogue_greeting(npc_target)
 
-        self.chat_ui_history.append((npc_target.name, greeting.strip()))
+        self.chat_ui_history.append((npc_display_name, greeting.strip()))
 
         # If the NPC has a dynamic quest to offer, add it to the dialogue
         if hasattr(npc_target, 'active_quest') and npc_target.active_quest:
             quest = npc_target.active_quest
             offer_text = f"I'm in a bit of a bind. I desperately need {quest.required_count} {quest.item_key.replace('_', ' ')}. Can you help me? (You can 'accept quest' or 'decline quest')"
-            self.chat_ui_history.append((npc_target.name, offer_text))
+            self.chat_ui_history.append((npc_display_name, offer_text))
 
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
@@ -5559,6 +5842,8 @@ class World:
         """Continues dialogue with an NPC based on player input and history."""
         if not npc_target:
             return
+
+        npc_display_name = self.get_entity_display_name(npc_target)
 
         # --- Handle special keywords before general conversation ---
         # --- Handle special keywords before general conversation ---
@@ -5582,11 +5867,11 @@ class World:
                     "item_fetch_count": quest.required_count,
                     "progress": 0
                 }
-                self.chat_ui_history.append((npc_target.name, "Oh, thank you! Please hurry!"))
+                self.chat_ui_history.append((npc_display_name, "Oh, thank you! Please hurry!"))
                 npc_target.active_quest = None # Quest is now with the player
                 return
             elif 'decline' in player_input_text.lower():
-                self.chat_ui_history.append((npc_target.name, "Oh, I see. I'll have to find another way then."))
+                self.chat_ui_history.append((npc_display_name, "Oh, I see. I'll have to find another way then."))
                 npc_target.active_quest = None # NPC gives up offering this quest for now
                 return
 
@@ -5635,7 +5920,7 @@ class World:
                      )
                      response = self._call_llm(prompt)
                      if response:
-                         self.chat_ui_history.append((npc_target.name, response.strip()))
+                         self.chat_ui_history.append((npc_display_name, response.strip()))
                          return
             # If no subject found or no events known, fall through to general conversation
 
@@ -5649,17 +5934,17 @@ class World:
                     if loc_name not in npc_target.knowledge.known_locations:
                         npc_target.knowledge.known_locations[loc_name] = coords
                         npc_target.social.relationships[self.player.id] = npc_target.social.relationships.get(self.player.id, 50) + 10
-                        self.chat_ui_history.append((npc_target.name, f"Oh, the {loc_name}? I didn't know where that was. Thank you!"))
+                        self.chat_ui_history.append((npc_display_name, f"Oh, the {loc_name}? I didn't know where that was. Thank you!"))
                         shared = True
                         break
             if not shared:
-                self.chat_ui_history.append((npc_target.name, "I'm not sure what you mean."))
+                self.chat_ui_history.append((npc_display_name, "I'm not sure what you mean."))
             return
 
         # Player Applying for Job Logic
         if any(word in player_input_text.lower() for word in ["hired", "job", "work", "vacancy", "hire me"]) and npc_target.economic.profession != "Unemployed":
             if self.player.economic.job_building_id:
-                self.chat_ui_history.append((npc_target.name, "You already have a job. You can't work two places at once!"))
+                self.chat_ui_history.append((npc_display_name, "You already have a job. You can't work two places at once!"))
                 return
 
             work_building = self.buildings_by_id.get(npc_target.schedule.work_building_id)
@@ -5682,27 +5967,28 @@ class World:
                     if work_building.building_type == "sheriff_office": new_prof = "Deputy"
                     elif work_building.building_type == "lumber_mill": new_prof = "Woodcutter"
                     elif work_building.building_type == "blacksmith_shop": new_prof = "Blacksmith Apprentice"
+                    elif work_building.building_type == "clinic": new_prof = "Healer's Assistant"
                     elif work_building.building_type == "tavern": new_prof = "Server"
                     elif work_building.building_type == "farm": new_prof = "Farmhand"
                     elif work_building.building_type == "general_store": new_prof = "Shop Assistant"
 
-                    self.player.economic.profession = new_prof
+                    self._set_entity_profession(self.player, new_prof, reason="player_hired")
 
-                    self.chat_ui_history.append((npc_target.name, f"You want to work here? We could use the help. You're hired as a {new_prof}!"))
+                    self.chat_ui_history.append((npc_display_name, f"You want to work here? We could use the help. You're hired as a {new_prof}!"))
                     self.add_message_to_chat_log(f"You have been hired as a {new_prof} at the {work_building.building_type.replace('_', ' ')}.")
 
                     # Social boost
                     npc_target.social.relationships[self.player.id] = min(100, npc_target.social.relationships.get(self.player.id, 50) + 10)
                     return
                 else:
-                    self.chat_ui_history.append((npc_target.name, "Sorry, we're fully staffed right now. Try somewhere else."))
+                    self.chat_ui_history.append((npc_display_name, "Sorry, we're fully staffed right now. Try somewhere else."))
                     return
             else:
-                self.chat_ui_history.append((npc_target.name, "I don't have a steady workplace myself to offer you a job."))
+                self.chat_ui_history.append((npc_display_name, "I don't have a steady workplace myself to offer you a job."))
                 return
 
         # Job Referral Logic
-        if npc_target.economic.profession == "Unemployed" and any(word in player_input_text.lower() for word in ["job", "work", "hiring", "vacancy"]):
+        if entity_has_profession(npc_target, "Unemployed") and any(word in player_input_text.lower() for word in ["job", "work", "hiring", "vacancy"]):
             # Check if player mentioned a specific known building that has a vacancy
             referred_building = None
             for loc_id, coords in self.player.knowledge.known_locations.items():
@@ -5715,7 +6001,7 @@ class World:
                          break
 
             if referred_building:
-                self.chat_ui_history.append((npc_target.name, f"The {referred_building.building_type.replace('_', ' ')}? I'll go apply right now! Thank you!"))
+                self.chat_ui_history.append((npc_display_name, f"The {referred_building.building_type.replace('_', ' ')}? I'll go apply right now! Thank you!"))
                 npc_target.schedule.current_task = "applying_for_job"
                 npc_target.schedule.current_destination_coords = (referred_building.global_center_x, referred_building.global_center_y)
                 npc_target.schedule.current_path = [] # Clear path to trigger recalculation
@@ -5728,7 +6014,7 @@ class World:
         gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
         if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
             if not npc_target.knowledge.known_events:
-                self.chat_ui_history.append((npc_target.name, "I haven't heard anything interesting lately."))
+                self.chat_ui_history.append((npc_display_name, "I haven't heard anything interesting lately."))
             else:
                 # Select a random event to gossip about
                 event_to_share = random.choice(list(npc_target.knowledge.known_events.values()))
@@ -5759,7 +6045,7 @@ class World:
                 if not gossip_dialogue:
                     gossip_dialogue = "I... uh... forget what I was going to say."
 
-                self.chat_ui_history.append((npc_target.name, gossip_dialogue.strip()))
+                self.chat_ui_history.append((npc_display_name, gossip_dialogue.strip()))
             # End the turn after sharing gossip
             return
 
@@ -5786,10 +6072,13 @@ class World:
         # ---
 
         relationship_score = npc_target.social.relationships.get(self.player.id, 50)
+        relationship_context = self._describe_relationship_for_prompt(npc_target)
 
         prompt = LLM_PROMPTS["npc_conversation_continue"].format(
-            npc_name=npc_target.name,
+            npc_name=npc_display_name,
             npc_personality=npc_target.social.personality,
+            npc_attitude=npc_target.attitude_to_player,
+            npc_relationship_to_player=relationship_context,
             relationship_score=relationship_score,
             player_fame=self.player.social.fame,
             player_infamy=self.player.social.infamy,
@@ -5804,24 +6093,33 @@ class World:
         )
 
         response_str = self._call_llm(prompt)
-        if not response_str:
-            self.chat_ui_history.append((npc_target.name, "... (LLM failed to respond)"))
+        if self._llm_output_is_empty(response_str):
+            fallback_response, fallback_goal = self._fallback_dialogue_continue(npc_target, player_input_text)
+            self.chat_ui_history.append((npc_display_name, fallback_response))
+            self._handle_npc_goal(npc_target, fallback_goal, player_input_text)
             return
 
-        try:
-            response_json = json.loads(response_str)
-            npc_response = response_json.get("response", "...")
+        response_json = self._parse_llm_json_object(response_str)
+        if response_json is not None:
+            npc_response = response_json.get("response", "").strip() or self._fallback_dialogue_continue(npc_target, player_input_text)[0]
             goal = response_json.get("goal", "continue_conversation")
+            if self._contains_placeholder_player_reference(npc_response):
+                npc_response, goal = self._fallback_dialogue_continue(npc_target, player_input_text)
 
-            self.chat_ui_history.append((npc_target.name, npc_response.strip()))
+            self.chat_ui_history.append((npc_display_name, npc_response.strip()))
             self._handle_npc_goal(npc_target, goal, player_input_text)
-
-        except json.JSONDecodeError:
+        else:
             # If the LLM fails to return valid JSON, just treat the whole response as dialogue
-            self.chat_ui_history.append((npc_target.name, response_str.strip()))
+            fallback_response, fallback_goal = self._fallback_dialogue_continue(npc_target, player_input_text)
+            dialogue_text = response_str.strip() if not self._llm_output_is_empty(response_str) else fallback_response
+            if self._contains_placeholder_player_reference(dialogue_text):
+                dialogue_text = fallback_response
+            self.chat_ui_history.append((npc_display_name, dialogue_text))
+            if dialogue_text == fallback_response:
+                self._handle_npc_goal(npc_target, fallback_goal, player_input_text)
 
         # After NPC response, check if this NPC should offer a job
-        if npc_target.economic.profession == "Lumber Mill Foreman" and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
+        if entity_has_profession(npc_target, "Lumber Mill Foreman") and f"lumber_delivery_{npc_target.id}" not in self.player.economic.active_contracts:
             # Check if player's response was affirmative to a previous implicit offer or just general talk
             # This is tricky without more state. For now, let's assume if they talk to Foreman, job is offered.
             # A better way: Foreman's initial greeting (start_npc_dialogue) could offer.
@@ -5850,7 +6148,7 @@ class World:
             if not job_offer_dialogue:
                 job_offer_dialogue = f"I might have some work for you... if you're interested. Need {quantity_needed} {item_name_plural} for {reward_amount} coins."
 
-            self.chat_ui_history.append((npc_target.name, job_offer_dialogue.strip()))
+            self.chat_ui_history.append((npc_display_name, job_offer_dialogue.strip()))
             # Store pending offer to be accepted on player's next input if affirmative
             self.player.economic.pending_contract_offer = {
                 "contract_id": contract_id, "npc_id": npc_target.id,
@@ -5861,13 +6159,13 @@ class World:
 
         # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
         # This is a simplified trigger; more robust would be keyword matching or LLM intent.
-        if npc_target.economic.profession == "Sheriff" and "kill_wolves_01" not in self.player.knowledge.active_quests and \
+        if entity_has_profession(npc_target, "Sheriff") and "kill_wolves_01" not in self.player.knowledge.active_quests and \
            "kill_wolves_01" not in self.player.knowledge.completed_quests:
 
             quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
             if quest_def:
                 offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
-                self.chat_ui_history.append((npc_target.name, offer_dialogue))
+                self.chat_ui_history.append((npc_display_name, offer_dialogue))
                 self.add_message_to_chat_log(f"Quest Offered: {quest_def['title']}")
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
@@ -5879,17 +6177,30 @@ class World:
             npc.schedule.current_task = "following_player"
             npc.task_target_entity_id = self.player.id
             npc.schedule.current_path = []  # Clear path to allow recalculation
-            self.add_message_to_chat_log(f"{npc.name} is now following you.")
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} is now following you.")
         elif goal == "go_to_location":
             # Placeholder for future implementation where the LLM might specify coordinates
-            self.add_message_to_chat_log(f"{npc.name} wants to go to a location mentioned.")
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} wants to go to a location mentioned.")
             # Example: npc.schedule.current_task = "going_to_location"
             # npc.task_target_coords = (x, y) # (extracted from player_input or LLM response)
         elif goal == "start_trade":
-            if npc.economic.profession in TRADE_CAPABLE_PROFESSIONS:
+            if entity_has_capability(npc, "trade"):
                 self.request_open_trade(npc)
             else:
-                self.add_message_to_chat_log(f"{npc.name} seems to want to trade, but isn't a merchant.")
+                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} seems to want to trade, but isn't a merchant.")
+        elif goal == "give_item":
+            if len(npc.inventory) > 0:
+                item = npc.inventory.pop(0) # In the future, parse the exact item name
+                self.player.inventory.append(item)
+                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} gave you {item.name}.")
+            else:
+                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has nothing to give.")
+            self.request_close_dialogue()
+        elif goal == "attack_target":
+            npc.attitude_to_player = "hostile"
+            npc.social.relationships[self.player.id] = 0
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} becomes incredibly hostile!")
+            self.request_close_dialogue()
         elif goal == "end_conversation":
             self._summarize_and_store_conversation(npc, self.chat_ui_history)
             self.request_close_dialogue()
@@ -5957,22 +6268,59 @@ class World:
     def _call_llm(self, prompt: str) -> str:
         """Makes a request to the configured LLM backend and returns the response."""
         if not ENABLE_LLM_CONNECTION:
-            return "{}"
+            return ""
 
         if LLM_BACKEND == "gemini":
             return self._call_gemini(prompt)
         else:
             return self._call_ollama_backend(prompt)
 
+    def _call_llm_for_worldgen(self, prompt: str) -> str:
+        """World generation should stay fast and local; reserve LLM calls for live gameplay."""
+        return ""
+
+    def _call_llm_for_background(self, prompt: str) -> str:
+        """Background simulation should not block on remote model calls during active play."""
+        return ""
+
+    def _submit_background_llm_task(self, task_key, prompt: str) -> None:
+        if task_key in self._background_llm_tasks:
+            return
+        if len(self._background_llm_tasks) >= 4:
+            return
+        self._background_llm_tasks[task_key] = self._background_llm_executor.submit(self._call_llm, prompt)
+
+    def _cancel_background_llm_task(self, task_key) -> None:
+        future = self._background_llm_tasks.pop(task_key, None)
+        if future is not None:
+            future.cancel()
+
+    def _poll_background_llm_task(self, task_key):
+        future = self._background_llm_tasks.get(task_key)
+        if future is None:
+            return None
+        if not future.done():
+            return BACKGROUND_LLM_PENDING
+        del self._background_llm_tasks[task_key]
+        try:
+            return future.result()
+        except Exception:
+            return ""
+
     def _call_gemini(self, prompt: str) -> str:
         if not GOOGLE_API_KEY:
-            return "{}"
+            self._warn_missing_llm_once()
+            return ""
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt)
-            return response.text.strip()
+            client = genai.Client(api_key=GOOGLE_API_KEY)
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt
+            )
+            response_text = getattr(response, "text", "") or ""
+            return response_text.strip()
         except Exception as e:
-            # # print(f"Error communicating with Gemini: {e}")
+            self.add_message_to_chat_log(f"Gemini error: {e}")
             return ""
 
     def _call_ollama_backend(self, prompt: str) -> str:
@@ -5995,7 +6343,7 @@ class World:
 
     def log_event(self, event_type: str, description: str, subject_id: int, target_id: int | None = None, location: tuple[int, int] | None = None) -> Event:
         """Creates an Event object and adds it to the global event log."""
-        new_event = Event(
+        new_event = self.history.add_event(
             event_type=event_type,
             description=description,
             subject_id=subject_id,
@@ -6029,11 +6377,6 @@ class World:
 
             if valid_witnesses or player_saw:
                 new_event.public_knowledge = True
-
-        self.global_events.append(new_event)
-        # Keep the event log from growing indefinitely
-        if len(self.global_events) > 200: # Max 200 recent events
-            self.global_events.pop(0)
 
         return new_event
 
@@ -6105,7 +6448,7 @@ class World:
 
             if possible_weathers:
                 self.weather = random.choice(possible_weathers)
-                self.add_message_to_chat_log(f"The weather has changed to {self.weather}.")
+                self.add_message_to_chat_log(self.text.weather_changed(self.weather))
 
             self.weather_change_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS * 2)
 
@@ -6294,7 +6637,7 @@ class World:
                 family_ties_hint="",
                 attitude_to_player_hint=""
             )
-            llm_response = self._call_llm(llm_prompt)
+            llm_response = self._call_llm_for_worldgen(llm_prompt)
             try:
                 npc_data = json.loads(llm_response)
                 # Assign home
@@ -6363,44 +6706,10 @@ class World:
                 if work_building:
                     npc.schedule.work_building_id = work_building.id
                     work_building.occupants.append(npc) # Store NPC object for now
-                    # Simple profession mapping
-                    if work_building.building_type == "sheriff_office":
-                        npc.economic.profession = "Sheriff"
-                    elif work_building.building_type == "capital_hall":
-                        npc.economic.profession = "Town Official"
-                    elif work_building.building_type == "general_store" or \
-                         "shop" in work_building.building_type or \
-                         "market" in work_building.building_type:
-                        npc.economic.profession = "Merchant"
-                    elif work_building.building_type == "tavern":
-                        npc.economic.profession = "Tavern Keeper"
-                    elif work_building.building_type == "lumber_mill":
-                        is_foreman_assigned_to_mill = any(
-                            other_npc.economic.profession == "Lumber Mill Foreman" and other_npc.schedule.work_building_id == work_building.id
-                            for other_npc in self.all_npcs
-                        )
-                        if not is_foreman_assigned_to_mill:
-                            npc.economic.profession = "Lumber Mill Foreman"
-                        else:
-                            npc.economic.profession = "Woodcutter"
-                    elif work_building.building_type == "farm":
-                         npc.economic.profession = "Farmer"
-                    elif work_building.building_type == "mine":
-                         npc.economic.profession = "Miner"
-                    elif work_building.building_type == "carpenter_shop":
-                        npc.economic.profession = "Carpenter"
-                    elif work_building.building_type == "mill":
-                        npc.economic.profession = "Miller"
-                    elif work_building.building_type == "bakery":
-                        npc.economic.profession = "Baker"
-                    elif work_building.building_type == "fishing_hut":
-                        npc.economic.profession = "Fisherman"
-                    elif work_building.building_type == "library":
-                        npc.economic.profession = "Scribe"
-                    else:
-                        npc.economic.profession = work_building.building_type.replace("_", " ").title()
+                    resolved_profession = self._resolve_profession_for_work_building(work_building, exclude_entity=npc)
+                    self._set_entity_profession(npc, resolved_profession, reason="initial_job_assignment")
                 else:
-                    npc.economic.profession = "Unemployed"
+                    self._set_entity_profession(npc, "Unemployed", reason="initial_unemployed")
 
                 # If NPC is a Merchant and assigned to a general store, pre-populate store inventory
                 if npc.economic.profession == "Merchant" and work_building and work_building.building_type == "general_store":
@@ -6483,7 +6792,30 @@ class World:
             self.village_npcs = []
 
         for npc in self.npcs + self.village_npcs:
+            task_key = ("ambient_speech", npc.id)
+            if task_key in self._background_llm_tasks and not self._is_npc_llm_relevant_to_player(npc):
+                self._cancel_background_llm_task(task_key)
+            llm_dialogue = self._poll_background_llm_task(task_key)
+            if llm_dialogue is not None and llm_dialogue is not BACKGROUND_LLM_PENDING:
+                if llm_dialogue:
+                    distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+                    can_hear = (
+                        distance_to_player <= self.player.physical.hearing_radius
+                        and distance_to_player <= npc.speech_volume
+                    )
+                    if can_hear:
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)}: {llm_dialogue.strip()}")
+                npc.last_speech_time = current_time
+                continue
+
+            if task_key in self._background_llm_tasks:
+                continue
+
             if current_time - npc.last_speech_time > random.randint(10, 30):
+                if not self._is_npc_llm_relevant_to_player(npc):
+                    self._cancel_background_llm_task(task_key)
+                    npc.last_speech_time = current_time
+                    continue
                 # Ambient speech might be general, or react to player if nearby and reputation is notable
                 prompt = (
                     f"NPC {npc.name} (Personality: {npc.social.personality}, Attitude to Player: {npc.attitude_to_player}, Family: {npc.social.family_ties}) "
@@ -6494,23 +6826,7 @@ class World:
                     f"or a comment related to the player if their reputation is particularly high or low and the player is assumed to be generally known or nearby. "
                     f"Keep it concise."
                 )
-                llm_dialogue = self._call_llm(prompt)
-                if llm_dialogue:
-                    # Check if player can hear this NPC
-                    distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y) # Manhattan distance
-
-                    can_hear = False
-                    if distance_to_player <= self.player.physical.hearing_radius and \
-                       distance_to_player <= npc.speech_volume:
-                        can_hear = True
-
-                    if can_hear:
-                        # For now, keep existing message format.
-                        # Could later add "(you overhear)" or similar if NPC not visible.
-                        self.add_message_to_chat_log(f"{npc.name}: {llm_dialogue.strip()}")
-                    # Else, player doesn't hear it, so don't add to log.
-
-                    npc.last_speech_time = current_time # Update speech time regardless of player hearing
+                self._submit_background_llm_task(task_key, prompt)
 
     def decorate_building_interior(self, building: Building, chunk: Chunk):
         decoration_data = {'decorations': []}
@@ -6567,7 +6883,7 @@ class World:
 
         # self.add_message_to_chat_log(f"Decorating prompt for {building.id[:6]}:\n{prompt}") # For debugging the full prompt
 
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm_for_worldgen(prompt)
         try:
             # If the response is a valid JSON, use it. Otherwise, fallback to placeholder.
             decoration_data = json.loads(llm_response)
@@ -6652,7 +6968,7 @@ class World:
                 family_ties_hint="none",
                 attitude_to_player_hint="neutral"
             )
-            llm_response = self._call_llm(prompt)
+            llm_response = self._call_llm_for_worldgen(prompt)
             try:
                 npc_data = json.loads(llm_response)
 
@@ -6666,7 +6982,7 @@ class World:
                     attitude_to_player=npc_data.get("attitude_to_player", "neutral"),
                     player_id=self.player.id
                 )
-                merchant.economic.profession = "Traveling Merchant"
+                self._set_entity_profession(merchant, "Traveling Merchant", reason="spawn_trader")
                 merchant.economic.money = random.randint(200, 500)
                 # Give them some goods to sell
                 merchant.economic.npc_inventory["healing_salve"] = random.randint(5, 15)
@@ -6678,7 +6994,7 @@ class World:
 
                 self.npcs.append(merchant) # Add them to the general NPC list, not a specific village
                 self._mark_entity_positions_dirty()
-                self.add_message_to_chat_log(f"A traveling merchant, {merchant.name}, has begun their journey.")
+                self.add_message_to_chat_log(f"A traveling merchant, {self.get_entity_display_name(merchant)}, has begun their journey.")
 
             except json.JSONDecodeError as e:
                 self.add_message_to_chat_log(f"Error parsing LLM response for Traveling Merchant: {e}")
@@ -6704,7 +7020,7 @@ class World:
                 f"Generate a short, in-character dialogue response from {closest_npc.name} to the player. "
                 f"The dialogue should reflect their personality, current attitude, and potentially acknowledge the player's reputation if significant. Keep it concise."
             )
-            llm_dialogue = self._call_llm(prompt)
+            llm_dialogue = self._call_llm_for_background(prompt)
             # self.add_message_to_chat_log(f"{closest_npc.name}: {llm_dialogue}") # Use chat log for consistency
             print(f"\n{closest_npc.name}: {llm_dialogue}") # Keep print for now as it's more direct for dialogue
             self.last_talked_to_npc = closest_npc # Store for potential follow-up actions like persuasion
@@ -6719,8 +7035,25 @@ class World:
             for x in range(self.chunk_width):
                 biome = self.generator.get_biome_at(x, y)
                 poi_type = self.generator.get_poi_at(x, y, biome)
-                chunks[y][x] = Chunk(biome, poi_type)
+                region = self.atlas.get_or_create_region_for_chunk(x, y, biome)
+                chunks[y][x] = Chunk(biome, poi_type, region_id=region.id)
         return chunks
+
+    def get_region_for_chunk(self, chunk_x: int, chunk_y: int):
+        """Returns the atlas-owned region for a chunk coordinate."""
+        return self.atlas.get_region_for_chunk(chunk_x, chunk_y)
+
+    def get_region_for_coords(self, world_x: int, world_y: int):
+        """Returns the atlas-owned region for world coordinates."""
+        return self.atlas.get_region_for_world_coords(world_x, world_y, CHUNK_SIZE)
+
+    def get_history_event(self, event_id: str):
+        """Returns a history event from the ledger."""
+        return self.history.get_event(event_id)
+
+    def get_book_record(self, book_id: str):
+        """Returns a book record from the ledger."""
+        return self.history.get_book(book_id)
 
     def _find_starting_position(self):
         """
@@ -6824,8 +7157,6 @@ class World:
 
     def _create_family_npc(self, role: str, last_name: str, home_building: Building, family_ties: dict):
         """Helper to create a family member NPC."""
-        npc_name = f"{role} {last_name}" # Fallback name
-
         # Determine age and gender based on role
         if role == "Father":
             age = random.randint(35, 55)
@@ -6848,6 +7179,9 @@ class World:
             gender = "male"
             name_hint = "a villager"
 
+        fallback_first_name = random.choice(FAMILY_FIRST_NAMES.get(gender, FAMILY_FIRST_NAMES["male"]))
+        fallback_name = f"{fallback_first_name} {last_name}"
+
         prompt = LLM_PROMPTS["npc_personality"].format(
             player_criminal_points=0,
             player_hero_points=0,
@@ -6858,20 +7192,23 @@ class World:
         )
 
         npc_data = {}
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm_for_worldgen(prompt)
         try:
             npc_data = json.loads(llm_response)
         except:
             npc_data = {
-                "name": f"{role} {last_name}",
+                "name": fallback_name,
                 "dialogue": ["Hello, dear."],
                 "personality": "friendly"
             }
 
+        family_ties = dict(family_ties)
+        family_ties.setdefault("relation_to_player", role.lower())
+
         npc = NPC(
             x=home_building.global_center_x,
             y=home_building.global_center_y,
-            name=npc_data.get("name", f"{role} {last_name}"),
+            name=npc_data.get("name") or fallback_name,
             dialogue=npc_data.get("dialogue", ["Welcome home."]),
             personality=npc_data.get("personality", "friendly"),
             family_ties=family_ties,
@@ -6879,6 +7216,7 @@ class World:
             player_id=self.player.id
         )
         npc.age = age
+        npc.gender = gender
         npc.schedule.home_building_id = home_building.id
         home_building.residents.append(npc)
 
@@ -6896,7 +7234,7 @@ class World:
                 job = random.choice(vacant_jobs)
                 self._assign_job(npc, job)
             else:
-                npc.economic.profession = "Unemployed"
+                self._set_entity_profession(npc, "Unemployed", reason="no_available_job")
 
         self.village_npcs.append(npc)
         self._mark_entity_positions_dirty()
@@ -6904,6 +7242,14 @@ class World:
 
     def _generate_player_family(self):
         """Generates a family for the player and assigns them a home."""
+        family_name = self.player.social.family_ties.get("last_name")
+        if not family_name:
+            family_name = random.choice(FAMILY_LAST_NAMES)
+            self.player.social.family_ties["last_name"] = family_name
+        first_name = str(getattr(self.player, "first_name", "") or "Player").strip() or "Player"
+        self.player.first_name = first_name
+        self.player.name = f"{first_name} {family_name}"
+
         if not self.villages:
             return
 
@@ -6948,22 +7294,20 @@ class World:
         elif wealth == "Wealthy":
             self.player.economic.money = random.randint(200, 500)
 
-        family_name = f"Family_{random.randint(1000,9999)}"
-
         # 5. Create NPCs
         if "Mother" in scenario or scenario == "Nuclear":
-            self._create_family_npc("Mother", family_name, player_home, {"son_id": self.player.id})
+            self._create_family_npc("Mother", family_name, player_home, {"child_id": self.player.id, "relation_to_player": "mother"})
             self.player.social.family_ties["mother_id"] = self.village_npcs[-1].id
 
         if "Father" in scenario or scenario == "Nuclear":
-            self._create_family_npc("Father", family_name, player_home, {"son_id": self.player.id})
+            self._create_family_npc("Father", family_name, player_home, {"child_id": self.player.id, "relation_to_player": "father"})
             self.player.social.family_ties["father_id"] = self.village_npcs[-1].id
 
         # Siblings
         num_siblings = random.randint(0, 3)
         for i in range(num_siblings):
             role = random.choice(["Brother", "Sister"])
-            self._create_family_npc(role, family_name, player_home, {"sibling_id": self.player.id})
+            self._create_family_npc(role, family_name, player_home, {"sibling_id": self.player.id, "relation_to_player": role.lower()})
             if "sibling_ids" not in self.player.social.family_ties:
                 self.player.social.family_ties["sibling_ids"] = []
             if isinstance(self.player.social.family_ties["sibling_ids"], list):
@@ -6973,14 +7317,17 @@ class World:
         """Generates the macro structure (village, buildings, NPCs) for a chunk."""
         if chunk.is_generated: return
 
+        region = self.atlas.get_region(chunk.region_id)
+        chunk_coords = (chunk_coord_x, chunk_coord_y)
         if chunk.poi_type == "village":
-            chunk.village = Village()
+            chunk.village = Village(primary_biome=chunk.biome, chunk_coords=chunk_coords, region_id=chunk.region_id)
             chunk.village.lore = "The mists of time have obscured this village's history." # Fallback
             self._generate_village_structure(chunk, chunk_coord_x, chunk_coord_y)
-            self.villages.append(chunk.village)
+            self.atlas.add_village(chunk.village, chunk_coords=chunk_coords, region=region)
         elif chunk.poi_type == "ruin":
-            chunk.ruin = Ruin()
+            chunk.ruin = Ruin(primary_biome=chunk.biome, chunk_coords=chunk_coords, region_id=chunk.region_id)
             chunk.ruin.lore = "The origins of this place are lost to time."
+            self.atlas.add_ruin(chunk.ruin, chunk_coords=chunk_coords, region=region)
             # Ruins are simple, we can just init the object and generate details later.
 
         chunk.is_generated = True
@@ -7121,7 +7468,7 @@ class World:
         """Generates the logical structure of a village (buildings, NPCs) without rendering tiles."""
 
         llm_prompt = LLM_PROMPTS["village_lore"].format(biome=chunk.biome)
-        llm_response = self._call_llm(llm_prompt)
+        llm_response = self._call_llm_for_worldgen(llm_prompt)
         try:
             lore_data = json.loads(llm_response)
             chunk.village.lore = lore_data.get("village_lore", "The mists of time have obscured this village's history.")
@@ -7187,7 +7534,7 @@ class World:
                                         global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
                     building.max_workers = max_workers
                     chunk.village.add_building(building)
-                    self.buildings_by_id[building.id] = building
+                    self.atlas.register_building(building)
                     return building
             return None
 
@@ -7195,6 +7542,12 @@ class World:
 
         # Capital Hall
         try_place_building("capital_hall", "civic", 9, 7, road_x - 11, road_y - 3, max_workers=3)
+
+        # Clinic
+        clinic = try_place_building("clinic", "civic_workplace", 7, 6, road_x - 10, road_y - 8, max_workers=2)
+        if clinic:
+            clinic.work_zone_tiles["medical_bed"] = [(clinic.global_origin_x + 1, clinic.global_origin_y + 1)]
+            clinic.work_zone_tiles["alchemy_station"] = [(clinic.global_origin_x + 5, clinic.global_origin_y + 1)]
 
         # Jail
         jail = try_place_building("jail", "civic", 7, 5, road_x + 2, road_y - 2, max_workers=2)
@@ -7413,11 +7766,15 @@ class World:
                         self.npcs.append(new_entity)
                 else:
                     new_entity = NPC(global_x, global_y, name="Cultist", dialogue=["The master awakens..."], personality="fanatic")
-                    new_entity.economic.profession = "Cultist"
+                    self._set_entity_profession(new_entity, "Cultist", reason="cultist_spawn")
                     new_entity.combat.is_hostile_to_player = True
                     new_entity.combat.max_hp = 30
                     new_entity.combat.hp = 30
-                    new_entity.char = ord('c')
+                    new_entity.char = get_human_sprite(
+                        gender=getattr(new_entity, "gender", None),
+                        profession="Cultist",
+                        age=getattr(new_entity, "age", None),
+                    )
                     new_entity.color = (150, 0, 150) # Purple
                     self.npcs.append(new_entity)
 
@@ -7683,6 +8040,8 @@ class World:
                 else:
                     # Set cooldown for next move (e.g., 5 ticks for fast movement)
                     self.player.state.move_cooldown = 5
+                    if "broken_leg" in self.player.physical.status_effects:
+                        self.player.state.move_cooldown += 5 # Increase cooldown drastically
                     # Add to game time based on action cost (though update also adds 1)
                     # If we want consistent time, we should probably just let update add 1
                     # and assume player moves faster than world ticks?
@@ -7768,6 +8127,19 @@ class World:
                         undiscussed_events = [e for e_id, e in npc.knowledge.known_events.items() if e_id not in npc.knowledge.discussed_event_ids]
                         if undiscussed_events:
                             event_to_discuss = random.choice(undiscussed_events)
+                            task_key = ("event_dialogue", npc.id, event_to_discuss.id)
+                            starter_dialogue = self._poll_background_llm_task(task_key)
+                            if starter_dialogue is BACKGROUND_LLM_PENDING:
+                                continue
+                            if starter_dialogue is not None:
+                                npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
+                                if starter_dialogue:
+                                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} approaches you.")
+                                    self.start_npc_dialogue(npc)
+                                    self.chat_ui_history.append((self.get_entity_display_name(npc), starter_dialogue))
+                                    self.request_open_dialogue(npc)
+                                    break
+                                continue
 
                             # Gather context for the prompt
                             subject = self.get_entity_by_id(event_to_discuss.subject_id)
@@ -7787,15 +8159,7 @@ class World:
                                 relationship_with_subject=npc.social.relationships.get(event_to_discuss.subject_id, 50),
                                 relationship_with_target=npc.social.relationships.get(event_to_discuss.target_id, 50)
                             )
-
-                            starter_dialogue = self._call_llm(prompt)
-                            if starter_dialogue:
-                                self.add_message_to_chat_log(f"{npc.name} approaches you.")
-                                self.start_npc_dialogue(npc) # This clears history and sets up the UI state
-                                self.chat_ui_history.append((npc.name, starter_dialogue)) # Add the event-driven line
-                                self.request_open_dialogue(npc)
-                                npc.knowledge.discussed_event_ids.add(event_to_discuss.id)
-                                break # Only one NPC starts a conversation per tick
+                            self._submit_background_llm_task(task_key, prompt)
 
     def _handle_reputation_based_reactions(self):
         """Makes NPCs react to famous or infamous characters they see."""
@@ -7821,7 +8185,9 @@ class World:
                         # Flee if personality is cowardly or neutral, and not already fleeing
                         if npc.social.personality in ["cowardly", "neutral", "commoner"] and npc.schedule.current_task != "fleeing_from_player":
                             npc.schedule.current_task = "fleeing_from_player"
-                            self.add_message_to_chat_log(f"{npc.name} sees {self.player.social.title or 'an infamous figure'} and flees in terror!")
+                            self.add_message_to_chat_log(
+                                f"{self.get_entity_display_name(npc)} sees {self.player.social.title or 'an infamous figure'} and flees in terror!"
+                            )
                             npc.schedule.current_path = [] # Force path recalculation
 
                     # Reaction to Fame
@@ -7829,7 +8195,9 @@ class World:
                          # Only friendly or neutral NPCs will greet
                         if npc.social.personality in ["friendly", "gregarious", "neutral", "commoner"] and npc.schedule.current_task != "greeting_player":
                             npc.schedule.current_task = "greeting_player"
-                            self.add_message_to_chat_log(f"{npc.name} recognizes you and approaches to greet {self.player.social.title or 'a famous hero'}.")
+                            self.add_message_to_chat_log(
+                                f"{self.get_entity_display_name(npc)} recognizes you and approaches to greet {self.player.social.title or 'a famous hero'}."
+                            )
                             npc.schedule.current_path = [] # Force path recalculation
 
     def get_entity_by_id(self, entity_id: int):
@@ -7841,6 +8209,281 @@ class World:
                 return npc
         return None
 
+    def _is_placeholder_family_name(self, name: str) -> bool:
+        return bool(name and PLACEHOLDER_FAMILY_NAME_RE.match(name))
+
+    def get_relationship_to_player(self, entity) -> str | None:
+        """Return the entity's relationship to the player from the player's perspective."""
+        if not entity or entity == self.player:
+            return None
+        if hasattr(entity, "get_relationship_to"):
+            return entity.get_relationship_to(self.player)
+        return None
+
+    def get_relationship_label(self, entity) -> str:
+        if not entity:
+            return ""
+        if hasattr(entity, "get_relationship_label"):
+            return entity.get_relationship_label(self.player)
+        relation = self.get_relationship_to_player(entity)
+        return relation.replace("_", " ").title() if relation else ""
+
+    def get_entity_title_label(self, entity) -> str:
+        if not entity:
+            return ""
+        if hasattr(entity, "get_title_label"):
+            return entity.get_title_label()
+        profession = str(getattr(getattr(entity, "economic", None), "profession", "") or "").strip()
+        if not profession or profession in {"Unemployed", "Creature"}:
+            return ""
+        return profession
+
+    def _set_entity_profession(self, entity, profession: str, reason: str = "") -> str:
+        return set_entity_profession(entity, profession, reason=reason, game_time=self.game_time)
+
+    def _get_coworker_roles(self, work_building, exclude_entity=None) -> list[str]:
+        if not work_building:
+            return []
+        roles = []
+        for other_npc in self.all_npcs:
+            if exclude_entity is not None and other_npc.id == getattr(exclude_entity, "id", None):
+                continue
+            if getattr(getattr(other_npc, "schedule", None), "work_building_id", None) == work_building.id:
+                roles.append(normalize_profession(getattr(getattr(other_npc, "economic", None), "profession", "")))
+        return roles
+
+    def _resolve_profession_for_work_building(self, work_building, exclude_entity=None) -> str:
+        if not work_building:
+            return "Unemployed"
+        coworker_roles = self._get_coworker_roles(work_building, exclude_entity=exclude_entity)
+        return resolve_profession_for_building(work_building.building_type, coworker_roles)
+
+    def get_entity_display_name(self, entity, include_relationship: bool = False) -> str:
+        """Return a player-facing label for an entity."""
+        if not entity:
+            return "Unknown"
+        if hasattr(entity, "get_display_name"):
+            return entity.get_display_name(viewer=self.player, include_relationship=include_relationship)
+        if entity == self.player:
+            return "You"
+        return str(getattr(entity, "name", "Unknown")).replace("_", " ").strip() or "Unknown"
+
+    def get_entity_relationship_summary(self, entity) -> str:
+        """Return a short player-facing summary of how the player knows an NPC."""
+        if not entity or entity == self.player:
+            return ""
+
+        parts = []
+        relation_label = self.get_relationship_label(entity)
+        if relation_label:
+            parts.append(f"your {relation_label.lower()}")
+
+        profession = getattr(getattr(entity, "economic", None), "profession", "")
+        if profession and profession not in {"", "Unemployed"}:
+            parts.append(profession.lower())
+
+        attitude = getattr(entity, "attitude_to_player", "")
+        if attitude:
+            parts.append(attitude)
+
+        return ", ".join(parts[:3])
+
+    def _describe_relationship_for_prompt(self, entity) -> str:
+        relation = self.get_relationship_to_player(entity)
+        if not relation:
+            return "No known family relation to the player."
+        prompt_map = {
+            "mother": "You are the player's mother.",
+            "father": "You are the player's father.",
+            "brother": "You are the player's brother.",
+            "sister": "You are the player's sister.",
+            "sibling": "You are the player's sibling.",
+            "partner": "You are the player's partner.",
+            "parent": "You are the player's parent.",
+            "child": "You are the player's child.",
+        }
+        return prompt_map.get(relation, f"You are the player's {relation.replace('_', ' ')}.")
+
+    def _llm_output_is_empty(self, response_text: str | None) -> bool:
+        if response_text is None:
+            return True
+        normalized = str(response_text).strip()
+        return normalized in {"", "{}", "[]", "null", '""'}
+
+    def _contains_placeholder_player_reference(self, response_text: str | None) -> bool:
+        if response_text is None:
+            return False
+        text = str(response_text)
+        placeholder_patterns = [
+            r"\[\s*player\s*name\s*\]",
+            r"\{\s*player_name\s*\}",
+            r"\bplayer_name\b",
+            r"\bplayer name\b",
+        ]
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in placeholder_patterns)
+
+    def _extract_json_object_text(self, response_text: str | None) -> str | None:
+        """Best-effort extraction of a JSON object from model output."""
+        if response_text is None:
+            return None
+
+        text = str(response_text).strip()
+        if not text:
+            return None
+
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+            if text.lower().startswith("json"):
+                text = text[4:].lstrip()
+
+        if text.startswith("{") and text.endswith("}"):
+            return text
+
+        start = text.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:index + 1]
+        return None
+
+    def _parse_llm_json_object(self, response_text: str | None):
+        json_text = self._extract_json_object_text(response_text)
+        if not json_text:
+            return None
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError:
+            return None
+
+    def _warn_missing_llm_once(self) -> None:
+        if self._llm_warning_issued:
+            return
+        self._llm_warning_issued = True
+        self.add_message_to_chat_log("LLM dialogue is offline. Add a GOOGLE_API_KEY or switch to Ollama for AI responses.")
+
+    def _fallback_dialogue_greeting(self, npc_target: NPC) -> str:
+        relation = self.get_relationship_label(npc_target)
+        attitude = npc_target.attitude_to_player
+        if npc_target.knowledge.help_needed:
+            return f"Please, I need help with {npc_target.knowledge.help_needed}."
+        if relation == "Mother":
+            return "There you are. Are you keeping yourself fed?"
+        if relation == "Father":
+            return "Good to see you. How are you holding up?"
+        if relation in {"Brother", "Sister", "Sibling"}:
+            return "Hey. What do you need?"
+        if attitude in {"warm", "friendly"}:
+            return npc_target.dialogue[0] if npc_target.dialogue else "Good to see you."
+        if attitude in {"hostile", "unfriendly"}:
+            return "What do you want?"
+        return npc_target.dialogue[0] if npc_target.dialogue else "Hello."
+
+    def _fallback_dialogue_continue(self, npc_target: NPC, player_input_text: str) -> tuple[str, str]:
+        text = player_input_text.lower().strip()
+        relation = self.get_relationship_label(npc_target)
+
+        if any(word in text for word in ["bye", "goodbye", "see you", "farewell"]):
+            return ("Take care.", "end_conversation")
+        if "how are you" in text or "how're you" in text:
+            if relation == "Mother":
+                return ("I'm managing. You should be asking how you are doing, too.", "continue_conversation")
+            if relation == "Father":
+                return ("Still standing. Work never stops around here.", "continue_conversation")
+            if relation in {"Brother", "Sister", "Sibling"}:
+                return ("I've been alright. Same village, same troubles.", "continue_conversation")
+            return ("I've been alright.", "continue_conversation")
+        if any(word in text for word in ["who are you", "your name", "name?"]):
+            return (f"I'm {self.get_entity_display_name(npc_target)}.", "continue_conversation")
+        if any(word in text for word in ["follow me", "come with me"]):
+            return ("Alright. Lead the way.", "follow_player")
+        if "trade" in text and npc_target.economic.profession in {"Merchant", "Miller", "Scribe", "Traveling Merchant"}:
+            return ("Let's see what we can trade.", "start_trade")
+        if relation:
+            return ("I'm listening.", "continue_conversation")
+        return ("I hear you.", "continue_conversation")
+
+    def _can_player_overhear(self, speaker) -> bool:
+        distance_to_player = abs(speaker.x - self.player.x) + abs(speaker.y - self.player.y)
+        return (
+            distance_to_player <= self.player.physical.hearing_radius
+            and distance_to_player <= getattr(speaker, "speech_volume", 0)
+        )
+
+    def _is_npc_llm_relevant_to_player(self, *entities) -> bool:
+        for entity in entities:
+            if entity and self._can_player_overhear(entity):
+                return True
+        return False
+
+    def _fallback_npc_social_line(self, speaker, listener) -> tuple[str, str]:
+        attitude = speaker.social.relationships.get(listener.id, 50)
+        if attitude >= 70:
+            return (f"It's good to see you, {listener.name}.", "continue_conversation")
+        if attitude <= 30:
+            return ("I don't have much to say to you.", "end_conversation")
+        if speaker.schedule.work_building_id and random.random() < 0.3:
+            return ("I should get back to work soon.", "go_to_work")
+        if speaker.schedule.home_building_id and random.random() < 0.2:
+            return ("I ought to head home before long.", "go_home")
+        return ("Strange day, isn't it?", "continue_conversation")
+
+    def _handle_npc_social_goal(self, speaker, listener, goal: str) -> None:
+        if goal == "go_to_work" and speaker.schedule.work_building_id:
+            dest = self._get_building_global_center_coords(speaker.schedule.work_building_id)
+            if dest:
+                speaker.schedule.current_task = "going to work"
+                speaker.schedule.current_destination_coords = dest
+                speaker.schedule.current_path = []
+        elif goal == "go_home" and speaker.schedule.home_building_id:
+            dest = self._get_building_global_center_coords(speaker.schedule.home_building_id)
+            if dest:
+                speaker.schedule.current_task = "going home"
+                speaker.schedule.current_destination_coords = dest
+                speaker.schedule.current_path = []
+        elif goal == "visit_listener_home" and listener.schedule.home_building_id:
+            friend_home = self.buildings_by_id.get(listener.schedule.home_building_id)
+            if friend_home:
+                speaker.schedule.current_task = "visiting friend"
+                speaker.task_target_entity_id = listener.id
+                speaker.schedule.current_destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
+                speaker.schedule.current_path = []
+        elif goal == "socialize":
+            dest_x, dest_y = self._find_best_adjacent_tile(listener.x, listener.y, speaker)
+            if dest_x is not None:
+                speaker.schedule.current_task = "socializing"
+                speaker.task_target_entity_id = listener.id
+                speaker.schedule.current_destination_coords = (dest_x, dest_y)
+                speaker.schedule.current_path = []
+        elif goal == "end_conversation":
+            speaker.conversation_partner_id = None
+            listener.conversation_partner_id = None
+
     def _update_entity_titles(self):
         """Periodically checks and updates titles for all entities based on fame/infamy."""
         if self.game_time % 100 != 0:  # Check every 100 ticks
@@ -7848,6 +8491,25 @@ class World:
 
         entities_to_check = itertools.chain([self.player], self.all_npcs)
         for entity in entities_to_check:
+            task_key = ("title_generation", entity.id)
+            response_str = self._poll_background_llm_task(task_key)
+            if response_str is BACKGROUND_LLM_PENDING:
+                continue
+            if response_str is not None:
+                if response_str:
+                    try:
+                        response_json = json.loads(response_str)
+                        new_title = response_json.get("title")
+                        if new_title:
+                            entity.social.title = new_title
+                            if isinstance(entity, Player):
+                                self.add_message_to_chat_log(f"You are now known as {new_title}.")
+                            else:
+                                self.add_message_to_chat_log(f"{self.get_entity_display_name(entity)} is now known as {new_title}.")
+                    except json.JSONDecodeError:
+                        pass
+                continue
+
             if not entity.social.title and (entity.social.fame >= 50 or entity.social.infamy >= 50):
                 # Only use public knowledge events
                 recent_events = [e for e in self.global_events if e.subject_id == entity.id and e.type in ["quest_complete", "crime_witnessed", "entity_death"] and e.public_knowledge]
@@ -7858,19 +8520,7 @@ class World:
                     player_infamy=entity.social.infamy,
                     player_actions_summary=actions_summary
                 )
-                response_str = self._call_llm(prompt)
-                if response_str:
-                    try:
-                        response_json = json.loads(response_str)
-                        new_title = response_json.get("title")
-                        if new_title:
-                            entity.social.title = new_title
-                            if isinstance(entity, Player):
-                                self.add_message_to_chat_log(f"You are now known as {new_title}.")
-                            else:
-                                self.add_message_to_chat_log(f"{entity.name} is now known as {new_title}.")
-                    except json.JSONDecodeError:
-                        pass
+                self._submit_background_llm_task(task_key, prompt)
 
     def _update_npc_reputations(self):
         """
@@ -8073,6 +8723,8 @@ class World:
                 continue
 
             if npc.economic.profession.lower() != "unemployed":
+                if hasattr(npc, "career"):
+                    npc.career.advance_day()
                 # Factors affecting satisfaction
                 satisfaction_change = 0
 
@@ -8105,7 +8757,7 @@ class World:
                             npc.add_grudge(boss.id, f"Fired me from my job as {old_profession}.")
                             # self.add_message_to_chat_log(f"{npc.name} blames {boss.name} for their termination.")
 
-                    npc.economic.profession = "Unemployed"
+                    self._set_entity_profession(npc, "Unemployed", reason="fired")
                     npc.economic.job_satisfaction = 30 # Fired creates unhappiness
                     npc.economic.days_unemployed = 0
                     npc.economic.work_performance = 50 # Reset for next job
@@ -8115,7 +8767,7 @@ class World:
                         # so we don't remove them from the building list here (they might still be standing there).
                         npc.schedule.work_building_id = None
 
-                    self.add_message_to_chat_log(f"{npc.name} was fired from their job as a {old_profession} for poor performance.")
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} was fired from their job as a {old_profession} for poor performance.")
 
                     # Log firing event
                     # Use workplace location for the event if possible, so gossiping unemployed NPCs know where to go
@@ -8131,7 +8783,7 @@ class World:
                 if npc.economic.profession.lower() != "unemployed" and npc.economic.job_satisfaction < 10:
                     # NPC Quits
                     old_profession = npc.economic.profession
-                    npc.economic.profession = "Unemployed"
+                    self._set_entity_profession(npc, "Unemployed", reason="quit_job")
                     npc.economic.job_satisfaction = 50 # Reset for "new life"
                     npc.economic.days_unemployed = 0
                     npc.economic.work_performance = 50
@@ -8140,7 +8792,7 @@ class World:
                         # Just clear the schedule ID. 'occupants' tracks physical presence.
                         npc.schedule.work_building_id = None
 
-                    self.add_message_to_chat_log(f"{npc.name} has quit their job as a {old_profession} due to low satisfaction.")
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has quit their job as a {old_profession} due to low satisfaction.")
 
                     # Log quitting event
                     work_building = self.buildings_by_id.get(npc.schedule.work_building_id) if npc.schedule.work_building_id else None
@@ -8201,7 +8853,7 @@ class World:
                 npc.schedule.current_path = self.calculate_path(npc.x, npc.y, edge_x, edge_y)
                 npc.schedule.current_destination_coords = (edge_x, edge_y)
 
-                self.add_message_to_chat_log(f"{npc.name} has decided to leave the village in search of better opportunities.")
+                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has decided to leave the village in search of better opportunities.")
                 self.log_event(event_type="npc_emigrated", description=f"{{subject}} left the village.", subject_id=npc.id, location=(npc.x, npc.y))
 
         # --- Job Hopping (for Employed NPCs) ---
@@ -8241,7 +8893,7 @@ class World:
                     if best_new_job and best_new_score > current_job_score * 1.2 + 5:
                         old_profession = npc.economic.profession
                         self._assign_job(npc, best_new_job)
-                        self.add_message_to_chat_log(f"{npc.name} left their job as {old_profession} to become a {npc.economic.profession}.")
+                        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} left their job as {old_profession} to become a {npc.economic.profession}.")
 
 
         # --- Immigration Logic ---
@@ -8280,33 +8932,13 @@ class World:
         """Assigns a job to an NPC at a specific building."""
         npc.schedule.work_building_id = work_building.id
 
-        # Determine profession name based on building type
-        new_profession = "Worker" # Default
-        if work_building.building_type == "sheriff_office":
-            has_sheriff = any(o.economic.profession == "Sheriff" and o.schedule.work_building_id == work_building.id for o in self.village_npcs if o.id != npc.id)
-            new_profession = "Deputy" if has_sheriff else "Sheriff"
-        elif work_building.building_type == "general_store": new_profession = "Merchant"
-        elif work_building.building_type == "tavern": new_profession = "Tavern Keeper"
-        elif work_building.building_type == "lumber_mill":
-            has_foreman = any(o.economic.profession == "Lumber Mill Foreman" and o.schedule.work_building_id == work_building.id for o in self.village_npcs if o.id != npc.id)
-            new_profession = "Woodcutter" if has_foreman else "Lumber Mill Foreman"
-        elif work_building.building_type == "farm": new_profession = "Farmer"
-        elif work_building.building_type == "mine": new_profession = "Miner"
-        elif work_building.building_type == "carpenter_shop": new_profession = "Carpenter"
-        elif work_building.building_type == "mill": new_profession = "Miller"
-        elif work_building.building_type == "bakery": new_profession = "Baker"
-        elif work_building.building_type == "fishing_hut": new_profession = "Fisherman"
-        elif work_building.building_type == "library": new_profession = "Scribe"
-        elif work_building.building_type == "capital_hall": new_profession = "Town Official"
-        elif work_building.building_type == "jail": new_profession = "Guard"
-        elif work_building.building_type == "blacksmith_shop": new_profession = "Blacksmith"
-
-        npc.economic.profession = new_profession
+        new_profession = self._resolve_profession_for_work_building(work_building, exclude_entity=npc)
+        self._set_entity_profession(npc, new_profession, reason="hired")
         npc.economic.job_satisfaction = 70
         npc.economic.days_unemployed = 0
         npc.economic.work_performance = 50 # Reset performance
 
-        self.add_message_to_chat_log(f"{npc.name} has been hired as a {new_profession}.")
+        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has been hired as a {new_profession}.")
 
         # Social Boost: Gratitude to Boss
         boss = self._find_boss_for_npc(npc, work_building)
@@ -8353,10 +8985,14 @@ class World:
                 personality="aggressive",
                 player_id=self.player.id
             )
-            raider.economic.profession = "Raider"
+            self._set_entity_profession(raider, "Raider", reason="raider_spawn")
             raider.combat.max_hp = 35
             raider.combat.hp = 35
-            raider.char = ord('r')
+            raider.char = get_human_sprite(
+                gender=getattr(raider, "gender", None),
+                profession="Raider",
+                age=getattr(raider, "age", None),
+            )
             raider.color = (255, 100, 100) # Reddish
             raider.speed = 1.2
 
@@ -8389,7 +9025,7 @@ class World:
             family_ties_hint="none",
             attitude_to_player_hint="neutral"
         )
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm_for_background(prompt)
         try:
             npc_data = json.loads(llm_response)
             npc = NPC(
@@ -8399,7 +9035,7 @@ class World:
                 personality=npc_data.get("personality", "commoner"),
                 player_id=None
             )
-            npc.economic.profession = "Unemployed"
+            self._set_entity_profession(npc, "Unemployed", reason="migrant_spawn")
             npc.economic.money = random.randint(10, 50) # Modest starting funds
 
             # Try to find a home
@@ -8412,7 +9048,7 @@ class World:
 
             self.village_npcs.append(npc)
             self._mark_entity_positions_dirty()
-            self.add_message_to_chat_log(f"A migrant named {npc.name} has arrived in the village looking for work.")
+            self.add_message_to_chat_log(f"A migrant named {self.get_entity_display_name(npc)} has arrived in the village looking for work.")
 
         except json.JSONDecodeError:
             pass
@@ -8505,13 +9141,14 @@ class World:
         # 3. Handle Firing
         if self.player.economic.job_performance <= 0:
             self.add_message_to_chat_log(f"You have been fired from your job as {self.player.economic.profession} due to poor performance!")
-            self.player.economic.profession = "Unemployed"
+            self._set_entity_profession(self.player, "Unemployed", reason="player_fired")
             self.player.economic.job_building_id = None
             self.player.economic.days_employed = 0
             self.player.economic.job_performance = 50
             return
 
         self.player.economic.days_employed += 1
+        self.player.career.advance_day()
 
     def _plan_village_expansion(self, village: Village):
         """Decides if the village should build something."""
@@ -8591,7 +9228,7 @@ class World:
             )
 
             village.add_building(new_building)
-            self.buildings_by_id[new_building.id] = new_building
+            self.atlas.register_building(new_building)
 
             # Decorate/Tile update
             # We need to find the chunk object
@@ -8811,7 +9448,7 @@ class World:
                                 known_events_summary=recent_events_summary,
                                 year=self.game_time // (DAY_LENGTH_TICKS * DAYS_PER_SEASON * 4)
                             )
-                            llm_response = self._call_llm(prompt)
+                            llm_response = self._call_llm_for_background(prompt)
                             try:
                                 book_data = json.loads(llm_response)
                                 new_book = Book(
@@ -8822,7 +9459,7 @@ class World:
                                     content=book_data.get("content", "..."),
                                     book_type="chronicle"
                                 )
-                                self.books.append(new_book)
+                                self.history.add_book(new_book)
                                 village.supply[f"book_{new_book.id}"] = village.supply.get(f"book_{new_book.id}", 0) + 1
                                 # Clear events so we don't write the same history forever
                                 village.local_events = []
@@ -8855,7 +9492,7 @@ class World:
                                 player_id=self.player.id
                             )
                             child.age = 0
-                            child.economic.profession = "Child"
+                            self._set_entity_profession(child, "Child", reason="birth")
                             child.schedule.home_building_id = home_id
 
                             # Add to family ties
@@ -8979,7 +9616,7 @@ class World:
                 event_type=event_to_process.type
             )
 
-            response_str = self._call_llm(prompt)
+            response_str = self._call_llm_for_background(prompt)
             if not response_str:
                 continue
 
@@ -8992,7 +9629,7 @@ class World:
 
                 # Log the internal thought if player is very close
                 if dialogue and abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= 2:
-                    self.add_message_to_chat_log(f"({npc.name} seems to be pondering something: '{dialogue}')")
+                    self.add_message_to_chat_log(f"({self.get_entity_display_name(npc)} seems to be pondering something: '{dialogue}')")
 
                 # Mark as reacted
                 npc.reacted_to_event_ids.add(event_to_process.id)
@@ -9078,6 +9715,37 @@ class World:
 
         return witnesses
 
+    def _broadcast_combat_memory(self, attacker, defender, weapon_name: str, actual_damage: int, new_statuses: set[str]):
+        """Constructs and logs a deterministic memory string for a combat event."""
+        if actual_damage <= 0:
+            return
+
+        attacker_name = attacker.name if hasattr(attacker, "name") else "Someone"
+        defender_name = defender.name if hasattr(defender, "name") else "someone"
+        body_part = defender.combat.last_hit_part if hasattr(defender, "combat") and getattr(defender.combat, "last_hit_part", None) else "body"
+
+        memory_str = f"Witnessed {attacker_name} strike {defender_name}'s {body_part} with {weapon_name} for {actual_damage} damage."
+
+        if "broken_leg" in new_statuses:
+            memory_str += " ...causing a broken_leg."
+
+        # Add to attacker and defender
+        if hasattr(attacker, "knowledge") and hasattr(attacker.knowledge, "long_term_memory"):
+            attacker.knowledge.long_term_memory.append(memory_str)
+        if hasattr(defender, "knowledge") and hasattr(defender.knowledge, "long_term_memory"):
+            defender.knowledge.long_term_memory.append(memory_str)
+
+        # Broadcast to witnesses in FOV
+        for w_npc in self.all_npcs:
+            if w_npc.id == attacker.id or w_npc.id == defender.id or w_npc.physical.is_dead:
+                continue
+
+            if w_npc.id in self.npc_fov_maps:
+                if 0 <= defender.x < WORLD_WIDTH and 0 <= defender.y < WORLD_HEIGHT:
+                    if self.npc_fov_maps[w_npc.id][defender.y, defender.x]:
+                        if hasattr(w_npc, "knowledge") and hasattr(w_npc.knowledge, "long_term_memory"):
+                            w_npc.knowledge.long_term_memory.append(memory_str)
+
     def _handle_witness_reaction(self, witness: NPC, crime_type: str, criminal: Player or NPC, victim: NPC | None = None):
         """Determines how an NPC reacts to witnessing a crime using an LLM prompt."""
         if witness.combat.is_hostile_to_player or witness.schedule.current_task in ["fleeing_from_player", "going_to_report_crime", "combat_action_flee_from_player"]:
@@ -9097,7 +9765,7 @@ class World:
         if isinstance(criminal, Player):
             self.add_message_to_chat_log("Your infamy has increased by 5.")
         else:
-            self.add_message_to_chat_log(f"{criminal.name}'s infamy has increased by 5.")
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(criminal)}'s infamy has increased by 5.")
 
         # Log the crime event itself
         self.log_event(
@@ -9121,7 +9789,7 @@ class World:
 
         response_str = self._call_llm(prompt)
         if not response_str:
-            self.add_message_to_chat_log(f"{witness.name} seems confused by what they saw. (LLM Error)")
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(witness)} seems confused by what they saw. (LLM Error)")
             return
 
         try:
@@ -9136,7 +9804,7 @@ class World:
                 witness.add_grudge(criminal.id, grudge_reason)
                 # Make this message conditional on the criminal being the player for clarity
                 if isinstance(criminal, Player):
-                    self.add_message_to_chat_log(f"({witness.name} now holds a grudge against you: {grudge_reason})")
+                    self.add_message_to_chat_log(f"({self.get_entity_display_name(witness)} now holds a grudge against you: {grudge_reason})")
 
             if reaction == "become_hostile":
                 witness.combat.is_hostile_to_player = True
@@ -9147,7 +9815,7 @@ class World:
                     witness.task_target_coords = (sheriff_office.global_center_x, sheriff_office.global_center_y)
                     witness.schedule.current_path = [] # Clear path for new destination
                 else:
-                    self.add_message_to_chat_log(f"{witness.name} wants to report the crime but doesn't know where the sheriff is.")
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(witness)} wants to report the crime but doesn't know where the sheriff is.")
             elif reaction == "flee":
                 witness.schedule.current_task = "combat_action_flee_from_player"
                 witness.schedule.current_path = [] # Force path recalculation
@@ -9159,7 +9827,7 @@ class World:
                 pass
 
         except json.JSONDecodeError:
-            self.add_message_to_chat_log(f"{witness.name} seems unsure how to react. (LLM Format Error: {response_str})")
+            self.add_message_to_chat_log(f"{self.get_entity_display_name(witness)} seems unsure how to react. (LLM Format Error: {response_str})")
 
     def _update_economy(self):
         """Periodically updates the supply and demand of all villages."""
@@ -9416,10 +10084,11 @@ class World:
 
     def complete_quest(self, quest_id: str, quest_giver_npc: NPC):
         """Handles player attempting to complete a quest."""
+        quest_giver_name = self.get_entity_display_name(quest_giver_npc)
         if quest_id not in self.player.knowledge.active_quests:
             self.add_message_to_chat_log("Error: Quest not found or not active.")
             if self.chat_ui_active and self.chat_ui_target_npc == quest_giver_npc:
-                self.chat_ui_history.append((quest_giver_npc.name, "Are you sure we had an arrangement like that?"))
+                self.chat_ui_history.append((quest_giver_name, "Are you sure we had an arrangement like that?"))
             return
 
         active_quest_data = self.player.knowledge.active_quests[quest_id]
@@ -9481,18 +10150,18 @@ class World:
 
             # Dialogue
             if self.chat_ui_active:
-                self.chat_ui_history.append((quest_giver_npc.name, completion_dialogue))
+                self.chat_ui_history.append((quest_giver_name, completion_dialogue))
         else:
             # Dialogue for incomplete quest
             if self.chat_ui_active:
                 if active_quest_data["type"] == "fetch":
                     item_name = active_quest_data['item_to_fetch_key'].replace('_', ' ')
-                    self.chat_ui_history.append((quest_giver_npc.name, f"It looks like you still don't have the {active_quest_data['item_fetch_count']} {item_name} I need."))
+                    self.chat_ui_history.append((quest_giver_name, f"It looks like you still don't have the {active_quest_data['item_fetch_count']} {item_name} I need."))
                 elif active_quest_data["type"] == "kill":
                     quest_def = QUEST_DEFINITIONS.get(quest_id, {})
                     remaining = active_quest_data["target_count"] - active_quest_data["progress"]
                     incomplete_dialogue = quest_def.get("dialogue_incomplete_report", f"You still need to defeat {remaining} more.").format(remaining_count=remaining)
-                    self.chat_ui_history.append((quest_giver_npc.name, incomplete_dialogue))
+                    self.chat_ui_history.append((quest_giver_name, incomplete_dialogue))
     def player_attempt_fish(self, water_x: int, water_y: int):
         """Handles the player's attempt to fish."""
         if not self.player.has_item("fishing_rod"):
@@ -9526,7 +10195,7 @@ class World:
             work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
             if work_building:
                 work_building.building_inventory[f"raw_{fish_caught}"] = work_building.building_inventory.get(f"raw_{fish_caught}", 0) + 1
-                self.add_message_to_chat_log(f"{npc.name} caught a {fish_caught}!")
+                self.add_message_to_chat_log(self.text.entity_caught_fish(npc, fish_caught))
 
     def player_attempt_till_soil(self, target_x: int, target_y: int):
         """Handles the player's attempt to till soil."""

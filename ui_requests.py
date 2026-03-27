@@ -34,10 +34,12 @@ def apply_ui_requests(world, context_handler=None):
             world.chat_ui_target_npc = npc
             world.chat_ui_mode = request.get("mode", "talk")
             world.chat_ui_active = True
+            if hasattr(world, "interaction_context") and isinstance(world.interaction_context, dict):
+                world.interaction_context["active"] = False
             world.trade_ui_active = False
             world.trade_ui_npc_target = None
             world.needs_text_input = context_handler is None
-            if context_handler is not None:
+            if context_handler is not None and hasattr(context_handler, "start_text_input"):
                 context_handler.start_text_input()
         elif request_type == CLOSE_DIALOGUE:
             if npc is None or world.chat_ui_target_npc == npc:
@@ -45,24 +47,26 @@ def apply_ui_requests(world, context_handler=None):
                 world.chat_ui_target_npc = None
                 world.game_state = "PLAYING"
                 world.needs_text_input = False
-                if context_handler is not None:
+                if context_handler is not None and hasattr(context_handler, "stop_text_input"):
                     context_handler.stop_text_input()
         elif request_type == OPEN_TRADE:
             world.chat_ui_active = False
             world.chat_ui_target_npc = None
             world.game_state = "TRADE_MENU"
             world.trade_ui_active = True
+            if hasattr(world, "interaction_context") and isinstance(world.interaction_context, dict):
+                world.interaction_context["active"] = False
             world.trade_ui_npc_target = npc
             world.initialize_trade_session()
             world.needs_text_input = False
-            if context_handler is not None:
+            if context_handler is not None and hasattr(context_handler, "stop_text_input"):
                 context_handler.stop_text_input()
         elif request_type == CLOSE_TRADE:
             if npc is None or world.trade_ui_npc_target == npc:
                 world.trade_ui_active = False
                 world.trade_ui_npc_target = None
                 world.needs_text_input = False
-                if context_handler is not None:
+                if context_handler is not None and hasattr(context_handler, "stop_text_input"):
                     context_handler.stop_text_input()
                 if world.game_state == "TRADE_MENU":
                     world.game_state = "PLAYING"

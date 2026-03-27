@@ -3,15 +3,20 @@ This module defines the base classes for all entities in the game world,
 including NPCs and specialized creature types.
 """
 import random
+import re
 from dataclasses import dataclass, field
 from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
+from data.dawnlike import ANIMAL_SPRITES, get_human_sprite
 from data.items import ITEM_DEFINITIONS
+from simulation.careers import CareerState, normalize_profession, set_entity_profession
+
+PLACEHOLDER_FAMILY_NAME_RE = re.compile(r"^(Mother|Father|Brother|Sister)\s+Family_\d+$", re.IGNORECASE)
 
 @dataclass
 class CombatStats:
     """Stores combat-related attributes for an entity."""
-    max_hp: int = 20
-    hp: int = 20
+    body_parts_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
+    body_parts_max_hp: dict = field(default_factory=lambda: {"head": 5, "torso": 10, "left_arm": 5, "right_arm": 5, "left_leg": 5, "right_leg": 5})
     toughness: str = "average"
     is_hostile_to_player: bool = False
     combat_behavior: str = "defensive"
@@ -19,6 +24,44 @@ class CombatStats:
     base_attack_damage_dice: str = "1d3"
     attack_range: int = 1
     target_entity_id: int | None = None
+    last_hit_part: str | None = None
+
+    @property
+    def max_hp(self):
+        return sum(self.body_parts_max_hp.values())
+
+    @max_hp.setter
+    def max_hp(self, value):
+        current_max = self.max_hp
+        if current_max == 0:
+            return
+        ratio = value / current_max
+        for part in self.body_parts_max_hp:
+            self.body_parts_max_hp[part] = max(1, int(self.body_parts_max_hp[part] * ratio))
+        diff = value - sum(self.body_parts_max_hp.values())
+        if diff != 0:
+            self.body_parts_max_hp["torso"] += diff
+
+    @property
+    def hp(self):
+        return sum(self.body_parts_hp.values())
+
+    @hp.setter
+    def hp(self, value):
+        current_hp = self.hp
+        if value <= 0:
+            for part in self.body_parts_hp:
+                self.body_parts_hp[part] = 0
+            return
+        if value == self.max_hp:
+            self.body_parts_hp = self.body_parts_max_hp.copy()
+            return
+        ratio = value / current_hp if current_hp > 0 else 0
+        for part in self.body_parts_hp:
+            self.body_parts_hp[part] = int(self.body_parts_hp[part] * ratio)
+        diff = value - sum(self.body_parts_hp.values())
+        if diff != 0:
+            self.body_parts_hp["torso"] += diff
 
 @dataclass
 class PhysicalState:
@@ -98,12 +141,14 @@ class NPC:
                  wealth_level="average"):
         self.x, self.y, self.name = x, y, name
         self.render_x, self.render_y = float(x), float(y) # For smooth animation
-        self.char, self.color, self.speed, self.id = ord('N'), (0, 255, 0), 1, id(self)
+        self.age = random.randint(18, 65)
+        self.gender = random.choice(["male", "female"])
+        self.char = get_human_sprite(gender=self.gender, profession="Unemployed", age=self.age)
+        self.color, self.speed, self.id = (0, 255, 0), 1, id(self)
 
         self.dialogue = dialogue if dialogue is not None else ["Hello!"]
         self.player_id = player_id
         self.last_speech_time = 0
-        self.age = random.randint(18, 65)
         self.original_char_before_sleep = self.char
         self.speech_volume: int = DEFAULT_SPEECH_VOLUME
         self.hearing_radius: int = DEFAULT_HEARING_RADIUS
@@ -117,6 +162,7 @@ class NPC:
         self.combat, self.physical, self.social = CombatStats(), PhysicalState(), SocialState()
         self.economic, self.schedule = EconomicState(), Schedule()
         self.equipment, self.knowledge = Equipment(), Knowledge()
+        self.career = CareerState()
 
         self.social.personality = personality
         if isinstance(family_ties, str):
@@ -142,10 +188,14 @@ class NPC:
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []
         self.defense_bonus = 0
+        set_entity_profession(self, self.economic.profession, reason="spawn")
 
     @property
     def is_dead(self) -> bool:
         return self.physical.is_dead
+
+    def is_placeholder_family_name(self) -> bool:
+        return bool(self.name and PLACEHOLDER_FAMILY_NAME_RE.match(str(self.name)))
 
     def _initialize_relationships(self, attitude, player_id):
         initial_score = 50
@@ -186,6 +236,91 @@ class NPC:
     def get_dialogue(self):
         """Returns the NPC's dialogue options."""
         return self.dialogue
+
+    def get_relationship_to(self, viewer) -> str | None:
+        """Return this entity's relationship to a viewer, if known."""
+        if not viewer or getattr(viewer, "id", None) == self.id:
+            return None
+
+        ties = getattr(self.social, "family_ties", {}) or {}
+        relation = str(ties.get("relation_to_player", "")).strip().lower()
+        if relation:
+            return relation
+
+        viewer_social = getattr(viewer, "social", None)
+        viewer_ties = getattr(viewer_social, "family_ties", {}) or {}
+        viewer_id = getattr(viewer, "id", None)
+
+        if viewer_ties.get("mother_id") == self.id:
+            return "mother"
+        if viewer_ties.get("father_id") == self.id:
+            return "father"
+        if self.id in viewer_ties.get("sibling_ids", []):
+            return "sibling"
+        if viewer_ties.get("partner_id") == self.id:
+            return "partner"
+        if ties.get("child_id") == viewer_id:
+            return "parent"
+        if ties.get("son_id") == viewer_id or ties.get("daughter_id") == viewer_id:
+            inferred = str(self.name).split(" ", 1)[0].strip().lower()
+            if inferred in {"mother", "father"}:
+                return inferred
+            return "parent"
+        if ties.get("sibling_id") == viewer_id:
+            inferred = str(self.name).split(" ", 1)[0].strip().lower()
+            if inferred in {"brother", "sister"}:
+                return inferred
+            return "sibling"
+        return None
+
+    def get_relationship_label(self, viewer) -> str:
+        relation = self.get_relationship_to(viewer)
+        if not relation:
+            return ""
+        label_map = {
+            "mother": "Mother",
+            "father": "Father",
+            "brother": "Brother",
+            "sister": "Sister",
+            "sibling": "Sibling",
+            "parent": "Parent",
+            "partner": "Partner",
+            "child": "Child",
+        }
+        return label_map.get(relation, relation.replace("_", " ").title())
+
+    def get_title_label(self) -> str:
+        profession = str(getattr(getattr(self, "economic", None), "profession", "") or "").strip()
+        if hasattr(self, "career"):
+            if self.career.current_role != normalize_profession(profession):
+                self.career.set_role(profession)
+            title = self.career.display_title()
+            if title:
+                return title
+        if not profession or profession in {"Unemployed", "Creature", "unemployed"}:
+            return ""
+        return profession
+
+    def get_display_name(self, viewer=None, include_relationship: bool = False) -> str:
+        """Return a player-facing display name for this entity."""
+        if viewer and getattr(viewer, "id", None) == self.id:
+            return "You"
+
+        original_name = str(getattr(self, "name", "Unknown")).strip()
+        raw_name = original_name.replace("_", " ").strip()
+        relation_label = self.get_relationship_label(viewer)
+        if self.is_placeholder_family_name() and relation_label:
+            base_name = relation_label
+        else:
+            base_name = raw_name or "Unknown"
+
+        title_label = self.get_title_label()
+        if title_label:
+            base_name = f"{base_name} ({title_label})"
+
+        if include_relationship and relation_label and base_name != relation_label:
+            return f"{base_name} [{relation_label}]"
+        return base_name
 
     def recalculate_stats(self):
         """Recalculates NPC stats based on equipped items."""
@@ -237,7 +372,35 @@ class NPC:
             total_defense_bonus += armor_def.get("properties", {}).get("defense_bonus", 0)
 
         effective_damage = max(0, amount - total_defense_bonus)
-        self.combat.hp -= effective_damage
+
+        remaining_damage = effective_damage
+        import random
+        if remaining_damage > 0:
+            hit_part = random.choice(list(self.combat.body_parts_hp.keys()))
+            self.combat.last_hit_part = hit_part
+            if self.combat.body_parts_hp[hit_part] >= remaining_damage:
+                self.combat.body_parts_hp[hit_part] -= remaining_damage
+                remaining_damage = 0
+            else:
+                remaining_damage -= self.combat.body_parts_hp[hit_part]
+                self.combat.body_parts_hp[hit_part] = 0
+                for part in ["torso", "head", "left_arm", "right_arm", "left_leg", "right_leg"]:
+                    if remaining_damage <= 0:
+                        break
+                    if self.combat.body_parts_hp[part] > 0:
+                        if self.combat.body_parts_hp[part] >= remaining_damage:
+                            self.combat.body_parts_hp[part] -= remaining_damage
+                            remaining_damage = 0
+                        else:
+                            remaining_damage -= self.combat.body_parts_hp[part]
+                            self.combat.body_parts_hp[part] = 0
+
+            # Check for broken legs
+            if self.combat.body_parts_hp.get("left_leg", 1) <= 0 or self.combat.body_parts_hp.get("right_leg", 1) <= 0:
+                if "broken_leg" not in self.physical.status_effects:
+                    self.physical.status_effects.append("broken_leg")
+                    if world:
+                        world.add_message_to_chat_log(f"{self.name}'s leg is broken!")
 
         # Add visual effect if world is passed
         if world:
@@ -250,7 +413,8 @@ class NPC:
             return True
         if not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
             self.combat.is_hostile_to_player = True
-            world.add_message_to_chat_log(f"{self.name} becomes hostile!")
+            if world:
+                world.add_message_to_chat_log(f"{self.name} becomes hostile!")
         return False
 
 class DireWolf(NPC):
@@ -259,12 +423,14 @@ class DireWolf(NPC):
     """
     def __init__(self, x, y, name="Dire Wolf"):
         super().__init__(x, y, name=name)
-        self.char, self.color = ord('w'), (160, 160, 160)
-        self.combat = CombatStats(max_hp=15, hp=15, toughness="average",
+        self.char, self.color = ANIMAL_SPRITES["dire_wolf"], (160, 160, 160)
+        self.combat = CombatStats(toughness="average",
                                   is_hostile_to_player=True, combat_behavior="aggressive",
                                   base_attack_name="bite", base_attack_damage_dice="1d6",
                                   attack_range=1)
-        self.economic.profession = "Creature"
+        self.combat.max_hp = 15
+        self.combat.hp = 15
+        set_entity_profession(self, "Creature", reason="direwolf_spawn")
         self.dialogue = ["*Growl*", "*Snarl*"]
         self.speech_volume = 5
         self.hearing_radius = DEFAULT_HEARING_RADIUS + 2

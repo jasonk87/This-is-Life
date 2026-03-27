@@ -1,12 +1,13 @@
 """
 This file defines the properties of different weather types in the game.
 """
+from data.dawnlike import WEATHER_SPRITES
 from data.tiles import COLORS
 
 WEATHER_DEFINITIONS = {
     "clear": {
         "name": "Clear",
-        "char": " ",
+        "char": WEATHER_SPRITES["clear"],
         "color": (255, 255, 255),
         "applies_wetness": False,
         "extinguishes_fires": False,
@@ -15,7 +16,7 @@ WEATHER_DEFINITIONS = {
     },
     "rain": {
         "name": "Rain",
-        "char": ":",
+        "char": WEATHER_SPRITES["rain"],
         "color": COLORS["water_fg"],
         "applies_wetness": True,
         "extinguishes_fires": True,
@@ -24,7 +25,7 @@ WEATHER_DEFINITIONS = {
     },
     "snow": {
         "name": "Snow",
-        "char": "*",
+        "char": WEATHER_SPRITES["snow"],
         "color": (255, 255, 255),
         "applies_wetness": True,
         "extinguishes_fires": True,

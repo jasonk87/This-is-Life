@@ -2150,6 +2150,7 @@ class World:
         # Update Entity Interpolation
         # Movement speed in tiles per second for animation
         ANIMATION_SPEED = 20.0
+        ANIMATION_SNAP_DISTANCE = 2.0
 
         for entity in itertools.chain([self.player], self.all_npcs):
             if entity is not self.player and getattr(entity, "is_sleeping", False):
@@ -2162,7 +2163,10 @@ class World:
                 dy = target_y - entity.render_y
                 dist = math.sqrt(dx*dx + dy*dy)
 
-                if dist > 0.01:
+                if dist > ANIMATION_SNAP_DISTANCE:
+                    entity.render_x = float(target_x)
+                    entity.render_y = float(target_y)
+                elif dist > 0.01:
                     move_dist = ANIMATION_SPEED * dt
                     if move_dist >= dist:
                         entity.render_x = float(target_x)
@@ -5697,6 +5701,273 @@ class World:
                 # Update transparency map
                 self.transparency_map[y, x] = not new_tile.blocks_fov
 
+    def _get_loaded_tile_at(self, x: int, y: int):
+        """Return a tile from an already-loaded chunk without triggering generation."""
+        if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
+            return None
+        chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
+        local_x, local_y = x % CHUNK_SIZE, y % CHUNK_SIZE
+        if not (0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height):
+            return None
+        chunk = self.chunks[chunk_y][chunk_x]
+        if chunk is None or chunk.tiles is None:
+            return None
+        return chunk.tiles[local_y][local_x]
+
+    def _building_requires_entrance_integrity(self, building: Building) -> bool:
+        return building.width >= 3 and building.height >= 3
+
+    def _get_building_entrance_candidates(self, building: Building) -> list[dict[str, tuple[int, int]]]:
+        center_x = building.global_origin_x + building.width // 2
+        center_y = building.global_origin_y + building.height // 2
+        return [
+            {
+                "door": (center_x, building.global_origin_y + building.height - 1),
+                "inside": (center_x, building.global_origin_y + building.height - 2),
+                "outside": (center_x, building.global_origin_y + building.height),
+            },
+            {
+                "door": (center_x, building.global_origin_y),
+                "inside": (center_x, building.global_origin_y + 1),
+                "outside": (center_x, building.global_origin_y - 1),
+            },
+            {
+                "door": (building.global_origin_x, center_y),
+                "inside": (building.global_origin_x + 1, center_y),
+                "outside": (building.global_origin_x - 1, center_y),
+            },
+            {
+                "door": (building.global_origin_x + building.width - 1, center_y),
+                "inside": (building.global_origin_x + building.width - 2, center_y),
+                "outside": (building.global_origin_x + building.width, center_y),
+            },
+        ]
+
+    def _is_usable_building_entrance(self, building: Building, candidate: dict[str, tuple[int, int]]) -> bool:
+        door_x, door_y = candidate["door"]
+        inside_x, inside_y = candidate["inside"]
+        outside_x, outside_y = candidate["outside"]
+        door_tile = self._get_loaded_tile_at(door_x, door_y)
+        inside_tile = self._get_loaded_tile_at(inside_x, inside_y)
+        outside_tile = self._get_loaded_tile_at(outside_x, outside_y)
+        if door_tile is None or inside_tile is None or outside_tile is None:
+            return False
+        if building.contains_global_coords(outside_x, outside_y):
+            return False
+        entrance_is_opening = getattr(door_tile, "passable", False) or door_tile.properties.get("is_door", False)
+        return entrance_is_opening and getattr(inside_tile, "passable", False) and getattr(outside_tile, "passable", False)
+
+    def _ensure_building_entrance_integrity(self, building: Building) -> tuple[int, int] | None:
+        """Guarantee a deterministic usable entrance for enclosed enterable buildings."""
+        if not self._building_requires_entrance_integrity(building):
+            return None
+
+        for candidate in self._get_building_entrance_candidates(building):
+            if self._is_usable_building_entrance(building, candidate):
+                building.interaction_points["entrance"] = candidate["door"]
+                return candidate["door"]
+
+        chosen_candidate = None
+        for candidate in self._get_building_entrance_candidates(building):
+            outside_x, outside_y = candidate["outside"]
+            outside_tile = self._get_loaded_tile_at(outside_x, outside_y)
+            if outside_tile and getattr(outside_tile, "passable", False) and not building.contains_global_coords(outside_x, outside_y):
+                chosen_candidate = candidate
+                break
+
+        if chosen_candidate is None:
+            return None
+
+        inside_x, inside_y = chosen_candidate["inside"]
+        inside_tile = self._get_loaded_tile_at(inside_x, inside_y)
+        if inside_tile is None or not getattr(inside_tile, "passable", False):
+            self._change_map_tile((inside_x, inside_y), TILE_DEFINITIONS["wood_floor"])
+
+        door_x, door_y = chosen_candidate["door"]
+        door_tile = self._get_loaded_tile_at(door_x, door_y)
+        if door_tile is None or not door_tile.properties.get("is_door", False):
+            self._change_map_tile((door_x, door_y), DECORATION_ITEM_DEFINITIONS["wooden_door_closed"])
+
+        if self._is_usable_building_entrance(building, chosen_candidate):
+            building.interaction_points["entrance"] = chosen_candidate["door"]
+            return chosen_candidate["door"]
+        return None
+
+    def _building_interior_path_exists(
+        self,
+        building: Building,
+        start: tuple[int, int],
+        target: tuple[int, int],
+    ) -> bool:
+        if start == target:
+            tile = self._get_loaded_tile_at(*start)
+            return bool(tile and getattr(tile, "passable", False))
+        start_tile = self._get_loaded_tile_at(*start)
+        target_tile = self._get_loaded_tile_at(*target)
+        if not (start_tile and target_tile and start_tile.passable and target_tile.passable):
+            return False
+        if not (building.contains_global_coords(*start) and building.contains_global_coords(*target)):
+            return False
+
+        queue = [start]
+        visited = {start}
+        index = 0
+        while index < len(queue):
+            current_x, current_y = queue[index]
+            index += 1
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                next_x, next_y = current_x + dx, current_y + dy
+                next_pos = (next_x, next_y)
+                if next_pos in visited or not building.contains_global_coords(next_x, next_y):
+                    continue
+                next_tile = self._get_loaded_tile_at(next_x, next_y)
+                if not (next_tile and getattr(next_tile, "passable", False)):
+                    continue
+                if next_pos == target:
+                    return True
+                visited.add(next_pos)
+                queue.append(next_pos)
+        return False
+
+    def _get_spawn_tile_for_building(self, building: Building) -> tuple[int, int] | None:
+        entrance = self._ensure_building_entrance_integrity(building)
+        if entrance is None:
+            return None
+        entrance_candidate = next(
+            (
+                candidate
+                for candidate in self._get_building_entrance_candidates(building)
+                if candidate["door"] == entrance
+            ),
+            None,
+        )
+        if entrance_candidate is None:
+            return None
+
+        center = (building.global_center_x, building.global_center_y)
+        if self._building_interior_path_exists(building, center, entrance_candidate["inside"]):
+            return center
+        return entrance_candidate["inside"]
+
+    def _place_building_decoration_tile(self, building: Building, item_type: str, world_x: int, world_y: int) -> bool:
+        decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
+        if decoration_tile_def is None:
+            return False
+        if not building.contains_global_coords(world_x, world_y):
+            return False
+
+        target_chunk_x = world_x // CHUNK_SIZE
+        target_chunk_y = world_y // CHUNK_SIZE
+        if not (0 <= target_chunk_x < self.chunk_width and 0 <= target_chunk_y < self.chunk_height):
+            return False
+
+        target_chunk = self.chunks[target_chunk_y][target_chunk_x]
+        if target_chunk is None or target_chunk.tiles is None:
+            return False
+
+        local_x = world_x % CHUNK_SIZE
+        local_y = world_y % CHUNK_SIZE
+        target_chunk.tiles[local_y][local_x] = Tile(
+            char=decoration_tile_def["char"],
+            color=decoration_tile_def["color"],
+            passable=decoration_tile_def["passable"],
+            name=decoration_tile_def.get("name", item_type),
+            properties=decoration_tile_def.get("properties", {}),
+        )
+        self.transparency_map[world_y, world_x] = not target_chunk.tiles[local_y][local_x].blocks_fov
+
+        interaction_hint = decoration_tile_def.get("properties", {}).get("interaction_hint")
+        if interaction_hint == "sleep" and "sleep_spot" not in building.interaction_points:
+            building.interaction_points["sleep_spot"] = (world_x, world_y)
+        return True
+
+    def _get_default_interior_decorations(self, building: Building) -> list[dict[str, int | str]]:
+        max_x = building.width - 2
+        max_y = building.height - 2
+        center_x = max(1, min(max_x, building.width // 2))
+        center_y = max(1, min(max_y, building.height // 2))
+
+        if max_x < 1 or max_y < 1:
+            return []
+
+        layouts_by_type = {
+            "house": [
+                {"type": "bed_simple", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": center_x, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ],
+            "general_store": [
+                {"type": "wooden_table", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": center_x, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ],
+            "bakery": [
+                {"type": "wooden_table", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": center_x, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": max_y},
+            ],
+            "library": [
+                {"type": "wooden_table", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": center_x, "y": 1},
+                {"type": "wall_shelf", "x": max_x, "y": 1},
+            ],
+            "blacksmith_shop": [
+                {"type": "workbench", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": max_x, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": max_y},
+            ],
+            "mill": [
+                {"type": "workbench", "x": 1, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ],
+            "mine": [
+                {"type": "workbench", "x": 1, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": max_y},
+            ],
+            "farm": [
+                {"type": "workbench", "x": 1, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ],
+            "capital_hall": [
+                {"type": "wooden_table", "x": center_x, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ],
+            "sheriff_office": [
+                {"type": "wooden_table", "x": 1, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ],
+            "jail": [
+                {"type": "bed_simple", "x": 1, "y": 1},
+            ],
+        }
+
+        default_layout = layouts_by_type.get(building.building_type)
+        if default_layout is not None:
+            return default_layout
+
+        if building.category == "residential":
+            return [
+                {"type": "bed_simple", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": center_x, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ]
+        if building.category in {"commercial", "commercial_workplace"}:
+            return [
+                {"type": "wooden_table", "x": 1, "y": 1},
+                {"type": "wooden_table", "x": center_x, "y": 1},
+            ]
+        if building.category in {"industrial", "industrial_workplace", "agricultural_workplace"}:
+            return [
+                {"type": "workbench", "x": 1, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ]
+        if building.category in {"civic", "civic_workplace", "medical"}:
+            return [
+                {"type": "wooden_table", "x": 1, "y": 1},
+                {"type": "chest_wooden", "x": max_x, "y": 1},
+            ]
+        return []
+
     def get_blueprint_at(self, x: int, y: int) -> ConstructionBlueprint | None:
         blueprint_id = self.blueprint_positions.get((x, y))
         if blueprint_id is None:
@@ -7103,6 +7374,7 @@ class World:
                     name=new_door_def["name"],
                     properties=new_door_def["properties"]
                 )
+                self.transparency_map[door_y, door_x] = not self.chunks[chunk_y][chunk_x].tiles[local_y][local_x].blocks_fov
                 # self.add_message_to_chat_log(action_message) # Can be spammy
                 return True
             else:
@@ -7274,6 +7546,7 @@ class World:
                     name=new_door_def["name"],
                     properties=new_door_def["properties"]
                 )
+                self.transparency_map[target_y, target_x] = not self.chunks[chunk_y][chunk_x].tiles[local_y][local_x].blocks_fov
                 self.add_message_to_chat_log(action_message)
                 return True # Action taken
             else:
@@ -8680,6 +8953,9 @@ class World:
     def decorate_building_interior(self, building: Building, chunk: Chunk):
         from simulation.systems.architecture import BUILDING_ARCHETYPES, generate_building
 
+        if building.interior_decorated:
+            return
+
         # Fast path if new architecture system supports this building type
         if building.building_type in BUILDING_ARCHETYPES:
             generated = generate_building(
@@ -8705,37 +8981,7 @@ class World:
                     if 0 <= furn_x < WORLD_WIDTH and 0 <= furn_y < WORLD_HEIGHT:
                         global_x = building.global_origin_x + (furn_x - building.x)
                         global_y = building.global_origin_y + (furn_y - building.y)
-
-                        target_chunk_x = global_x // CHUNK_SIZE
-                        target_chunk_y = global_y // CHUNK_SIZE
-
-                        # Only place tiles that belong in the chunk we're currently decorating
-                        # Note: `chunk` parameter represents the primary chunk the building falls into,
-                        # but just to be safe if `decorate_building_interior` is meant to populate
-                        # just this chunk... wait, the engine passes the building's origin chunk in `_generate_chunk_macro`.
-                        # Let's ensure we find the right chunk from the world if it spans across.
-
-                        # To keep it robust within `decorate_building_interior` where `chunk` is passed in:
-                        current_chunk_x = chunk.tiles[0][0].__dict__.get("x", 0) # Fallback if we can't find coords
-                        # Actually we can just write to self.chunks directly to avoid boundary bugs
-                        if 0 <= target_chunk_x < self.chunk_width and 0 <= target_chunk_y < self.chunk_height:
-                            target_chunk = self.chunks[target_chunk_y][target_chunk_x]
-
-                            local_x = global_x % CHUNK_SIZE
-                            local_y = global_y % CHUNK_SIZE
-
-                            target_chunk.tiles[local_y][local_x] = Tile(
-                                char=decoration_tile_def["char"],
-                                color=decoration_tile_def["color"],
-                                passable=decoration_tile_def["passable"],
-                                name=decoration_tile_def.get("name", item_type),
-                                properties=decoration_tile_def.get("properties", {})
-                            )
-
-                            interaction_hint = decoration_tile_def.get("properties", {}).get("interaction_hint")
-                            if interaction_hint == "sleep":
-                                if "sleep_spot" not in building.interaction_points:
-                                    building.interaction_points["sleep_spot"] = (global_x, global_y)
+                        self._place_building_decoration_tile(building, item_type, global_x, global_y)
 
             for anchor in generated.anchors:
                 global_x = building.global_origin_x + (anchor.x - building.x)
@@ -8751,6 +8997,7 @@ class World:
                         "tags": anchor.tags
                     })
 
+            self._ensure_building_entrance_integrity(building)
             building.interior_decorated = True
             return
 
@@ -8821,7 +9068,9 @@ class World:
                 decoration_data["decorations"].append({"type": "wooden_chair", "x": building.width - 3, "y": 1})
 
         try:
-            for item in decoration_data.get("decorations", []):
+            fallback_decorations = self._get_default_interior_decorations(building)
+            decorations_to_place = decoration_data.get("decorations", []) or fallback_decorations
+            for item in decorations_to_place:
                 item_type = item.get("type")
                 item_x = item.get("x")
                 item_y = item.get("y")
@@ -8834,24 +9083,7 @@ class World:
 
                         decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
                         if decoration_tile_def:
-                            tile_in_chunk_x = building.x + item_x
-                            tile_in_chunk_y = building.y + item_y
-
-                            if 0 <= tile_in_chunk_x < CHUNK_SIZE and 0 <= tile_in_chunk_y < CHUNK_SIZE:
-                                chunk.tiles[tile_in_chunk_y][tile_in_chunk_x] = Tile(
-                                    char=decoration_tile_def["char"],
-                                    color=decoration_tile_def["color"],
-                                    passable=decoration_tile_def["passable"],
-                                    name=decoration_tile_def.get("name", item_type),
-                                    properties=decoration_tile_def.get("properties", {})
-                                )
-
-                                interaction_hint = decoration_tile_def.get("properties", {}).get("interaction_hint")
-                                if interaction_hint == "sleep":
-                                    if "sleep_spot" not in building.interaction_points:
-                                        building.interaction_points["sleep_spot"] = (global_x, global_y)
-                            else:
-                                print(f"Error: Calculated tile coords for item '{item_type}' are out of chunk bounds.")
+                            self._place_building_decoration_tile(building, item_type, global_x, global_y)
                         else:
                             print(f"Unknown decoration item type: {item_type}")
                     else:
@@ -8859,6 +9091,7 @@ class World:
         except Exception as e:
             print(f"Error during placeholder decoration: {e}")
 
+        self._ensure_building_entrance_integrity(building)
         building.interior_decorated = True
 
     def _spawn_traveling_merchants(self):
@@ -9000,20 +9233,24 @@ class World:
                     break
 
         if home_building:
+            home_chunk_x = home_building.global_origin_x // CHUNK_SIZE
+            home_chunk_y = home_building.global_origin_y // CHUNK_SIZE
+            if 0 <= home_chunk_x < self.chunk_width and 0 <= home_chunk_y < self.chunk_height:
+                home_chunk = self.chunks[home_chunk_y][home_chunk_x]
+                if not home_chunk.is_terrain_generated:
+                    self._generate_chunk_detail(home_chunk, home_chunk_x, home_chunk_y)
+
+            spawn_tile = self._get_spawn_tile_for_building(home_building)
+            if spawn_tile is not None:
+                self._update_entity_position(self.player, *spawn_tile)
+                return
+
             start_x = home_building.global_center_x
             start_y = home_building.global_center_y
-
-            # Verify passability
-            tile = self.get_tile_at(start_x, start_y)
-            if tile and tile.passable:
-                self._update_entity_position(self.player, start_x, start_y)
+            sx, sy = self._find_best_adjacent_tile(start_x, start_y, self.player)
+            if sx is not None:
+                self._update_entity_position(self.player, sx, sy)
                 return
-            else:
-                # Find adjacent passable
-                sx, sy = self._find_best_adjacent_tile(start_x, start_y, self.player)
-                if sx is not None:
-                    self._update_entity_position(self.player, sx, sy)
-                    return
 
         # 2. Fallback to searching outwards from the center
         center_x, center_y = self.player.x, self.player.y
@@ -9758,6 +9995,8 @@ class World:
                 wall_type = "capital_hall_wall"
 
             self._draw_building(tiles, building, wall_type)
+            if not building.interior_decorated:
+                self.decorate_building_interior(building, chunk)
 
         # Render Well (if exists)
         if "well" in chunk.village.interaction_points:
@@ -9925,25 +10164,7 @@ class World:
                     if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
                          self.transparency_map[global_y, global_x] = True
 
-        # Place door for houses and capital hall
-        if building.building_type in ["house", "capital_hall", "sheriff_office", "jail"]:
-            door_x = building.x + building.width // 2
-            door_y = building.y + building.height - 1 # Bottom wall
-
-            global_door_x = building.global_origin_x + building.width // 2
-            global_door_y = building.global_origin_y + building.height - 1
-
-            door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"] # Default to closed door
-            new_tile = Tile(
-                char=door_def["char"],
-                color=door_def["color"],
-                passable=door_def["passable"],
-                name=door_def["name"],
-                properties=door_def["properties"] # Store door properties on the tile
-            )
-            tiles[door_y][door_x] = new_tile
-            if 0 <= global_door_x < WORLD_WIDTH and 0 <= global_door_y < WORLD_HEIGHT:
-                 self.transparency_map[global_door_y, global_door_x] = not new_tile.blocks_fov
+        self._ensure_building_entrance_integrity(building)
 
     def ensure_player_surroundings_generated(self):
         """Ensures chunks around the player are generated."""

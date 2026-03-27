@@ -645,6 +645,290 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
         self.assertIn("*", rendered)
 
 
+class TestConsoleRendererEntities(unittest.TestCase):
+    def test_entity_labels_only_show_when_close_or_focused(self):
+        entity = SimpleNamespace(name="Villager")
+
+        self.assertTrue(console_renderer._should_draw_entity_label(1, {"entity": None}, entity))
+        self.assertFalse(console_renderer._should_draw_entity_label(4, {"entity": None}, entity))
+        self.assertTrue(console_renderer._should_draw_entity_label(4, {"entity": entity}, entity))
+        self.assertFalse(console_renderer._should_draw_entity_label(2, {"entity": None}, entity))
+
+    def test_wood_floor_colors_are_softened_without_changing_material(self):
+        fg, bg = console_renderer._tune_floor_colors("wood_floor", (160, 82, 45), (64, 42, 22))
+
+        self.assertLess(sum(fg), sum((160, 82, 45)))
+        self.assertGreater(sum(bg), sum((64, 42, 22)))
+
+    def test_draw_entities_uses_logical_visibility_not_stale_render_position(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+                self.bg = np.zeros((3, 3, 3), dtype=np.uint8)
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        entity = SimpleNamespace(
+            x=10,
+            y=10,
+            render_x=1.0,
+            render_y=1.0,
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=1),
+            color=(120, 130, 140),
+        )
+        world = SimpleNamespace(
+            npcs=[entity],
+            village_npcs=[],
+            player=SimpleNamespace(x=0, y=0, state=SimpleNamespace(is_riding=False)),
+        )
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", side_effect=lambda _world, x, y: (x, y) == (1, 1)), \
+             patch("rendering.console_renderer.get_entity_sprite", return_value=ord("@")):
+            console_renderer._draw_entities(console, world, 0, 0)
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_entity_contrast_boosts_foreground_against_similar_background(self):
+        adjusted = console_renderer._ensure_entity_contrast((90, 90, 90), (80, 80, 80))
+
+        self.assertNotEqual(adjusted, (90, 90, 90))
+        self.assertGreater(sum(adjusted), 270)
+
+    def test_player_contrast_stays_strong_on_bright_floor(self):
+        adjusted = console_renderer._ensure_player_contrast((220, 210, 180))
+
+        self.assertNotEqual(adjusted, (255, 245, 140))
+        self.assertLess(sum(adjusted), 220)
+
+    def test_draw_entities_does_not_write_background_fill(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+                self.bg = np.zeros((2, 2, 3), dtype=np.uint8)
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        player = SimpleNamespace(
+            x=1,
+            y=1,
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=2),
+        )
+        npc = SimpleNamespace(
+            x=0,
+            y=0,
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=1),
+            color=(120, 130, 140),
+        )
+        world = SimpleNamespace(
+            npcs=[npc],
+            village_npcs=[],
+            player=player,
+        )
+
+        with patch("rendering.console_renderer.is_visible", return_value=True), \
+             patch("rendering.console_renderer.get_entity_sprite", return_value=ord("@")):
+            console_renderer._draw_entities(console, world, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 2)
+        for call in console.print_calls:
+            self.assertNotIn("bg", call)
+            self.assertIn("fg", call)
+
+    def test_entity_marker_skips_overlay_cell_outside_visibility(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        merchant = SimpleNamespace(
+            x=5,
+            y=5,
+            is_sleeping=False,
+            economic=SimpleNamespace(profession="Merchant"),
+            combat=SimpleNamespace(is_hostile_to_player=False),
+            physical=SimpleNamespace(is_dead=False),
+        )
+        world = SimpleNamespace(npcs=[merchant], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", side_effect=lambda _world, x, y: (x, y) == (5, 5)):
+            console_renderer._draw_entity_markers(console, world, 0, 0, {"entity": merchant})
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_entity_markers_requires_focused_entity(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        merchant = SimpleNamespace(
+            x=5,
+            y=5,
+            is_sleeping=False,
+            economic=SimpleNamespace(profession="Merchant"),
+            combat=SimpleNamespace(is_hostile_to_player=False),
+            physical=SimpleNamespace(is_dead=False),
+        )
+        world = SimpleNamespace(npcs=[merchant], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_markers(console, world, 0, 0, {"entity": None})
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_orders_entities_after_world_lighting_and_before_overlays(self):
+        class FakeConsole:
+            def __init__(self):
+                self.width = 1
+                self.height = 1
+                self.fg = np.zeros((1, 1, 3), dtype=np.uint8)
+                self.bg = np.zeros((1, 1, 3), dtype=np.uint8)
+                self.print_calls = []
+
+            def clear(self):
+                pass
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+            def draw_frame(self, *args, **kwargs):
+                pass
+
+        tile = SimpleNamespace(name="Plains", char=ord("."), color=(10, 20, 30), blocks_fov=False)
+        chunk = SimpleNamespace(is_terrain_generated=True, tiles=[[tile]])
+        player = SimpleNamespace(x=0, y=0, state=SimpleNamespace(current_path=[]))
+        world = SimpleNamespace(
+            explored_map=np.zeros((1, 1), dtype=bool),
+            player_fov_map=np.ones((1, 1), dtype=bool),
+            chunks=[[chunk]],
+            _generate_chunk_detail=lambda *args, **kwargs: None,
+            get_tile_at=lambda x, y: tile,
+            visual_effects=[],
+            npcs=[],
+            village_npcs=[],
+            player=player,
+            items_on_map={},
+            weather="clear",
+            mouse_x=-1,
+            mouse_y=-1,
+            interaction_context={"active": False},
+            game_state="PLAYING",
+            game_time=0,
+            chat_ui_active=False,
+            trade_ui_active=False,
+            chat_log=[],
+        )
+        console = FakeConsole()
+        order = []
+
+        with patch.object(console_renderer, "MAP_WIDTH", 1), \
+             patch.object(console_renderer, "MAP_HEIGHT", 1), \
+             patch.object(console_renderer, "WORLD_WIDTH", 1), \
+             patch.object(console_renderer, "WORLD_HEIGHT", 1), \
+             patch.object(console_renderer, "CHUNK_SIZE", 1), \
+             patch("rendering.console_renderer._apply_lighting_and_depth", side_effect=lambda *args: order.append("lighting")), \
+             patch("rendering.console_renderer._draw_entities", side_effect=lambda *args: order.append("entities")), \
+             patch("rendering.console_renderer._draw_entity_markers", side_effect=lambda *args: order.append("entity_markers")), \
+             patch("rendering.console_renderer._draw_world_markers", side_effect=lambda *args: order.append("world_markers")), \
+             patch("rendering.console_renderer.draw_status_panel"), \
+             patch("rendering.console_renderer.draw_cursor_info"), \
+             patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
+             patch("rendering.console_renderer._draw_focus_badge"), \
+             patch("rendering.console_renderer.draw_weather_overlay"), \
+             patch("rendering.console_renderer._get_visible_nearby_entities", return_value=[]):
+            console_renderer.draw(console, world, 0, 0)
+
+        self.assertEqual(order, ["lighting", "entities", "entity_markers", "world_markers"])
+
+    def test_draw_skips_label_when_overlay_cell_is_not_visible(self):
+        class FakeConsole:
+            def __init__(self):
+                self.width = 3
+                self.height = 3
+                self.fg = np.zeros((3, 3, 3), dtype=np.uint8)
+                self.bg = np.zeros((3, 3, 3), dtype=np.uint8)
+                self.print_calls = []
+
+            def clear(self):
+                pass
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+            def draw_frame(self, *args, **kwargs):
+                pass
+
+        tile = SimpleNamespace(name="Plains", char=ord("."), color=(10, 20, 30), blocks_fov=False)
+        chunk = SimpleNamespace(is_terrain_generated=True, tiles=[[tile for _ in range(3)] for _ in range(3)])
+        entity = SimpleNamespace(
+            x=1,
+            y=1,
+            name="Villager",
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=1),
+            color=(120, 130, 140),
+            physical=SimpleNamespace(is_dead=False),
+        )
+        player = SimpleNamespace(x=0, y=0, state=SimpleNamespace(current_path=[]))
+        world = SimpleNamespace(
+            explored_map=np.ones((3, 3), dtype=bool),
+            player_fov_map=np.ones((3, 3), dtype=bool),
+            chunks=[[chunk, chunk, chunk], [chunk, chunk, chunk], [chunk, chunk, chunk]],
+            _generate_chunk_detail=lambda *args, **kwargs: None,
+            get_tile_at=lambda x, y: tile,
+            visual_effects=[],
+            npcs=[entity],
+            village_npcs=[],
+            player=player,
+            items_on_map={},
+            weather="clear",
+            mouse_x=-1,
+            mouse_y=-1,
+            interaction_context={"active": False},
+            game_state="PLAYING",
+            game_time=0,
+            chat_ui_active=False,
+            trade_ui_active=False,
+            chat_log=[],
+            get_entity_display_name=lambda e: e.name,
+        )
+        console = FakeConsole()
+
+        with patch.object(console_renderer, "MAP_WIDTH", 3), \
+             patch.object(console_renderer, "MAP_HEIGHT", 3), \
+             patch.object(console_renderer, "WORLD_WIDTH", 3), \
+             patch.object(console_renderer, "WORLD_HEIGHT", 3), \
+             patch.object(console_renderer, "CHUNK_SIZE", 1), \
+             patch("rendering.console_renderer._apply_lighting_and_depth"), \
+             patch("rendering.console_renderer._draw_entities"), \
+             patch("rendering.console_renderer._draw_entity_markers"), \
+             patch("rendering.console_renderer._draw_world_markers"), \
+             patch("rendering.console_renderer.draw_status_panel"), \
+             patch("rendering.console_renderer.draw_cursor_info"), \
+             patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
+             patch("rendering.console_renderer._draw_focus_badge"), \
+             patch("rendering.console_renderer.draw_weather_overlay"), \
+             patch("rendering.console_renderer._get_visible_nearby_entities", return_value=[(1, entity)]), \
+             patch("rendering.console_renderer.is_visible", side_effect=lambda _world, x, y: (x, y) != (1, 0)):
+            console_renderer.draw(console, world, 0, 0)
+
+        label_calls = [call for call in console.print_calls if call.get("string") == "Villager"]
+        self.assertEqual(label_calls, [])
+
+
 class TestConsoleRendererLighting(unittest.TestCase):
     def test_apply_lighting_and_depth_respects_console_buffer_bounds(self):
         console = SimpleNamespace(
@@ -661,6 +945,95 @@ class TestConsoleRendererLighting(unittest.TestCase):
 
         with patch("rendering.console_renderer.is_visible", return_value=True):
             console_renderer._apply_lighting_and_depth(console, world, 0, 0)
+
+
+class TestConsoleRendererFocusBadge(unittest.TestCase):
+    def test_focus_badge_does_not_pulse_plain_tile_focus(self):
+        class FakeConsole:
+            def __init__(self):
+                self.bg = np.zeros((3, 3, 3), dtype=np.uint8)
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(game_time=0)
+        focus = {"x": 1, "y": 1, "label": "Facing Plains", "entity": None}
+
+        console_renderer._draw_focus_badge(console, world, focus, 0, 0)
+
+        self.assertEqual(console.print_calls, [])
+        self.assertTrue(np.array_equal(console.bg, np.zeros((3, 3, 3), dtype=np.uint8)))
+
+    def test_focus_badge_pulses_and_prints_for_visible_entity_focus(self):
+        class FakeConsole:
+            def __init__(self):
+                self.bg = np.zeros((3, 3, 3), dtype=np.uint8)
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        entity = SimpleNamespace(physical=SimpleNamespace(is_dead=False))
+        world = SimpleNamespace(game_time=0)
+        focus = {"x": 1, "y": 1, "label": "Merchant", "entity": entity}
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_focus_badge(console, world, focus, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertGreater(console.bg[1, 1].sum(), 0)
+
+
+class TestWeatherOverlayShelter(unittest.TestCase):
+    def test_weather_overlay_draws_on_exposed_outdoor_tiles(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(
+            weather="rain",
+            game_time=0,
+            get_building_at=lambda x, y: None,
+        )
+
+        with patch.object(console_renderer, "MAP_WIDTH", 1), \
+             patch.object(console_renderer, "MAP_HEIGHT", 1), \
+             patch("rendering.console_renderer.is_visible", return_value=True), \
+             patch("rendering.console_renderer.hash", return_value=0):
+            console_renderer.draw_weather_overlay(console, world, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 1)
+
+    def test_weather_overlay_skips_visible_building_interior_tiles(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        building = SimpleNamespace(global_origin_x=10, global_origin_y=10, width=7, height=6)
+        world = SimpleNamespace(
+            weather="rain",
+            game_time=0,
+            get_building_at=lambda x, y: building if (x, y) == (12, 12) else None,
+        )
+
+        with patch.object(console_renderer, "MAP_WIDTH", 1), \
+             patch.object(console_renderer, "MAP_HEIGHT", 1), \
+             patch("rendering.console_renderer.is_visible", return_value=True), \
+             patch("rendering.console_renderer.hash", return_value=0):
+            console_renderer.draw_weather_overlay(console, world, 12, 12)
+
+        self.assertEqual(console.print_calls, [])
 
 
 

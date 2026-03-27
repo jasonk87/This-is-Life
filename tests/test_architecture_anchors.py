@@ -13,6 +13,7 @@ class MockWorld:
     def __init__(self):
         self.buildings_by_id = {}
         self.entity_positions = {}
+        self.village_npcs = []
 
     def _get_building_global_center_coords(self, building_id):
         building = self.buildings_by_id.get(building_id)
@@ -28,6 +29,15 @@ class MockWorld:
 
     def get_tile_at(self, x, y):
         return MockTile(passable=True)
+
+    def _find_nearest_tavern(self, npc):
+        return None
+
+    def _get_village_for_npc(self, npc):
+        return None
+
+    def _start_npc_socialization(self, npc):
+        return None
 
 class TestArchitectureAnchors(unittest.TestCase):
     def setUp(self):
@@ -91,6 +101,40 @@ class TestArchitectureAnchors(unittest.TestCase):
         # Because (23,23) is closer to (24,24) than (21,21), proximity scoring should pick it
         self.assertEqual(coords, (23, 23))
 
+    def test_correct_role_beats_closer_incorrect_role(self):
+        self.workplace.anchors = [
+            {"type": "work", "x": 24, "y": 25, "tags": {"role": "desk"}},
+            {"type": "work", "x": 31, "y": 31, "tags": {"role": "workbench"}},
+        ]
+        self.npc.x = 25
+        self.npc.y = 25
+
+        coords = self.workplace.get_anchor_coordinates(
+            "work",
+            world=self.world,
+            requesting_entity=self.npc,
+            ideal_role="workbench",
+        )
+
+        self.assertEqual(coords, (31, 31))
+
+    def test_proximity_breaks_ties_between_similar_anchors(self):
+        self.workplace.anchors = [
+            {"type": "work", "x": 21, "y": 21, "tags": {"role": "workbench"}},
+            {"type": "work", "x": 24, "y": 24, "tags": {"role": "workbench"}},
+        ]
+        self.npc.x = 25
+        self.npc.y = 25
+
+        coords = self.workplace.get_anchor_coordinates(
+            "work",
+            world=self.world,
+            requesting_entity=self.npc,
+            ideal_role="workbench",
+        )
+
+        self.assertEqual(coords, (24, 24))
+
     def test_anchor_occupancy_penalty(self):
         self.workplace.anchors = [
             {"type": "work", "x": 21, "y": 21, "tags": {"role": "workbench"}},
@@ -107,6 +151,24 @@ class TestArchitectureAnchors(unittest.TestCase):
         coords = self.workplace.get_anchor_coordinates("work", world=self.world, requesting_entity=self.npc, ideal_role="workbench")
         # Should pick the further, but unoccupied anchor
         self.assertEqual(coords, (21, 21))
+
+    def test_occupied_best_role_anchor_still_returns_safe_choice(self):
+        self.workplace.anchors = [
+            {"type": "work", "x": 26, "y": 25, "tags": {"role": "desk"}},
+            {"type": "work", "x": 40, "y": 40, "tags": {"role": "workbench"}},
+        ]
+        self.npc.x = 25
+        self.npc.y = 25
+        self.world.entity_positions[(40, 40)] = 999
+
+        coords = self.workplace.get_anchor_coordinates(
+            "work",
+            world=self.world,
+            requesting_entity=self.npc,
+            ideal_role="workbench",
+        )
+
+        self.assertEqual(coords, (40, 40))
 
     def test_sleep_behavior_prefers_sleep_anchor(self):
         self.home.anchors = [{"type": "sleep", "x": 2, "y": 3}]
@@ -177,6 +239,65 @@ class TestArchitectureAnchors(unittest.TestCase):
         # Should prefer the work anchor
         self.assertEqual(self.npc.schedule.current_task, "going_to_work")
         self.assertEqual(self.npc.schedule.current_destination_coords, (22, 23))
+
+    def test_work_behavior_prefers_role_anchor_over_closer_wrong_role(self):
+        self.workplace.anchors = [
+            {"type": "work", "x": 21, "y": 21, "tags": {"role": "desk"}},
+            {"type": "work", "x": 28, "y": 28, "tags": {"role": "workbench"}},
+        ]
+        self.npc.x = 5
+        self.npc.y = 5
+        self.npc.schedule.current_task = "idle"
+
+        current_time_in_day = int(DAY_LENGTH_TICKS * 0.4)
+
+        update_npc_daily_goal_policy(self.world, self.npc, current_time_in_day)
+
+        self.assertEqual(self.npc.schedule.current_task, "going_to_work")
+        self.assertEqual(self.npc.schedule.current_destination_coords, (28, 28))
+
+    def test_at_home_does_not_randomly_drift_to_social_anchor(self):
+        self.home.anchors = [
+            {"type": "social", "x": 4, "y": 4},
+            {"type": "eat", "x": 6, "y": 6},
+        ]
+        self.home.global_center_x = 5
+        self.home.global_center_y = 5
+        self.npc.x = 5
+        self.npc.y = 5
+        self.npc.schedule.current_task = "at_home"
+        self.npc.leisure_timer = 0
+
+        current_time_in_day = int(DAY_LENGTH_TICKS * 0.75)
+
+        update_npc_daily_goal_policy(self.world, self.npc, current_time_in_day)
+
+        self.assertEqual(self.npc.schedule.current_task, "at_home")
+        self.assertIsNone(self.npc.schedule.current_destination_coords)
+
+    def test_anchor_selection_is_deterministic(self):
+        self.workplace.anchors = [
+            {"type": "work", "x": 24, "y": 24, "tags": {"role": "workbench"}},
+            {"type": "work", "x": 29, "y": 29, "tags": {"role": "workbench"}},
+            {"type": "work", "x": 21, "y": 21, "tags": {"role": "desk"}},
+        ]
+        self.npc.x = 25
+        self.npc.y = 25
+
+        first = self.workplace.get_anchor_coordinates(
+            "work",
+            world=self.world,
+            requesting_entity=self.npc,
+            ideal_role="workbench",
+        )
+        second = self.workplace.get_anchor_coordinates(
+            "work",
+            world=self.world,
+            requesting_entity=self.npc,
+            ideal_role="workbench",
+        )
+
+        self.assertEqual(first, second)
 
     def test_missing_anchors_fallback_to_existing_behavior(self):
         self.home.anchors = []

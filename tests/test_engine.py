@@ -300,3 +300,291 @@ class TestChunkSleepWakeAndAbstractSimulation(unittest.TestCase):
         self.assertGreater(npc.physical.hunger, 0)
         self.assertLess(building.building_inventory.get("money", 0), 120)
         self.assertGreater(building.building_inventory.get("wheat", 0), 0)
+
+
+class TestAnimationSync(unittest.TestCase):
+    def test_update_animations_snaps_large_position_gaps_to_target(self):
+        world = object.__new__(engine.World)
+        world.player = SimpleNamespace(x=25, y=30, render_x=0.0, render_y=0.0)
+        world.npcs = []
+        world.village_npcs = []
+        world.visual_effects = []
+
+        engine.World.update_animations(world, 0.016)
+
+        self.assertEqual((world.player.render_x, world.player.render_y), (25.0, 30.0))
+
+
+class TestBuildingEntranceIntegrity(unittest.TestCase):
+    def make_world(self):
+        world = object.__new__(engine.World)
+        world.chunk_width = 1
+        world.chunk_height = 1
+        plains_def = engine.TILE_DEFINITIONS["plains"]
+        tiles = [
+            [
+                engine.Tile(
+                    plains_def["char"],
+                    plains_def["color"],
+                    plains_def["passable"],
+                    plains_def["name"],
+                    plains_def.get("properties", {}),
+                )
+                for _ in range(config.CHUNK_SIZE)
+            ]
+            for _ in range(config.CHUNK_SIZE)
+        ]
+        world.chunks = [[SimpleNamespace(tiles=tiles, is_terrain_generated=True, poi_type="village", village=None)]]
+        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, order="F")
+        world.buildings_by_id = {}
+        world.player = SimpleNamespace(
+            id=1,
+            x=0,
+            y=0,
+            social=SimpleNamespace(family_ties={}),
+        )
+        world.entity_positions = {(0, 0): 1}
+        world.entities_by_chunk = {(0, 0): {1}}
+        world._refresh_chunk_activity = lambda *args, **kwargs: None
+        world._ensure_entity_positions_current = lambda *args, **kwargs: None
+        world.add_message_to_chat_log = lambda *args, **kwargs: None
+        world.get_entity_by_id = lambda entity_id: None
+        world._generate_chunk_detail = lambda chunk, chunk_x, chunk_y: setattr(chunk, "is_terrain_generated", True)
+        return world
+
+    def make_building(self, building_type="general_store"):
+        return engine.Building(
+            10,
+            10,
+            7,
+            6,
+            building_type=building_type,
+            category="workplace" if building_type != "house" else "residential",
+            global_chunk_x_start=0,
+            global_chunk_y_start=0,
+        )
+
+    def get_candidate_for_entrance(self, world, building, entrance):
+        return next(
+            candidate
+            for candidate in engine.World._get_building_entrance_candidates(world, building)
+            if candidate["door"] == entrance
+        )
+
+    def test_enterable_building_gets_usable_entrance_with_interior_and_exterior_connection(self):
+        world = self.make_world()
+        building = self.make_building("general_store")
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+
+        entrance = building.interaction_points.get("entrance")
+        self.assertIsNotNone(entrance)
+        candidate = self.get_candidate_for_entrance(world, building, entrance)
+        door_tile = world.get_tile_at(*candidate["door"])
+        inside_tile = world.get_tile_at(*candidate["inside"])
+        outside_tile = world.get_tile_at(*candidate["outside"])
+
+        self.assertTrue(door_tile.properties.get("is_door"))
+        self.assertTrue(inside_tile.passable)
+        self.assertTrue(outside_tile.passable)
+        self.assertFalse(building.contains_global_coords(*candidate["outside"]))
+
+    def test_entrance_repair_restores_door_and_walkable_approach_after_overwrite(self):
+        world = self.make_world()
+        building = self.make_building("library")
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "stone_wall")
+        original_entrance = building.interaction_points["entrance"]
+        candidate = self.get_candidate_for_entrance(world, building, original_entrance)
+
+        engine.World._change_map_tile(world, candidate["door"], engine.TILE_DEFINITIONS["stone_wall"])
+        engine.World._change_map_tile(world, candidate["inside"], engine.DECORATION_ITEM_DEFINITIONS["chest_wooden"])
+
+        repaired_entrance = engine.World._ensure_building_entrance_integrity(world, building)
+
+        self.assertEqual(repaired_entrance, original_entrance)
+        self.assertTrue(world.get_tile_at(*candidate["door"]).properties.get("is_door"))
+        self.assertTrue(world.get_tile_at(*candidate["inside"]).passable)
+
+    def test_starting_home_spawn_uses_tile_with_reliable_egress(self):
+        world = self.make_world()
+        building = self.make_building("house")
+        building.category = "residential"
+        world.buildings_by_id[building.id] = building
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+        center = (building.global_center_x, building.global_center_y)
+        engine.World._change_map_tile(world, center, engine.DECORATION_ITEM_DEFINITIONS["chest_wooden"])
+
+        relative = SimpleNamespace(schedule=SimpleNamespace(home_building_id=building.id))
+        world.player.social.family_ties = {"mother_id": relative.schedule.home_building_id}
+        world.get_entity_by_id = lambda entity_id: relative if entity_id == building.id else None
+        chosen_positions = []
+        world._update_entity_position = lambda entity, x, y: chosen_positions.append((x, y))
+
+        engine.World._find_starting_position(world)
+
+        entrance = building.interaction_points["entrance"]
+        candidate = self.get_candidate_for_entrance(world, building, entrance)
+        self.assertEqual(chosen_positions[0], candidate["inside"])
+        self.assertTrue(
+            engine.World._building_interior_path_exists(
+                world,
+                building,
+                chosen_positions[0],
+                candidate["inside"],
+            )
+        )
+
+    def test_player_door_toggle_keeps_open_state_passability_and_transparency_in_sync(self):
+        world = self.make_world()
+        building = self.make_building("house")
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+        door_x, door_y = building.interaction_points["entrance"]
+
+        self.assertFalse(world.get_tile_at(door_x, door_y).passable)
+        engine.World.player_attempt_toggle_door(world, door_x, door_y)
+        self.assertTrue(world.get_tile_at(door_x, door_y).passable)
+        self.assertTrue(world.transparency_map[door_y, door_x])
+
+        engine.World.player_attempt_toggle_door(world, door_x, door_y)
+        self.assertFalse(world.get_tile_at(door_x, door_y).passable)
+        self.assertFalse(world.transparency_map[door_y, door_x])
+
+    def test_entrance_selection_is_deterministic_for_matching_buildings(self):
+        first_world = self.make_world()
+        second_world = self.make_world()
+        first_building = self.make_building("general_store")
+        second_building = self.make_building("general_store")
+
+        engine.World._draw_building(first_world, first_world.chunks[0][0].tiles, first_building, "wood_wall")
+        engine.World._draw_building(second_world, second_world.chunks[0][0].tiles, second_building, "wood_wall")
+
+        self.assertEqual(
+            first_building.interaction_points.get("entrance"),
+            second_building.interaction_points.get("entrance"),
+        )
+
+
+class TestInteriorFurnishingIntegrity(unittest.TestCase):
+    def make_world(self, llm_response="{}"):
+        world = object.__new__(engine.World)
+        world.chunk_width = 1
+        world.chunk_height = 1
+        plains_def = engine.TILE_DEFINITIONS["plains"]
+        tiles = [
+            [
+                engine.Tile(
+                    plains_def["char"],
+                    plains_def["color"],
+                    plains_def["passable"],
+                    plains_def["name"],
+                    plains_def.get("properties", {}),
+                )
+                for _ in range(config.CHUNK_SIZE)
+            ]
+            for _ in range(config.CHUNK_SIZE)
+        ]
+        village = SimpleNamespace(buildings=[], interaction_points={}, lore="")
+        chunk = SimpleNamespace(
+            tiles=tiles,
+            is_terrain_generated=True,
+            poi_type="village",
+            village=village,
+        )
+        world.chunks = [[chunk]]
+        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, order="F")
+        world.buildings_by_id = {}
+        world._call_llm_for_worldgen = lambda prompt: llm_response
+        world.add_message_to_chat_log = lambda *args, **kwargs: None
+        return world
+
+    def make_building(self, building_type, *, category="residential", width=7, height=6):
+        return engine.Building(
+            10,
+            10,
+            width,
+            height,
+            building_type=building_type,
+            category=category,
+            global_chunk_x_start=0,
+            global_chunk_y_start=0,
+        )
+
+    def collect_interior_furniture(self, world, building):
+        furniture_names = {
+            engine.DECORATION_ITEM_DEFINITIONS[key]["name"]
+            for key in ["bed_simple", "wooden_table", "wooden_chair", "chest_wooden", "wall_shelf", "workbench", "fire_pit_simple"]
+        }
+        found = []
+        for y in range(building.global_origin_y + 1, building.global_origin_y + building.height - 1):
+            for x in range(building.global_origin_x + 1, building.global_origin_x + building.width - 1):
+                tile = world.get_tile_at(x, y)
+                if tile and tile.name in furniture_names:
+                    found.append((x, y, tile.name))
+        return found
+
+    def test_supported_house_is_furnished_during_village_render(self):
+        world = self.make_world()
+        building = self.make_building("house", category="residential")
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(building.interior_decorated)
+        self.assertGreaterEqual(len(furniture), 2)
+
+    def test_unsupported_work_building_uses_deterministic_fallback_when_llm_is_empty(self):
+        world = self.make_world(llm_response="{}")
+        building = self.make_building("general_store", category="commercial_workplace", width=8, height=6)
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(furniture)
+        self.assertTrue(any(name == engine.DECORATION_ITEM_DEFINITIONS["wooden_table"]["name"] for _, _, name in furniture))
+
+    def test_furniture_tiles_land_on_valid_interior_coordinates(self):
+        world = self.make_world(llm_response="{}")
+        building = self.make_building("library", category="civic_workplace", width=8, height=6)
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(furniture)
+        for x, y, _ in furniture:
+            self.assertTrue(building.global_origin_x < x < building.global_origin_x + building.width - 1)
+            self.assertTrue(building.global_origin_y < y < building.global_origin_y + building.height - 1)
+
+    def test_generation_flow_leaves_furniture_in_chunk_tiles_after_building_render(self):
+        world = self.make_world(llm_response="{}")
+        building = self.make_building("blacksmith_shop", category="industrial_workplace", width=7, height=6)
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(furniture)
+        for x, y, _ in furniture:
+            tile = world.chunks[0][0].tiles[y][x]
+            self.assertNotEqual(tile.name, engine.TILE_DEFINITIONS["wood_floor"]["name"])
+
+    def test_furnished_layout_is_deterministic(self):
+        first_world = self.make_world(llm_response="{}")
+        second_world = self.make_world(llm_response="{}")
+        first_building = self.make_building("general_store", category="commercial_workplace", width=8, height=6)
+        second_building = self.make_building("general_store", category="commercial_workplace", width=8, height=6)
+        first_world.chunks[0][0].village.buildings = [first_building]
+        second_world.chunks[0][0].village.buildings = [second_building]
+
+        engine.World._render_village_tiles(first_world, first_world.chunks[0][0])
+        engine.World._render_village_tiles(second_world, second_world.chunks[0][0])
+
+        self.assertEqual(
+            self.collect_interior_furniture(first_world, first_building),
+            self.collect_interior_furniture(second_world, second_building),
+        )

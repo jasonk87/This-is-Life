@@ -857,20 +857,6 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 npc.task_target_entity_id = chosen_partner.id
         else:
             npc.schedule.current_task = "idle"
-    elif npc.schedule.current_task == "at_home" and is_leisure_time:
-        # Add light preference for eating/social anchors while idling inside at home
-        home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
-        if home_building_obj:
-            leisure_anchor = home_building_obj.get_anchor_coordinates(["eat", "social"], world=world, requesting_entity=npc)
-            if leisure_anchor:
-                # 5% chance to wander over to a social/eat anchor if available and idling
-                if random.random() < 0.05 and (npc.x, npc.y) != leisure_anchor:
-                    dest_coords = home_building_obj.refine_anchor_coordinates(world, leisure_anchor[0], leisure_anchor[1], requesting_entity=npc)
-                    if dest_coords and dest_coords != (npc.x, npc.y):
-                        new_task_label = "going_to_social_anchor"
-                        destination_coords = dest_coords
-                        npc.leisure_timer = random.randint(100, 200)
-
     elif is_leisure_time and npc.age > 18 and not npc.social.family_ties.get("partner_id"):
         if random.random() < 0.01:
             npc.schedule.current_task = "seeking_partner"

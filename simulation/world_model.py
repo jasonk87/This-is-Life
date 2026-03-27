@@ -55,11 +55,11 @@ class Building:
         )
 
     def get_anchor_coordinates(self, anchor_types: list[str] | str, fallback_coords: tuple[int, int] | None = None, world=None, requesting_entity=None, ideal_role: str | None = None) -> tuple[int, int] | None:
-        """Returns the global coordinates of the best anchor matching the requested types, applying lightweight preference scoring."""
+        """Return the best matching anchor using simple role, occupancy, and proximity preferences."""
         if isinstance(anchor_types, str):
             anchor_types = [anchor_types]
 
-        best_score = -9999
+        best_score = None
         best_coords = None
 
         for anchor in self.anchors:
@@ -71,30 +71,25 @@ class Building:
             if x is None or y is None:
                 continue
 
+            tags = anchor.get("tags", {})
             score = 0
 
-            # Prefer non-fallback anchors
-            tags = anchor.get("tags", {})
-            if tags.get("fallback") != "true":
-                score += 10
+            if ideal_role and tags.get("role") == ideal_role:
+                score += 100
 
-                # Bonus for exact role match (e.g. asking for "desk" in a "work" anchor type)
-                if ideal_role and tags.get("role") == ideal_role:
-                    score += 5
+            if tags.get("fallback") == "true":
+                score -= 10
 
             if world:
-                # Check occupancy safely
                 occupant_id = getattr(world, "entity_positions", {}).get((x, y))
                 if occupant_id is not None and (not requesting_entity or occupant_id != requesting_entity.id):
-                    # Penalize occupied anchors, but don't strictly forbid returning them (refine_anchor_coordinates handles finding a nearby walkable tile)
-                    score -= 50
+                    score -= 25
 
-                # Add small proximity bonus if requesting_entity exists
                 if requesting_entity:
                     dist = abs(requesting_entity.x - x) + abs(requesting_entity.y - y)
-                    score -= dist * 0.1 # Slight distance penalty so closer anchors tie-break
+                    score -= dist
 
-            if score > best_score:
+            if best_score is None or score > best_score:
                 best_score = score
                 best_coords = (x, y)
 

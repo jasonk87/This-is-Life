@@ -127,11 +127,56 @@ def _get_wealth_tier(tags: List[str]) -> str:
         return "high"
     return "mid"
 
-def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid") -> List[Tuple[int, int, str]]:
+def _get_building_identity_profile(building_type: str, category: str) -> Dict:
+    """Returns a lightweight preference profile for visual identity."""
+    # Defaults
+    profile = {
+        "room_bias": [],
+        "furniture_bias": [],
+        "density_bias": "mid",
+        "clustering": "light"
+    }
+
+    if building_type == "tavern" or category == "commercial":
+        profile["room_bias"] = ["tavern_floor", "dining"]
+        profile["furniture_bias"] = ["table", "chair", "counter", "fireplace"]
+        profile["density_bias"] = "high"
+        profile["clustering"] = "tight"
+    elif building_type == "clinic" or category == "medical":
+        profile["room_bias"] = ["clinic_room", "office"]
+        profile["furniture_bias"] = ["bed", "desk", "storage"]
+        profile["density_bias"] = "low"
+        profile["clustering"] = "spaced"
+    elif category == "industrial":
+        profile["room_bias"] = ["workshop", "storage"]
+        profile["furniture_bias"] = ["workbench", "storage"]
+        profile["density_bias"] = "mid"
+        profile["clustering"] = "functional"
+    elif category == "civic":
+        profile["room_bias"] = ["office", "dining"]
+        profile["furniture_bias"] = ["desk", "chair", "storage"]
+        profile["density_bias"] = "mid"
+        profile["clustering"] = "functional"
+    elif category == "residential":
+        profile["room_bias"] = ["bedroom", "dining"]
+        profile["furniture_bias"] = ["bed", "table", "chair", "fireplace"]
+        profile["density_bias"] = "mid"
+        profile["clustering"] = "light"
+
+    return profile
+
+def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid", profile: Dict = None) -> List[Tuple[int, int, str]]:
     placed = []
     archetype = ROOM_ARCHETYPES.get(room.room_type)
     if not archetype:
         return placed
+
+    if profile is None:
+        profile = {
+            "furniture_bias": [],
+            "density_bias": "mid",
+            "clustering": "light"
+        }
 
     # We need to preserve door access. Assume door is at center of one wall or just reserve inner boundary middle tiles.
     inner_doors = [
@@ -144,11 +189,25 @@ def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid") -
         occupied_tiles.add((dx, dy))
 
     optional_furniture = archetype.optional_furniture_roles.copy()
+
+    # Sort optional furniture based on profile bias
+    optional_furniture.sort(key=lambda f: 0 if f in profile.get("furniture_bias", []) else 1)
+
+    # Base wealth logic for slicing optional furniture
+    slice_idx = len(optional_furniture)
     if wealth_tier == "low":
-        optional_furniture = optional_furniture[:1] if optional_furniture else []
+        slice_idx = 1 if optional_furniture else 0
     elif wealth_tier == "mid":
-        optional_furniture = optional_furniture[:len(optional_furniture) // 2 + 1]
-    # high: place all optional
+        slice_idx = len(optional_furniture) // 2 + 1
+
+    # Density bias nudge (keep it strictly bounded)
+    density_bias = profile.get("density_bias", "mid")
+    if density_bias == "high" and wealth_tier != "high":
+        slice_idx = min(len(optional_furniture), slice_idx + 1)
+    elif density_bias == "low" and wealth_tier != "low":
+        slice_idx = max(0, slice_idx - 1)
+
+    optional_furniture = optional_furniture[:slice_idx]
 
     all_roles_to_place = archetype.required_furniture_roles + optional_furniture
 
@@ -202,6 +261,32 @@ def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid") -
                         score += 1
 
                 if score > 0:
+                    # Apply clustering adjustments
+                    clustering = profile.get("clustering", "light")
+                    if placed:
+                        # Distance to identical or related items
+                        min_sim_dist = 999
+                        for px, py, prole in placed:
+                            # Related if same role, or both in the identity's biased furniture
+                            if prole == role_id or (prole in profile.get("furniture_bias", []) and role_id in profile.get("furniture_bias", [])):
+                                dist = abs(px - x) + abs(py - y)
+                                if dist < min_sim_dist:
+                                    min_sim_dist = dist
+
+                        if min_sim_dist != 999:
+                            if clustering == "tight":
+                                if min_sim_dist < 3:
+                                    score += 2  # Encourage clustering
+                            elif clustering == "spaced":
+                                if min_sim_dist < 3:
+                                    score -= 3  # Discourage clustering
+                                elif min_sim_dist >= 3:
+                                    score += 1  # Encourage spacing
+                            elif clustering == "functional":
+                                # Group work/storage items
+                                if role_id in ["workbench", "storage", "desk"] and min_sim_dist < 6:
+                                    score += 3
+
                     # Minor coordinate-based deterministic tie-breaker or scatter
                     tie_breaker = ((x * 7 + y * 3) % 5) / 10.0
                     if wealth_tier == "low":
@@ -233,8 +318,15 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     # Determine wealth tier
     wealth_tier = _get_wealth_tier(archetype.tags)
 
-    # Filter optional rooms by wealth tier
+    # Get identity profile
+    profile = _get_building_identity_profile(building_type, archetype.category)
+
+    # Bias and filter optional rooms
     optional_rooms = archetype.optional_room_types.copy()
+
+    # Sort optional rooms based on profile bias
+    optional_rooms.sort(key=lambda r: 0 if r in profile["room_bias"] else 1)
+
     if wealth_tier == "low":
         optional_rooms = [] # Skip optional rooms
     elif wealth_tier == "mid":
@@ -315,7 +407,7 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     occupied_tiles = set()
 
     for room in rooms:
-        placed_furniture.extend(place_furniture(room, occupied_tiles, wealth_tier))
+        placed_furniture.extend(place_furniture(room, occupied_tiles, wealth_tier, profile))
 
     # Generate Anchors
     anchors = []

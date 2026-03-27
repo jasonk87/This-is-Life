@@ -9433,46 +9433,178 @@ class World:
         noticeboard_y = chunk_global_start_y + road_y
         chunk.village.interaction_points["noticeboard"] = [(noticeboard_x, noticeboard_y)]
 
+        # Helper to determine placement bias
+        def _get_building_placement_bias(building_type: str, category: str, wealth_tier: str) -> str:
+            if building_type in ["capital_hall", "tavern", "clinic"]:
+                return "central"
+
+            if category in ["civic", "civic_workplace", "commercial", "commercial_workplace", "medical"]:
+                if wealth_tier == "poor":
+                    return "mixed"
+                return "central"
+
+            if category in ["industrial", "industrial_workplace", "agricultural_workplace"]:
+                return "edge"
+
+            if category == "residential":
+                if wealth_tier == "poor":
+                    return "cluster_with_same"
+                elif wealth_tier == "rich":
+                    return "near_civic"
+                return "mixed"
+
+            return "mixed"
+
         # Helper to place building
         def try_place_building(b_type, category, width, height, x_hint=None, y_hint=None, max_workers=2):
-            for attempt in range(20):
-                # Use hints if provided and valid, otherwise random
-                if x_hint is not None and attempt == 0 and 0 <= x_hint < CHUNK_SIZE - width:
-                    bx = x_hint
-                else:
-                    bx = random.randint(1, CHUNK_SIZE - width - 1)
+            # 1. Try exact hint first (existing exact behavior)
+            if x_hint is not None and y_hint is not None:
+                if 0 <= x_hint < CHUNK_SIZE - width and 0 <= y_hint < CHUNK_SIZE - height:
+                    overlap = False
+                    for i in range(height):
+                        for j in range(width):
+                            if layout_grid[y_hint + i][x_hint + j] == 1:
+                                overlap = True
+                                break
+                        if overlap: break
+                    if not overlap:
+                        for i in range(height):
+                            for j in range(width):
+                                layout_grid[y_hint + i][x_hint + j] = 1
+                        building = Building(x_hint, y_hint, width, height, building_type=b_type, category=category,
+                                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                        building.max_workers = max_workers
+                        chunk.village.add_building(building)
+                        self.atlas.register_building(building)
+                        return building
 
-                if y_hint is not None and attempt == 0 and 0 <= y_hint < CHUNK_SIZE - height:
-                    by = y_hint
-                else:
-                    by = random.randint(1, CHUNK_SIZE - height - 1)
+            # 2. Extract wealth tier for bias scoring
+            from simulation.systems.architecture import BUILDING_ARCHETYPES
+            wealth_tier = "middle"
+            if b_type in BUILDING_ARCHETYPES:
+                tags = BUILDING_ARCHETYPES[b_type].tags
+                if "poor" in tags: wealth_tier = "poor"
+                elif "rich" in tags: wealth_tier = "rich"
 
-                # Check collision with layout_grid (roads and other buildings)
+            bias = _get_building_placement_bias(b_type, category, wealth_tier)
+
+            # 3. Generate a deterministic candidate set of offsets
+            # A spiral outward from the center (or hinted location) provides a good stable set
+            # Default to the middle of the quadrant instead of the road if no hint,
+            # so buildings have room to place instead of colliding with the road immediately.
+            center_x = x_hint if x_hint is not None else (CHUNK_SIZE // 4)
+            center_y = y_hint if y_hint is not None else (CHUNK_SIZE // 4)
+
+            # Fixed offset sequence (approximate spiral: dx, dy)
+            # Limit to deterministic checks, expanded to ensure we find room
+            offsets = [
+                (0, 0), (1, 0), (0, 1), (-1, 0), (0, -1),
+                (2, 0), (0, 2), (-2, 0), (0, -2), (2, 2), (-2, -2), (2, -2), (-2, 2),
+                (3, 0), (0, 3), (-3, 0), (0, -3), (3, 3), (-3, -3),
+                (4, 0), (0, 4), (-4, 0), (0, -4),
+                (5, 5), (-5, -5), (5, -5), (-5, 5),
+                (8, 0), (0, 8), (-8, 0), (0, -8), (8, 8), (-8, -8), (8, -8), (-8, 8),
+                (12, 0), (0, 12), (-12, 0), (0, -12), (12, 12), (-12, -12), (12, -12), (-12, 12),
+                (16, 0), (0, 16), (-16, 0), (0, -16), (16, 16), (-16, -16), (16, -16), (-16, 16),
+                (20, 0), (0, 20), (-20, 0), (0, -20), (20, 20), (-20, -20), (20, -20), (-20, 20),
+                (24, 0), (0, 24), (-24, 0), (0, -24), (24, 24), (-24, -24), (24, -24), (-24, 24)
+            ]
+
+            valid_candidates = []
+            for dx, dy in offsets:
+                bx = center_x + dx
+                by = center_y + dy
+
+                # Check bounds
+                if not (1 <= bx < CHUNK_SIZE - width - 1 and 1 <= by < CHUNK_SIZE - height - 1):
+                    continue
+
+                # Check collision
                 overlap = False
                 for i in range(height):
                     for j in range(width):
-                        # Ensure we don't go out of bounds (though generation logic should prevent this)
-                        if not (0 <= by + i < CHUNK_SIZE and 0 <= bx + j < CHUNK_SIZE):
-                            overlap = True
-                            break
                         if layout_grid[by + i][bx + j] == 1:
                             overlap = True
                             break
                     if overlap: break
 
                 if not overlap:
-                    # Mark grid
+                    valid_candidates.append((bx, by))
+
+            if not valid_candidates:
+                # Fallback to random placement attempts if all deterministic offsets fail
+                for attempt in range(20):
+                    bx = random.randint(1, CHUNK_SIZE - width - 1)
+                    by = random.randint(1, CHUNK_SIZE - height - 1)
+                    # Check bounds
+                    if not (1 <= bx < CHUNK_SIZE - width - 1 and 1 <= by < CHUNK_SIZE - height - 1):
+                        continue
+                    overlap = False
                     for i in range(height):
                         for j in range(width):
-                            layout_grid[by + i][bx + j] = 1
+                            if layout_grid[by + i][bx + j] == 1:
+                                overlap = True
+                                break
+                        if overlap: break
+                    if not overlap:
+                        valid_candidates.append((bx, by))
+                        break
 
-                    building = Building(bx, by, width, height, building_type=b_type, category=category,
-                                        global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
-                    building.max_workers = max_workers
-                    chunk.village.add_building(building)
-                    self.atlas.register_building(building)
-                    return building
-            return None
+            if not valid_candidates:
+                return None
+
+            # 4. Score valid candidates based on bias
+            best_score = float('-inf')
+            best_candidate = valid_candidates[0]
+
+            for bx, by in valid_candidates:
+                score = 0.0
+
+                # Distance to center
+                dist_to_center = abs(bx - road_x) + abs(by - road_y)
+
+                if bias == "central":
+                    score -= dist_to_center * 0.5  # Slight preference for center
+                elif bias == "edge":
+                    score += dist_to_center * 0.5  # Slight preference for edges
+
+                # Distance to same category or civic
+                min_dist_same = float('inf')
+                min_dist_civic = float('inf')
+
+                for existing_b in chunk.village.buildings:
+                    dist = abs(bx - existing_b.x) + abs(by - existing_b.y)
+                    if existing_b.category == category:
+                        min_dist_same = min(min_dist_same, dist)
+                    if existing_b.category in ["civic", "civic_workplace"]:
+                        min_dist_civic = min(min_dist_civic, dist)
+
+                if bias == "cluster_with_same" and min_dist_same != float('inf'):
+                    score -= min_dist_same * 0.2  # Very slight pull
+                elif bias == "spread" and min_dist_same != float('inf'):
+                    score += min_dist_same * 0.2  # Very slight push
+                elif bias == "near_civic" and min_dist_civic != float('inf'):
+                    score -= min_dist_civic * 0.2
+
+                # Deterministic tie-breaker
+                score += (bx * 0.01) + (by * 0.001)
+
+                if score > best_score:
+                    best_score = score
+                    best_candidate = (bx, by)
+
+            # 5. Place building
+            final_bx, final_by = best_candidate
+            for i in range(height):
+                for j in range(width):
+                    layout_grid[final_by + i][final_bx + j] = 1
+
+            building = Building(final_bx, final_by, width, height, building_type=b_type, category=category,
+                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+            building.max_workers = max_workers
+            chunk.village.add_building(building)
+            self.atlas.register_building(building)
+            return building
 
         # --- Generate Buildings ---
 

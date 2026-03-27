@@ -188,6 +188,21 @@ def test_optional_furniture_scales_correctly():
 
     assert high_count >= low_count, "High wealth should have higher or equal furniture density than low wealth"
 
+def test_furniture_distinctiveness():
+    """Verify that generated furniture roles map to distinctly identified components."""
+    from simulation.systems.architecture import FURNITURE_ROLES
+
+    # Generate an office which should spawn a desk, chair, and storage
+    office_building = generate_building("guard_post", 0, 0, 10, 10)
+
+    placed_roles = [role for x, y, role in office_building.placed_furniture]
+    assert "desk" in placed_roles, "Office should have a desk"
+    assert "storage" in placed_roles, "Office should have storage"
+
+    # Verify that desk and storage are distinct roles (the real mapping assert happens in test_dawnlike_mapping.py)
+    assert FURNITURE_ROLES["desk"].id != FURNITURE_ROLES["storage"].id
+
+
 def test_tavern_furniture_density():
     # Tavern (high density bias) vs House (mid density bias), assuming same tags/wealth
     tavern = generate_building("tavern", 0, 0, 15, 15)

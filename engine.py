@@ -2619,6 +2619,12 @@ class World:
             # (Keep other elif blocks for path recalculation like move_to_cover, etc.)
 
 
+            # --- Check for Micro-Reactions (Pause) ---
+            if hasattr(npc, "task_context_data") and isinstance(npc.task_context_data, dict):
+                pause_until = npc.task_context_data.get("pause_until_tick", 0)
+                if pause_until > self.game_time:
+                    continue # Skip movement to simulate a subtle reaction pause
+
             # --- Unified Path-Based Movement ---
             if npc.schedule.current_path:
                 moves_made = 0

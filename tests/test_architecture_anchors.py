@@ -64,6 +64,50 @@ class TestArchitectureAnchors(unittest.TestCase):
         coords = self.home.get_anchor_coordinates("eat", None)
         self.assertIsNone(coords)
 
+    def test_anchor_preference_scoring(self):
+        # Setup multiple anchors of same type but different roles
+        self.workplace.anchors = [
+            {"type": "work", "x": 21, "y": 21, "tags": {"role": "desk"}},
+            {"type": "work", "x": 23, "y": 23, "tags": {"role": "workbench"}},
+        ]
+
+        # A scribe should prefer the desk
+        self.npc.economic.profession = "Scribe"
+        self.npc.x = 25
+        self.npc.y = 25
+        coords = self.workplace.get_anchor_coordinates("work", world=self.world, requesting_entity=self.npc, ideal_role="desk")
+        self.assertEqual(coords, (21, 21))
+
+        # A carpenter should prefer the workbench
+        self.npc.economic.profession = "Carpenter"
+        coords = self.workplace.get_anchor_coordinates("work", world=self.world, requesting_entity=self.npc, ideal_role="workbench")
+        self.assertEqual(coords, (23, 23))
+
+        # If neither ideal role matches, it should just pick the closest or first valid one
+        self.npc.economic.profession = "Unemployed"
+        self.npc.x = 24
+        self.npc.y = 24
+        coords = self.workplace.get_anchor_coordinates("work", world=self.world, requesting_entity=self.npc)
+        # Because (23,23) is closer to (24,24) than (21,21), proximity scoring should pick it
+        self.assertEqual(coords, (23, 23))
+
+    def test_anchor_occupancy_penalty(self):
+        self.workplace.anchors = [
+            {"type": "work", "x": 21, "y": 21, "tags": {"role": "workbench"}},
+            {"type": "work", "x": 23, "y": 23, "tags": {"role": "workbench"}},
+        ]
+
+        # NPC is closest to 23, 23
+        self.npc.x = 24
+        self.npc.y = 24
+
+        # But 23, 23 is occupied
+        self.world.entity_positions[(23, 23)] = 999
+
+        coords = self.workplace.get_anchor_coordinates("work", world=self.world, requesting_entity=self.npc, ideal_role="workbench")
+        # Should pick the further, but unoccupied anchor
+        self.assertEqual(coords, (21, 21))
+
     def test_sleep_behavior_prefers_sleep_anchor(self):
         self.home.anchors = [{"type": "sleep", "x": 2, "y": 3}]
         self.npc.x = 5

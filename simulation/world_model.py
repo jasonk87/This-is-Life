@@ -54,17 +54,53 @@ class Building:
             and self.global_origin_y <= world_y < self.global_origin_y + self.height
         )
 
-    def get_anchor_coordinates(self, anchor_types: list[str] | str, fallback_coords: tuple[int, int] | None = None) -> tuple[int, int] | None:
-        """Returns the global coordinates of an anchor matching any of the requested types, or the fallback coordinates if none is found."""
+    def get_anchor_coordinates(self, anchor_types: list[str] | str, fallback_coords: tuple[int, int] | None = None, world=None, requesting_entity=None, ideal_role: str | None = None) -> tuple[int, int] | None:
+        """Returns the global coordinates of the best anchor matching the requested types, applying lightweight preference scoring."""
         if isinstance(anchor_types, str):
             anchor_types = [anchor_types]
 
+        best_score = -9999
+        best_coords = None
+
         for anchor in self.anchors:
-            if anchor.get("type") in anchor_types:
-                x = anchor.get("x")
-                y = anchor.get("y")
-                if x is not None and y is not None:
-                    return x, y
+            if anchor.get("type") not in anchor_types:
+                continue
+
+            x = anchor.get("x")
+            y = anchor.get("y")
+            if x is None or y is None:
+                continue
+
+            score = 0
+
+            # Prefer non-fallback anchors
+            tags = anchor.get("tags", {})
+            if tags.get("fallback") != "true":
+                score += 10
+
+                # Bonus for exact role match (e.g. asking for "desk" in a "work" anchor type)
+                if ideal_role and tags.get("role") == ideal_role:
+                    score += 5
+
+            if world:
+                # Check occupancy safely
+                occupant_id = getattr(world, "entity_positions", {}).get((x, y))
+                if occupant_id is not None and (not requesting_entity or occupant_id != requesting_entity.id):
+                    # Penalize occupied anchors, but don't strictly forbid returning them (refine_anchor_coordinates handles finding a nearby walkable tile)
+                    score -= 50
+
+                # Add small proximity bonus if requesting_entity exists
+                if requesting_entity:
+                    dist = abs(requesting_entity.x - x) + abs(requesting_entity.y - y)
+                    score -= dist * 0.1 # Slight distance penalty so closer anchors tie-break
+
+            if score > best_score:
+                best_score = score
+                best_coords = (x, y)
+
+        if best_coords is not None:
+            return best_coords
+
         return fallback_coords
 
     def refine_anchor_coordinates(self, world, start_x: int, start_y: int, radius: int = 1, requesting_entity=None) -> tuple[int, int] | None:

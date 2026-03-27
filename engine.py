@@ -3713,7 +3713,16 @@ class World:
             # Check for anchor usage for these indoor work tags first
             if target_zone_tag in {"workbench", "desk_area", "writing_desk", "cooking_station", "alchemy_station", "medical_bed", "office_desk"}:
                 anchor_types = ["work", "service"]
-                anchor_coords = work_building.get_anchor_coordinates(anchor_types, None)
+
+                ideal_role = "workbench"
+                if target_zone_tag in {"desk_area", "writing_desk", "office_desk"}:
+                    ideal_role = "desk"
+                elif target_zone_tag == "medical_bed":
+                    ideal_role = "bed"
+                elif target_zone_tag == "cooking_station":
+                    ideal_role = "fireplace"
+
+                anchor_coords = work_building.get_anchor_coordinates(anchor_types, None, world=self, requesting_entity=npc, ideal_role=ideal_role)
                 if anchor_coords:
                     return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
 
@@ -3725,7 +3734,7 @@ class World:
                 return random.choice(zone_coords_list)
             else:
                 # Fallback to work/service anchors if no zone coordinates defined
-                anchor_coords = work_building.get_anchor_coordinates(["work", "service"], None)
+                anchor_coords = work_building.get_anchor_coordinates(["work", "service"], None, world=self, requesting_entity=npc)
                 if anchor_coords:
                     return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
 

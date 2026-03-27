@@ -697,7 +697,14 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             if dest_coords_temp:
                 work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
                 if work_building_obj:
-                    work_anchor = work_building_obj.get_anchor_coordinates(["work", "service"])
+                    # Guess ideal role based on profession
+                    ideal_role = "workbench"
+                    if npc.economic.profession in {"Mayor", "Scribe", "Town Official", "Sheriff"}:
+                        ideal_role = "desk"
+                    elif npc.economic.profession in {"Merchant", "Tavern Keeper", "Traveling Merchant"}:
+                        ideal_role = "counter"
+
+                    work_anchor = work_building_obj.get_anchor_coordinates(["work", "service"], world=world, requesting_entity=npc, ideal_role=ideal_role)
                     if work_anchor:
                         dest_coords_temp = work_building_obj.refine_anchor_coordinates(world, work_anchor[0], work_anchor[1], requesting_entity=npc)
                 new_task_label = "going_to_work"
@@ -780,7 +787,10 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 destination_coords = fishing_spot
                 npc.leisure_timer = random.randint(100, 300)
 
-    if npc.schedule.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
+    if npc.schedule.current_task == "going_to_social_anchor" and (npc.x, npc.y) == destination_coords:
+        npc.schedule.current_task = "at_home"
+        npc.leisure_timer = random.randint(50, 150)
+    elif npc.schedule.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
         world.npc_attempt_fish(npc, npc.x, npc.y)
     elif npc.schedule.current_task == "crying_news" and (npc.x, npc.y) == destination_coords:
         event_id_to_shout = npc.task_context_data
@@ -797,7 +807,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
         if home_building_obj:
             sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
             if not sleep_spot_coords:
-                sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep")
+                sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
                 if sleep_spot_coords:
                     sleep_spot_coords = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
             if is_at_home:
@@ -822,7 +832,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
         if dest_coords_temp:
             home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
             if home_building_obj:
-                sleep_anchor = home_building_obj.get_anchor_coordinates("sleep")
+                sleep_anchor = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
                 if sleep_anchor:
                     dest_coords_temp = home_building_obj.refine_anchor_coordinates(world, sleep_anchor[0], sleep_anchor[1], requesting_entity=npc)
             new_task_label = "going_home"
@@ -847,6 +857,20 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 npc.task_target_entity_id = chosen_partner.id
         else:
             npc.schedule.current_task = "idle"
+    elif npc.schedule.current_task == "at_home" and is_leisure_time:
+        # Add light preference for eating/social anchors while idling inside at home
+        home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
+        if home_building_obj:
+            leisure_anchor = home_building_obj.get_anchor_coordinates(["eat", "social"], world=world, requesting_entity=npc)
+            if leisure_anchor:
+                # 5% chance to wander over to a social/eat anchor if available and idling
+                if random.random() < 0.05 and (npc.x, npc.y) != leisure_anchor:
+                    dest_coords = home_building_obj.refine_anchor_coordinates(world, leisure_anchor[0], leisure_anchor[1], requesting_entity=npc)
+                    if dest_coords and dest_coords != (npc.x, npc.y):
+                        new_task_label = "going_to_social_anchor"
+                        destination_coords = dest_coords
+                        npc.leisure_timer = random.randint(100, 200)
+
     elif is_leisure_time and npc.age > 18 and not npc.social.family_ties.get("partner_id"):
         if random.random() < 0.01:
             npc.schedule.current_task = "seeking_partner"

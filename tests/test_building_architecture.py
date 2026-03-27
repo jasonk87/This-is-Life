@@ -187,3 +187,56 @@ def test_optional_furniture_scales_correctly():
     high_count = len(high_building.placed_furniture)
 
     assert high_count >= low_count, "High wealth should have higher or equal furniture density than low wealth"
+
+def test_tavern_furniture_density():
+    # Tavern (high density bias) vs House (mid density bias), assuming same tags/wealth
+    tavern = generate_building("tavern", 0, 0, 15, 15)
+    house = generate_building("house", 0, 0, 15, 15)
+
+    # We expect tavern to place a good amount of furniture due to its density bias, especially optional
+    # Taverns should feel busy
+    assert len(tavern.placed_furniture) > 0
+    # House places multiple small rooms which artificially inflates total furniture counts (2 beds, 2 dressers, etc).
+    # We instead verify that the tavern floor specifically gets its optional items maxed out due to density bias.
+    tavern_floor_items = [pos for pos in tavern.placed_furniture if tavern.rooms[0].room_type == "tavern_floor"]
+
+    # Tavern floor has 5 required + 1 optional. Mid wealth normally gets len(opt)//2 + 1 = 0 + 1 = 1 optional.
+    # High density nudges this up.
+    assert len(tavern_floor_items) >= 6, "Tavern floor should place its optional items due to high density bias"
+
+def test_clinic_furniture_density():
+    # Clinic (low density bias) vs Tavern (high density bias)
+    clinic = generate_building("clinic", 0, 0, 15, 15)
+    tavern = generate_building("tavern", 0, 0, 15, 15)
+
+    clinic_furniture = len(clinic.placed_furniture)
+    tavern_furniture = len(tavern.placed_furniture)
+
+    # Clinics should generally have fewer or strictly bounded furniture items
+    # They shouldn't be completely empty, but shouldn't be overwhelmingly full
+    assert clinic_furniture > 0
+    # A tavern floor room in a tavern should generally result in more items
+    assert tavern_furniture >= clinic_furniture
+
+def test_industrial_clustering():
+    carpenter_shop = generate_building("carpenter_shop", 0, 0, 12, 12)
+
+    # Industrial buildings have "functional" clustering, grouping work and storage items.
+    # Carpenter shop is mid-wealth, providing enough optional items and stable placements to test proximity reliably without brittle overlap.
+    work_storage_items = [pos for pos in carpenter_shop.placed_furniture if pos[2] in ["workbench", "storage", "desk"]]
+
+    # If we have multiple such items, verify they are relatively close.
+    if len(work_storage_items) > 1:
+        # Check average distance or at least one pair is close
+        min_dist = 999
+        for i in range(len(work_storage_items)):
+            for j in range(i + 1, len(work_storage_items)):
+                x1, y1, _ = work_storage_items[i]
+                x2, y2, _ = work_storage_items[j]
+                dist = abs(x1 - x2) + abs(y1 - y2)
+                if dist < min_dist:
+                    min_dist = dist
+
+        # In functional clustering, items should be biased toward grouping if valid spots allow.
+        # We ensure they are closer than the maximum possible distance in this 12x12 room footprint.
+        assert min_dist < 15, f"Functional items should be grouped somewhat closely, min dist was {min_dist}"

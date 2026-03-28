@@ -157,6 +157,116 @@ def run_npc_item_pickup_policy(world, npc) -> bool:
     return True
 
 
+def run_npc_follower_catch_up_policy(world, npc) -> bool:
+    """Catch up to follow target if too far, and track shared experience when near."""
+    target_id = getattr(getattr(npc, "social", None), "follow_target_id", None)
+    if target_id is None:
+        return False
+
+    target = world.get_entity_by_id(target_id)
+    if target is None or getattr(getattr(target, "physical", None), "is_dead", False):
+        npc.social.follow_target_id = None
+        return False
+
+    dist = abs(npc.x - target.x) + abs(npc.y - target.y)
+
+    if dist <= 6:
+        npc_hostile = getattr(getattr(npc, "combat", None), "is_hostile_to_player", False) or getattr(npc, "is_frightened", False)
+        target_hostile = getattr(getattr(target, "combat", None), "is_hostile_to_player", False) or getattr(target, "is_frightened", False)
+        if not npc_hostile and not target_hostile:
+            current_ticks = npc.social.shared_experience_ticks.get(target.id, 0)
+            npc.social.shared_experience_ticks[target.id] = current_ticks + 1
+            if hasattr(target, "social"):
+                target_ticks = target.social.shared_experience_ticks.get(npc.id, 0)
+                target.social.shared_experience_ticks[npc.id] = target_ticks + 1
+
+    if dist > 4:
+        if npc.schedule.current_task == "following_target" and npc.schedule.current_path:
+            dest = npc.schedule.current_destination_coords
+            if dest and abs(dest[0] - target.x) + abs(dest[1] - target.y) <= 2:
+                return True
+
+        dest_x, dest_y = world._find_best_adjacent_tile(target.x, target.y, npc)
+        if dest_x is not None:
+            path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+            if path:
+                npc.schedule.current_task = "following_target"
+                npc.schedule.current_path = path
+                npc.schedule.current_destination_coords = (dest_x, dest_y)
+                return True
+
+    if npc.schedule.current_task == "following_target":
+        npc.schedule.current_task = "idle"
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None
+
+    return False
+
+
+def run_npc_follower_envelope_policy(world, npc) -> bool:
+    """Keep follower in a local behavior envelope around target instead of doing daily goals."""
+    target_id = getattr(getattr(npc, "social", None), "follow_target_id", None)
+    if target_id is None:
+        return False
+
+    target = world.get_entity_by_id(target_id)
+    if target is None:
+        return False
+
+    dist = abs(npc.x - target.x) + abs(npc.y - target.y)
+
+    # If within envelope distance, we block daily goals but allow minimal movement if in the way
+    if dist <= 4:
+        _try_companion_conversation_trigger(world, npc, target)
+
+        if npc.schedule.current_task not in {"idle", "wandering", "avoiding_crowding"}:
+            return False
+
+        if dist == 0:
+            dest_x, dest_y = world._find_best_adjacent_tile(npc.x, npc.y, npc)
+            if dest_x is not None:
+                path = world.calculate_path(npc.x, npc.y, dest_x, dest_y)
+                if path:
+                    npc.schedule.current_task = "avoiding_crowding"
+                    npc.schedule.current_path = path
+                    npc.schedule.current_destination_coords = (dest_x, dest_y)
+                    return True
+
+        if random.random() < 0.05 and npc.schedule.current_task != "avoiding_crowding":
+            candidates = [
+                (npc.x + dx, npc.y + dy)
+                for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0))
+                if abs((npc.x + dx) - target.x) + abs((npc.y + dy) - target.y) <= 4
+            ]
+            if candidates:
+                dest = random.choice(candidates)
+                tile = world.get_tile_at(dest[0], dest[1])
+                if tile and getattr(tile, "passable", False):
+                    npc.schedule.current_task = "wandering"
+                    npc.schedule.current_path = [dest]
+                    npc.schedule.current_destination_coords = dest
+
+        return True
+
+    return False
+
+
+def _try_companion_conversation_trigger(world, npc, target) -> None:
+    """Modestly bias conversation frequency for companions traveling/idling together."""
+    if getattr(npc, "conversation_partner_id", None) is not None:
+        return
+    if getattr(target, "conversation_partner_id", None) is not None:
+        return
+    if getattr(npc, "conversation_cooldown", 0) > 0 or getattr(target, "conversation_cooldown", 0) > 0:
+        return
+    if random.random() < 0.005:  # ~0.5% chance per tick when near
+        npc.conversation_partner_id = target.id
+        target.conversation_partner_id = npc.id
+        if hasattr(world, "game_time"):
+            npc.last_conversation_time = world.game_time
+            target.last_conversation_time = world.game_time
+
+
 def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> None:
     """Run humanoid scheduling policies in their existing priority order."""
     run_town_crier_broadcast(world, npc)
@@ -165,11 +275,15 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
         return
     if run_npc_social_reaction_policy(world, npc):
         return
+    if run_npc_follower_catch_up_policy(world, npc):
+        return
     if run_npc_social_gathering_policy(world, npc):
         return
     run_npc_proactive_help_seeking_policy(world, npc)
     run_npc_crime_reporting_policy(world, npc)
     run_npc_item_pickup_policy(world, npc)
+    if run_npc_follower_envelope_policy(world, npc):
+        return
     update_npc_daily_goal_policy(world, npc, current_time_in_day)
 
 

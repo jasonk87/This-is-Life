@@ -111,11 +111,11 @@ class WorldGenerator:
         if (x, y) in self.village_coords:
             return "village"
         if biome == "plains":
-            coord_rng = random.Random((self.seed, x, y))
+            coord_rng = random.Random(str((self.seed, x, y)))
             if coord_rng.random() < POI_DENSITY / 8:
                 return "ruin"
         elif biome == "mountain":
-            coord_rng = random.Random((self.seed, x, y, "mountain"))
+            coord_rng = random.Random(str((self.seed, x, y, "mountain")))
             if coord_rng.random() < POI_DENSITY / 3:
                 return "ruin"
         return None

@@ -10048,18 +10048,41 @@ class World:
                 )
 
         # Render buildings
+        from simulation.systems.architecture import BUILDING_ARCHETYPES, _get_wealth_tier
         for building in chunk.village.buildings:
             wall_type = "wood_wall"
+            floor_type = "wood_floor"
+
+            # Determine dynamic architecture from archetype tags if available
+            archetype = BUILDING_ARCHETYPES.get(building.building_type)
+            if archetype:
+                wealth = _get_wealth_tier(archetype.tags)
+                if wealth == "poor":
+                    wall_type = "log_wall"
+                    floor_type = "dirt_floor"
+                elif wealth == "mid":
+                    wall_type = "wood_wall"
+                    floor_type = "wood_floor"
+                elif wealth == "high":
+                    wall_type = random.choice(["brick_wall", "stone_wall"])
+                    floor_type = "stone_floor" if wall_type == "stone_wall" else "brick_floor"
+
+                if archetype.category == "industrial":
+                    wall_type = "plaster_wall"
+                    floor_type = "dirt_floor"
+
+            # Hardcoded overrides for specific civic structures
             if building.building_type in ["mine", "blacksmith_shop", "library", "sheriff_office", "jail", "capital_hall"]:
                 wall_type = "stone_wall"
-            elif building.building_type == "jail":
+                floor_type = "stone_floor"
+            if building.building_type == "jail":
                 wall_type = "jail_bars"
             elif building.building_type == "sheriff_office":
                 wall_type = "sheriff_office_wall"
             elif building.building_type == "capital_hall":
                 wall_type = "capital_hall_wall"
 
-            self._draw_building(tiles, building, wall_type)
+            self._draw_building(tiles, building, wall_type, floor_type)
             if not building.interior_decorated:
                 self.decorate_building_interior(building, chunk)
 
@@ -10198,7 +10221,7 @@ class World:
         return tiles
 
 
-    def _draw_building(self, tiles, building, wall_tile_key):
+    def _draw_building(self, tiles, building, wall_tile_key, floor_tile_key="wood_floor"):
         for i in range(building.height):
             for j in range(building.width):
                 is_border = i == 0 or i == building.height - 1 or j == 0 or j == building.width - 1
@@ -10216,14 +10239,14 @@ class World:
                     if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
                          self.transparency_map[global_y, global_x] = not new_tile.blocks_fov
 
-                elif is_window and building.building_type == "house": # Only houses have windows for now
+                elif is_window and building.building_type in ["house", "large_house", "common_house", "city_hall", "tavern", "clinic"]:
                     new_tile = Tile(TILE_DEFINITIONS["window"]["char"], TILE_DEFINITIONS["window"]["color"], TILE_DEFINITIONS["window"]["passable"], TILE_DEFINITIONS["window"]["name"])
                     tiles[target_y][target_x] = new_tile
                     if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:
                          self.transparency_map[global_y, global_x] = not new_tile.blocks_fov
 
                 else:
-                    new_tile = Tile(TILE_DEFINITIONS["wood_floor"]["char"], TILE_DEFINITIONS["wood_floor"]["color"], TILE_DEFINITIONS["wood_floor"]["passable"], TILE_DEFINITIONS["wood_floor"]["name"])
+                    new_tile = Tile(TILE_DEFINITIONS[floor_tile_key]["char"], TILE_DEFINITIONS[floor_tile_key]["color"], TILE_DEFINITIONS[floor_tile_key]["passable"], TILE_DEFINITIONS[floor_tile_key]["name"])
                     tiles[target_y][target_x] = new_tile
                     # Floors usually don't block FOV, but update just in case
                     if 0 <= global_x < WORLD_WIDTH and 0 <= global_y < WORLD_HEIGHT:

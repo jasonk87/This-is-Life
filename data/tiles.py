@@ -76,6 +76,27 @@ TILE_DEFINITIONS = {
         "name": "Stone Wall",
         "properties": {"provides_shelter": True}
     },
+    "brick_wall": {
+        "char": WORLD_TILE_SPRITES["brick_wall"],
+        "color": COLORS["wall_fg"],
+        "passable": False,
+        "name": "Brick Wall",
+        "properties": {"provides_shelter": True}
+    },
+    "plaster_wall": {
+        "char": WORLD_TILE_SPRITES["plaster_wall"],
+        "color": COLORS["khaki"],
+        "passable": False,
+        "name": "Plaster Wall",
+        "properties": {"provides_shelter": True}
+    },
+    "log_wall": {
+        "char": WORLD_TILE_SPRITES["log_wall"],
+        "color": COLORS["saddlebrown"],
+        "passable": False,
+        "name": "Log Wall",
+        "properties": {"provides_shelter": True}
+    },
     "door": {
         "char": WORLD_TILE_SPRITES["door"],
         "color": COLORS["door_fg"],
@@ -87,6 +108,24 @@ TILE_DEFINITIONS = {
         "color": (160, 82, 45), # Sienna
         "passable": True,
         "name": "Wood Floor"
+    },
+    "stone_floor": {
+        "char": WORLD_TILE_SPRITES["stone_floor"],
+        "color": COLORS["grey"],
+        "passable": True,
+        "name": "Stone Floor"
+    },
+    "brick_floor": {
+        "char": WORLD_TILE_SPRITES["brick_floor"],
+        "color": COLORS["wall_fg"],
+        "passable": True,
+        "name": "Brick Floor"
+    },
+    "dirt_floor": {
+        "char": WORLD_TILE_SPRITES["dirt_floor"],
+        "color": COLORS["saddlebrown"],
+        "passable": True,
+        "name": "Dirt Floor"
     },
     "window": {
         "char": WORLD_TILE_SPRITES["window"],

@@ -9,6 +9,7 @@ import engine
 from engine import World
 import main
 import rendering.console_renderer as console_renderer
+from entities.behaviors import PredatorBehavior
 from save_manager import save_game, load_game
 from data.items import ITEM_DEFINITIONS
 import config
@@ -300,6 +301,166 @@ class TestChunkSleepWakeAndAbstractSimulation(unittest.TestCase):
         self.assertGreater(npc.physical.hunger, 0)
         self.assertLess(building.building_inventory.get("money", 0), 120)
         self.assertGreater(building.building_inventory.get("wheat", 0), 0)
+
+
+class TestDayNightVisibility(unittest.TestCase):
+    def make_visibility_world(self):
+        world = object.__new__(engine.World)
+        world.game_time = 0
+        world.current_light_level_name = "DAY"
+        world.current_fov_radius = config.FOV_RADIUS_DAY
+        world.transparency_map = engine.np.ones((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.explored_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.player_fov_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.player = SimpleNamespace(
+            x=config.WORLD_WIDTH // 2,
+            y=config.WORLD_HEIGHT // 2,
+            equipment=SimpleNamespace(
+                equipped_light_item_key=None,
+                current_personal_light_radius=0,
+                light_source_active_until_tick=-1,
+            ),
+        )
+        world._handle_player_light_source_burnout = MagicMock()
+        return world
+
+    def test_ambient_fov_radius_is_larger_in_day_than_night(self):
+        self.assertGreater(
+            engine.World._ambient_fov_radius_for_light_level("DAY"),
+            engine.World._ambient_fov_radius_for_light_level("NIGHT"),
+        )
+        self.assertGreater(
+            engine.World._ambient_fov_radius_for_light_level("DUSK"),
+            engine.World._ambient_fov_radius_for_light_level("PITCH BLACK"),
+        )
+
+    def test_update_light_level_and_fov_tracks_time_of_day_with_clear_radius_changes(self):
+        world = self.make_visibility_world()
+
+        world.game_time = 0
+        engine.World._update_light_level_and_fov(world)
+        pitch_black_radius = world.current_fov_radius
+        self.assertEqual(world.current_light_level_name, "PITCH BLACK")
+
+        world.game_time = int(config.DAY_LENGTH_TICKS * 0.35)
+        engine.World._update_light_level_and_fov(world)
+        day_radius = world.current_fov_radius
+        self.assertEqual(world.current_light_level_name, "DAY")
+
+        world.game_time = int(config.DAY_LENGTH_TICKS * 0.85)
+        engine.World._update_light_level_and_fov(world)
+        night_radius = world.current_fov_radius
+        self.assertEqual(world.current_light_level_name, "NIGHT")
+
+        self.assertGreater(day_radius, night_radius)
+        self.assertGreater(night_radius, pitch_black_radius)
+
+    def test_player_fov_visible_area_is_meaningfully_smaller_at_night(self):
+        world = self.make_visibility_world()
+
+        world.current_fov_radius = config.FOV_RADIUS_DAY
+        engine.World._update_player_fov(world)
+        day_visible_tiles = int(world.player_fov_map.sum())
+
+        world.current_fov_radius = config.FOV_RADIUS_NIGHT
+        engine.World._update_player_fov(world)
+        night_visible_tiles = int(world.player_fov_map.sum())
+
+        self.assertGreater(day_visible_tiles, night_visible_tiles)
+        self.assertGreater(day_visible_tiles - night_visible_tiles, 150)
+
+    def test_personal_light_can_override_night_penalty(self):
+        world = self.make_visibility_world()
+        world.current_fov_radius = config.FOV_RADIUS_PITCH_BLACK
+        world.player.equipment.equipped_light_item_key = "lit_torch"
+        world.player.equipment.current_personal_light_radius = config.FOV_RADIUS_DUSK_DAWN
+        world.player.equipment.light_source_active_until_tick = world.game_time + 100
+
+        self.assertEqual(engine.World._get_effective_player_fov_radius(world), config.FOV_RADIUS_DUSK_DAWN)
+
+
+class TestPredatorPursuit(unittest.TestCase):
+    def make_predator_world(self, *, light_level="DAY", game_time=100):
+        world = object.__new__(engine.World)
+        world.game_time = game_time
+        world.current_light_level_name = light_level
+        world.player = SimpleNamespace(id=1, x=12, y=8)
+        return world
+
+    def make_predator(self):
+        return SimpleNamespace(
+            id=99,
+            x=4,
+            y=8,
+            animal_type="wolf",
+            animal_definition={"prey": ["deer"], "pack_animal": True},
+            task_context_data={},
+            task_target_entity_id=None,
+            schedule=SimpleNamespace(current_task="idle", current_path=[], current_destination_coords=None),
+            combat=SimpleNamespace(is_hostile_to_player=True),
+        )
+
+    def test_night_predator_pursuit_window_is_longer_than_day(self):
+        predator = self.make_predator()
+        day_world = self.make_predator_world(light_level="DAY")
+        night_world = self.make_predator_world(light_level="NIGHT")
+
+        day_duration = engine.World._get_predator_pursuit_duration(day_world, predator, committed=True)
+        night_duration = engine.World._get_predator_pursuit_duration(night_world, predator, committed=True)
+
+        self.assertGreater(night_duration, day_duration)
+
+    def test_refresh_predator_pursuit_state_tracks_last_seen_target_and_commitment(self):
+        predator = self.make_predator()
+        world = self.make_predator_world(light_level="NIGHT", game_time=200)
+
+        engine.World._refresh_predator_pursuit_state(world, predator, world.player, committed=True)
+
+        state = predator.task_context_data["predator_pursuit"]
+        self.assertEqual(state["target_id"], world.player.id)
+        self.assertEqual(state["last_seen"], (world.player.x, world.player.y))
+        self.assertTrue(state["committed"])
+        self.assertGreater(state["persist_until_tick"], world.game_time)
+
+    def test_predator_behavior_keeps_chasing_player_after_brief_loss_of_sight(self):
+        predator = self.make_predator()
+        world = self.make_predator_world(light_level="NIGHT", game_time=300)
+        world._is_predator = lambda entity: True
+        world.calculate_path = lambda start_x, start_y, end_x, end_y: [(start_x, start_y), (end_x, end_y)]
+        predator.physical = SimpleNamespace(hunger=0, max_hunger=100)
+
+        engine.World._refresh_predator_pursuit_state(world, predator, world.player, committed=True)
+
+        took_turn = PredatorBehavior().take_turn(predator, world)
+
+        self.assertTrue(took_turn)
+        self.assertEqual(predator.schedule.current_task, "hunting_player")
+        self.assertEqual(predator.schedule.current_destination_coords, (world.player.x, world.player.y))
+        self.assertEqual(predator.task_target_entity_id, world.player.id)
+
+    def test_predator_behavior_drops_special_pursuit_after_window_expires(self):
+        predator = self.make_predator()
+        world = self.make_predator_world(light_level="DAY", game_time=400)
+        world._is_predator = lambda entity: True
+        world.calculate_path = lambda start_x, start_y, end_x, end_y: [(start_x, start_y), (end_x, end_y)]
+        predator.physical = SimpleNamespace(hunger=0, max_hunger=100)
+
+        predator.task_context_data["predator_pursuit"] = {
+            "target_id": world.player.id,
+            "last_seen": (world.player.x, world.player.y),
+            "last_seen_tick": world.game_time - 10,
+            "persist_until_tick": world.game_time - 1,
+            "committed": True,
+        }
+        predator.schedule.current_task = "hunting_player"
+        predator.schedule.current_path = [(predator.x, predator.y)]
+        predator.schedule.current_destination_coords = (world.player.x, world.player.y)
+
+        took_turn = PredatorBehavior().take_turn(predator, world)
+
+        self.assertFalse(took_turn)
+        self.assertNotIn("predator_pursuit", predator.task_context_data)
+        self.assertEqual(predator.schedule.current_task, "idle")
 
 
 class TestAnimationSync(unittest.TestCase):

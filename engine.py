@@ -2259,11 +2259,19 @@ class World:
             # No need to call self._update_player_fov() here, as _update_light_level_and_fov (which calls this)
             # is followed by _update_player_fov() in the main loop.
 
-    def _update_player_fov(self) -> None:
-        """
-        Updates the player's field of view map and explored tiles.
-        """
-        # Player FOV
+    @staticmethod
+    def _ambient_fov_radius_for_light_level(light_level_name: str) -> int:
+        if light_level_name == "DAY":
+            return FOV_RADIUS_DAY
+        if light_level_name in {"DAWN", "DUSK"}:
+            return FOV_RADIUS_DUSK_DAWN
+        if light_level_name == "NIGHT":
+            return FOV_RADIUS_NIGHT
+        if light_level_name == "PITCH BLACK":
+            return FOV_RADIUS_PITCH_BLACK
+        return FOV_RADIUS_DAY
+
+    def _get_effective_player_fov_radius(self) -> int:
         base_ambient_fov_radius = self.current_fov_radius
         effective_player_fov_radius = base_ambient_fov_radius
 
@@ -2275,6 +2283,14 @@ class World:
 
             if is_active:
                 effective_player_fov_radius = max(base_ambient_fov_radius, self.player.equipment.current_personal_light_radius)
+
+        return effective_player_fov_radius
+
+    def _update_player_fov(self) -> None:
+        """
+        Updates the player's field of view map and explored tiles.
+        """
+        effective_player_fov_radius = self._get_effective_player_fov_radius()
 
         self.player_fov_map = tcod.map.compute_fov(
             self.transparency_map,
@@ -2368,18 +2384,7 @@ class World:
 
 
         self.current_light_level_name = current_period["name"]
-
-        # Map fov_config_key string to actual config variable
-        if current_period["fov_config_key"] == "FOV_RADIUS_DAY":
-            self.current_fov_radius = FOV_RADIUS_DAY
-        elif current_period["fov_config_key"] == "FOV_RADIUS_DUSK_DAWN":
-            self.current_fov_radius = FOV_RADIUS_DUSK_DAWN
-        elif current_period["fov_config_key"] == "FOV_RADIUS_NIGHT":
-            self.current_fov_radius = FOV_RADIUS_NIGHT
-        elif current_period["fov_config_key"] == "FOV_RADIUS_PITCH_BLACK":
-            self.current_fov_radius = FOV_RADIUS_PITCH_BLACK
-        else: # Fallback
-            self.current_fov_radius = FOV_RADIUS_DAY
+        self.current_fov_radius = self._ambient_fov_radius_for_light_level(self.current_light_level_name)
 
         # Optional: Log change for debugging
         # if self.game_time % 10 == 0: # Log less frequently
@@ -2461,6 +2466,57 @@ class World:
             return False
         animal_def = ANIMAL_DEFINITIONS.get(npc.animal_type, {})
         return "prey" in animal_def
+
+    def _get_predator_pursuit_duration(self, predator, *, committed: bool = False) -> int:
+        duration = 4
+        if committed:
+            duration += 5
+        if getattr(self, "current_light_level_name", "DAY") in {"NIGHT", "PITCH BLACK"}:
+            duration += 3
+        animal_def = getattr(predator, "animal_definition", {}) or {}
+        if animal_def.get("fearless"):
+            duration += 2
+        if animal_def.get("pack_animal"):
+            duration += 1
+        return duration
+
+    def _get_predator_pursuit_state(self, predator, *, create: bool = True) -> dict | None:
+        task_context = getattr(predator, "task_context_data", None)
+        if task_context is None:
+            if not create:
+                return None
+            task_context = {}
+            predator.task_context_data = task_context
+        elif not isinstance(task_context, dict):
+            if not create:
+                return None
+            task_context = {"legacy_context": task_context}
+            predator.task_context_data = task_context
+
+        state = task_context.get("predator_pursuit")
+        if state is None and create:
+            state = {}
+            task_context["predator_pursuit"] = state
+        return state
+
+    def _refresh_predator_pursuit_state(self, predator, target, *, committed: bool = False) -> None:
+        if predator is None or target is None:
+            return
+        state = self._get_predator_pursuit_state(predator, create=True)
+        if state is None:
+            return
+
+        duration = self._get_predator_pursuit_duration(predator, committed=committed)
+        state["target_id"] = getattr(target, "id", None)
+        state["last_seen"] = (getattr(target, "x", predator.x), getattr(target, "y", predator.y))
+        state["last_seen_tick"] = self.game_time
+        state["persist_until_tick"] = max(int(state.get("persist_until_tick", self.game_time)), self.game_time + duration)
+        state["committed"] = bool(state.get("committed")) or committed
+
+    def _clear_predator_pursuit_state(self, predator) -> None:
+        task_context = getattr(predator, "task_context_data", None)
+        if isinstance(task_context, dict):
+            task_context.pop("predator_pursuit", None)
 
     def _get_predator_target(self, predator):
         if not predator.task_target_entity_id:
@@ -3234,6 +3290,10 @@ class World:
                     can_see_player = False
                     if npc.id in self.npc_fov_maps and 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT:
                         can_see_player = self.npc_fov_maps[npc.id][self.player.y, self.player.x]
+                    if self._is_predator(npc) and can_see_player:
+                        attack_range = getattr(npc, "attack_range", getattr(npc.combat, "attack_range", 1))
+                        in_attack_range = abs(npc.x - self.player.x) + abs(npc.y - self.player.y) <= attack_range
+                        self._refresh_predator_pursuit_state(npc, self.player, committed=in_attack_range)
                     if not can_see_player and npc.ai_brain.take_turn(npc, self):
                         continue
                 self._handle_npc_combat_turn(npc)
@@ -4331,6 +4391,8 @@ class World:
         """
         if npc.is_dead or player.combat.hp <= 0:
             return
+        if isinstance(npc, Animal) and self._is_predator(npc):
+            self._refresh_predator_pursuit_state(npc, player, committed=True)
 
         # Add Visual Effect for Ranged Attack
         attack_range = getattr(npc, 'attack_range', 1)

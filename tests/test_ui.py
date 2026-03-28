@@ -93,6 +93,54 @@ class TestMainInputHelpers(unittest.TestCase):
 
         world.player_attempt_build.assert_called_once_with("wood_wall", 3, 7)
 
+    def test_camera_origin_uses_zoomed_world_window_and_keeps_player_centered(self):
+        world = SimpleNamespace(
+            player=SimpleNamespace(x=100, y=80),
+            zoom_levels=(1.0,),
+            zoom_index=0,
+        )
+
+        camera_x, camera_y = main._get_camera_origin(world)
+        view_width, view_height = main._get_world_view_size(world)
+
+        self.assertEqual(camera_x, 100 - view_width // 2)
+        self.assertEqual(camera_y, 80 - view_height // 2)
+        self.assertEqual(view_width, config.MAP_WIDTH)
+        self.assertEqual(view_height, config.MAP_HEIGHT)
+
+    def test_screen_to_world_position_respects_zoom(self):
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+
+        world_x, world_y = main._screen_to_world_position(world, 50, 60, 10, 12)
+
+        self.assertEqual((world_x, world_y), (60, 72))
+
+    def test_handle_events_mouse_wheel_updates_zoom_index(self):
+        class FakeMouseWheel:
+            def __init__(self, y):
+                self.y = y
+
+        world = SimpleNamespace(
+            game_state="PLAYING",
+            player=SimpleNamespace(x=5, y=5, state=SimpleNamespace(current_path=[])),
+            mouse_x=1,
+            mouse_y=1,
+            chat_ui_active=False,
+            interaction_context={"active": False},
+            ui_requests=[],
+            zoom_levels=(1.0,),
+            zoom_index=0,
+        )
+        context = SimpleNamespace(convert_event=lambda event: None)
+        event = FakeMouseWheel(1)
+
+        with patch("tcod.event.get", return_value=[event]), \
+             patch("tcod.event.MouseWheel", new=FakeMouseWheel):
+            turn_taken = main.handle_events(world, context)
+
+        self.assertFalse(turn_taken)
+        self.assertEqual(world.zoom_index, 0)
+
     def test_handle_noticeboard_menu_input_enter_claims_selected_task(self):
         event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
         world = SimpleNamespace(
@@ -637,8 +685,10 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
         text_effect = SimpleNamespace(effect_type="floating_text", x=5, y=6, text="12", color=(1, 2, 3))
         projectile_effect = SimpleNamespace(effect_type="projectile", x=7, y=8, char='*', color=(4, 5, 6))
 
-        console_renderer._draw_visual_effect(console, text_effect, 0, 0)
-        console_renderer._draw_visual_effect(console, projectile_effect, 0, 0)
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+
+        console_renderer._draw_visual_effect(console, world, text_effect, 0, 0)
+        console_renderer._draw_visual_effect(console, world, projectile_effect, 0, 0)
 
         rendered = [call["string"] for call in console.print_calls]
         self.assertIn("12", rendered)
@@ -646,6 +696,79 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
 
 
 class TestConsoleRendererEntities(unittest.TestCase):
+    def test_get_hover_inspect_returns_tile_coords_entity_and_building(self):
+        tile = SimpleNamespace(name="Wood Floor")
+        villager = {"type": "npc", "name": "Mira"}
+        building = SimpleNamespace(building_type="town_house")
+        world = SimpleNamespace(
+            mouse_x=2,
+            mouse_y=3,
+            get_tile_at=lambda x, y: tile if (x, y) == (12, 23) else None,
+            _get_interactables_at=lambda x, y: [villager] if (x, y) == (12, 23) else [],
+            get_building_at=lambda x, y: building if (x, y) == (12, 23) else None,
+        )
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            inspect = console_renderer._get_hover_inspect(world, 10, 20)
+
+        self.assertEqual(inspect["coords"], (12, 23))
+        self.assertEqual(inspect["tile"], "Wood Floor")
+        self.assertEqual(inspect["entity"], "Mira")
+        self.assertEqual(inspect["object"], "Town House")
+
+    def test_get_hover_inspect_uses_feature_tile_as_object_when_no_other_object_exists(self):
+        tile = SimpleNamespace(name="Wooden Chair")
+        world = SimpleNamespace(
+            mouse_x=1,
+            mouse_y=1,
+            get_tile_at=lambda x, y: tile,
+            _get_interactables_at=lambda x, y: [],
+            get_building_at=lambda x, y: None,
+        )
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            inspect = console_renderer._get_hover_inspect(world, 0, 0)
+
+        self.assertEqual(inspect["tile"], "Wooden Chair")
+        self.assertEqual(inspect["object"], "Wooden Chair")
+
+    def test_get_hover_inspect_returns_none_outside_viewport_or_unseen(self):
+        world = SimpleNamespace(mouse_x=-1, mouse_y=0)
+        self.assertIsNone(console_renderer._get_hover_inspect(world, 0, 0))
+
+        world = SimpleNamespace(
+            mouse_x=0,
+            mouse_y=0,
+            get_tile_at=lambda x, y: SimpleNamespace(name="Plains"),
+            _get_interactables_at=lambda x, y: [],
+            get_building_at=lambda x, y: None,
+        )
+        with patch("rendering.console_renderer.is_visible", return_value=False):
+            self.assertIsNone(console_renderer._get_hover_inspect(world, 0, 0))
+
+    def test_draw_hover_inspect_renders_compact_panel_section(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace()
+
+        with patch("rendering.console_renderer._get_hover_inspect", return_value={
+            "coords": (4, 5),
+            "tile": "Wood Floor",
+            "entity": "Mira",
+            "object": "Town House",
+        }):
+            end_y = console_renderer._draw_hover_inspect(console, world, 0, 0, 60, 8, 20)
+
+        rendered = [call["string"] for call in console.print_calls]
+        self.assertEqual(rendered, ["Hover", "At: (4, 5)", "Tile: Wood Floor", "Entity: Mira", "Object: Town House"])
+        self.assertEqual(end_y, 13)
+
     def test_entity_labels_only_show_when_close_or_focused(self):
         entity = SimpleNamespace(name="Villager")
 
@@ -654,11 +777,96 @@ class TestConsoleRendererEntities(unittest.TestCase):
         self.assertTrue(console_renderer._should_draw_entity_label(4, {"entity": entity}, entity))
         self.assertFalse(console_renderer._should_draw_entity_label(2, {"entity": None}, entity))
 
+    def test_overhead_label_uses_first_name_for_known_entity(self):
+        entity = SimpleNamespace(id=7, name="Elara Hart", is_identity_concealed=lambda: False)
+        world = SimpleNamespace(
+            player=SimpleNamespace(knowledge=SimpleNamespace(known_memories={
+                "m1": SimpleNamespace(subject_id=7, target_id=None),
+            })),
+            get_entity_relationship_summary=lambda _entity: "",
+        )
+
+        label = console_renderer._get_entity_overhead_label(world, entity, {"entity": None}, hovered=False)
+
+        self.assertEqual(label, "Elara")
+
+    def test_overhead_label_uses_unknown_for_unfamiliar_entity(self):
+        entity = SimpleNamespace(id=8, name="Mara Bennett", is_identity_concealed=lambda: False)
+        world = SimpleNamespace(
+            player=SimpleNamespace(knowledge=SimpleNamespace(known_memories={})),
+            get_entity_relationship_summary=lambda _entity: "",
+        )
+
+        label = console_renderer._get_entity_overhead_label(world, entity, {"entity": None}, hovered=False)
+
+        self.assertEqual(label, "Unknown")
+
+    def test_overhead_label_expands_to_full_name_when_hovered(self):
+        entity = SimpleNamespace(id=9, name="Clara Wilder", is_identity_concealed=lambda: False)
+        world = SimpleNamespace(
+            player=SimpleNamespace(knowledge=SimpleNamespace(known_memories={
+                "m1": SimpleNamespace(subject_id=9, target_id=None),
+            })),
+            get_entity_relationship_summary=lambda _entity: "",
+        )
+
+        label = console_renderer._get_entity_overhead_label(world, entity, {"entity": None}, hovered=True)
+
+        self.assertEqual(label, "Clara Wilder")
+
+    def test_identity_concealment_forces_unknown_label(self):
+        entity = SimpleNamespace(id=10, name="Hidden Person", is_identity_concealed=lambda: True)
+        world = SimpleNamespace(
+            player=SimpleNamespace(knowledge=SimpleNamespace(known_memories={
+                "m1": SimpleNamespace(subject_id=10, target_id=None),
+            })),
+            get_entity_relationship_summary=lambda _entity: "friend",
+        )
+
+        label = console_renderer._get_entity_overhead_label(world, entity, {"entity": entity}, hovered=True)
+
+        self.assertEqual(label, "Unknown")
+
     def test_wood_floor_colors_are_softened_without_changing_material(self):
         fg, bg = console_renderer._tune_floor_colors("wood_floor", (160, 82, 45), (64, 42, 22))
 
         self.assertLess(sum(fg), sum((160, 82, 45)))
         self.assertGreater(sum(bg), sum((64, 42, 22)))
+
+    def test_draw_world_tile_keeps_furniture_as_single_centered_glyph_when_zoomed(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        chair_tile = SimpleNamespace(name="Wooden Chair", char=ord("c"), color=(180, 140, 90))
+
+        console_renderer._draw_world_tile(console, world, 0, 0, 1, 1, chair_tile, (180, 140, 90), (50, 30, 20))
+
+        glyph_calls = [call for call in console.print_calls if call["string"] == "c"]
+        self.assertEqual(len(glyph_calls), 1)
+        self.assertEqual((glyph_calls[0]["x"], glyph_calls[0]["y"]), (1, 1))
+
+    def test_draw_world_tile_keeps_ground_tiles_zoom_filled(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        floor_tile = SimpleNamespace(name="Wood Floor", char=ord("."), color=(120, 80, 40))
+
+        console_renderer._draw_world_tile(console, world, 0, 0, 1, 1, floor_tile, (120, 80, 40), (60, 40, 20))
+
+        glyph_calls = [call for call in console.print_calls if call["string"] == "."]
+        self.assertEqual(len(glyph_calls), 1)
 
     def test_draw_entities_uses_logical_visibility_not_stale_render_position(self):
         class FakeConsole:
@@ -740,6 +948,40 @@ class TestConsoleRendererEntities(unittest.TestCase):
         for call in console.print_calls:
             self.assertNotIn("bg", call)
             self.assertIn("fg", call)
+
+    def test_draw_entities_renders_single_centered_sprite_when_zoomed_in(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+                self.bg = np.zeros((6, 6, 3), dtype=np.uint8)
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        player = SimpleNamespace(
+            x=1,
+            y=1,
+            render_x=1.0,
+            render_y=1.0,
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=2),
+        )
+        world = SimpleNamespace(
+            npcs=[],
+            village_npcs=[],
+            player=player,
+            zoom_levels=(1.0,),
+            zoom_index=0,
+        )
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True), \
+             patch("rendering.console_renderer.get_entity_sprite", return_value=ord("@")):
+            console_renderer._draw_entities(console, world, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual(console.print_calls[0]["string"], "@")
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (1, 1))
 
     def test_entity_marker_skips_overlay_cell_outside_visibility(self):
         class FakeConsole:

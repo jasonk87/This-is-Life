@@ -2,11 +2,24 @@
 This module contains the main game loop and handles player input.
 """
 import argparse
+import math
 from tcod_compat import tcod, libtcodpy
 import os
 import sys
 from engine import World
-from config import SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, MAP_WIDTH, MAP_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT, TILESET_PATH
+from config import (
+    SCREEN_WIDTH_TILES,
+    SCREEN_HEIGHT_TILES,
+    MAP_WIDTH,
+    MAP_HEIGHT,
+    WORLD_WIDTH,
+    WORLD_HEIGHT,
+    WINDOW_WIDTH,
+    WINDOW_HEIGHT,
+    TILESET_PATH,
+    ZOOM_LEVELS,
+    DEFAULT_ZOOM_INDEX,
+)
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
@@ -26,6 +39,39 @@ def normalize_player_first_name(raw_name: str | None) -> str:
     if not cleaned:
         return DEFAULT_PLAYER_FIRST_NAME
     return cleaned[:20]
+
+
+def _ensure_zoom_state(world: World) -> None:
+    if not hasattr(world, "zoom_levels") or not getattr(world, "zoom_levels", None):
+        world.zoom_levels = tuple(ZOOM_LEVELS)
+    if not hasattr(world, "zoom_index"):
+        world.zoom_index = min(max(0, DEFAULT_ZOOM_INDEX), len(world.zoom_levels) - 1)
+
+
+def _get_zoom(world: World) -> float:
+    _ensure_zoom_state(world)
+    return float(world.zoom_levels[max(0, min(world.zoom_index, len(world.zoom_levels) - 1))])
+
+
+def _get_world_view_size(world: World) -> tuple[int, int]:
+    zoom = _get_zoom(world)
+    view_width = max(1, int(math.ceil(MAP_WIDTH / zoom)))
+    view_height = max(1, int(math.ceil(MAP_HEIGHT / zoom)))
+    return min(WORLD_WIDTH, view_width), min(WORLD_HEIGHT, view_height)
+
+
+def _get_camera_origin(world: World) -> tuple[int, int]:
+    view_width, view_height = _get_world_view_size(world)
+    camera_x = int(world.player.x) - view_width // 2
+    camera_y = int(world.player.y) - view_height // 2
+    camera_x = max(0, min(camera_x, max(0, WORLD_WIDTH - view_width)))
+    camera_y = max(0, min(camera_y, max(0, WORLD_HEIGHT - view_height)))
+    return camera_x, camera_y
+
+
+def _screen_to_world_position(world: World, camera_x: int, camera_y: int, screen_x: int, screen_y: int) -> tuple[int, int]:
+    zoom = _get_zoom(world)
+    return camera_x + int(screen_x / zoom), camera_y + int(screen_y / zoom)
 
 
 def prompt_for_new_player_name(console, context) -> str | None:
@@ -844,6 +890,8 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         context.present(console)
         world = World(player_first_name=normalize_player_first_name(player_first_name))
 
+    _ensure_zoom_state(world)
+
     last_time = time.perf_counter()
 
     while True:
@@ -859,9 +907,7 @@ def start_game(context, console, world_state=None, player_first_name: str | None
             render_game_over(console, context)
             break # Break to return to main menu
 
-        camera_x, camera_y = int(world.player.x) - MAP_WIDTH // 2, int(world.player.y) - MAP_HEIGHT // 2
-        camera_x = max(0, min(camera_x, WORLD_WIDTH - MAP_WIDTH))
-        camera_y = max(0, min(camera_y, WORLD_HEIGHT - MAP_HEIGHT))
+        camera_x, camera_y = _get_camera_origin(world)
         draw(console, world, camera_x, camera_y)
         context.present(console)
 
@@ -912,11 +958,16 @@ def handle_events(world, context) -> bool:
             raise SystemExit()
         if isinstance(event, tcod.event.MouseMotion):
             world.mouse_x, world.mouse_y = int(event.position[0]), int(event.position[1])
+        if isinstance(event, tcod.event.MouseWheel) and world.game_state == "PLAYING":
+            _ensure_zoom_state(world)
+            wheel_delta = getattr(event, "y", 0)
+            if wheel_delta > 0 and world.zoom_index < len(world.zoom_levels) - 1:
+                world.zoom_index += 1
+            elif wheel_delta < 0 and world.zoom_index > 0:
+                world.zoom_index -= 1
         if isinstance(event, tcod.event.MouseButtonDown) and world.game_state == "PLAYING":
-            camera_x, camera_y = int(world.player.x) - MAP_WIDTH // 2, int(world.player.y) - MAP_HEIGHT // 2
-            camera_x = max(0, min(camera_x, WORLD_WIDTH - MAP_WIDTH))
-            camera_y = max(0, min(camera_y, WORLD_HEIGHT - MAP_HEIGHT))
-            mouse_world_x, mouse_world_y = int(camera_x + world.mouse_x), int(camera_y + world.mouse_y)
+            camera_x, camera_y = _get_camera_origin(world)
+            mouse_world_x, mouse_world_y = _screen_to_world_position(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
 
             if event.button == tcod.event.MouseButton.RIGHT:
                 world.player.state.current_path = [] # Stop moving if interaction menu opens

@@ -194,7 +194,7 @@ def _get_world_view_dimensions(world):
 
 def _screen_to_world(world, camera_x, camera_y, screen_x, screen_y):
     zoom = _get_zoom_factor(world)
-    return camera_x + int(math.floor(screen_x / zoom)), camera_y + int(math.floor(screen_y / zoom))
+    return camera_x + int(screen_x // zoom), camera_y + int(screen_y // zoom)
 
 
 def _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y):

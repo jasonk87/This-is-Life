@@ -71,7 +71,7 @@ def _get_camera_origin(world: World) -> tuple[int, int]:
 
 def _screen_to_world_position(world: World, camera_x: int, camera_y: int, screen_x: int, screen_y: int) -> tuple[int, int]:
     zoom = _get_zoom(world)
-    return camera_x + int(math.floor(screen_x / zoom)), camera_y + int(math.floor(screen_y / zoom))
+    return camera_x + int(screen_x // zoom), camera_y + int(screen_y // zoom)
 
 
 def prompt_for_new_player_name(console, context) -> str | None:

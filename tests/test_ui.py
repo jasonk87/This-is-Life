@@ -1206,7 +1206,8 @@ class TestConsoleRendererFocusBadge(unittest.TestCase):
         console_renderer._draw_focus_badge(console, world, focus, 0, 0)
 
         self.assertEqual(console.print_calls, [])
-        self.assertTrue(np.array_equal(console.bg, np.zeros((3, 3, 3), dtype=np.uint8)))
+        # Check that array sum is 0 instead of np.array_equal
+        self.assertEqual(sum(sum(sum(row) for row in col) for col in console.bg), 0)
 
     def test_focus_badge_pulses_and_prints_for_visible_entity_focus(self):
         class FakeConsole:
@@ -1226,7 +1227,8 @@ class TestConsoleRendererFocusBadge(unittest.TestCase):
             console_renderer._draw_focus_badge(console, world, focus, 0, 0)
 
         self.assertEqual(len(console.print_calls), 1)
-        self.assertGreater(console.bg[1, 1].sum(), 0)
+        # Manually sum instead of using .sum() for compat shim
+        self.assertGreater(sum(console.bg[1, 1]), 0)
 
 
 class TestWeatherOverlayShelter(unittest.TestCase):

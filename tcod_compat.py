@@ -69,6 +69,9 @@ except ModuleNotFoundError:
     class _TextInput(_BaseEvent):
         pass
 
+    class _MouseWheel(_BaseEvent):
+        pass
+
     def _bresenham(start: tuple[int, int], end: tuple[int, int]):
         x0, y0 = start
         x1, y1 = end
@@ -221,6 +224,7 @@ except ModuleNotFoundError:
         MouseMotion=_MouseMotion,
         MouseButtonDown=_MouseButtonDown,
         TextInput=_TextInput,
+        MouseWheel=_MouseWheel,
         get=lambda: [],
         wait=lambda timeout=None: [],
     )

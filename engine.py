@@ -9028,6 +9028,7 @@ class World:
             for furn_x, furn_y, furn_role in generated.placed_furniture:
                 item_type = furn_role
                 if item_type == "bed": item_type = "bed_simple"
+                elif item_type == "wooden_bed": item_type = "wooden_bed"
                 elif item_type == "chair": item_type = "wooden_chair"
                 elif item_type == "table": item_type = "wooden_table"
                 elif item_type == "storage": item_type = "chest_wooden"
@@ -9035,8 +9036,10 @@ class World:
                 elif item_type == "counter": item_type = "wooden_table"
                 elif item_type == "desk": item_type = "wooden_table"
                 elif item_type == "shelf": item_type = "wall_shelf"
+                elif item_type == "bookshelf": item_type = "bookshelf"
                 elif item_type == "fireplace": item_type = "fire_pit_simple"
                 elif item_type == "workbench": item_type = "workbench"
+                elif item_type == "stone_anvil": item_type = "stone_anvil"
 
                 decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
                 if decoration_tile_def:

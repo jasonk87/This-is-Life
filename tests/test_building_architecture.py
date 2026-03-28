@@ -25,7 +25,7 @@ def test_required_furniture_always_placed():
 
     # "house" archetype requires a bedroom and a dining room
     # Check if a bed was placed. A bed is required in the bedroom room archetype.
-    has_bed = any(role == "bed" for _, _, role in gen_building.placed_furniture)
+    has_bed = any(role in ["bed", "wooden_bed"] for _, _, role in gen_building.placed_furniture)
     has_table = any(role == "table" for _, _, role in gen_building.placed_furniture)
 
     assert has_bed, "Bed should be placed in a house"
@@ -116,7 +116,7 @@ def test_furniture_anchors_created():
     # Check if a sleep anchor was created from a bed
     has_sleep_anchor = False
     for anchor in gen_building.anchors:
-        if anchor.type == "sleep" and anchor.tags.get("role") == "bed":
+        if anchor.type == "sleep" and anchor.tags.get("role") in ["bed", "wooden_bed"]:
             has_sleep_anchor = True
             # Verify anchor is within bounds
             assert 0 <= anchor.x < 8

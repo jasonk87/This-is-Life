@@ -288,6 +288,30 @@ DECORATION_ITEM_DEFINITIONS = {
             "interaction_hint": "read"
         }
     },
+    "wooden_bed": {
+        "name": "Wooden Bed",
+        "description": "A sturdy wooden bed with a mattress.",
+        "char": WORLD_DECORATION_SPRITES["wooden_bed"],
+        "color": COLORS["saddlebrown"],
+        "passable": True,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture"],
+        "properties": {
+            "interaction_hint": "sleep"
+        }
+    },
+    "stone_anvil": {
+        "name": "Stone Anvil",
+        "description": "A heavy stone anvil used for smithing.",
+        "char": WORLD_DECORATION_SPRITES["stone_anvil"],
+        "color": COLORS["mountain_fg"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "properties": {
+            "interaction_hint": "forge"
+        }
+    },
     # --- Animal Dens ---
     "wolf_den": {
         "name": "Wolf Den",

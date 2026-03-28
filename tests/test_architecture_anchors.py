@@ -257,6 +257,8 @@ class TestArchitectureAnchors(unittest.TestCase):
         self.assertEqual(self.npc.schedule.current_destination_coords, (28, 28))
 
     def test_at_home_does_not_randomly_drift_to_social_anchor(self):
+        import random
+        random.seed(42) # stabilize the test to prevent the 1% chance of courting happening
         self.home.anchors = [
             {"type": "social", "x": 4, "y": 4},
             {"type": "eat", "x": 6, "y": 6},

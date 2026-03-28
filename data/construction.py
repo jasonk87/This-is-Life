@@ -84,6 +84,27 @@ CONSTRUCTION_RECIPES = {
         "materials": {"wooden_plank": 4},
         "description": "A table for placing items."
     },
+    "wooden_bed": {
+        "name": "Wooden Bed",
+        "tile_def_key": "wooden_bed",
+        "source": "decoration",
+        "materials": {"wooden_plank": 15, "cloth": 4},
+        "description": "A robust bed with a mattress."
+    },
+    "stone_anvil": {
+        "name": "Stone Anvil",
+        "tile_def_key": "stone_anvil",
+        "source": "decoration",
+        "materials": {"stone_chunk": 12},
+        "description": "A heavy stone block used as an anvil."
+    },
+    "bookshelf": {
+        "name": "Bookshelf",
+        "tile_def_key": "bookshelf",
+        "source": "decoration",
+        "materials": {"wooden_plank": 12},
+        "description": "A tall wooden shelf for holding books."
+    },
     "fire_pit": {
         "name": "Fire Pit",
         "tile_def_key": "fire_pit_simple", # From DECORATION_ITEM_DEFINITIONS

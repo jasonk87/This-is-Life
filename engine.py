@@ -4048,8 +4048,8 @@ class World:
                     if item_key and quantity_produced > 0:
                         current_building_qty = work_building.building_inventory.get(item_key, 0)
                         work_building.building_inventory[item_key] = current_building_qty + quantity_produced
-                        # item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                        # self.add_message_to_chat_log(f"Debug: {npc.name} harvested {quantity_produced} {item_name} into {work_building.building_type}.")
+                        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                        self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"+{quantity_produced} {item_name}", color=(50, 255, 50)))
 
             # B. Standard sub-task defined production (if not tile harvest or in addition to)
             # Ensure this doesn't double-produce if tile harvest already happened for same item.
@@ -4059,11 +4059,8 @@ class World:
                 for item_key, quantity_produced in produces_at_building_def.items():
                     current_building_qty = work_building.building_inventory.get(item_key, 0)
                     work_building.building_inventory[item_key] = current_building_qty + quantity_produced
-                    # item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-                    # Optional: Log production for player if they can see/hear the NPC
-                    # dist_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
-                    # if dist_to_player <= 10:
-                    #    self.add_message_to_chat_log(f"{npc.name} finishes working and produces {quantity_produced} {item_name} at the {work_building.building_type}.")
+                    item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                    self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"+{quantity_produced} {item_name}", color=(50, 255, 50)))
 
         village = self._get_village_for_npc(npc)
         if village:
@@ -5251,6 +5248,8 @@ class World:
             return True
 
         if npc.schedule.current_task == "hauling_to_blueprint":
+            if getattr(self, "game_time", 0) % 40 == 0:
+                self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*hauling*", color=(200, 200, 150)))
             if (npc.x, npc.y) != (blueprint.x, blueprint.y):
                 if not npc.schedule.current_path:
                     npc.schedule.current_path = self.calculate_path(npc.x, npc.y, blueprint.x, blueprint.y) or []
@@ -6255,6 +6254,8 @@ class World:
             if not blueprint.deposit_item_reference(item_reference):
                 self.drop_item_reference_on_map(item_reference, getattr(actor, "x", blueprint.x), getattr(actor, "y", blueprint.y))
                 continue
+            item_name = ITEM_DEFINITIONS.get(item_reference.key, {}).get("name", item_reference.key)
+            self.visual_effects.append(FloatingTextEffect(getattr(actor, "x", blueprint.x), getattr(actor, "y", blueprint.y), f"-1 {item_name}", color=(255, 100, 100)))
             self._complete_one_blueprint_task(blueprint, item_reference.key, task_id=resolved_task_id)
             if blueprint.is_complete():
                 self._complete_construction_blueprint(blueprint)

@@ -270,19 +270,6 @@ NPC_WORK_TOOL_TYPES = {
 }
 
 @dataclass
-class PlayerEconomicState:
-    inventory: list[dict] = field(default_factory=list)
-    money: int = 100
-    active_contracts: dict = field(default_factory=dict)
-    pending_contract_offer: Any | None = None
-    bounty: int = 0
-    profession: str = "Unemployed"
-    job_building_id: str | None = None
-    job_performance: int = 50
-    days_employed: int = 0
-    job_satisfaction: int = 50
-
-@dataclass
 class PlayerState:
     is_sitting: bool = False
     is_sleeping: bool = False
@@ -315,7 +302,7 @@ class Player:
         self.physical = PhysicalState()
         self.combat = CombatStats()
         self.social = SocialState()
-        self.economic = PlayerEconomicState()
+        self.economic = EconomicState()
         self.equipment = Equipment()
         self.knowledge = KnowledgeComponent()
         self.state = PlayerState()
@@ -461,142 +448,55 @@ class Player:
                     self.combat.defense_bonus += item_def["properties"].get("defense_bonus", 0)
 
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None, item_reference: ItemReference | None = None):
-        item_def = ITEM_DEFINITIONS.get(item_key_to_add)
-        if not item_def:
-            # print(f"Warning: Tried to add unknown item key '{item_key_to_add}'")
+        if item_reference is not None:
+            for _ in range(max(1, quantity)):
+                self.economic.inventory.add_item_reference(item_reference)
             return
 
+        item_def = ITEM_DEFINITIONS.get(item_key_to_add, {})
         is_stackable = item_def.get("stackable", False)
 
-        if item_reference is not None and getattr(item_reference, "key", None) != item_key_to_add:
-            item_reference = None
-
-        if is_stackable:
-            for item_instance in self.economic.inventory:
-                if item_instance["key"] == item_key_to_add:
-                    item_instance["quantity"] = item_instance.get("quantity", 0) + quantity
-                    return
-            # Not found, add new stack
-            self.economic.inventory.append({"key": item_key_to_add, "quantity": quantity})
-        else: # Non-stackable (durable or unique)
-            for _ in range(quantity): # Add multiple individual instances if quantity > 1
-                new_instance = {"key": item_key_to_add}
-                concrete_item = item_reference if item_reference is not None else ItemReference(
-                    item_key_to_add,
-                    current_durability=initial_durability,
-                )
-                new_instance["item_reference"] = concrete_item
-                if concrete_item.max_durability is not None:
-                    new_instance["max_durability"] = concrete_item.max_durability
-                    new_instance["durability"] = concrete_item.current_durability
-                self.economic.inventory.append(new_instance)
-                item_reference = None
+        if not is_stackable and initial_durability is not None:
+            for _ in range(max(1, quantity)):
+                ref = ItemReference(item_key_to_add, current_durability=initial_durability)
+                self.economic.inventory.add_item_reference(ref)
+        else:
+            self.economic.inventory.add_item(item_key_to_add, quantity)
 
     def remove_item(self, item_key_to_remove: str, quantity: int = 1, specific_instance_index: int | None = None) -> bool:
-        item_def = ITEM_DEFINITIONS.get(item_key_to_remove)
-        if not item_def:
-            # # print(f"Warning: Tried to remove unknown item key '{item_key_to_remove}'")
-            return False
-
-        is_stackable = item_def.get("stackable", False)
-
-        if is_stackable:
-            for i, item_instance in enumerate(self.economic.inventory):
-                if item_instance["key"] == item_key_to_remove:
-                    if item_instance.get("quantity", 0) >= quantity:
-                        item_instance["quantity"] -= quantity
-                        if item_instance["quantity"] <= 0:
-                            self.economic.inventory.pop(i)
-                        return True
-                    else: # Not enough in this stack (shouldn't happen if has_item was checked)
-                        return False
-            return False # Item not found
-        else: # Non-stackable
-            removed_count = 0
-            indices_to_remove = []
-            if specific_instance_index is not None and 0 <= specific_instance_index < len(self.economic.inventory):
-                 if self.economic.inventory[specific_instance_index]["key"] == item_key_to_remove:
-                    indices_to_remove.append(specific_instance_index)
-                    removed_count = 1
-            else: # Remove first N instances found
-                for i in range(len(self.economic.inventory) -1, -1, -1): # Iterate backwards for safe removal
-                    if self.economic.inventory[i]["key"] == item_key_to_remove:
-                        indices_to_remove.append(i)
-                        removed_count += 1
-                        if removed_count == quantity:
-                            break
-
-            if removed_count == quantity:
-                for index in sorted(indices_to_remove, reverse=True): # Sort to remove from end first
-                    self.economic.inventory.pop(index)
-                return True
-            return False # Not enough instances found or specific instance mismatch
+        if specific_instance_index is not None:
+            refs = list(self.economic.inventory.iter_item_references())
+            if 0 <= specific_instance_index < len(refs):
+                target_ref = refs[specific_instance_index]
+                if target_ref.key == item_key_to_remove:
+                    self.economic.inventory.extract_item_reference(target_ref)
+                    return True
+        return self.economic.inventory.remove_item(item_key_to_remove, quantity)
 
     def has_item(self, item_key_to_check: str, quantity: int = 1) -> bool:
-        item_def = ITEM_DEFINITIONS.get(item_key_to_check)
-        if not item_def: return False
-        is_stackable = item_def.get("stackable", False)
-
-        if is_stackable:
-            for item_instance in self.economic.inventory:
-                if item_instance["key"] == item_key_to_check:
-                    return item_instance.get("quantity", 0) >= quantity
-            return False
-        else: # Non-stackable, check for presence of N instances
-            count = 0
-            for item_instance in self.economic.inventory:
-                if item_instance["key"] == item_key_to_check:
-                    count += 1
-            return count >= quantity
+        return self.economic.inventory.has_item(item_key_to_check, quantity)
 
     def get_item_instance_indices(self, item_key_to_find: str) -> list[int]:
         """Returns a list of indices for all instances of a given non-stackable item key."""
-        indices = []
-        for i, item_instance in enumerate(self.economic.inventory):
-            if item_instance["key"] == item_key_to_find:
-                indices.append(i)
-        return indices
+        refs = list(self.economic.inventory.iter_item_references())
+        return [i for i, ref in enumerate(refs) if ref.key == item_key_to_find]
 
     def get_item_by_index(self, index: int) -> dict | None:
-        if 0 <= index < len(self.economic.inventory):
-            return self.economic.inventory[index]
+        """DEPRECATED - returns a mock dictionary wrapper over the reference to avoid breaking old callers."""
+        refs = list(self.economic.inventory.iter_item_references())
+        if 0 <= index < len(refs):
+            ref = refs[index]
+            return {"key": ref.key, "item_reference": ref, "durability": ref.current_durability, "max_durability": ref.max_durability}
         return None
 
     def get_item_reference(self, item_key_to_find: str) -> ItemReference | None:
-        for item_instance in self.economic.inventory:
-            if item_instance["key"] != item_key_to_find:
-                continue
-            item_reference = item_instance.get("item_reference")
-            if item_reference is not None:
-                return item_reference
-            return ItemReference(
-                item_key_to_find,
-                current_durability=item_instance.get("durability"),
-            )
-        return None
+        return self.economic.inventory.get_item_reference(item_key_to_find)
 
     def add_item_reference(self, item_reference: ItemReference | None) -> bool:
-        if item_reference is None:
-            return False
-        self.add_item(item_reference.key, 1, item_reference=item_reference)
-        return True
+        return self.economic.inventory.add_item_reference(item_reference)
 
     def pop_item_reference(self, item_key_to_find: str) -> ItemReference | None:
-        item_def = ITEM_DEFINITIONS.get(item_key_to_find, {})
-        if item_def.get("stackable", False):
-            return None
-        for index, item_instance in enumerate(self.economic.inventory):
-            if item_instance["key"] != item_key_to_find:
-                continue
-            removed = self.economic.inventory.pop(index)
-            item_reference = removed.get("item_reference")
-            if item_reference is not None:
-                return item_reference
-            return ItemReference(
-                item_key_to_find,
-                current_durability=removed.get("durability"),
-            )
-        return None
+        return self.economic.inventory.pop_item_reference(item_key_to_find)
 
     def adjust_reputation(self, rep_type: str, amount: int):
         """Adjusts the player's reputation of a specific type."""
@@ -1755,22 +1655,33 @@ class World:
                     }
                 )
 
-        for index, item_entry in enumerate(self.player.economic.inventory):
-            item_key = item_entry.get("key", "")
-            item_reference = item_entry.get("item_reference")
-            if item_reference is not None:
-                value = max(1, int(item_reference.value))
-            else:
-                value = max(1, int(ITEM_DEFINITIONS.get(item_key, {}).get("value", 1)))
-            options.append(
-                {
+        index = 0
+        for item_key, count in self.player.economic.inventory.items():
+            if item_key == "item_references":
+                continue
+            item_def = ITEM_DEFINITIONS.get(item_key, {})
+            is_stackable = item_def.get("stackable", False)
+            if is_stackable:
+                value = max(1, int(item_def.get("value", 1)))
+                options.append({
                     "type": "item",
-                    "index": index,
                     "item_key": item_key,
-                    "label": self._describe_player_inventory_entry(item_entry),
+                    "label": f"{count}x {item_def.get('name', item_key)}",
                     "value": value,
-                }
-            )
+                })
+                index += 1
+            else:
+                for item_ref in self.player.economic.inventory.iter_item_references():
+                    if item_ref.key == item_key:
+                        value = max(1, int(item_ref.value))
+                        options.append({
+                            "type": "item",
+                            "item_reference": item_ref,
+                            "item_key": item_key,
+                            "label": item_ref.name,
+                            "value": value,
+                        })
+                        index += 1
         return options
 
     def get_player_gossip_options(self) -> list[MemoryEvent]:
@@ -1778,32 +1689,24 @@ class World:
         memories.sort(key=lambda memory: (-memory.importance_score, -memory.timestamp, memory.id))
         return memories
 
-    def _pop_player_gift_item(self, inventory_index: int) -> tuple[str | None, ItemReference | None, int]:
-        if not (0 <= inventory_index < len(self.player.economic.inventory)):
-            return None, None, 0
-
-        item_entry = self.player.economic.inventory[inventory_index]
-        item_key = item_entry.get("key")
+    def _pop_player_gift_item(self, gift_option: dict[str, Any]) -> tuple[str | None, ItemReference | None, int]:
+        item_key = gift_option.get("item_key")
+        item_reference = gift_option.get("item_reference")
         if not item_key:
             return None, None, 0
 
         item_def = ITEM_DEFINITIONS.get(item_key, {})
         if item_def.get("stackable", False):
-            remaining_quantity = max(0, int(item_entry.get("quantity", 1)) - 1)
-            if remaining_quantity > 0:
-                item_entry["quantity"] = remaining_quantity
-            else:
-                self.player.economic.inventory.pop(inventory_index)
-            return item_key, None, max(1, int(item_def.get("value", 1)))
+            if self.player.has_item(item_key, 1):
+                self.player.remove_item(item_key, 1)
+                return item_key, None, max(1, int(item_def.get("value", 1)))
+            return None, None, 0
 
-        removed_entry = self.player.economic.inventory.pop(inventory_index)
-        item_reference = removed_entry.get("item_reference")
-        if item_reference is None:
-            item_reference = ItemReference(
-                item_key,
-                current_durability=removed_entry.get("durability"),
-            )
-        return item_key, item_reference, max(1, int(item_reference.value))
+        if item_reference is not None and self.player.economic.inventory.has_item_reference(item_reference):
+            removed = self.player.economic.inventory.extract_item_reference(item_reference)
+            if removed:
+                return item_key, removed, max(1, int(removed.value))
+        return None, None, 0
 
     def give_gift_to_npc(self, npc: NPC | None, gift_option: dict[str, Any] | None) -> bool:
         if npc is None or gift_option is None:
@@ -1821,7 +1724,7 @@ class World:
             gift_value = amount
             gift_label = f"{amount} coins"
         elif gift_option.get("type") == "item":
-            item_key, item_reference, gift_value = self._pop_player_gift_item(int(gift_option.get("index", -1)))
+            item_key, item_reference, gift_value = self._pop_player_gift_item(gift_option)
             if not item_key:
                 self.add_message_to_chat_log("That item is no longer available.")
                 return False
@@ -1952,11 +1855,21 @@ class World:
         self.add_message_to_chat_log(f"{npc.name} accepts your proposal. You are now married!")
         return True
 
-    def _get_employment_daily_wage(self, profession_role: str, *, override_wage: int | None = None) -> int:
+    def _get_employment_daily_wage(self, profession_role: str, *, override_wage: int | None = None, village=None) -> int:
         if override_wage is not None:
             return max(1, int(override_wage))
+
         profession_data = get_profession_data(profession_role) or {}
-        return max(1, int(profession_data.get("wage", 10)))
+        base_wage = max(1, int(profession_data.get("wage", 10)))
+
+        if village is not None:
+            wealth_tier = getattr(village, "wealth_tier", "middle")
+            if wealth_tier == "poor":
+                base_wage = max(1, int(base_wage * 0.75))
+            elif wealth_tier == "rich":
+                base_wage = int(base_wage * 1.5)
+
+        return base_wage
 
     def _is_player_owned_workplace(self, building: Building | None) -> bool:
         return bool(building and "workplace" in str(getattr(building, "category", "")) and self._building_is_owned_by_player(building))
@@ -5462,12 +5375,8 @@ class World:
 
         item_key = contract["item_key"]
         qty_needed = contract["quantity_needed"]
-        player_has_qty = 0
-        for item in self.player.economic.inventory:
-            if item["key"] == item_key:
-                player_has_qty += item.get("quantity", 1)
 
-        if player_has_qty >= qty_needed:
+        if self.player.has_item(item_key, qty_needed):
             self.player.remove_item(item_key, qty_needed)
 
             self.player.economic.money += contract["reward"]
@@ -5619,8 +5528,10 @@ class World:
         if entity_type == "tile" and entity_data.properties.get("workstation_type") == "fire":
              # Check if player has raw food
              has_raw_food = False
-             for item in self.player.economic.inventory:
-                 item_def = ITEM_DEFINITIONS.get(item["key"], {})
+             for item_key, count in list(self.player.economic.inventory.items()):
+                 if item_key == "item_references":
+                     continue
+                 item_def = ITEM_DEFINITIONS.get(item_key, {})
                  if "food_ingredient_raw" in item_def.get("item_type_tags", []):
                      has_raw_food = True
                      break
@@ -6599,19 +6510,17 @@ class World:
                 if axe_def and not axe_def.get("stackable", False):
                     degrade_chance = axe_def.get("properties", {}).get("durability_chance_to_degrade", 0.05) # 5% chance
                     if random.random() < degrade_chance:
-                        axe_indices = self.player.get_item_instance_indices(axe_item_key)
-                        if axe_indices:
-                            axe_to_degrade = self.player.get_item_by_index(axe_indices[0])
-                            if axe_to_degrade and "durability" in axe_to_degrade:
-                                axe_to_degrade["durability"] -= 1
-                                if axe_to_degrade["durability"] <= 0:
-                                    self.player.remove_item(axe_item_key, 1, specific_instance_index=axe_indices[0])
-                                    self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
-                                    if "broken_tool_handle" in ITEM_DEFINITIONS:
-                                        self.player.add_item("broken_tool_handle", 1)
-                                        self.add_message_to_chat_log("You salvaged a broken tool handle.")
-                                else:
-                                    self.add_message_to_chat_log(f"Your {axe_def['name']} shows some wear.")
+                        axe_ref = self.player.get_item_reference(axe_item_key)
+                        if axe_ref:
+                            broke = axe_ref.degrade(1)
+                            if broke:
+                                self.player.remove_item(axe_item_key, 1)
+                                self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
+                                if "broken_tool_handle" in ITEM_DEFINITIONS:
+                                    self.player.add_item("broken_tool_handle", 1)
+                                    self.add_message_to_chat_log("You salvaged a broken tool handle.")
+                            else:
+                                self.add_message_to_chat_log(f"Your {axe_def['name']} shows some wear (Durability: {axe_ref.current_durability}/{axe_ref.max_durability}).")
             else:
                 self.add_message_to_chat_log("Nothing was yielded from the tree.")
         elif isinstance(target_tile, Tree) and not target_tile.is_choppable:
@@ -7485,17 +7394,13 @@ class World:
         merchant_village = self._get_village_for_npc(merchant_npc)
 
         # Player inventory snapshot: (item_key, quantity, price_to_sell_at)
-        player_inventory_aggregated = {}
-        for item in self.player.economic.inventory:
-            key = item["key"]
-            qty = item.get("quantity", 1)
-            player_inventory_aggregated[key] = player_inventory_aggregated.get(key, 0) + qty
-
-        for item_key, quantity in player_inventory_aggregated.items():
+        for item_key, count in list(self.player.economic.inventory.items()):
+            if item_key == "item_references":
+                continue
             item_def = ITEM_DEFINITIONS.get(item_key)
             if item_def:
                 price = self.get_dynamic_price(item_key, merchant_village, merchant=merchant_npc)
-                self.trade_ui_player_inventory_snapshot.append((item_key, quantity, price))
+                self.trade_ui_player_inventory_snapshot.append((item_key, count, price))
 
         # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
         # Merchant inventory is likely in their work building
@@ -11070,50 +10975,7 @@ class World:
                 inventory[key] = inventory.get(key, 0) + count
 
         # 1. Player Inventory
-        # Player inventory is a list of dicts, need to handle differently or convert temporarily
-        # The current player structure is list[dict] e.g. [{"key": "apple", "quantity": 5}, ...]
-        # My helper above expects a dict {key: qty}. Let's write a specific one for player list.
-
-        items_to_remove_indices = []
-        items_to_add_player = []
-
-        for i, item_entry in enumerate(self.player.economic.inventory):
-            item_key = item_entry["key"]
-            quantity = item_entry.get("quantity", 1)
-            item_def = ITEM_DEFINITIONS.get(item_key)
-
-            if item_def:
-                spoilage_chance = item_def.get("properties", {}).get("spoilage_chance", 0.0)
-                if spoilage_chance > 0:
-                    spoiled_count = 0
-                    if quantity > 10:
-                        spoiled_count = np.random.binomial(quantity, spoilage_chance)
-                    else:
-                        for _ in range(quantity):
-                            if random.random() < spoilage_chance:
-                                spoiled_count += 1
-
-                    if spoiled_count > 0:
-                        # For stackable items in list
-                        if item_def.get("stackable"):
-                            item_entry["quantity"] -= spoiled_count
-                            if item_entry["quantity"] <= 0:
-                                items_to_remove_indices.append(i)
-                        else:
-                            # Non-stackable (e.g. unique food?), remove instance
-                            items_to_remove_indices.append(i)
-
-                        rots_into = item_def.get("properties", {}).get("rots_into", "rotten_food")
-                        items_to_add_player.append((rots_into, spoiled_count))
-                        self.add_message_to_chat_log(f"One of your {item_def['name']} has rotted.")
-
-        # Remove from end to avoid index shifting issues
-        for i in sorted(items_to_remove_indices, reverse=True):
-            self.player.economic.inventory.pop(i)
-
-        # Add spoiled items
-        for key, count in items_to_add_player:
-            self.player.add_item(key, count)
+        process_inventory(self.player.economic.inventory, owner_name="Player")
 
         # 2. NPC Inventories (dicts)
         for npc in self.all_npcs:
@@ -11206,7 +11068,18 @@ class World:
                 npc.schedule.last_paid_day = current_day
                 continue
 
-            wage = self._get_employment_daily_wage(npc.economic.profession, override_wage=getattr(npc.economic, "daily_wage", 0) or None)
+            # Check performance to decide if wages are paid
+            if getattr(npc.economic, "work_performance", 50) <= 20:
+                npc.schedule.last_paid_day = current_day
+                continue
+
+            village = self._get_village_for_npc(npc)
+            wage = self._get_employment_daily_wage(npc.economic.profession, override_wage=getattr(npc.economic, "daily_wage", 0) or None, village=village)
+
+            # Performance bonus
+            if getattr(npc.economic, "work_performance", 50) > 80:
+                wage += int(wage * 0.2) # 20% bonus
+
             if self._is_player_owned_workplace(work_building):
                 building_balance = self._get_trade_money_balance(work_building)
                 if building_balance < wage:
@@ -11441,7 +11314,8 @@ class World:
         npc.schedule.work_building_id = work_building.id
 
         new_profession = normalize_profession(profession) if profession else self._resolve_profession_for_work_building(work_building, exclude_entity=npc)
-        npc.economic.daily_wage = self._get_employment_daily_wage(new_profession, override_wage=daily_wage)
+        village = self._get_village_for_npc(npc)
+        npc.economic.daily_wage = self._get_employment_daily_wage(new_profession, override_wage=daily_wage, village=village)
         npc.schedule.last_paid_day = self.game_time // max(1, DAY_LENGTH_TICKS)
         self._set_entity_profession(npc, new_profession, reason=reason)
         npc.economic.job_satisfaction = 70
@@ -11619,12 +11493,14 @@ class World:
         return None
 
     def _update_player_career(self):
-        """Updates the player's career status daily."""
+        """Updates the player's career status daily using standardized NPC logic."""
         if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
             return
 
         if not self.player.economic.job_building_id:
             return
+
+        self.player.career.advance_day()
 
         # 1. Decay performance (natural attrition if not working)
         # Check if player is currently at work (end of day check is harsh but simple)
@@ -11635,18 +11511,30 @@ class World:
                 is_at_work = True
 
         if is_at_work:
-            self.player.economic.job_performance = min(100, self.player.economic.job_performance + 10)
+            self.player.economic.work_performance = min(100, self.player.economic.work_performance + 10)
             if hasattr(self.player, "gain_skill_experience"):
                 self.player.gain_skill_experience("labor", 3)
         else:
-            self.player.economic.job_performance -= 10 # Penalty for absence at check time
+            self.player.economic.work_performance -= 10 # Penalty for absence at check time
+
+        self.player.economic.work_performance = max(0, self.player.economic.work_performance)
 
         # 2. Handle Wages
-        if self.player.economic.job_performance > 20:
-            wage = 20 # Base wage
+        if self.player.economic.work_performance > 20:
+            wage = getattr(self.player.economic, "daily_wage", 0)
+            if wage == 0:
+                village = None
+                if self.player.economic.job_building_id:
+                    building = self.buildings_by_id.get(self.player.economic.job_building_id)
+                    if building and building.settlement_id:
+                        atlas = getattr(self, "atlas", None)
+                        if atlas and hasattr(atlas, "get_village"):
+                            village = atlas.get_village(building.settlement_id)
+                wage = self._get_employment_daily_wage(self.player.economic.profession, village=village)
+
             # Performance bonus
-            if self.player.economic.job_performance > 80:
-                wage += 10
+            if self.player.economic.work_performance > 80:
+                wage += int(wage * 0.2)
 
             self.player.economic.money += wage
             self.add_message_to_chat_log(f"You received {wage} coins in wages from your job as {self.player.economic.profession}.")
@@ -11654,16 +11542,15 @@ class World:
             self.add_message_to_chat_log(f"You did not perform well enough to receive wages today.")
 
         # 3. Handle Firing
-        if self.player.economic.job_performance <= 0:
+        if self.player.economic.work_performance <= 0:
             self.add_message_to_chat_log(f"You have been fired from your job as {self.player.economic.profession} due to poor performance!")
             self._set_entity_profession(self.player, "Unemployed", reason="player_fired")
             self.player.economic.job_building_id = None
             self.player.economic.days_employed = 0
-            self.player.economic.job_performance = 50
+            self.player.economic.work_performance = 50
             return
 
         self.player.economic.days_employed += 1
-        self.player.career.advance_day()
 
     def _plan_village_expansion(self, village: Village):
         """Decides if the village should build something."""
@@ -12695,8 +12582,7 @@ class World:
 
     def player_attempt_till_soil(self, target_x: int, target_y: int):
         """Handles the player's attempt to till soil."""
-        hoe_indices = self.player.get_item_instance_indices("stone_hoe")
-        if not hoe_indices:
+        if not self.player.has_item("stone_hoe"):
             self.add_message_to_chat_log("You need a hoe to till the soil.")
             return
 
@@ -12710,14 +12596,14 @@ class World:
         self._change_map_tile((target_x, target_y), tilled_soil_def)
 
         # Handle tool durability
-        hoe_instance = self.player.get_item_by_index(hoe_indices[0])
-        if hoe_instance and "durability" in hoe_instance:
-            hoe_instance["durability"] -= 1
-            if hoe_instance["durability"] <= 0:
-                self.player.remove_item("stone_hoe", 1, specific_instance_index=hoe_indices[0])
+        hoe_reference = self.player.get_item_reference("stone_hoe")
+        if hoe_reference is not None:
+            broke = hoe_reference.degrade(1)
+            if broke:
+                self.player.remove_item("stone_hoe", 1)
                 self.add_message_to_chat_log("Your stone hoe broke!")
             else:
-                self.add_message_to_chat_log(f"Your stone hoe shows some wear (Durability: {hoe_instance['durability']}/{hoe_instance['max_durability']}).")
+                self.add_message_to_chat_log(f"Your stone hoe shows some wear (Durability: {hoe_reference.current_durability}/{hoe_reference.max_durability}).")
 
     def player_attempt_plant_seeds(self, target_x: int, target_y: int):
         """Handles the player's attempt to plant seeds."""
@@ -12773,8 +12659,9 @@ class World:
 
         # Find cookable items in inventory
         cookable_items = []
-        for item in self.player.economic.inventory:
-            item_key = item["key"]
+        for item_key, count in list(self.player.economic.inventory.items()):
+            if item_key == "item_references":
+                continue
             # Iterate all items to find if they are a product of cooking this ingredient
             for product_key, product_def in ITEM_DEFINITIONS.items():
                 recipe = product_def.get("crafting_recipe")
@@ -12812,8 +12699,9 @@ class World:
 
         # Find smokable items
         smokable_items = []
-        for item in self.player.economic.inventory:
-            item_key = item["key"]
+        for item_key, count in list(self.player.economic.inventory.items()):
+            if item_key == "item_references":
+                continue
 
             # Map raw -> smoked
             smoked_version = None

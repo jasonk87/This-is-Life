@@ -248,14 +248,12 @@ class TestClothProductionSystem(unittest.TestCase):
         self.assertTrue(self.world.player.has_item("raw_wool"), "Player should have raw wool after shearing sheep.")
 
         # Find wool in inventory to check quantity
-        wool_indices = self.world.player.get_item_instance_indices("raw_wool")
-        self.assertTrue(wool_indices)
-        initial_wool_quantity = self.world.player.economic.inventory[wool_indices[0]].get("quantity", 0)
+        initial_wool_quantity = self.world.player.economic.inventory.get("raw_wool", 0)
         self.assertGreater(initial_wool_quantity, 0)
 
         # Check that sheep can't be shorn again immediately
         self.world.player_attempt_shear(sheep)
-        current_wool_quantity = self.world.player.economic.inventory[wool_indices[0]].get("quantity", 0)
+        current_wool_quantity = self.world.player.economic.inventory.get("raw_wool", 0)
         self.assertEqual(initial_wool_quantity, current_wool_quantity)
 
 
@@ -303,8 +301,8 @@ class TestPlayerFarming(unittest.TestCase):
         # Give player a hoe
         player.add_item("stone_hoe", 1)
         self.assertTrue(player.has_item("stone_hoe"))
-        hoe_instance = player.get_item_by_index(player.get_item_instance_indices("stone_hoe")[0])
-        initial_durability = hoe_instance['durability']
+        hoe_instance = player.get_item_reference("stone_hoe")
+        initial_durability = hoe_instance.current_durability
 
         # Find a plains tile in front of the player
         target_x, target_y = player.x + 1, player.y
@@ -322,7 +320,7 @@ class TestPlayerFarming(unittest.TestCase):
         self.assertEqual(tilled_tile.name, "Tilled Soil")
 
         # Assert hoe durability has decreased
-        self.assertLess(hoe_instance['durability'], initial_durability)
+        self.assertLess(hoe_instance.current_durability, initial_durability)
 
     def test_player_can_plant_seeds(self):
         from data.tiles import TILE_DEFINITIONS

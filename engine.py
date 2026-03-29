@@ -9388,7 +9388,33 @@ class World:
                             self._update_entity_position(self.player, tx, ty)
                             return
 
+        # Fallback 2: Ignore margin, just find ANY passable non-water tile
+        for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
+            for x_offset in range(-r, r + 1):
+                for y_sign in [-1, 1]:
+                    tx, ty = center_x + x_offset, center_y + (r * y_sign)
+                    if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
+                        tile = self.get_tile_at(tx, ty)
+                        if tile and tile.passable and "water" not in tile.name.lower():
+                            self._update_entity_position(self.player, tx, ty)
+                            return
+            for y_offset in range(-r + 1, r):
+                for x_sign in [-1, 1]:
+                    tx, ty = center_x + (r * x_sign), center_y + y_offset
+                    if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
+                        tile = self.get_tile_at(tx, ty)
+                        if tile and tile.passable and "water" not in tile.name.lower():
+                            self._update_entity_position(self.player, tx, ty)
+                            return
+
         print("Warning: No passable starting tile found within the safe margin. Player may be stuck.")
+        # Fallback 3: Force overwrite center to plains
+        center_x, center_y = max(0, min(WORLD_WIDTH - 1, center_x)), max(0, min(WORLD_HEIGHT - 1, center_y))
+        plains_def = TILE_DEFINITIONS.get("plains", {
+            "char": 0xE000, "color": (100, 200, 100), "passable": True, "name": "Plains"
+        })
+        self._change_map_tile((center_x, center_y), plains_def)
+        self._update_entity_position(self.player, center_x, center_y)
 
     def _create_family_npc(self, role: str, last_name: str, home_building: Building, family_ties: dict):
         """Helper to create a family member NPC."""

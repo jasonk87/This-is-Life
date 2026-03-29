@@ -9388,33 +9388,7 @@ class World:
                             self._update_entity_position(self.player, tx, ty)
                             return
 
-        # Fallback 2: Ignore margin, just find ANY passable non-water tile
-        for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
-            for x_offset in range(-r, r + 1):
-                for y_sign in [-1, 1]:
-                    tx, ty = center_x + x_offset, center_y + (r * y_sign)
-                    if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
-                        tile = self.get_tile_at(tx, ty)
-                        if tile and tile.passable and "water" not in tile.name.lower():
-                            self._update_entity_position(self.player, tx, ty)
-                            return
-            for y_offset in range(-r + 1, r):
-                for x_sign in [-1, 1]:
-                    tx, ty = center_x + (r * x_sign), center_y + y_offset
-                    if 0 <= tx < WORLD_WIDTH and 0 <= ty < WORLD_HEIGHT:
-                        tile = self.get_tile_at(tx, ty)
-                        if tile and tile.passable and "water" not in tile.name.lower():
-                            self._update_entity_position(self.player, tx, ty)
-                            return
-
         print("Warning: No passable starting tile found within the safe margin. Player may be stuck.")
-        # Fallback 3: Force overwrite center to plains
-        center_x, center_y = max(0, min(WORLD_WIDTH - 1, center_x)), max(0, min(WORLD_HEIGHT - 1, center_y))
-        plains_def = TILE_DEFINITIONS.get("plains", {
-            "char": 0xE000, "color": (100, 200, 100), "passable": True, "name": "Plains"
-        })
-        self._change_map_tile((center_x, center_y), plains_def)
-        self._update_entity_position(self.player, center_x, center_y)
 
     def _create_family_npc(self, role: str, last_name: str, home_building: Building, family_ties: dict):
         """Helper to create a family member NPC."""
@@ -9497,6 +9471,9 @@ class World:
             else:
                 self._set_entity_profession(npc, "Unemployed", reason="no_available_job")
 
+        # Force a schedule update on their very first tick instead of idling
+        npc.schedule.game_time_last_updated = self.game_time - NPC_SCHEDULE_UPDATE_INTERVAL
+
         self.village_npcs.append(npc)
         self._mark_entity_positions_dirty()
         return npc
@@ -9573,15 +9550,6 @@ class World:
                 self.player.social.family_ties["sibling_ids"] = []
             if isinstance(self.player.social.family_ties["sibling_ids"], list):
                 self.player.social.family_ties["sibling_ids"].append(self.village_npcs[-1].id)
-
-        # Force an initial schedule update for all newly created family members so they don't just stand idle
-        # They will find their beds if it's nighttime or go to work if it's daytime.
-        current_time_in_day = self.game_time % max(1, DAY_LENGTH_TICKS)
-        for npc in self.village_npcs:
-            if npc.schedule.home_building_id == player_home.id:
-                # Force them to wake if they're stuck in a sleep state from bad init
-                self.wake_entity(npc)
-                run_npc_humanoid_scheduling_flow(self, npc, current_time_in_day)
 
     def _generate_chunk_macro(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the macro structure (village, buildings, NPCs) for a chunk."""

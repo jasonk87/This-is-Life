@@ -79,6 +79,17 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
             npc.sub_task_timer -= 1
             npc.schedule.current_task = TaskType.AT_WORK
 
+            # Emit a visual sub-task action randomly while performing it
+            if npc.sub_task_timer > 0 and getattr(world, "game_time", 0) % 30 == 0:
+                sub_task_data = get_sub_task_data(npc.economic.profession, npc.current_sub_task)
+                if sub_task_data:
+                    action_verb = sub_task_data.get("action_verb")
+                    if action_verb:
+                        from engine import FloatingTextEffect
+                        world.visual_effects.append(
+                            FloatingTextEffect(npc.x, npc.y, f"*{action_verb}*", color=(200, 200, 200))
+                        )
+
             if npc.sub_task_timer <= 0:
                 npc.economic.work_performance = min(100, npc.economic.work_performance + 5)
                 if hasattr(getattr(npc, "skills", None), "gain_experience"):

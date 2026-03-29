@@ -309,9 +309,9 @@ class TestDayNightVisibility(unittest.TestCase):
         world.game_time = 0
         world.current_light_level_name = "DAY"
         world.current_fov_radius = config.FOV_RADIUS_DAY
-        world.transparency_map = engine.np.ones((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
-        world.explored_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
-        world.player_fov_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.transparency_map = engine.np.ones((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, )
+        world.explored_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, )
+        world.player_fov_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, )
         world.player = SimpleNamespace(
             x=config.WORLD_WIDTH // 2,
             y=config.WORLD_HEIGHT // 2,
@@ -360,11 +360,11 @@ class TestDayNightVisibility(unittest.TestCase):
 
         world.current_fov_radius = config.FOV_RADIUS_DAY
         engine.World._update_player_fov(world)
-        day_visible_tiles = int(world.player_fov_map.sum())
+        day_visible_tiles = sum(1 for row in world.player_fov_map for cell in row if cell)
 
         world.current_fov_radius = config.FOV_RADIUS_NIGHT
         engine.World._update_player_fov(world)
-        night_visible_tiles = int(world.player_fov_map.sum())
+        night_visible_tiles = sum(1 for row in world.player_fov_map for cell in row if cell)
 
         self.assertGreater(day_visible_tiles, night_visible_tiles)
         self.assertGreater(day_visible_tiles - night_visible_tiles, 150)
@@ -496,7 +496,7 @@ class TestBuildingEntranceIntegrity(unittest.TestCase):
             for _ in range(config.CHUNK_SIZE)
         ]
         world.chunks = [[SimpleNamespace(tiles=tiles, is_terrain_generated=True, poi_type="village", village=None)]]
-        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, order="F")
+        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, )
         world.buildings_by_id = {}
         world.player = SimpleNamespace(
             id=1,
@@ -655,7 +655,7 @@ class TestInteriorFurnishingIntegrity(unittest.TestCase):
             village=village,
         )
         world.chunks = [[chunk]]
-        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, order="F")
+        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, )
         world.buildings_by_id = {}
         world._call_llm_for_worldgen = lambda prompt: llm_response
         world.add_message_to_chat_log = lambda *args, **kwargs: None

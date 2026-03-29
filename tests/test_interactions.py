@@ -7,6 +7,7 @@ import time
 import uuid
 
 import engine
+from simulation.systems.task_types import TaskType
 from engine import World
 import main
 import rendering.console_renderer as console_renderer
@@ -1859,7 +1860,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         scribe = engine.NPC(5, 5, name="Alda")
         scribe.economic.profession = "Scribe"
         scribe.career.set_role("Scribe")
-        scribe.schedule.current_task = "at work"
+        scribe.schedule.current_task = TaskType.AT_WORK
         library = engine.Building(4, 4, 6, 6, building_type="library", category="commercial_workplace")
         self.world.buildings_by_id[library.id] = library
         scribe.schedule.work_building_id = library.id

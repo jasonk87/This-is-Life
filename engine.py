@@ -1,3 +1,4 @@
+from simulation.systems.task_types import TaskType
 # engine.py
 import math
 import random
@@ -2019,11 +2020,11 @@ class World:
         if (npc.x, npc.y) == (board_x, board_y):
             task = self._find_best_employment_task_for_npc(npc)
             if task and self._hire_npc_from_employment_task(npc, task):
-                npc.schedule.current_task = "idle"
+                npc.schedule.current_task = TaskType.IDLE
                 npc.schedule.current_path = []
                 npc.schedule.current_destination_coords = None
                 return True
-            npc.schedule.current_task = "idle"
+            npc.schedule.current_task = TaskType.IDLE
             npc.schedule.current_destination_coords = None
             npc.schedule.current_path = []
             return False
@@ -2540,7 +2541,7 @@ class World:
             if npc.schedule.current_task == "execute_political_warrant" and npc.task_target_entity_id is not None:
                 target = self.get_entity_by_id(npc.task_target_entity_id)
                 if target is None or getattr(getattr(target, "physical", None), "is_dead", False):
-                    npc.schedule.current_task = "idle"
+                    npc.schedule.current_task = TaskType.IDLE
                     npc.task_target_entity_id = None
                     npc.combat.is_hostile_to_player = False
                 else:
@@ -2637,7 +2638,7 @@ class World:
                         npc.schedule.current_path = path
                         npc.schedule.current_destination_coords = (flee_x, flee_y)
                     else:
-                        npc.schedule.current_task = "idle" # Can't flee, so just idle
+                        npc.schedule.current_task = TaskType.IDLE # Can't flee, so just idle
 
             elif npc.schedule.current_task == "greeting_player":
                 # Greeting player due to fame
@@ -2649,7 +2650,7 @@ class World:
                             npc.schedule.current_path = path
                             npc.schedule.current_destination_coords = (dest_x, dest_y)
                         else:
-                            npc.schedule.current_task = "idle" # Can't greet, so idle
+                            npc.schedule.current_task = TaskType.IDLE # Can't greet, so idle
 
             elif npc.schedule.current_task == "combat_action_move_to_attack_player":
                 player = self.player
@@ -2805,7 +2806,7 @@ class World:
                             self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.")
 
                     elif npc.schedule.current_task == "mobile_conversation_follow":
-                        npc.schedule.current_task = "idle"
+                        npc.schedule.current_task = TaskType.IDLE
                     elif npc.schedule.current_task == "socializing" and npc.task_target_entity_id:
                         chat_partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if chat_partner and abs(npc.x - chat_partner.x) + abs(npc.y - chat_partner.y) <= 1:
@@ -2835,7 +2836,7 @@ class World:
                             chat_partner.social.relationships[npc.id] = min(100, chat_partner.social.relationships.get(npc.id, 50) + 5)
 
 
-                        npc.schedule.current_task = "idle" # Done socializing for now
+                        npc.schedule.current_task = TaskType.IDLE # Done socializing for now
                     elif npc.schedule.current_task == "gathering_social":
                         npc.schedule.current_task = "socializing_at_focal_point"
                         npc.schedule.current_path = []
@@ -2851,7 +2852,7 @@ class World:
                                 npc.social.relationships[friend.id] = min(100, npc.social.relationships.get(friend.id, 50) + 10)
                                 friend.social.relationships[npc.id] = min(100, friend.social.relationships.get(npc.id, 50) + 10)
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
-                        npc.schedule.current_task = "idle" # Done visiting
+                        npc.schedule.current_task = TaskType.IDLE # Done visiting
                     elif npc.schedule.current_task == "applying_for_job":
                         # Arrived at potential workplace to apply
                         target_building = None
@@ -2866,7 +2867,7 @@ class World:
                              current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == target_building.id and not n.physical.is_dead)
                              if current_workers < target_building.max_workers:
                                  self._assign_job(npc, target_building)
-                                 npc.schedule.current_task = "at work"
+                                 npc.schedule.current_task = TaskType.AT_WORK
                                  self.add_message_to_chat_log(
                                      f"{self.get_entity_display_name(npc)} got the job at the {target_building.building_type.replace('_', ' ')} thanks to your tip!"
                                  )
@@ -2875,20 +2876,20 @@ class World:
                                  self.add_message_to_chat_log(
                                      f"{self.get_entity_display_name(npc)} was told there are no vacancies at the {target_building.building_type.replace('_', ' ')}."
                                  )
-                                 npc.schedule.current_task = "idle"
+                                 npc.schedule.current_task = TaskType.IDLE
                         else:
-                            npc.schedule.current_task = "idle"
+                            npc.schedule.current_task = TaskType.IDLE
 
                     elif npc.schedule.current_task == "greeting_player":
                         # Successfully reached the player, initiate dialogue
                         self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} says hello!")
                         self.start_npc_dialogue(npc)
                         self.request_open_dialogue(npc)
-                        npc.schedule.current_task = "idle"
+                        npc.schedule.current_task = TaskType.IDLE
                     elif npc.schedule.current_task == "approaching_player_for_help":
                         self.start_npc_dialogue(npc)
                         self.request_open_dialogue(npc)
-                        npc.schedule.current_task = "idle"
+                        npc.schedule.current_task = TaskType.IDLE
                     elif npc.schedule.current_task == "courting":
                         partner = next((p for p in self.village_npcs if p.id == npc.task_target_entity_id), None)
                         if partner:
@@ -2927,21 +2928,21 @@ class World:
                                 self.add_message_to_chat_log(
                                     f"{self.get_entity_display_name(npc)} proposed to {self.get_entity_display_name(partner)}, but was rejected."
                                 )
-                        npc.schedule.current_task = "idle"
-                    elif npc.schedule.current_task == "going_to_work":
-                        npc.schedule.current_task = "at work"
-                    elif npc.schedule.current_task == "looking_for_work":
+                        npc.schedule.current_task = TaskType.IDLE
+                    elif npc.schedule.current_task == TaskType.GOING_TO_WORK:
+                        npc.schedule.current_task = TaskType.AT_WORK
+                    elif npc.schedule.current_task == TaskType.LOOKING_FOR_WORK:
                         # Arrived at potential workplace
-                        npc.schedule.current_task = "idle" # Or "lingering" if handled elsewhere, for now idle means they stay put
+                        npc.schedule.current_task = TaskType.IDLE # Or "lingering" if handled elsewhere, for now idle means they stay put
                         # self.add_message_to_chat_log(f"Debug: {npc.name} is looking for work at a building.")
                     elif npc.schedule.current_task == "leaving_village":
                         # NPC has arrived at the edge of the map
                         self._remove_npc_from_world(npc, reason="emigrated")
                         continue # Stop processing this NPC
-                    elif npc.schedule.current_task in ["going_home", "going_home_to_sleep", "going_to_bed"]:
-                        npc.schedule.current_task = "at_home"
+                    elif npc.schedule.current_task in [TaskType.GOING_HOME, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
+                        npc.schedule.current_task = TaskType.AT_HOME
                     else:
-                        npc.schedule.current_task = "idle" # Default state post-movement
+                        npc.schedule.current_task = TaskType.IDLE # Default state post-movement
 
                     npc.schedule.current_destination_coords = None
 
@@ -3415,7 +3416,7 @@ class World:
                 if npc.task_timer > 0:
                     npc.task_timer -= 1
                 else:
-                    npc.schedule.current_task = "idle"
+                    npc.schedule.current_task = TaskType.IDLE
                     npc.task_target_coords = None
                 continue # Skip normal scheduling
 
@@ -3494,7 +3495,7 @@ class World:
                                 self.broadcast_news(npc, 20, threat_event)
                                 npc.is_frightened = False # Job done
                                 npc.threat_source_ids = []
-                                npc.schedule.current_task = "idle"
+                                npc.schedule.current_task = TaskType.IDLE
 
                     elif entity_has_any_profession(npc, ["Guard", "Sheriff"]):
                         if npc.schedule.current_task == "alerting_guards" and (not npc.schedule.current_path or len(npc.schedule.current_path) <= 1):
@@ -3530,7 +3531,7 @@ class World:
                 else:
                     npc.is_frightened = False
                     npc.threat_source_ids = []
-                    npc.schedule.current_task = "idle"
+                    npc.schedule.current_task = TaskType.IDLE
                     npc.schedule.current_path = []
                     self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} calms down as the threat is gone.")
                 continue
@@ -3568,8 +3569,8 @@ class World:
 
         # After all task decisions and path assignments:
         # If NPC is at work, handle specific work sub-tasks or general production.
-        # This is also where NPCs who have arrived at work ("at work") will start their sub-task logic.
-        if npc.schedule.current_task == "at work":
+        # This is also where NPCs who have arrived at work (TaskType.AT_WORK) will start their sub-task logic.
+        if npc.schedule.current_task == TaskType.AT_WORK:
             # Sub-task logic is now the primary driver of production.
             # The old _handle_npc_production is removed.
             work_behavior = getattr(getattr(npc, "ai_brain", None), "work_behavior", None)
@@ -4408,7 +4409,7 @@ class World:
             self.add_message_to_chat_log(self.text.entity_apprehends_you(npc))
             self.serve_jail_time()
             npc.combat.is_hostile_to_player = False
-            npc.schedule.current_task = "idle"
+            npc.schedule.current_task = TaskType.IDLE
             npc.schedule.current_path = []
             return
 
@@ -4531,7 +4532,7 @@ class World:
             self.handle_npc_death(target, killer_id=attacker.id)
             if self._is_predator(attacker):
                 attacker.physical.hunger = 0
-                attacker.schedule.current_task = "idle"
+                attacker.schedule.current_task = TaskType.IDLE
                 attacker.task_target_entity_id = None
 
     def _find_nearest_food_vendor(self, npc: NPC) -> Building | None:
@@ -4903,7 +4904,7 @@ class World:
             member.travel.eta_days = 0
             member.macro_x, member.macro_y = destination_coords
             member.x, member.y = destination_coords
-            member.schedule.current_task = "idle"
+            member.schedule.current_task = TaskType.IDLE
             vacant_home = next((building for building in destination.buildings if building.category == "residential" and len(building.residents) < 2), None)
             if vacant_home is not None and member not in vacant_home.residents:
                 vacant_home.residents.append(member)
@@ -4994,13 +4995,13 @@ class World:
             "wandering_hungry_homeless",
             "idle_confused",
         }
-        current_task = getattr(npc.schedule, "current_task", "idle")
+        current_task = getattr(npc.schedule, "current_task", TaskType.IDLE)
         if current_task in survival_tasks:
             return
-        npc.schedule.previous_task = current_task if current_task not in ["idle", "wandering"] else "idle"
+        npc.schedule.previous_task = current_task if current_task not in [TaskType.IDLE, TaskType.WANDERING] else TaskType.IDLE
 
     def _resume_npc_after_survival_need(self, npc: NPC) -> None:
-        npc.schedule.current_task = npc.schedule.previous_task or "idle"
+        npc.schedule.current_task = npc.schedule.previous_task or TaskType.IDLE
         npc.schedule.previous_task = None
         npc.schedule.current_path = []
         npc.schedule.current_destination_coords = None
@@ -5162,7 +5163,7 @@ class World:
         task_data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
         if release_claim and task_data.get("haul_task_id"):
             self.town_board.release_task(task_data["haul_task_id"])
-        npc.schedule.current_task = "idle"
+        npc.schedule.current_task = TaskType.IDLE
         npc.schedule.current_path = []
         npc.schedule.current_destination_coords = None
         npc.task_target_coords = None
@@ -5574,6 +5575,7 @@ class World:
                 actions.append("Read")
 
         elif entity_type == "tile":
+            interaction_hint = entity_data.properties.get("interaction_hint")
             if isinstance(entity_data, Tree) and entity_data.is_choppable:
                 actions.append("Chop")
             elif entity_data.properties.get("is_door"):
@@ -5582,8 +5584,14 @@ class World:
                 actions.append("Butcher")
             elif entity_data.name == "Treasure Chest":
                 actions.append("Loot Chest")
-            elif entity_data.properties.get("interaction_hint") == "noticeboard":
+            elif interaction_hint == "noticeboard":
                 actions.append("Read Notices")
+            elif interaction_hint == "sit":
+                actions.append("Sit")
+            elif interaction_hint == "sleep":
+                actions.append("Sleep")
+            elif interaction_hint == "forge":
+                actions.append("Forge")
 
             elif entity_data.name == "Plains" and self.player.has_item("stone_hoe"):
                 actions.append("Till Soil")
@@ -6783,7 +6791,7 @@ class World:
                 group_participants.append(p)
             elif abs(p.x - speaker.x) + abs(p.y - speaker.y) <= 3:
                 is_following = getattr(getattr(p, "social", None), "follow_target_id", None) in (speaker.id, listener.id)
-                if is_following or (p.schedule.current_task in {"idle", "gathering_social", "socializing_at_focal_point"} and random.random() < 0.2):
+                if is_following or (p.schedule.current_task in {TaskType.IDLE, "gathering_social", "socializing_at_focal_point"} and random.random() < 0.2):
                     group_participants.append(p)
             if len(group_participants) >= 4:
                 break
@@ -8328,7 +8336,7 @@ class World:
             return False
         if str(getattr(getattr(scribe, "economic", None), "profession", "") or "") != "Scribe":
             return False
-        if getattr(getattr(scribe, "schedule", None), "current_task", "") not in {"at work"}:
+        if getattr(getattr(scribe, "schedule", None), "current_task", "") not in {TaskType.AT_WORK}:
             return False
 
         eligible_memories = [
@@ -8377,7 +8385,7 @@ class World:
         scribe.knowledge.chronicle_pending_memory_ids.difference_update(memory_ids)
         scribe.skills.gain_experience("crafting", max(2, len(memory_ids) * 2))
         if getattr(getattr(scribe, "schedule", None), "current_task", "") == "Begin Drafting":
-            scribe.schedule.current_task = "at work"
+            scribe.schedule.current_task = TaskType.AT_WORK
         self.add_message_to_chat_log(f"{scribe.name} completes a new town chronicle.")
 
     def _drain_gossip_flavor_text_queue(self) -> None:
@@ -10900,13 +10908,13 @@ class World:
         if goal == "go_to_work" and speaker.schedule.work_building_id:
             dest = self._get_building_global_center_coords(speaker.schedule.work_building_id)
             if dest:
-                speaker.schedule.current_task = "going_to_work"
+                speaker.schedule.current_task = TaskType.GOING_TO_WORK
                 speaker.schedule.current_destination_coords = dest
                 speaker.schedule.current_path = []
         elif goal == "go_home" and speaker.schedule.home_building_id:
             dest = self._get_building_global_center_coords(speaker.schedule.home_building_id)
             if dest:
-                speaker.schedule.current_task = "going_home"
+                speaker.schedule.current_task = TaskType.GOING_HOME
                 speaker.schedule.current_destination_coords = dest
                 speaker.schedule.current_path = []
         elif goal == "visit_listener_home" and listener.schedule.home_building_id:
@@ -12831,6 +12839,16 @@ class World:
                 self.add_message_to_chat_log("Error: Failed to consume wood.")
         else:
              self.add_message_to_chat_log("Something went wrong with smoking.")
+
+    def player_attempt_forge(self, x: int, y: int):
+        """Handles the player's attempt to use an anvil."""
+        target_tile = self.get_tile_at(x, y)
+        interaction_hint = target_tile.properties.get("interaction_hint") if target_tile and hasattr(target_tile, "properties") else None
+        if not (target_tile and interaction_hint == "forge"):
+            self.add_message_to_chat_log("You need an anvil to forge.")
+            return
+
+        self.add_message_to_chat_log("You hammer away at the anvil, but lack a crafting blueprint.")
 
     def player_attempt_build(self, recipe_key: str, x: int, y: int):
         """Handles the player's attempt to build a structure or furniture."""

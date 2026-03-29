@@ -1,5 +1,6 @@
 """Brain and job behavior components for humanoid NPCs."""
 from __future__ import annotations
+from simulation.systems.task_types import TaskType
 
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -86,7 +87,7 @@ class SleepBehavior(JobBehavior):
 class HaulingBehavior(JobBehavior):
     profession_name = "Hauling"
 
-    FREE_TIME_TASKS = {"idle", "wandering", "at_home", "idle_confused"}
+    FREE_TIME_TASKS = {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, "idle_confused"}
 
     def take_turn(self, entity, world) -> bool:
         current_task = getattr(getattr(entity, "schedule", None), "current_task", "") or ""
@@ -107,7 +108,7 @@ class HaulingBehavior(JobBehavior):
 
 class GossipBehavior(JobBehavior):
     profession_name = "Gossip"
-    ELIGIBLE_TASKS = {"idle", "wandering", "at_home", "at work", "going_to_work", "going_home", "looking_for_work"}
+    ELIGIBLE_TASKS = {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, TaskType.AT_WORK, TaskType.GOING_TO_WORK, TaskType.GOING_HOME, TaskType.LOOKING_FOR_WORK}
 
     def take_turn(self, entity, world) -> bool:
         knowledge = getattr(entity, "knowledge", None)

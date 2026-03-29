@@ -1,6 +1,7 @@
 """Daily humanoid schedule-policy transitions (work/home/leisure/social)."""
 
 from __future__ import annotations
+from simulation.systems.task_types import TaskType
 
 import random
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ def run_npc_presence_micro_reactions(world, npc) -> bool:
         return False
 
     # Only react if in a low-priority, non-critical state
-    if npc.schedule.current_task not in {"idle", "wandering", "socializing", "gathering_social", "at_home"}:
+    if npc.schedule.current_task not in {TaskType.IDLE, TaskType.WANDERING, "socializing", "gathering_social", TaskType.AT_HOME}:
         return False
 
     max_presence = 0.0
@@ -123,7 +124,7 @@ def run_npc_crime_reporting_policy(world, npc) -> bool:
             world.add_message_to_chat_log(world.text.entity_reports_your_crimes(npc))
             world.player.economic.bounty += 50
             world.add_message_to_chat_log(f"Your bounty has increased by 50. Total bounty: {world.player.economic.bounty}.")
-            npc.schedule.current_task = "idle"
+            npc.schedule.current_task = TaskType.IDLE
             npc.task_target_coords = None
         else:
             if not npc.schedule.current_path or npc.schedule.current_destination_coords != npc.task_target_coords:
@@ -138,7 +139,7 @@ def run_npc_crime_reporting_policy(world, npc) -> bool:
 
 def run_npc_item_pickup_policy(world, npc) -> bool:
     """Decide whether a humanoid should interrupt idle flow to pick up a perceived item."""
-    if not npc.knowledge.perceived_item_tiles or npc.schedule.current_task not in ["idle", "wandering", "at_home", "at work"]:
+    if not npc.knowledge.perceived_item_tiles or npc.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, TaskType.AT_WORK]:
         return False
 
     best_item_score = 0
@@ -245,7 +246,7 @@ def run_npc_follower_catch_up_policy(world, npc) -> bool:
                 return True
 
     if npc.schedule.current_task == "following_target":
-        npc.schedule.current_task = "idle"
+        npc.schedule.current_task = TaskType.IDLE
         npc.schedule.current_path = []
         npc.schedule.current_destination_coords = None
 
@@ -270,7 +271,7 @@ def run_npc_follower_envelope_policy(world, npc) -> bool:
     if dist <= envelope_dist:
         _try_companion_conversation_trigger(world, npc, target)
 
-        if npc.schedule.current_task not in {"idle", "wandering", "avoiding_crowding"}:
+        if npc.schedule.current_task not in {TaskType.IDLE, TaskType.WANDERING, "avoiding_crowding"}:
             return False
 
         if dist == 0:
@@ -316,7 +317,7 @@ def run_npc_follower_envelope_policy(world, npc) -> bool:
 
                 tile = world.get_tile_at(dest[0], dest[1])
                 if tile and getattr(tile, "passable", False):
-                    npc.schedule.current_task = "wandering"
+                    npc.schedule.current_task = TaskType.WANDERING
                     npc.schedule.current_path = [dest]
                     npc.schedule.current_destination_coords = dest
 
@@ -363,14 +364,69 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
         return
     if run_npc_mobile_conversation_policy(world, npc):
         return
+    if run_npc_furniture_interaction_policy(world, npc):
+        return
     update_npc_daily_goal_policy(world, npc, current_time_in_day)
+
+
+def run_npc_furniture_interaction_policy(world, npc) -> bool:
+    """Occasionally have idle/at_home/at_work NPCs sit on chairs or work at anvils/desks."""
+    if npc.schedule.current_task in {TaskType.SITTING, TaskType.FORGING}:
+        if npc.leisure_timer > 0:
+            npc.leisure_timer -= 1
+            if getattr(npc, "is_sitting", False) and npc.schedule.current_task != TaskType.SITTING:
+                 # Stand up if task interrupted
+                 npc.is_sitting = False
+                 npc.sitting_on_object_at = None
+            return True
+        else:
+            npc.schedule.current_task = TaskType.IDLE
+            npc.is_sitting = False
+            npc.sitting_on_object_at = None
+            return False
+
+    if getattr(npc, "is_sitting", False) and npc.schedule.current_task not in {TaskType.SITTING, TaskType.FORGING}:
+        npc.is_sitting = False
+        npc.sitting_on_object_at = None
+
+    if npc.schedule.current_task not in {TaskType.IDLE, TaskType.AT_HOME, TaskType.AT_WORK} or npc.schedule.current_path:
+        return False
+
+    if random.random() >= 0.05:
+        return False
+
+    # Look for adjacent furniture to interact with
+    candidate_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    for dx, dy in candidate_offsets:
+        target_x, target_y = npc.x + dx, npc.y + dy
+        tile = world.get_tile_at(target_x, target_y)
+        if not tile or not hasattr(tile, "properties"):
+            continue
+        hint = tile.properties.get("interaction_hint")
+        if hint == "sit":
+            npc.schedule.current_task = TaskType.SITTING
+            npc.is_sitting = True
+            npc.sitting_on_object_at = (target_x, target_y)
+            npc.leisure_timer = random.randint(30, 80)
+            return True
+        elif hint == "forge" and npc.schedule.current_task == TaskType.AT_WORK:
+            npc.schedule.current_task = TaskType.FORGING
+            npc.leisure_timer = random.randint(20, 50)
+            return True
+        elif hint == "read" and npc.schedule.current_task in {TaskType.IDLE, TaskType.AT_HOME}:
+            # Simulating reading by looking at it for a while
+            npc.schedule.current_task = TaskType.IDLE # Just pause essentially
+            npc.leisure_timer = random.randint(20, 50)
+            return True
+
+    return False
 
 
 def run_npc_mobile_conversation_policy(world, npc) -> bool:
     """Allow active conversations to gently continue while moving, without fixed destinations."""
     if npc.schedule.current_task == "mobile_conversation_follow":
         if not getattr(npc.schedule, "current_path", None):
-            npc.schedule.current_task = "idle"
+            npc.schedule.current_task = TaskType.IDLE
 
     partner_id = getattr(npc, "conversation_partner_id", None)
     if partner_id is None:
@@ -386,7 +442,7 @@ def run_npc_mobile_conversation_policy(world, npc) -> bool:
         return False
 
     if dist > 2:
-        if npc.schedule.current_task in {"idle", "wandering", "socializing", "avoiding_crowding", "gathering_social", "socializing_at_focal_point", "mobile_conversation_follow"}:
+        if npc.schedule.current_task in {TaskType.IDLE, TaskType.WANDERING, "socializing", "avoiding_crowding", "gathering_social", "socializing_at_focal_point", "mobile_conversation_follow"}:
             rel = getattr(getattr(npc, "social", None), "relationships", {}).get(partner_id, 50)
             shared = getattr(getattr(npc, "social", None), "shared_experience_ticks", {}).get(partner_id, 0)
 
@@ -419,7 +475,7 @@ def run_npc_mobile_conversation_policy(world, npc) -> bool:
 
 def run_npc_social_reaction_policy(world, npc) -> bool:
     """React to nearby visible social threats in an entity-agnostic way."""
-    if npc.schedule.current_task not in ["idle", "wandering", "at_home", "at work"] or npc.schedule.current_path:
+    if npc.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, TaskType.AT_WORK] or npc.schedule.current_path:
         return False
 
     # Check if guarding someone
@@ -502,11 +558,11 @@ def run_npc_social_gathering_policy(world, npc) -> bool:
             if random.random() < 0.15:
                 world._start_npc_socialization(npc)
             return True
-        npc.schedule.current_task = "idle"
+        npc.schedule.current_task = TaskType.IDLE
         npc.task_context_data = None
         return False
 
-    if npc.schedule.current_task not in {"idle", "wandering", "at_home"} or npc.schedule.current_path:
+    if npc.schedule.current_task not in {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME} or npc.schedule.current_path:
         return False
     if random.random() >= 0.08:
         return False
@@ -661,7 +717,7 @@ def run_npc_traveling_merchant_policy(world, npc) -> None:
                 process_traveling_merchant_village_trade(world, npc, current_village)
         else:
             npc.schedule.current_task = "traveling_to_village"
-    elif npc.schedule.current_task == "idle" and random.random() < 0.1:
+    elif npc.schedule.current_task == TaskType.IDLE and random.random() < 0.1:
         npc.schedule.current_task = "traveling_to_village"
 
 
@@ -692,7 +748,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
     is_leisure_time = work_end_tick <= current_time_in_day < sleep_start_tick
 
     if work_start_tick <= current_time_in_day < work_end_tick:
-        if npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != "going_to_work":
+        if npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
             dest_coords_temp = world._get_building_global_center_coords(npc.schedule.work_building_id)
             if dest_coords_temp:
                 work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
@@ -707,11 +763,11 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                     work_anchor = work_building_obj.get_anchor_coordinates(["work", "service"], world=world, requesting_entity=npc, ideal_role=ideal_role)
                     if work_anchor:
                         dest_coords_temp = work_building_obj.refine_anchor_coordinates(world, work_anchor[0], work_anchor[1], requesting_entity=npc)
-                new_task_label = "going_to_work"
+                new_task_label = TaskType.GOING_TO_WORK
                 destination_coords = dest_coords_temp
         elif npc.schedule.work_building_id and is_at_work:
-            npc.schedule.current_task = "at work"
-        elif npc.economic.profession.lower() == "unemployed" and npc.schedule.current_task != "looking_for_work":
+            npc.schedule.current_task = TaskType.AT_WORK
+        elif npc.economic.profession.lower() == "unemployed" and npc.schedule.current_task != TaskType.LOOKING_FOR_WORK:
             if random.random() < 0.02:
                 npc_village = world._get_village_for_npc(npc)
                 if npc_village:
@@ -720,11 +776,11 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                         target_workplace = random.choice(workplaces)
                         dest_coords = (target_workplace.global_center_x, target_workplace.global_center_y)
                         if (npc.x, npc.y) != dest_coords:
-                            new_task_label = "looking_for_work"
+                            new_task_label = TaskType.LOOKING_FOR_WORK
                             destination_coords = dest_coords
                             npc.leisure_timer = random.randint(50, 100)
 
-    elif is_leisure_time and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", "going_home", "visiting_friend", "gathering_social", "socializing_at_focal_point"]:
+    elif is_leisure_time and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", TaskType.GOING_HOME, "visiting_friend", "gathering_social", "socializing_at_focal_point"]:
         if npc.leisure_timer > 0:
             npc.leisure_timer -= 1
         elif random.random() < 0.05:
@@ -788,7 +844,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 npc.leisure_timer = random.randint(100, 300)
 
     if npc.schedule.current_task == "going_to_social_anchor" and (npc.x, npc.y) == destination_coords:
-        npc.schedule.current_task = "at_home"
+        npc.schedule.current_task = TaskType.AT_HOME
         npc.leisure_timer = random.randint(50, 150)
     elif npc.schedule.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
         world.npc_attempt_fish(npc, npc.x, npc.y)
@@ -799,10 +855,10 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             event_to_shout = list(npc.knowledge.known_events.values())[-1]
         if event_to_shout:
             world.broadcast_news(npc, 15, event_to_shout)
-        npc.schedule.current_task = "idle"
+        npc.schedule.current_task = TaskType.IDLE
         npc.leisure_timer = 50
         npc.task_context_data = None
-    elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in ["sleeping", "going_home_to_sleep"]:
+    elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in [TaskType.SLEEPING, TaskType.GOING_HOME_TO_SLEEP]:
         home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
         if home_building_obj:
             sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
@@ -812,22 +868,22 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                     sleep_spot_coords = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
             if is_at_home:
                 if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords:
-                    npc.schedule.current_task = "sleeping"
+                    npc.schedule.current_task = TaskType.SLEEPING
                 elif sleep_spot_coords and (npc.x, npc.y) != sleep_spot_coords:
-                    new_task_label = "going_to_bed"
+                    new_task_label = TaskType.GOING_TO_BED
                     destination_coords = sleep_spot_coords
                 elif not sleep_spot_coords and world._building_contains_item_with_interaction(home_building_obj, "sleep"):
-                    npc.schedule.current_task = "sleeping"
+                    npc.schedule.current_task = TaskType.SLEEPING
             else:
                 if sleep_spot_coords:
-                    new_task_label = "going_home_to_sleep"
+                    new_task_label = TaskType.GOING_HOME_TO_SLEEP
                     destination_coords = sleep_spot_coords
                 else:
                     dest_coords_temp = world._get_building_global_center_coords(npc.schedule.home_building_id)
                     if dest_coords_temp:
-                        new_task_label = "going_home"
+                        new_task_label = TaskType.GOING_HOME
                         destination_coords = dest_coords_temp
-    elif npc.schedule.home_building_id and not is_at_home and npc.schedule.current_task not in ["going_home", "going_home_to_sleep", "sleeping"]:
+    elif npc.schedule.home_building_id and not is_at_home and npc.schedule.current_task not in [TaskType.GOING_HOME, TaskType.GOING_HOME_TO_SLEEP, TaskType.SLEEPING]:
         dest_coords_temp = world._get_building_global_center_coords(npc.schedule.home_building_id)
         if dest_coords_temp:
             home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
@@ -835,11 +891,11 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 sleep_anchor = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
                 if sleep_anchor:
                     dest_coords_temp = home_building_obj.refine_anchor_coordinates(world, sleep_anchor[0], sleep_anchor[1], requesting_entity=npc)
-            new_task_label = "going_home"
+            new_task_label = TaskType.GOING_HOME
             destination_coords = dest_coords_temp
 
-    if npc.schedule.current_task == "sleeping" and not is_night_time:
-        npc.schedule.current_task = "at_home"
+    if npc.schedule.current_task == TaskType.SLEEPING and not is_night_time:
+        npc.schedule.current_task = TaskType.AT_HOME
     elif npc.schedule.current_task == "seeking_partner":
         potential_partners = [
             p for p in world.village_npcs
@@ -856,7 +912,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 new_task_label = "courting"
                 npc.task_target_entity_id = chosen_partner.id
         else:
-            npc.schedule.current_task = "idle"
+            npc.schedule.current_task = TaskType.IDLE
     elif is_leisure_time and npc.age > 18 and not npc.social.family_ties.get("partner_id"):
         if random.random() < 0.01:
             npc.schedule.current_task = "seeking_partner"
@@ -882,19 +938,19 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
 
     if new_task_label and destination_coords:
         if (npc.x, npc.y) == destination_coords:
-            if new_task_label == "going_to_work":
-                npc.schedule.current_task = "at work"
-            elif new_task_label == "going_home":
-                npc.schedule.current_task = "at_home"
+            if new_task_label == TaskType.GOING_TO_WORK:
+                npc.schedule.current_task = TaskType.AT_WORK
+            elif new_task_label == TaskType.GOING_HOME:
+                npc.schedule.current_task = TaskType.AT_HOME
             else:
-                npc.schedule.current_task = "idle"
+                npc.schedule.current_task = TaskType.IDLE
         else:
             path = world.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
             if path:
                 npc.schedule.current_path = path
                 npc.schedule.current_destination_coords = destination_coords
                 npc.schedule.current_task = new_task_label
-                if new_task_label not in ["going_to_work", "at work"]:
+                if new_task_label not in [TaskType.GOING_TO_WORK, TaskType.AT_WORK]:
                     npc.clear_work_sub_task_state(reset_sequence=True)
             else:
                 npc.schedule.current_task = "idle_confused"

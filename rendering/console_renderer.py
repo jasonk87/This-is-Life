@@ -239,6 +239,25 @@ def _iter_render_entities(world):
     return sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, "render_order") else 0)
 
 
+def _draw_items(console, world, camera_x, camera_y):
+    for (item_x, item_y), items in world.items_on_map.items():
+        if not items or not is_visible(world, item_x, item_y):
+            continue
+
+        item_key = next(iter(items))
+        item_def = ITEM_DEFINITIONS.get(item_key)
+        if not item_def:
+            continue
+
+        char_val = item_def.get("char", "*")
+        item_char = chr(char_val) if isinstance(char_val, int) else str(char_val)
+        item_color = item_def.get("color", (255, 245, 160))
+
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, item_x, item_y)
+        if screen_point is not None:
+            screen_x, screen_y = screen_point
+            console.print(x=screen_x, y=screen_y, string=item_char, fg=item_color)
+
 def _draw_entities(console, world, camera_x, camera_y):
     for entity in _iter_render_entities(world):
         if isinstance(entity, Player) and entity.state.is_riding:
@@ -705,24 +724,6 @@ def _draw_world_markers(console, world, camera_x, camera_y):
     marked = 0
     max_markers = 18
 
-    for (item_x, item_y), items in world.items_on_map.items():
-        if not items or not is_visible(world, item_x, item_y):
-            continue
-
-        item_key = next(iter(items))
-        item_def = ITEM_DEFINITIONS.get(item_key)
-        if not item_def:
-            continue
-
-        char_val = item_def.get("char", "*")
-        item_char = chr(char_val) if isinstance(char_val, int) else str(char_val)
-        item_color = item_def.get("color", (255, 245, 160))
-
-        screen_point = _screen_point_for_world(world, camera_x, camera_y, item_x, item_y)
-        if screen_point is not None:
-            screen_x, screen_y = screen_point
-            console.print(x=screen_x, y=screen_y, string=item_char, fg=item_color)
-
     for dy in range(-8, 9):
         if marked >= max_markers:
             break
@@ -1145,6 +1146,7 @@ def draw(console, world, camera_x, camera_y):
                     )
 
     _apply_lighting_and_depth(console, world, camera_x, camera_y)
+    _draw_items(console, world, camera_x, camera_y)
     _draw_entities(console, world, camera_x, camera_y)
     # Draw path visualizer
     if hasattr(world.player.state, 'current_path') and world.player.state.current_path:

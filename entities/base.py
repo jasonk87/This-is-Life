@@ -1,3 +1,4 @@
+from simulation.systems.task_types import TaskType
 """
 This module defines the base classes for all entities in the game world,
 including NPCs and specialized creature types.
@@ -194,8 +195,8 @@ class Schedule:
     current_path: list = field(default_factory=list)
     path_blocked_turns: int = 0
     last_blocked_position: tuple[int, int] | None = None
-    current_task: str = "idle"
-    previous_task: str = "idle"
+    current_task: str = TaskType.IDLE
+    previous_task: str = TaskType.IDLE
     game_time_last_updated: int = 0
     last_paid_day: int = 0
 

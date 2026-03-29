@@ -474,6 +474,8 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Harvest": lambda: world.player_attempt_harvest(target_x, target_y),
         "Trade": lambda: start_trade(world, entity_data),
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
+        "Sit": lambda: world.player_attempt_sit(target_x, target_y),
+        "Sleep": lambda: world.player_attempt_sleep(target_x, target_y),
         "Claim House": lambda: claim_house(world, entity_data),
         "Buy Property": lambda: world.buy_property(entity_data),
         "Company Ledger": lambda: world.open_company_ledger_menu(entity_data),
@@ -482,7 +484,9 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Read Notices": lambda: world.open_noticeboard_menu(),
 
         "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
+        "Cook": lambda: world.player_attempt_cook(target_x, target_y),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
+        "Forge": lambda: world.player_attempt_forge(target_x, target_y),
         "Read": lambda: world.player_attempt_read_book(entity_data),
         "Offer Mercenary Services": lambda: world.player_attempt_mercenary_contract(entity_data),
         "Loot Chest": lambda: world.player_attempt_loot_chest(target_x, target_y)

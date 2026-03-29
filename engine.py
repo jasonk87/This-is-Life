@@ -9574,6 +9574,15 @@ class World:
             if isinstance(self.player.social.family_ties["sibling_ids"], list):
                 self.player.social.family_ties["sibling_ids"].append(self.village_npcs[-1].id)
 
+        # Force an initial schedule update for all newly created family members so they don't just stand idle
+        # They will find their beds if it's nighttime or go to work if it's daytime.
+        current_time_in_day = self.game_time % max(1, DAY_LENGTH_TICKS)
+        for npc in self.village_npcs:
+            if npc.schedule.home_building_id == player_home.id:
+                # Force them to wake if they're stuck in a sleep state from bad init
+                self.wake_entity(npc)
+                run_npc_humanoid_scheduling_flow(self, npc, current_time_in_day)
+
     def _generate_chunk_macro(self, chunk: Chunk, chunk_coord_x: int, chunk_coord_y: int):
         """Generates the macro structure (village, buildings, NPCs) for a chunk."""
         if chunk.is_generated: return

@@ -78,6 +78,22 @@ def test_world_decorations_use_non_empty_dawnlike_sprites():
             assert _is_non_empty_sprite(DECORATION_ITEM_DEFINITIONS[key]["char"], sheet), key
 
 
+def test_distinct_furniture_role_sprites():
+    """Verify that different furniture roles map to distinct sprites, preventing visual collisions."""
+    from data.items import ITEM_DEFINITIONS
+
+    # Furniture roles that should be visually distinct
+    distinct_roles = ["bed_simple", "wooden_table", "desk", "counter", "workbench", "chest_wooden"]
+
+    seen_sprites = set()
+    for role in distinct_roles:
+        # Check that the role exists and has a char
+        assert role in ITEM_DEFINITIONS, f"Role {role} missing from ITEM_DEFINITIONS"
+        sprite_char = ITEM_DEFINITIONS[role]["char"]
+        assert sprite_char not in seen_sprites, f"Role '{role}' shares a sprite ({sprite_char}) with another distinct role"
+        seen_sprites.add(sprite_char)
+
+
 def test_animals_and_items_use_non_empty_dawnlike_sprites():
     with Image.open(ASSET_PATH).convert("RGBA") as sheet:
         animal_keys = [

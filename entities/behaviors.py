@@ -105,7 +105,51 @@ class PredatorBehavior:
                 nearest_prey = other_npc
         return nearest_prey
 
+    def _take_player_pursuit_turn(self, entity, world) -> bool:
+        if not getattr(getattr(entity, "combat", None), "is_hostile_to_player", False):
+            return False
+        if not hasattr(world, "_is_predator") or not world._is_predator(entity):
+            return False
+
+        pursuit_state = getattr(world, "_get_predator_pursuit_state", lambda *_args, **_kwargs: None)(entity, create=False)
+        if not pursuit_state:
+            return False
+
+        if world.game_time > int(pursuit_state.get("persist_until_tick", -1)):
+            if hasattr(world, "_clear_predator_pursuit_state"):
+                world._clear_predator_pursuit_state(entity)
+            if entity.schedule.current_task == "hunting_player":
+                entity.schedule.current_task = "idle"
+                entity.schedule.current_path = []
+                entity.schedule.current_destination_coords = None
+            return False
+
+        target_coords = pursuit_state.get("last_seen")
+        if not target_coords:
+            return False
+
+        target_x, target_y = target_coords
+        entity.task_target_entity_id = getattr(world.player, "id", None)
+        entity.schedule.current_task = "hunting_player"
+
+        if (entity.x, entity.y) == (target_x, target_y):
+            entity.schedule.current_path = []
+            entity.schedule.current_destination_coords = (target_x, target_y)
+            return True
+
+        if not entity.schedule.current_path or entity.schedule.current_destination_coords != (target_x, target_y):
+            path = world.calculate_path(entity.x, entity.y, target_x, target_y)
+            if path:
+                entity.schedule.current_path = path
+                entity.schedule.current_destination_coords = (target_x, target_y)
+                return True
+            return False
+        return True
+
     def take_turn(self, entity, world) -> bool:
+        if self._take_player_pursuit_turn(entity, world):
+            return True
+
         is_predator = "prey" in entity.animal_definition
         is_hungry_predator = is_predator and entity.physical.hunger >= entity.physical.max_hunger * 0.7
         if not (is_hungry_predator or entity.schedule.current_task in ["hunting", "eating_corpse"]):

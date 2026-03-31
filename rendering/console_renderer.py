@@ -70,6 +70,31 @@ def _clamp_color(color):
 def _dim_color(color, ratio=0.55):
     return _clamp_color((color[0] * ratio, color[1] * ratio, color[2] * ratio))
 
+
+def _color_distance(color_a, color_b):
+    return math.sqrt(sum((int(a) - int(b)) ** 2 for a, b in zip(color_a, color_b)))
+
+
+def _ensure_entity_contrast(fg_color, bg_color):
+    if bg_color is None or _color_distance(fg_color, bg_color) >= 90:
+        return fg_color
+
+    bg_luma = (bg_color[0] * 0.2126) + (bg_color[1] * 0.7152) + (bg_color[2] * 0.0722)
+    if bg_luma < 128:
+        return _lighten(fg_color, 0.35)
+    return _dim_color(fg_color, 0.55)
+
+
+def _ensure_player_contrast(bg_color):
+    base_color = (255, 245, 140)
+    if bg_color is None or _color_distance(base_color, bg_color) >= 110:
+        return base_color
+
+    bg_luma = (bg_color[0] * 0.2126) + (bg_color[1] * 0.7152) + (bg_color[2] * 0.0722)
+    if bg_luma < 128:
+        return (255, 255, 220)
+    return (96, 54, 20)
+
 def _get_tile_key(tile):
     if tile is None:
         return None
@@ -101,14 +126,147 @@ def _get_tile_char(tile):
         return " "
     return chr(tile.char)
 
-def _get_entity_style(entity):
+
+def _tune_floor_colors(tile_key, fg_color, bg_color):
+    if tile_key == "wood_floor":
+        return _dim_color(fg_color, 0.72), _lighten(bg_color, 0.06)
+    return fg_color, bg_color
+
+
+def _is_groundlike_tile(tile, tile_key):
+    if tile is None:
+        return False
+    if tile_key in {
+        "plains", "grass", "dirt", "road", "wood_floor", "water", "deep_water",
+        "forest", "mountain", "tilled_soil", "wheat_plant_growing", "wheat_plant_mature",
+        "fire_trap_active",
+    }:
+        return True
+    lowered = tile.name.lower()
+    return any(term in lowered for term in ("floor", "grass", "plains", "dirt", "soil", "road", "water", "forest", "mountain", "plant"))
+
+
+def _draw_world_tile(console, world, camera_x, camera_y, world_x, world_y, tile, fg_color, bg_color):
+    rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
+    if rect is None:
+        return
+    tile_key = _get_tile_key(tile)
+    glyph = _get_tile_char(tile)
+    if _is_groundlike_tile(tile, tile_key):
+        _draw_zoomed_glyph(console, rect, glyph, fg=fg_color, bg=bg_color)
+        return
+
+    x0, y0, x1, y1 = rect
+    for draw_y in range(y0, y1 + 1):
+        for draw_x in range(x0, x1 + 1):
+            console.print(x=draw_x, y=draw_y, string=" ", fg=fg_color, bg=bg_color)
+
+    screen_point = _screen_point_for_world(world, camera_x, camera_y, world_x, world_y)
+    if screen_point is not None:
+        screen_x, screen_y = screen_point
+        console.print(x=screen_x, y=screen_y, string=glyph, fg=fg_color)
+
+def _get_entity_foreground(entity):
     if getattr(getattr(entity, "physical", None), "is_dead", False):
-        return (130, 130, 130), (46, 20, 20)
+        return (130, 130, 130)
     if isinstance(entity, Player):
-        return (255, 245, 140), (96, 44, 16)
+        return (255, 245, 140)
     if isinstance(entity, Animal):
-        return getattr(entity, "color", (180, 220, 140)), (24, 44, 18)
-    return getattr(entity, "color", (255, 255, 255)), (36, 36, 72)
+        return getattr(entity, "color", (180, 220, 140))
+    return getattr(entity, "color", (255, 255, 255))
+
+
+def _get_zoom_factor(world):
+    zoom_levels = getattr(world, "zoom_levels", None)
+    zoom_index = getattr(world, "zoom_index", 0)
+    if not zoom_levels:
+        return 1.0
+    zoom_index = max(0, min(int(zoom_index), len(zoom_levels) - 1))
+    return float(zoom_levels[zoom_index])
+
+
+def _get_world_view_dimensions(world):
+    zoom = _get_zoom_factor(world)
+    view_width = max(1, int(math.ceil(MAP_WIDTH / zoom)))
+    view_height = max(1, int(math.ceil(MAP_HEIGHT / zoom)))
+    return min(WORLD_WIDTH, view_width), min(WORLD_HEIGHT, view_height)
+
+
+def _screen_to_world(world, camera_x, camera_y, screen_x, screen_y):
+    zoom = _get_zoom_factor(world)
+    return camera_x + int(screen_x / zoom), camera_y + int(screen_y / zoom)
+
+
+def _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y):
+    zoom = _get_zoom_factor(world)
+    rel_x = world_x - camera_x
+    rel_y = world_y - camera_y
+    x0 = int(math.floor(rel_x * zoom))
+    y0 = int(math.floor(rel_y * zoom))
+    x1 = int(math.floor((rel_x + 1) * zoom) - 1)
+    y1 = int(math.floor((rel_y + 1) * zoom) - 1)
+    if x1 < x0:
+        x1 = x0
+    if y1 < y0:
+        y1 = y0
+    if x1 < 0 or y1 < 0 or x0 >= MAP_WIDTH or y0 >= MAP_HEIGHT:
+        return None
+    return max(0, x0), max(0, y0), min(MAP_WIDTH - 1, x1), min(MAP_HEIGHT - 1, y1)
+
+
+def _draw_zoomed_glyph(console, rect, glyph, *, fg, bg=None):
+    if rect is None:
+        return
+    x0, y0, x1, y1 = rect
+    for draw_y in range(y0, y1 + 1):
+        for draw_x in range(x0, x1 + 1):
+            kwargs = {"x": draw_x, "y": draw_y, "string": glyph, "fg": fg}
+            if bg is not None:
+                kwargs["bg"] = bg
+            console.print(**kwargs)
+
+
+def _screen_point_for_world(world, camera_x, camera_y, world_x, world_y):
+    rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
+    if rect is None:
+        return None
+    x0, y0, x1, y1 = rect
+    return x0 + ((x1 - x0) // 2), y0 + ((y1 - y0) // 2)
+
+
+def _iter_render_entities(world):
+    all_entities = itertools.chain(world.npcs, world.village_npcs, [world.player])
+    return sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, "render_order") else 0)
+
+
+def _draw_entities(console, world, camera_x, camera_y):
+    for entity in _iter_render_entities(world):
+        if isinstance(entity, Player) and entity.state.is_riding:
+            continue
+        if entity is not world.player and getattr(entity, "is_sleeping", False):
+            continue
+
+        r_x = getattr(entity, "render_x", entity.x)
+        r_y = getattr(entity, "render_y", entity.y)
+        draw_x = int(round(r_x))
+        draw_y = int(round(r_y))
+
+        if not is_visible(world, entity.x, entity.y):
+            continue
+
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, draw_x, draw_y)
+        if screen_point is not None:
+            cell_bg = None
+            if hasattr(console, "bg"):
+                sample_x, sample_y = screen_point
+                cell_bg = tuple(console.bg[sample_y, sample_x])
+            fg = _get_entity_foreground(entity)
+            if isinstance(entity, Player):
+                fg = _ensure_player_contrast(cell_bg)
+            else:
+                fg = _ensure_entity_contrast(fg, cell_bg)
+            screen_x, screen_y = screen_point
+            console.print(x=screen_x, y=screen_y, string=chr(get_entity_sprite(entity)), fg=fg)
 
 def _get_entity_marker(entity):
     if getattr(getattr(entity, "physical", None), "is_dead", False):
@@ -138,6 +296,78 @@ def _get_visible_nearby_entities(world, limit=5):
     nearby.sort(key=lambda item: item[0])
     return nearby[:limit]
 
+
+def _should_draw_entity_label(distance, focus, entity):
+    focused_entity = focus.get("entity") if isinstance(focus, dict) else None
+    return distance <= 1 or focused_entity is entity
+
+
+def _is_entity_hovered(world, camera_x, camera_y, entity):
+    mouse_x, mouse_y = world.mouse_x, world.mouse_y
+    if not (0 <= mouse_x < MAP_WIDTH and 0 <= mouse_y < MAP_HEIGHT):
+        return False
+    return _screen_to_world(world, camera_x, camera_y, mouse_x, mouse_y) == (entity.x, entity.y)
+
+
+def _player_knows_entity_identity(world, entity):
+    if entity is None or entity is getattr(world, "player", None):
+        return True
+    if hasattr(entity, "is_identity_concealed") and entity.is_identity_concealed():
+        return False
+    if getattr(entity, "identity_known_to_player", None) is not None:
+        return bool(entity.identity_known_to_player)
+
+    relation_summary = getattr(world, "get_entity_relationship_summary", lambda _entity: "")(entity)
+    if relation_summary:
+        return True
+
+    known_memories = getattr(getattr(getattr(world, "player", None), "knowledge", None), "known_memories", {}) or {}
+    entity_id = getattr(entity, "id", None)
+    if entity_id is not None:
+        for memory in known_memories.values():
+            if getattr(memory, "subject_id", None) == entity_id or getattr(memory, "target_id", None) == entity_id:
+                return True
+
+    return False
+
+
+def _get_entity_name_parts(entity):
+    raw_name = str(getattr(entity, "name", "Unknown")).replace("_", " ").strip()
+    if not raw_name:
+        return ("Unknown", "")
+    parts = raw_name.split()
+    first_name = parts[0]
+    full_name = raw_name
+    return first_name, full_name
+
+
+def _get_entity_overhead_label(world, entity, focus, *, hovered=False):
+    if not _player_knows_entity_identity(world, entity):
+        return "Unknown"
+
+    first_name, full_name = _get_entity_name_parts(entity)
+    focused_entity = focus.get("entity") if isinstance(focus, dict) else None
+    if hovered or focused_entity is entity:
+        return full_name[:18]
+    return first_name[:10]
+
+
+def _is_overlay_cell_visible(world, overlay_x, overlay_y):
+    return 0 <= overlay_x < WORLD_WIDTH and 0 <= overlay_y < WORLD_HEIGHT and is_visible(world, overlay_x, overlay_y)
+
+
+def _is_entity_overlay_visible(world, entity, overlay_y):
+    return is_visible(world, entity.x, entity.y) and _is_overlay_cell_visible(world, entity.x, overlay_y)
+
+
+def _is_sheltered_from_weather(world, world_x, world_y):
+    building = getattr(world, "get_building_at", lambda _x, _y: None)(world_x, world_y)
+    if building is None:
+        return False
+    local_x = world_x - building.global_origin_x
+    local_y = world_y - building.global_origin_y
+    return 0 < local_x < building.width - 1 and 0 < local_y < building.height - 1
+
 def _get_focus_summary(world):
     standing_tile = world.get_tile_at(world.player.x, world.player.y)
     standing_on = standing_tile.name if standing_tile else "Unknown"
@@ -146,6 +376,87 @@ def _get_focus_summary(world):
         distance, entity = nearby[0]
         return standing_on, f"{world.get_entity_display_name(entity, include_relationship=True)} ({distance}t)"
     return standing_on, "No one nearby"
+
+
+def _format_hover_building_name(building):
+    if building is None:
+        return None
+    name = getattr(building, "name", "") or getattr(building, "building_type", "")
+    return str(name).replace("_", " ").title() if name else None
+
+
+def _is_feature_tile_name(tile_name):
+    if not tile_name:
+        return False
+    lowered = tile_name.lower()
+    feature_terms = (
+        "bed", "chair", "table", "desk", "bench", "counter", "shelf", "storage",
+        "barrel", "chest", "bookcase", "cabinet", "door", "window", "wall",
+        "well", "forge", "loom", "anvil", "hearth", "oven", "stool", "altar",
+    )
+    return any(term in lowered for term in feature_terms)
+
+
+def _get_hover_inspect(world, camera_x, camera_y):
+    mouse_x, mouse_y = world.mouse_x, world.mouse_y
+    if not (0 <= mouse_x < MAP_WIDTH and 0 <= mouse_y < MAP_HEIGHT):
+        return None
+
+    world_x, world_y = _screen_to_world(world, camera_x, camera_y, mouse_x, mouse_y)
+    if not (0 <= world_x < WORLD_WIDTH and 0 <= world_y < WORLD_HEIGHT):
+        return None
+    if not is_visible(world, world_x, world_y):
+        return None
+
+    tile = world.get_tile_at(world_x, world_y)
+    if tile is None:
+        return None
+
+    inspect = {
+        "coords": (world_x, world_y),
+        "tile": tile.name,
+        "entity": None,
+        "object": None,
+    }
+
+    interactables = getattr(world, "_get_interactables_at", lambda _x, _y: [])(world_x, world_y)
+    for interactable in interactables:
+        kind = interactable.get("type")
+        if kind in {"npc", "animal"} and inspect["entity"] is None:
+            inspect["entity"] = interactable.get("name")
+        elif kind in {"item", "blueprint"} and inspect["object"] is None:
+            inspect["object"] = interactable.get("name")
+
+    building = getattr(world, "get_building_at", lambda _x, _y: None)(world_x, world_y)
+    if inspect["object"] is None:
+        inspect["object"] = _format_hover_building_name(building)
+    if inspect["object"] is None and _is_feature_tile_name(tile.name):
+        inspect["object"] = tile.name
+
+    return inspect
+
+
+def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, panel_width):
+    inspect = _get_hover_inspect(world, camera_x, camera_y)
+    if not inspect:
+        return panel_y
+
+    panel_inner = panel_width - 2
+    y = panel_y
+    console.print(x=panel_x + 1, y=y, string="Hover", fg=(255, 215, 120))
+    y += 1
+    world_x, world_y = inspect["coords"]
+    console.print(x=panel_x + 1, y=y, string=f"At: ({world_x}, {world_y})"[:panel_inner], fg=(200, 200, 200))
+    y += 1
+    console.print(x=panel_x + 1, y=y, string=f"Tile: {inspect['tile']}"[:panel_inner], fg=(180, 220, 180))
+    y += 1
+    if inspect["entity"]:
+        console.print(x=panel_x + 1, y=y, string=f"Entity: {inspect['entity']}"[:panel_inner], fg=(255, 210, 150))
+        y += 1
+    if inspect["object"]:
+        console.print(x=panel_x + 1, y=y, string=f"Object: {inspect['object']}"[:panel_inner], fg=(170, 210, 255))
+        y += 1
+    return y
 
 def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_color):
     maximum = max(1, maximum)
@@ -174,8 +485,10 @@ def _animate_tile_colors(world, tile, fg_color, bg_color, world_x, world_y):
         return _lighten(fg_color, shimmer), _lighten(bg_color, shimmer * 0.7)
     if tile_key == "forest":
         return fg_color, _lighten(bg_color, 0.04 if time_band in {2, 3} else 0.0)
-    if tile_key in {"road", "wood_floor"}:
+    if tile_key == "road":
         return _lighten(fg_color, 0.04 if time_band == 0 else 0.0), bg_color
+    if tile_key == "wood_floor":
+        return _lighten(fg_color, 0.02 if time_band == 0 else 0.0), bg_color
     if tile_key == "fire_trap_active":
         flicker = 0.12 if time_band in {0, 2, 4} else 0.02
         return _lighten(fg_color, flicker), _lighten(bg_color, flicker)
@@ -205,8 +518,7 @@ def _get_focus_target(world, camera_x, camera_y):
         return focus
 
     candidates = []
-    mouse_world_x = camera_x + world.mouse_x
-    mouse_world_y = camera_y + world.mouse_y
+    mouse_world_x, mouse_world_y = _screen_to_world(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
     if 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT and is_visible(world, mouse_world_x, mouse_world_y):
         candidates.append((mouse_world_x, mouse_world_y, "mouse"))
     candidates.append((world.player.x + world.player.state.last_dx, world.player.y + world.player.state.last_dy, "facing"))
@@ -247,13 +559,10 @@ def _draw_focus_badge(console, world, focus, camera_x, camera_y):
     if focus["x"] is None or focus["y"] is None:
         return
 
-    screen_x = focus["x"] - camera_x
-    screen_y = focus["y"] - camera_y
-    if not (0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT):
+    screen_point = _screen_point_for_world(world, camera_x, camera_y, focus["x"], focus["y"])
+    if screen_point is None:
         return
-
-    pulse = _pulse(world, speed=18.0, low=0.15, high=0.4, phase=1.2)
-    console.bg[screen_y, screen_x] = _lighten(tuple(console.bg[screen_y, screen_x]), pulse)
+    screen_x, screen_y = screen_point
 
     # Only draw the floating badge above NPCs/Animals
     # focus["entity"] might be a dictionary (from _get_interactables_at) or an object (if passed directly).
@@ -274,7 +583,12 @@ def _draw_focus_badge(console, world, focus, camera_x, camera_y):
     info = focus["label"][:22]
     badge_x = max(0, min(MAP_WIDTH - len(info), screen_x - (len(info) // 2)))
     badge_y = screen_y - 1 if screen_y > 1 else screen_y + 1
-    console.print(x=badge_x, y=badge_y, string=info, fg=(255, 250, 210), bg=(24, 24, 36))
+    _, world_badge_y = _screen_to_world(world, camera_x, camera_y, screen_x, badge_y)
+    if not _is_overlay_cell_visible(world, focus["x"], world_badge_y):
+        return
+    pulse = _pulse(world, speed=18.0, low=0.12, high=0.22, phase=1.2)
+    console.bg[screen_y, screen_x] = _lighten(tuple(console.bg[screen_y, screen_x]), pulse)
+    console.print(x=badge_x, y=badge_y, string=info, fg=(235, 232, 210))
 
 def _draw_minimap_panel(console, world, panel_x, start_y, width, height):
     console.draw_frame(x=panel_x, y=start_y, width=width, height=height, title="Minimap", clear=True, fg=(220, 220, 220), bg=(10, 12, 18))
@@ -333,14 +647,7 @@ def _draw_minimap_panel(console, world, panel_x, start_y, width, height):
     return start_y + height
 
 def _light_radius_for_world(world):
-    light_name = getattr(world, "current_light_level_name", "DAY")
-    if light_name == "PITCH BLACK":
-        return 5
-    if light_name == "NIGHT":
-        return 7
-    if light_name in {"DAWN", "DUSK"}:
-        return 10
-    return 15
+    return max(3, int(getattr(world, "current_fov_radius", 15)))
 
 def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     light_radius = _light_radius_for_world(world)
@@ -348,11 +655,11 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     console_width = min(MAP_WIDTH, getattr(console, "width", MAP_WIDTH), console.bg.shape[1], console.fg.shape[1])
 
     for y in range(console_height):
-        map_y = camera_y + y
+        _, map_y = _screen_to_world(world, camera_x, camera_y, 0, y)
         if not (0 <= map_y < WORLD_HEIGHT):
             continue
         for x in range(console_width):
-            map_x = camera_x + x
+            map_x, map_y = _screen_to_world(world, camera_x, camera_y, x, y)
             if not (0 <= map_x < WORLD_WIDTH):
                 continue
             if not is_visible(world, map_x, map_y):
@@ -376,19 +683,23 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
                     if 0 <= sx < console_width and 0 <= sy < console_height:
                         console.bg[sy, sx] = _dim_color(tuple(console.bg[sy, sx]), 0.75)
 
-def _draw_entity_markers(console, world, camera_x, camera_y):
+def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
     for entity in itertools.chain(world.npcs, world.village_npcs):
         if getattr(entity, "is_sleeping", False):
             continue
+        focused_entity = focus.get("entity") if isinstance(focus, dict) else None
+        if focused_entity is not entity:
+            continue
         marker = _get_entity_marker(entity)
-        if marker is None or not is_visible(world, entity.x, entity.y):
+        marker_world_y = entity.y - 1
+        if marker is None or not _is_entity_overlay_visible(world, entity, marker_world_y):
             continue
 
         marker_char, marker_color = marker
-        screen_x = entity.x - camera_x
-        screen_y = entity.y - camera_y - 1
-        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-            console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color, bg=(0, 0, 0))
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, marker_world_y)
+        if screen_point is not None:
+            screen_x, screen_y = screen_point
+            console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
 
 def _draw_world_markers(console, world, camera_x, camera_y):
     marked = 0
@@ -401,10 +712,13 @@ def _draw_world_markers(console, world, camera_x, camera_y):
             continue
         if max(abs(world.player.x - item_x), abs(world.player.y - item_y)) > 10:
             continue
-        screen_x = item_x - camera_x
-        screen_y = item_y - camera_y - 1
-        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-            console.print(x=screen_x, y=screen_y, string="*", fg=(255, 245, 160), bg=(24, 24, 24))
+        marker_world_y = item_y - 1
+        if not _is_overlay_cell_visible(world, item_x, marker_world_y):
+            continue
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, item_x, marker_world_y)
+        if screen_point is not None:
+            screen_x, screen_y = screen_point
+            console.print(x=screen_x, y=screen_y, string="*", fg=(255, 245, 160))
             marked += 1
 
     for dy in range(-8, 9):
@@ -435,10 +749,13 @@ def _draw_world_markers(console, world, camera_x, camera_y):
             if marker_char is None:
                 continue
 
-            screen_x = world_x - camera_x
-            screen_y = world_y - camera_y - 1
-            if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-                console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color, bg=(0, 0, 0))
+            marker_world_y = world_y - 1
+            if not _is_overlay_cell_visible(world, world_x, marker_world_y):
+                continue
+            screen_point = _screen_point_for_world(world, camera_x, camera_y, world_x, marker_world_y)
+            if screen_point is not None:
+                screen_x, screen_y = screen_point
+                console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
                 marked += 1
 
 def _draw_status_panel_legacy(console, world):
@@ -593,7 +910,12 @@ def draw_status_panel(console, world, camera_x, camera_y):
     else:
         focus_line = f"Focus: {focus_target}"
     console.print(x=panel_x + 1, y=y, string=focus_line[:panel_inner], fg=(255, 210, 150))
-    y += 2
+    y += 1
+    hover_y = _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, y, panel_width)
+    if hover_y > y:
+        y = hover_y + 1
+    else:
+        y += 1
 
     y = _draw_minimap_panel(console, world, panel_x, y, panel_width, 12) + 1
 
@@ -741,27 +1063,8 @@ def draw_minimap(console, world):
 
 
 def draw_cursor_info(console, world, camera_x, camera_y):
-    """Draws information about the tile under the mouse cursor."""
-    mouse_x, mouse_y = world.mouse_x, world.mouse_y
-    if not (0 <= mouse_x < MAP_WIDTH and 0 <= mouse_y < MAP_HEIGHT):
-        return
-
-    world_x, world_y = camera_x + mouse_x, camera_y + mouse_y
-
-    info_str = ""
-    tile = world.get_tile_at(world_x, world_y)
-    if tile:
-        info_str = f"Tile: {tile.name} ({world_x}, {world_y})"
-
-        # Add weather info to the cursor
-        info_str += f" | Weather: {world.weather}"
-
-        if tile.name == "Animal Corpse" and "animal_type" in tile.properties:
-            info_str += f" ({tile.properties['animal_type'].replace('_', ' ')})"
-
-    if info_str:
-        # Print info at the bottom of the map view
-        console.print(x=1, y=MAP_HEIGHT - 1, string=info_str, fg=COLOR_CURSOR_INFO_TEXT)
+    """Legacy no-op kept for compatibility; hover inspect now lives in the status panel."""
+    return
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
@@ -774,12 +1077,12 @@ def is_visible(world, x, y):
         return fov_map[y, x]
     return False
 
-def _draw_visual_effect(console, effect, camera_x, camera_y):
+def _draw_visual_effect(console, world, effect, camera_x, camera_y):
     effect_type = getattr(effect, "effect_type", None)
-    draw_x = int(round(getattr(effect, "x", 0))) - camera_x
-    draw_y = int(round(getattr(effect, "y", 0))) - camera_y
-    if not (0 <= draw_x < console.width and 0 <= draw_y < console.height):
+    draw_point = _screen_point_for_world(world, camera_x, camera_y, int(round(getattr(effect, "x", 0))), int(round(getattr(effect, "y", 0))))
+    if draw_point is None:
         return
+    draw_x, draw_y = draw_point
 
     if effect_type == "floating_text":
         console.print(x=draw_x, y=draw_y, string=getattr(effect, "text", ""), fg=getattr(effect, "color", (255, 255, 255)))
@@ -793,18 +1096,18 @@ def draw(console, world, camera_x, camera_y):
     # Draw the map
     fov_map = getattr(world, 'player_fov_map', None)
     exp_map = world.explored_map
-    
-    for y in range(MAP_HEIGHT):
-        map_y = camera_y + y
+
+    view_width, view_height = _get_world_view_dimensions(world)
+
+    for map_y in range(camera_y, min(WORLD_HEIGHT, camera_y + view_height)):
         if not (0 <= map_y < WORLD_HEIGHT):
             continue
-            
+
         chunk_y = map_y // CHUNK_SIZE
         local_y = map_y % CHUNK_SIZE
         chunk_row = world.chunks[chunk_y]
 
-        for x in range(MAP_WIDTH):
-            map_x = camera_x + x
+        for map_x in range(camera_x, min(WORLD_WIDTH, camera_x + view_width)):
             if not (0 <= map_x < WORLD_WIDTH):
                 continue
 
@@ -818,91 +1121,72 @@ def draw(console, world, camera_x, camera_y):
 
             if tile:
                 is_in_fov = fov_map[map_y, map_x] if fov_map is not None else True
+                tile_key = _get_tile_key(tile)
                 bg_color = _get_tile_background(tile)
                 fg_color = tile.color
+                fg_color, bg_color = _tune_floor_colors(tile_key, fg_color, bg_color)
                 fg_color, bg_color = _animate_tile_colors(world, tile, fg_color, bg_color, map_x, map_y)
                 if is_in_fov:
-                    console.print(x=x, y=y, string=_get_tile_char(tile), fg=fg_color, bg=bg_color)
+                    _draw_world_tile(console, world, camera_x, camera_y, map_x, map_y, tile, fg_color, bg_color)
                     exp_map[map_y, map_x] = True
                 elif exp_map[map_y, map_x]:
-                    console.print(
-                        x=x, y=y, string=_get_tile_char(tile),
-                        fg=_dim_color(fg_color, 0.45),
-                        bg=_dim_color(bg_color, 0.5)
+                    _draw_world_tile(
+                        console,
+                        world,
+                        camera_x,
+                        camera_y,
+                        map_x,
+                        map_y,
+                        tile,
+                        _dim_color(fg_color, 0.45),
+                        _dim_color(bg_color, 0.5),
                     )
 
+    _apply_lighting_and_depth(console, world, camera_x, camera_y)
+    _draw_entities(console, world, camera_x, camera_y)
     # Draw path visualizer
     if hasattr(world.player.state, 'current_path') and world.player.state.current_path:
         for px, py in world.player.state.current_path:
-            screen_x = px - camera_x
-            screen_y = py - camera_y
-            if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-                # Draw path markers (e.g., small dots)
-                # Only if visible in player FOV
-                if is_visible(world, px, py):
-                    console.print(x=screen_x, y=screen_y, string="•", fg=(0, 255, 0))
+            screen_point = _screen_point_for_world(world, camera_x, camera_y, px, py)
+            if screen_point is not None and is_visible(world, px, py):
+                screen_x, screen_y = screen_point
+                console.print(x=screen_x, y=screen_y, string="•", fg=(0, 255, 0))
 
     # Draw Visual Effects
     for effect in world.visual_effects:
-        _draw_visual_effect(console, effect, camera_x, camera_y)
+        _draw_visual_effect(console, world, effect, camera_x, camera_y)
 
-    # Draw entities
-    all_entities = itertools.chain(world.npcs, world.village_npcs, [world.player])
-    for entity in sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, 'render_order') else 0):
-        if isinstance(entity, Player) and entity.state.is_riding:
-            continue
-        if entity is not world.player and getattr(entity, "is_sleeping", False):
-            continue
-
-        # Use render coordinates if available (for smooth movement), else fall back to logic coordinates
-        r_x = getattr(entity, 'render_x', entity.x)
-        r_y = getattr(entity, 'render_y', entity.y)
-
-        # Cast to int for grid rendering
-        draw_x = int(round(r_x))
-        draw_y = int(round(r_y))
-
-        # Check visibility based on the *logical* position (so they don't disappear while moving into FOV)
-        # Or check draw_x/y? Checking logical x/y is safer for consistency with FOV map.
-        if is_visible(world, entity.x, entity.y) or is_visible(world, draw_x, draw_y):
-            if 0 <= draw_x - camera_x < MAP_WIDTH and 0 <= draw_y - camera_y < MAP_HEIGHT:
-                fg_color, bg_color = _get_entity_style(entity)
-                entity_char = get_entity_sprite(entity)
-                console.print(x=draw_x - camera_x, y=draw_y - camera_y,
-                              string=chr(entity_char), fg=fg_color, bg=bg_color)
-
-    _apply_lighting_and_depth(console, world, camera_x, camera_y)
-    player_screen_x = world.player.x - camera_x
-    player_screen_y = world.player.y - camera_y
-    if 0 <= player_screen_x < MAP_WIDTH and 0 <= player_screen_y < MAP_HEIGHT:
-        console.print(
-            x=player_screen_x,
-            y=player_screen_y,
-            string=chr(get_entity_sprite(world.player)),
-            fg=(255, 248, 160),
-            bg=(120, 55, 20),
-        )
-    _draw_entity_markers(console, world, camera_x, camera_y)
+    focus = _get_focus_target(world, camera_x, camera_y)
+    _draw_entity_markers(console, world, camera_x, camera_y, focus)
     _draw_world_markers(console, world, camera_x, camera_y)
-
     for distance, entity in _get_visible_nearby_entities(world, limit=3):
-        screen_x = entity.x - camera_x
-        screen_y = entity.y - camera_y - 1
-        if 0 <= screen_x < MAP_WIDTH and 0 <= screen_y < MAP_HEIGHT:
-            label = world.get_entity_display_name(entity)[:12]
+        if not _should_draw_entity_label(distance, focus, entity):
+            continue
+        label_world_y = entity.y - 2
+        if label_world_y < 0 or not _is_entity_overlay_visible(world, entity, label_world_y):
+            label_world_y = entity.y - 1
+        if not _is_entity_overlay_visible(world, entity, label_world_y):
+            continue
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, label_world_y)
+        if screen_point is not None:
+            screen_x, screen_y = screen_point
+            label = _get_entity_overhead_label(
+                world,
+                entity,
+                focus,
+                hovered=_is_entity_hovered(world, camera_x, camera_y, entity),
+            )
             label_x = max(0, min(MAP_WIDTH - len(label), screen_x - (len(label) // 2)))
-            console.print(x=label_x, y=screen_y, string=label, fg=(240, 240, 240), bg=(0, 0, 0))
+            console.print(x=label_x, y=screen_y, string=label, fg=(142, 148, 156))
 
     current_tile = world.get_tile_at(world.player.x, world.player.y)
     area_label = current_tile.name if current_tile else "Unknown"
     hud_text = f"@ {area_label}  [{world.player.x},{world.player.y}]  {world.weather.replace('_', ' ').title()}"
     console.print(x=1, y=1, string=hud_text[:MAP_WIDTH - 2], fg=(255, 255, 255), bg=(0, 0, 0))
 
-    focus = _get_focus_target(world, camera_x, camera_y)
     _draw_focus_badge(console, world, focus, camera_x, camera_y)
 
     draw_status_panel(console, world, camera_x, camera_y)
-    draw_cursor_info(console, world, camera_x, camera_y)
 
     # Draw chat/interaction UI if active
     if world.interaction_context["active"]:
@@ -953,39 +1237,6 @@ def draw(console, world, camera_x, camera_y):
     # Draw weather overlay
     draw_weather_overlay(console, world, camera_x, camera_y)
 
-    # Draw Mouse Tooltip/Examine
-    if 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT:
-        mouse_world_x = camera_x + world.mouse_x
-        mouse_world_y = camera_y + world.mouse_y
-
-        # Check if visible
-        if is_visible(world, mouse_world_x, mouse_world_y):
-            tile = world.get_tile_at(mouse_world_x, mouse_world_y)
-            if tile:
-                info_text = tile.name
-
-                # Check for entities
-                entities_here = []
-                for entity in itertools.chain([world.player], world.all_npcs):
-                    if entity is not world.player and getattr(entity, "is_sleeping", False):
-                        continue
-                    if entity.x == mouse_world_x and entity.y == mouse_world_y:
-                        if hasattr(entity, "physical") and entity.physical.is_dead:
-                            entities_here.append(f"Dead {entity.name}")
-                        else:
-                            entities_here.append(entity.name)
-
-                if (mouse_world_x, mouse_world_y) in world.items_on_map:
-                    items = world.items_on_map[(mouse_world_x, mouse_world_y)]
-                    if items:
-                        entities_here.append(f"Items ({len(items)})")
-
-                if entities_here:
-                    info_text += f" | {', '.join(entities_here)}"
-
-                # Draw tooltip string near bottom right of map
-                console.print(x=1, y=MAP_HEIGHT - 1, string=info_text[:MAP_WIDTH - 2], fg=COLOR_CURSOR_INFO_TEXT, bg=(0,0,0))
-
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
     console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
@@ -1017,13 +1268,17 @@ def draw_weather_overlay(console, world, camera_x, camera_y):
     # Offset by time to create movement
     time_offset = world.game_time % 100
 
-    for y in range(MAP_HEIGHT):
-        for x in range(MAP_WIDTH):
+    view_width, view_height = _get_world_view_dimensions(world)
+    for world_y in range(camera_y, min(WORLD_HEIGHT, camera_y + view_height)):
+        for world_x in range(camera_x, min(WORLD_WIDTH, camera_x + view_width)):
+            if _is_sheltered_from_weather(world, world_x, world_y):
+                continue
             # Using coordinate hash to generate deterministic pseudo-random layout that changes with time
-            h = hash((x + camera_x + time_offset, y + camera_y + time_offset)) % 1000
+            h = hash((world_x + time_offset, world_y + time_offset)) % 1000
             if h < density * 1000:
-                if is_visible(world, camera_x + x, camera_y + y):
-                    console.print(x=x, y=y, string=char, fg=color)
+                if is_visible(world, world_x, world_y):
+                    rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
+                    _draw_zoomed_glyph(console, rect, char, fg=color)
 
 def draw_interaction_menu(console, world):
     """Draws the context-sensitive interaction menu."""

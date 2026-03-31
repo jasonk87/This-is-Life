@@ -9,6 +9,7 @@ import engine
 from engine import World
 import main
 import rendering.console_renderer as console_renderer
+from entities.behaviors import PredatorBehavior
 from save_manager import save_game, load_game
 from data.items import ITEM_DEFINITIONS
 import config
@@ -300,3 +301,451 @@ class TestChunkSleepWakeAndAbstractSimulation(unittest.TestCase):
         self.assertGreater(npc.physical.hunger, 0)
         self.assertLess(building.building_inventory.get("money", 0), 120)
         self.assertGreater(building.building_inventory.get("wheat", 0), 0)
+
+
+class TestDayNightVisibility(unittest.TestCase):
+    def make_visibility_world(self):
+        world = object.__new__(engine.World)
+        world.game_time = 0
+        world.current_light_level_name = "DAY"
+        world.current_fov_radius = config.FOV_RADIUS_DAY
+        world.transparency_map = engine.np.ones((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.explored_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.player_fov_map = engine.np.zeros((config.WORLD_HEIGHT, config.WORLD_WIDTH), dtype=bool, order="F")
+        world.player = SimpleNamespace(
+            x=config.WORLD_WIDTH // 2,
+            y=config.WORLD_HEIGHT // 2,
+            equipment=SimpleNamespace(
+                equipped_light_item_key=None,
+                current_personal_light_radius=0,
+                light_source_active_until_tick=-1,
+            ),
+        )
+        world._handle_player_light_source_burnout = MagicMock()
+        return world
+
+    def test_ambient_fov_radius_is_larger_in_day_than_night(self):
+        self.assertGreater(
+            engine.World._ambient_fov_radius_for_light_level("DAY"),
+            engine.World._ambient_fov_radius_for_light_level("NIGHT"),
+        )
+        self.assertGreater(
+            engine.World._ambient_fov_radius_for_light_level("DUSK"),
+            engine.World._ambient_fov_radius_for_light_level("PITCH BLACK"),
+        )
+
+    def test_update_light_level_and_fov_tracks_time_of_day_with_clear_radius_changes(self):
+        world = self.make_visibility_world()
+
+        world.game_time = 0
+        engine.World._update_light_level_and_fov(world)
+        pitch_black_radius = world.current_fov_radius
+        self.assertEqual(world.current_light_level_name, "PITCH BLACK")
+
+        world.game_time = int(config.DAY_LENGTH_TICKS * 0.35)
+        engine.World._update_light_level_and_fov(world)
+        day_radius = world.current_fov_radius
+        self.assertEqual(world.current_light_level_name, "DAY")
+
+        world.game_time = int(config.DAY_LENGTH_TICKS * 0.85)
+        engine.World._update_light_level_and_fov(world)
+        night_radius = world.current_fov_radius
+        self.assertEqual(world.current_light_level_name, "NIGHT")
+
+        self.assertGreater(day_radius, night_radius)
+        self.assertGreater(night_radius, pitch_black_radius)
+
+    def test_player_fov_visible_area_is_meaningfully_smaller_at_night(self):
+        world = self.make_visibility_world()
+
+        world.current_fov_radius = config.FOV_RADIUS_DAY
+        engine.World._update_player_fov(world)
+        day_visible_tiles = int(world.player_fov_map.sum())
+
+        world.current_fov_radius = config.FOV_RADIUS_NIGHT
+        engine.World._update_player_fov(world)
+        night_visible_tiles = int(world.player_fov_map.sum())
+
+        self.assertGreater(day_visible_tiles, night_visible_tiles)
+        self.assertGreater(day_visible_tiles - night_visible_tiles, 150)
+
+    def test_personal_light_can_override_night_penalty(self):
+        world = self.make_visibility_world()
+        world.current_fov_radius = config.FOV_RADIUS_PITCH_BLACK
+        world.player.equipment.equipped_light_item_key = "lit_torch"
+        world.player.equipment.current_personal_light_radius = config.FOV_RADIUS_DUSK_DAWN
+        world.player.equipment.light_source_active_until_tick = world.game_time + 100
+
+        self.assertEqual(engine.World._get_effective_player_fov_radius(world), config.FOV_RADIUS_DUSK_DAWN)
+
+
+class TestPredatorPursuit(unittest.TestCase):
+    def make_predator_world(self, *, light_level="DAY", game_time=100):
+        world = object.__new__(engine.World)
+        world.game_time = game_time
+        world.current_light_level_name = light_level
+        world.player = SimpleNamespace(id=1, x=12, y=8)
+        return world
+
+    def make_predator(self):
+        return SimpleNamespace(
+            id=99,
+            x=4,
+            y=8,
+            animal_type="wolf",
+            animal_definition={"prey": ["deer"], "pack_animal": True},
+            task_context_data={},
+            task_target_entity_id=None,
+            schedule=SimpleNamespace(current_task="idle", current_path=[], current_destination_coords=None),
+            combat=SimpleNamespace(is_hostile_to_player=True),
+        )
+
+    def test_night_predator_pursuit_window_is_longer_than_day(self):
+        predator = self.make_predator()
+        day_world = self.make_predator_world(light_level="DAY")
+        night_world = self.make_predator_world(light_level="NIGHT")
+
+        day_duration = engine.World._get_predator_pursuit_duration(day_world, predator, committed=True)
+        night_duration = engine.World._get_predator_pursuit_duration(night_world, predator, committed=True)
+
+        self.assertGreater(night_duration, day_duration)
+
+    def test_refresh_predator_pursuit_state_tracks_last_seen_target_and_commitment(self):
+        predator = self.make_predator()
+        world = self.make_predator_world(light_level="NIGHT", game_time=200)
+
+        engine.World._refresh_predator_pursuit_state(world, predator, world.player, committed=True)
+
+        state = predator.task_context_data["predator_pursuit"]
+        self.assertEqual(state["target_id"], world.player.id)
+        self.assertEqual(state["last_seen"], (world.player.x, world.player.y))
+        self.assertTrue(state["committed"])
+        self.assertGreater(state["persist_until_tick"], world.game_time)
+
+    def test_predator_behavior_keeps_chasing_player_after_brief_loss_of_sight(self):
+        predator = self.make_predator()
+        world = self.make_predator_world(light_level="NIGHT", game_time=300)
+        world._is_predator = lambda entity: True
+        world.calculate_path = lambda start_x, start_y, end_x, end_y: [(start_x, start_y), (end_x, end_y)]
+        predator.physical = SimpleNamespace(hunger=0, max_hunger=100)
+
+        engine.World._refresh_predator_pursuit_state(world, predator, world.player, committed=True)
+
+        took_turn = PredatorBehavior().take_turn(predator, world)
+
+        self.assertTrue(took_turn)
+        self.assertEqual(predator.schedule.current_task, "hunting_player")
+        self.assertEqual(predator.schedule.current_destination_coords, (world.player.x, world.player.y))
+        self.assertEqual(predator.task_target_entity_id, world.player.id)
+
+    def test_predator_behavior_drops_special_pursuit_after_window_expires(self):
+        predator = self.make_predator()
+        world = self.make_predator_world(light_level="DAY", game_time=400)
+        world._is_predator = lambda entity: True
+        world.calculate_path = lambda start_x, start_y, end_x, end_y: [(start_x, start_y), (end_x, end_y)]
+        predator.physical = SimpleNamespace(hunger=0, max_hunger=100)
+
+        predator.task_context_data["predator_pursuit"] = {
+            "target_id": world.player.id,
+            "last_seen": (world.player.x, world.player.y),
+            "last_seen_tick": world.game_time - 10,
+            "persist_until_tick": world.game_time - 1,
+            "committed": True,
+        }
+        predator.schedule.current_task = "hunting_player"
+        predator.schedule.current_path = [(predator.x, predator.y)]
+        predator.schedule.current_destination_coords = (world.player.x, world.player.y)
+
+        took_turn = PredatorBehavior().take_turn(predator, world)
+
+        self.assertFalse(took_turn)
+        self.assertNotIn("predator_pursuit", predator.task_context_data)
+        self.assertEqual(predator.schedule.current_task, "idle")
+
+
+class TestAnimationSync(unittest.TestCase):
+    def test_update_animations_snaps_large_position_gaps_to_target(self):
+        world = object.__new__(engine.World)
+        world.player = SimpleNamespace(x=25, y=30, render_x=0.0, render_y=0.0)
+        world.npcs = []
+        world.village_npcs = []
+        world.visual_effects = []
+
+        engine.World.update_animations(world, 0.016)
+
+        self.assertEqual((world.player.render_x, world.player.render_y), (25.0, 30.0))
+
+
+class TestBuildingEntranceIntegrity(unittest.TestCase):
+    def make_world(self):
+        world = object.__new__(engine.World)
+        world.chunk_width = 1
+        world.chunk_height = 1
+        plains_def = engine.TILE_DEFINITIONS["plains"]
+        tiles = [
+            [
+                engine.Tile(
+                    plains_def["char"],
+                    plains_def["color"],
+                    plains_def["passable"],
+                    plains_def["name"],
+                    plains_def.get("properties", {}),
+                )
+                for _ in range(config.CHUNK_SIZE)
+            ]
+            for _ in range(config.CHUNK_SIZE)
+        ]
+        world.chunks = [[SimpleNamespace(tiles=tiles, is_terrain_generated=True, poi_type="village", village=None)]]
+        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, order="F")
+        world.buildings_by_id = {}
+        world.player = SimpleNamespace(
+            id=1,
+            x=0,
+            y=0,
+            social=SimpleNamespace(family_ties={}),
+        )
+        world.entity_positions = {(0, 0): 1}
+        world.entities_by_chunk = {(0, 0): {1}}
+        world._refresh_chunk_activity = lambda *args, **kwargs: None
+        world._ensure_entity_positions_current = lambda *args, **kwargs: None
+        world.add_message_to_chat_log = lambda *args, **kwargs: None
+        world.get_entity_by_id = lambda entity_id: None
+        world._generate_chunk_detail = lambda chunk, chunk_x, chunk_y: setattr(chunk, "is_terrain_generated", True)
+        return world
+
+    def make_building(self, building_type="general_store"):
+        return engine.Building(
+            10,
+            10,
+            7,
+            6,
+            building_type=building_type,
+            category="workplace" if building_type != "house" else "residential",
+            global_chunk_x_start=0,
+            global_chunk_y_start=0,
+        )
+
+    def get_candidate_for_entrance(self, world, building, entrance):
+        return next(
+            candidate
+            for candidate in engine.World._get_building_entrance_candidates(world, building)
+            if candidate["door"] == entrance
+        )
+
+    def test_enterable_building_gets_usable_entrance_with_interior_and_exterior_connection(self):
+        world = self.make_world()
+        building = self.make_building("general_store")
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+
+        entrance = building.interaction_points.get("entrance")
+        self.assertIsNotNone(entrance)
+        candidate = self.get_candidate_for_entrance(world, building, entrance)
+        door_tile = world.get_tile_at(*candidate["door"])
+        inside_tile = world.get_tile_at(*candidate["inside"])
+        outside_tile = world.get_tile_at(*candidate["outside"])
+
+        self.assertTrue(door_tile.properties.get("is_door"))
+        self.assertTrue(inside_tile.passable)
+        self.assertTrue(outside_tile.passable)
+        self.assertFalse(building.contains_global_coords(*candidate["outside"]))
+
+    def test_entrance_repair_restores_door_and_walkable_approach_after_overwrite(self):
+        world = self.make_world()
+        building = self.make_building("library")
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "stone_wall")
+        original_entrance = building.interaction_points["entrance"]
+        candidate = self.get_candidate_for_entrance(world, building, original_entrance)
+
+        engine.World._change_map_tile(world, candidate["door"], engine.TILE_DEFINITIONS["stone_wall"])
+        engine.World._change_map_tile(world, candidate["inside"], engine.DECORATION_ITEM_DEFINITIONS["chest_wooden"])
+
+        repaired_entrance = engine.World._ensure_building_entrance_integrity(world, building)
+
+        self.assertEqual(repaired_entrance, original_entrance)
+        self.assertTrue(world.get_tile_at(*candidate["door"]).properties.get("is_door"))
+        self.assertTrue(world.get_tile_at(*candidate["inside"]).passable)
+
+    def test_starting_home_spawn_uses_tile_with_reliable_egress(self):
+        world = self.make_world()
+        building = self.make_building("house")
+        building.category = "residential"
+        world.buildings_by_id[building.id] = building
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+        center = (building.global_center_x, building.global_center_y)
+        engine.World._change_map_tile(world, center, engine.DECORATION_ITEM_DEFINITIONS["chest_wooden"])
+
+        relative = SimpleNamespace(schedule=SimpleNamespace(home_building_id=building.id))
+        world.player.social.family_ties = {"mother_id": relative.schedule.home_building_id}
+        world.get_entity_by_id = lambda entity_id: relative if entity_id == building.id else None
+        chosen_positions = []
+        world._update_entity_position = lambda entity, x, y: chosen_positions.append((x, y))
+
+        engine.World._find_starting_position(world)
+
+        entrance = building.interaction_points["entrance"]
+        candidate = self.get_candidate_for_entrance(world, building, entrance)
+        self.assertEqual(chosen_positions[0], candidate["inside"])
+        self.assertTrue(
+            engine.World._building_interior_path_exists(
+                world,
+                building,
+                chosen_positions[0],
+                candidate["inside"],
+            )
+        )
+
+    def test_player_door_toggle_keeps_open_state_passability_and_transparency_in_sync(self):
+        world = self.make_world()
+        building = self.make_building("house")
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+        door_x, door_y = building.interaction_points["entrance"]
+
+        self.assertFalse(world.get_tile_at(door_x, door_y).passable)
+        engine.World.player_attempt_toggle_door(world, door_x, door_y)
+        self.assertTrue(world.get_tile_at(door_x, door_y).passable)
+        self.assertTrue(world.transparency_map[door_y, door_x])
+
+        engine.World.player_attempt_toggle_door(world, door_x, door_y)
+        self.assertFalse(world.get_tile_at(door_x, door_y).passable)
+        self.assertFalse(world.transparency_map[door_y, door_x])
+
+    def test_entrance_selection_is_deterministic_for_matching_buildings(self):
+        first_world = self.make_world()
+        second_world = self.make_world()
+        first_building = self.make_building("general_store")
+        second_building = self.make_building("general_store")
+
+        engine.World._draw_building(first_world, first_world.chunks[0][0].tiles, first_building, "wood_wall")
+        engine.World._draw_building(second_world, second_world.chunks[0][0].tiles, second_building, "wood_wall")
+
+        self.assertEqual(
+            first_building.interaction_points.get("entrance"),
+            second_building.interaction_points.get("entrance"),
+        )
+
+
+class TestInteriorFurnishingIntegrity(unittest.TestCase):
+    def make_world(self, llm_response="{}"):
+        world = object.__new__(engine.World)
+        world.chunk_width = 1
+        world.chunk_height = 1
+        plains_def = engine.TILE_DEFINITIONS["plains"]
+        tiles = [
+            [
+                engine.Tile(
+                    plains_def["char"],
+                    plains_def["color"],
+                    plains_def["passable"],
+                    plains_def["name"],
+                    plains_def.get("properties", {}),
+                )
+                for _ in range(config.CHUNK_SIZE)
+            ]
+            for _ in range(config.CHUNK_SIZE)
+        ]
+        village = SimpleNamespace(buildings=[], interaction_points={}, lore="")
+        chunk = SimpleNamespace(
+            tiles=tiles,
+            is_terrain_generated=True,
+            poi_type="village",
+            village=village,
+        )
+        world.chunks = [[chunk]]
+        world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, order="F")
+        world.buildings_by_id = {}
+        world._call_llm_for_worldgen = lambda prompt: llm_response
+        world.add_message_to_chat_log = lambda *args, **kwargs: None
+        return world
+
+    def make_building(self, building_type, *, category="residential", width=7, height=6):
+        return engine.Building(
+            10,
+            10,
+            width,
+            height,
+            building_type=building_type,
+            category=category,
+            global_chunk_x_start=0,
+            global_chunk_y_start=0,
+        )
+
+    def collect_interior_furniture(self, world, building):
+        furniture_names = {
+            engine.DECORATION_ITEM_DEFINITIONS[key]["name"]
+            for key in ["bed_simple", "wooden_table", "wooden_chair", "chest_wooden", "wall_shelf", "workbench", "fire_pit_simple"]
+        }
+        found = []
+        for y in range(building.global_origin_y + 1, building.global_origin_y + building.height - 1):
+            for x in range(building.global_origin_x + 1, building.global_origin_x + building.width - 1):
+                tile = world.get_tile_at(x, y)
+                if tile and tile.name in furniture_names:
+                    found.append((x, y, tile.name))
+        return found
+
+    def test_supported_house_is_furnished_during_village_render(self):
+        world = self.make_world()
+        building = self.make_building("house", category="residential")
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(building.interior_decorated)
+        self.assertGreaterEqual(len(furniture), 2)
+
+    def test_unsupported_work_building_uses_deterministic_fallback_when_llm_is_empty(self):
+        world = self.make_world(llm_response="{}")
+        building = self.make_building("general_store", category="commercial_workplace", width=8, height=6)
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(furniture)
+        self.assertTrue(any(name == engine.DECORATION_ITEM_DEFINITIONS["wooden_table"]["name"] for _, _, name in furniture))
+
+    def test_furniture_tiles_land_on_valid_interior_coordinates(self):
+        world = self.make_world(llm_response="{}")
+        building = self.make_building("library", category="civic_workplace", width=8, height=6)
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(furniture)
+        for x, y, _ in furniture:
+            self.assertTrue(building.global_origin_x < x < building.global_origin_x + building.width - 1)
+            self.assertTrue(building.global_origin_y < y < building.global_origin_y + building.height - 1)
+
+    def test_generation_flow_leaves_furniture_in_chunk_tiles_after_building_render(self):
+        world = self.make_world(llm_response="{}")
+        building = self.make_building("blacksmith_shop", category="industrial_workplace", width=7, height=6)
+        world.chunks[0][0].village.buildings = [building]
+
+        engine.World._render_village_tiles(world, world.chunks[0][0])
+
+        furniture = self.collect_interior_furniture(world, building)
+        self.assertTrue(furniture)
+        for x, y, _ in furniture:
+            tile = world.chunks[0][0].tiles[y][x]
+            self.assertNotEqual(tile.name, engine.TILE_DEFINITIONS["wood_floor"]["name"])
+
+    def test_furnished_layout_is_deterministic(self):
+        first_world = self.make_world(llm_response="{}")
+        second_world = self.make_world(llm_response="{}")
+        first_building = self.make_building("general_store", category="commercial_workplace", width=8, height=6)
+        second_building = self.make_building("general_store", category="commercial_workplace", width=8, height=6)
+        first_world.chunks[0][0].village.buildings = [first_building]
+        second_world.chunks[0][0].village.buildings = [second_building]
+
+        engine.World._render_village_tiles(first_world, first_world.chunks[0][0])
+        engine.World._render_village_tiles(second_world, second_world.chunks[0][0])
+
+        self.assertEqual(
+            self.collect_interior_furniture(first_world, first_building),
+            self.collect_interior_furniture(second_world, second_building),
+        )

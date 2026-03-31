@@ -205,6 +205,103 @@ ITEM_DEFINITIONS = {
         },
         "required_workstation": "workbench"
     },
+    "desk": {
+        "name": "Desk",
+        "description": "A wooden desk for reading or writing.",
+        "char": ITEM_SPRITES["desk"],
+        "color": COLORS["saddlebrown"],
+        "value": 25,
+        "weight": 12,
+        "stackable": False,
+        "item_type_tags": ["furniture", "workstation"],
+        "crafting_recipe": {
+            "wooden_plank": 8
+        },
+        "required_workstation": "workbench"
+    },
+    "counter": {
+        "name": "Counter",
+        "description": "A service counter.",
+        "char": ITEM_SPRITES["counter"],
+        "color": COLORS["saddlebrown"],
+        "value": 30,
+        "weight": 15,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 10
+        },
+        "required_workstation": "workbench"
+    },
+    "storage": {
+        "name": "Storage Crate",
+        "description": "A wooden crate for storing items.",
+        "char": ITEM_SPRITES["storage"],
+        "color": COLORS["saddlebrown"],
+        "value": 15,
+        "weight": 5,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 4
+        },
+        "required_workstation": "workbench"
+    },
+    "chest_wooden": {
+        "name": "Wooden Chest",
+        "description": "A sturdy wooden chest.",
+        "char": ITEM_SPRITES["chest_wooden"],
+        "color": COLORS["saddlebrown"],
+        "value": 25,
+        "weight": 10,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 6
+        },
+        "required_workstation": "workbench"
+    },
+    "shelf": {
+        "name": "Shelf",
+        "description": "A simple wooden shelf.",
+        "char": ITEM_SPRITES["shelf"],
+        "color": COLORS["saddlebrown"],
+        "value": 10,
+        "weight": 3,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 3
+        },
+        "required_workstation": "workbench"
+    },
+    "dresser": {
+        "name": "Dresser",
+        "description": "A wooden dresser for clothes.",
+        "char": ITEM_SPRITES["dresser"],
+        "color": COLORS["saddlebrown"],
+        "value": 25,
+        "weight": 12,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 8
+        },
+        "required_workstation": "workbench"
+    },
+    "fireplace": {
+        "name": "Fireplace",
+        "description": "A stone fireplace for warmth and cooking.",
+        "char": ITEM_SPRITES["fireplace"],
+        "color": COLORS["grey"],
+        "value": 50,
+        "weight": 100,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "stone_chunk": 20
+        }
+    },
     "bed_simple": {
         "name": "Simple Bed",
         "description": "A simple bed with a straw mattress.",

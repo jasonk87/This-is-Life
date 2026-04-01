@@ -1,6 +1,7 @@
 """Medical-domain task transitions for injured NPCs and healer behavior."""
 
 from __future__ import annotations
+from simulation.systems.task_types import TaskType
 
 import math
 import random
@@ -79,7 +80,7 @@ def update_npc_medical_state(world, npc) -> None:
                         if path:
                             npc.schedule.current_path = path
                         else:
-                            npc.schedule.current_task = "idle"
+                            npc.schedule.current_task = TaskType.IDLE
                     else:
                         npc.schedule.current_task = "crafting_medical_supplies"
                         clinic = world._find_nearest_building_of_type(npc, "clinic")
@@ -91,7 +92,7 @@ def update_npc_medical_state(world, npc) -> None:
                                 if path:
                                     npc.schedule.current_path = path
                                 else:
-                                    npc.schedule.current_task = "idle"
+                                    npc.schedule.current_task = TaskType.IDLE
                         else:
                             npc.task_timer = 5
                             npc.schedule.current_destination_coords = (npc.x, npc.y)
@@ -102,7 +103,7 @@ def update_npc_medical_state(world, npc) -> None:
                 world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} foraged some medicinal herbs.")
                 amt = random.randint(2, 4)
                 npc.economic.npc_inventory["medicinal_herb"] = npc.economic.npc_inventory.get("medicinal_herb", 0) + amt
-                npc.schedule.current_task = "idle"
+                npc.schedule.current_task = TaskType.IDLE
                 npc.schedule.current_destination_coords = None
 
         elif npc.schedule.current_task == "crafting_medical_supplies":
@@ -118,13 +119,13 @@ def update_npc_medical_state(world, npc) -> None:
                             del npc.economic.npc_inventory["medicinal_herb"]
                         npc.craft_item("healing_salve", 1)
                         world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} crafted a healing salve.")
-                    npc.schedule.current_task = "idle"
+                    npc.schedule.current_task = TaskType.IDLE
                     npc.schedule.current_destination_coords = None
 
     if npc.schedule.current_task == "treating_patient":
         patient = world.get_entity_by_id(npc.task_target_entity_id)
         if not patient or patient.physical.is_dead or "broken_leg" not in patient.physical.status_effects:
-            npc.schedule.current_task = "idle"
+            npc.schedule.current_task = TaskType.IDLE
             npc.task_target_entity_id = None
             return
 
@@ -149,8 +150,8 @@ def update_npc_medical_state(world, npc) -> None:
                 world.add_message_to_chat_log(
                     f"{world.get_entity_display_name(npc)} successfully treats {world.get_entity_display_name(patient)}'s broken leg."
                 )
-                npc.schedule.current_task = "idle"
-                patient.schedule.current_task = "idle"
+                npc.schedule.current_task = TaskType.IDLE
+                patient.schedule.current_task = TaskType.IDLE
                 patient.speed = getattr(patient, "original_speed", 1)
         else:
             if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:

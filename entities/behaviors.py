@@ -1,5 +1,6 @@
 """Behavior strategy objects for animal AI."""
 from __future__ import annotations
+from simulation.systems.task_types import TaskType
 
 import math
 import random
@@ -62,7 +63,7 @@ class HerdingBehavior:
     def take_turn(self, entity, world) -> bool:
         if entity.combat.combat_behavior != "herd_defensive":
             return False
-        if entity.schedule.current_task not in ["idle", "wandering"]:
+        if entity.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING]:
             return False
 
         herd_members = [
@@ -119,7 +120,7 @@ class PredatorBehavior:
             if hasattr(world, "_clear_predator_pursuit_state"):
                 world._clear_predator_pursuit_state(entity)
             if entity.schedule.current_task == "hunting_player":
-                entity.schedule.current_task = "idle"
+                entity.schedule.current_task = TaskType.IDLE
                 entity.schedule.current_path = []
                 entity.schedule.current_destination_coords = None
             return False
@@ -196,9 +197,9 @@ class PredatorBehavior:
                 if path:
                     entity.schedule.current_path = path
                 else:
-                    entity.schedule.current_task = "idle"
+                    entity.schedule.current_task = TaskType.IDLE
             else:
-                entity.schedule.current_task = "idle"
+                entity.schedule.current_task = TaskType.IDLE
             entity.task_target_entity_id = None
             return True
 
@@ -209,10 +210,10 @@ class PredatorBehavior:
                     entity.physical.hunger = 0
                     world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} devours the carcass.")
                     world._change_map_tile((entity.x, entity.y), DECORATION_ITEM_DEFINITIONS["bones"])
-                entity.schedule.current_task = "idle"
+                entity.schedule.current_task = TaskType.IDLE
                 entity.schedule.current_destination_coords = None
             elif not entity.schedule.current_path:
-                entity.schedule.current_task = "idle"
+                entity.schedule.current_task = TaskType.IDLE
             return True
 
         return False
@@ -265,7 +266,7 @@ class WanderFleeBehavior:
             return True
 
         if entity.schedule.current_task == "fleeing":
-            entity.schedule.current_task = "idle"
+            entity.schedule.current_task = TaskType.IDLE
         return False
 
 
@@ -310,7 +311,7 @@ class GrazingBehavior:
             world._change_map_tile((entity.x, entity.y), TILE_DEFINITIONS["tilled_soil"])
         elif tile.name == "Flower":
             world._change_map_tile((entity.x, entity.y), TILE_DEFINITIONS["plains"])
-        entity.schedule.current_task = "idle"
+        entity.schedule.current_task = TaskType.IDLE
 
     def _search_for_food(self, entity, world) -> bool:
         food_sources = entity.animal_definition.get("food_sources", [])
@@ -339,7 +340,7 @@ class GrazingBehavior:
             if tile and tile.name in entity.animal_definition.get("food_sources", []):
                 self._finish_grazing(entity, world, tile)
             else:
-                entity.schedule.current_task = "idle"
+                entity.schedule.current_task = TaskType.IDLE
             return entity.schedule.current_task == "grazing"
 
         if entity.schedule.current_task != "grazing":
@@ -395,10 +396,10 @@ class ReproductionBehavior:
                         entity.schedule.current_task = "following"
                 return True
 
-            if entity.den_location and (self._is_night_time(world) or entity.combat.hp < entity.combat.max_hp * 0.3) and entity.schedule.current_task not in ["sleeping", "returning_to_den"]:
+            if entity.den_location and (self._is_night_time(world) or entity.combat.hp < entity.combat.max_hp * 0.3) and entity.schedule.current_task not in [TaskType.SLEEPING, "returning_to_den"]:
                 den_x, den_y = entity.den_location
                 if (entity.x, entity.y) == (den_x, den_y):
-                    entity.schedule.current_task = "sleeping"
+                    entity.schedule.current_task = TaskType.SLEEPING
                 else:
                     entity.schedule.current_task = "returning_to_den"
                     path = world.calculate_path(entity.x, entity.y, den_x, den_y)
@@ -406,11 +407,11 @@ class ReproductionBehavior:
                         entity.schedule.current_path = path
                         entity.schedule.current_destination_coords = (den_x, den_y)
                     else:
-                        entity.schedule.current_task = "wandering"
+                        entity.schedule.current_task = TaskType.WANDERING
                 return True
 
             if entity.schedule.current_task == "returning_to_den" and entity.den_location and (entity.x, entity.y) == entity.den_location:
-                entity.schedule.current_task = "sleeping"
+                entity.schedule.current_task = TaskType.SLEEPING
                 return True
             return False
 
@@ -438,7 +439,7 @@ class ReproductionBehavior:
 
         mate = next((candidate for candidate in world.npcs if candidate.id == entity.task_target_entity_id), None)
         if not mate:
-            entity.schedule.current_task = "idle"
+            entity.schedule.current_task = TaskType.IDLE
             entity.task_target_entity_id = None
             return False
 
@@ -448,7 +449,7 @@ class ReproductionBehavior:
                 entity.is_pregnant = True
                 entity.pregnancy_timer = entity.animal_definition.get("gestation_period_days", 7) * DAY_LENGTH_TICKS
                 world.add_message_to_chat_log(f"A wild {entity.animal_type} has become pregnant.")
-            entity.schedule.current_task = "idle"
+            entity.schedule.current_task = TaskType.IDLE
             return True
 
         target_x, target_y = world._find_best_adjacent_tile(mate.x, mate.y, entity)
@@ -463,7 +464,7 @@ class ReproductionBehavior:
 
 class RandomWanderBehavior:
     def take_turn(self, entity, world) -> bool:
-        if entity.schedule.current_task not in ["idle", "wandering"] or entity.schedule.current_path:
+        if entity.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING] or entity.schedule.current_path:
             return False
 
         if entity.physical.hunger < entity.physical.max_hunger:
@@ -482,7 +483,7 @@ class RandomWanderBehavior:
 
         entity.schedule.current_path = [(entity.x, entity.y), (potential_x, potential_y)]
         entity.schedule.current_destination_coords = (potential_x, potential_y)
-        entity.schedule.current_task = "wandering"
+        entity.schedule.current_task = TaskType.WANDERING
         return True
 
 

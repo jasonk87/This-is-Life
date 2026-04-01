@@ -1,6 +1,7 @@
 """Work-task progression system for structured NPC profession sub-tasks."""
 
 from __future__ import annotations
+from simulation.systems.task_types import TaskType
 
 from data.professions import get_profession_data, get_sub_task_data
 
@@ -54,7 +55,7 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                 break
 
             if not found_viable_task:
-                npc.schedule.current_task = "at work"
+                npc.schedule.current_task = TaskType.AT_WORK
                 return True
 
     if npc.current_sub_task and npc.sub_task_target_coords:
@@ -64,19 +65,19 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                 if path:
                     npc.schedule.current_path = path
                     npc.schedule.current_destination_coords = npc.sub_task_target_coords
-                    npc.schedule.current_task = "at work"
+                    npc.schedule.current_task = TaskType.AT_WORK
                 else:
                     npc.clear_work_sub_task_state()
                     npc.schedule.current_path = []
                     npc.schedule.current_destination_coords = None
-                    npc.schedule.current_task = "at work"
+                    npc.schedule.current_task = TaskType.AT_WORK
             else:
-                npc.schedule.current_task = "at work"
+                npc.schedule.current_task = TaskType.AT_WORK
         else:
             npc.schedule.current_path = []
             npc.schedule.current_destination_coords = None
             npc.sub_task_timer -= 1
-            npc.schedule.current_task = "at work"
+            npc.schedule.current_task = TaskType.AT_WORK
 
             if npc.sub_task_timer <= 0:
                 npc.economic.work_performance = min(100, npc.economic.work_performance + 5)
@@ -84,7 +85,7 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                     npc.skills.gain_experience("labor", 3)
         return True
 
-    if npc.schedule.current_task == "at work":
+    if npc.schedule.current_task == TaskType.AT_WORK:
         npc.economic.work_performance = max(0, npc.economic.work_performance - 1)
 
     return False

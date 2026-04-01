@@ -317,6 +317,48 @@ ITEM_DEFINITIONS = {
         },
         "required_workstation": "workbench"
     },
+    "wooden_bed": {
+        "name": "Wooden Bed",
+        "description": "A robust wooden bed.",
+        "char": ITEM_SPRITES["wooden_bed"],
+        "color": COLORS["saddlebrown"],
+        "value": 60,
+        "weight": 25,
+        "stackable": False,
+        "item_type_tags": ["furniture"],
+        "crafting_recipe": {
+            "wooden_plank": 15,
+            "cloth": 4
+        },
+        "required_workstation": "workbench"
+    },
+    "stone_anvil": {
+        "name": "Stone Anvil",
+        "description": "A heavy stone block used as an anvil.",
+        "char": ITEM_SPRITES["stone_anvil"],
+        "color": COLORS["mountain_fg"],
+        "value": 45,
+        "weight": 150,
+        "stackable": False,
+        "item_type_tags": ["furniture", "workstation"],
+        "crafting_recipe": {
+            "stone_chunk": 12
+        }
+    },
+    "bookshelf": {
+        "name": "Bookshelf",
+        "description": "A tall wooden shelf for holding books.",
+        "char": ITEM_SPRITES["bookshelf"],
+        "color": COLORS["saddlebrown"],
+        "value": 40,
+        "weight": 20,
+        "stackable": False,
+        "item_type_tags": ["furniture", "container"],
+        "crafting_recipe": {
+            "wooden_plank": 12
+        },
+        "required_workstation": "workbench"
+    },
     "lumber_processed": {
         "name": "Processed Lumber",
         "description": "Smooth, processed lumber, ready for fine construction.",

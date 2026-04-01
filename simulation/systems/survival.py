@@ -1,6 +1,7 @@
 """Shared survival and environmental simulation systems."""
 
 from __future__ import annotations
+from simulation.systems.task_types import TaskType
 
 from config import (
     BIOME_TEMPERATURE_MODIFIERS,
@@ -155,7 +156,7 @@ def update_npc_survival(world, npc) -> None:
 def update_npc_environmental_tasks(world, npc) -> None:
     """Handle high-priority weather/temperature task transitions for one NPC."""
     if "Freezing" in npc.physical.status_effects and npc.schedule.current_task != "seeking_warmth":
-        npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in ["idle", "wandering"] else "idle"
+        npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING] else TaskType.IDLE
         npc.schedule.current_task = "seeking_warmth"
         heat_source_coords = world._find_nearest_heat_source(npc)
         if heat_source_coords:
@@ -179,7 +180,7 @@ def update_npc_environmental_tasks(world, npc) -> None:
     npc_is_sheltered = world._check_for_shelter(npc.x, npc.y)
 
     if is_bad_weather and not npc_is_sheltered and npc.schedule.current_task != "seeking_shelter":
-        npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in ["idle", "wandering"] else "idle"
+        npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING] else TaskType.IDLE
         npc.schedule.current_task = "seeking_shelter"
         shelter_building = world.buildings_by_id.get(npc.schedule.home_building_id)
         if not shelter_building:
@@ -192,7 +193,7 @@ def update_npc_environmental_tasks(world, npc) -> None:
                 npc.schedule.current_path = path
                 npc.schedule.current_destination_coords = shelter_coords
     elif not is_bad_weather and npc.schedule.current_task == "seeking_shelter":
-        npc.schedule.current_task = npc.schedule.previous_task or "idle"
+        npc.schedule.current_task = npc.schedule.previous_task or TaskType.IDLE
         npc.schedule.previous_task = None
         npc.schedule.current_path = []
         npc.schedule.current_destination_coords = None

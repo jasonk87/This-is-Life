@@ -29,24 +29,27 @@ class BuildingArchetype:
 # Global Registry
 FURNITURE_ROLES = {
     "bed": FurnitureRole("bed", "wall", spacing_rules=1),
+    "wooden_bed": FurnitureRole("wooden_bed", "wall", spacing_rules=1),
     "table": FurnitureRole("table", "center", spacing_rules=1, adjacency_preferences=["chair"]),
     "chair": FurnitureRole("chair", "near_other", adjacency_preferences=["table", "desk"]),
     "dresser": FurnitureRole("dresser", "wall"),
     "shelf": FurnitureRole("shelf", "wall"),
+    "bookshelf": FurnitureRole("bookshelf", "wall"),
     "desk": FurnitureRole("desk", "wall", adjacency_preferences=["chair"]),
     "workbench": FurnitureRole("workbench", "wall"),
+    "stone_anvil": FurnitureRole("stone_anvil", "wall"),
     "storage": FurnitureRole("storage", "corner"),
     "counter": FurnitureRole("counter", "center"),
     "fireplace": FurnitureRole("fireplace", "wall")
 }
 
 ROOM_ARCHETYPES = {
-    "bedroom": RoomArchetype("bedroom", 9, ["bed", "dresser"], ["chair", "shelf"]),
+    "bedroom": RoomArchetype("bedroom", 9, ["wooden_bed", "dresser"], ["chair", "bookshelf", "shelf"]),
     "shared_sleeping": RoomArchetype("shared_sleeping", 16, ["bed", "bed", "storage"], ["chair"]),
     "dining": RoomArchetype("dining", 12, ["table", "chair", "chair"], ["fireplace", "shelf"]),
-    "workshop": RoomArchetype("workshop", 15, ["workbench", "storage"], ["chair", "shelf"]),
-    "clinic_room": RoomArchetype("clinic_room", 12, ["bed", "desk", "storage"], ["chair"]),
-    "office": RoomArchetype("office", 9, ["desk", "chair", "storage"], ["shelf"]),
+    "workshop": RoomArchetype("workshop", 15, ["workbench", "storage"], ["chair", "stone_anvil", "shelf"]),
+    "clinic_room": RoomArchetype("clinic_room", 12, ["wooden_bed", "desk", "storage"], ["chair"]),
+    "office": RoomArchetype("office", 9, ["desk", "chair", "storage"], ["bookshelf"]),
     "storage": RoomArchetype("storage", 6, ["storage", "storage"], ["shelf"]),
     "tavern_floor": RoomArchetype("tavern_floor", 25, ["counter", "table", "table", "chair", "chair"], ["fireplace"])
 }
@@ -68,11 +71,14 @@ BUILDING_ARCHETYPES = {
 
 FURNITURE_ANCHORS = {
     "bed": "sleep",
+    "wooden_bed": "sleep",
     "chair": "eat", # social could also fit, but eat is common. Let's make sure it handles both or pick one primary. Let's stick to the prompt's suggestions if possible.
     "table": "eat",
     "workbench": "work",
+    "stone_anvil": "work",
     "desk": "work",
     "storage": "storage",
+    "bookshelf": "read",
     "counter": "social",
     "fireplace": "social"
 }

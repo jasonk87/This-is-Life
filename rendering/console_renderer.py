@@ -194,7 +194,7 @@ def _get_world_view_dimensions(world):
 
 def _screen_to_world(world, camera_x, camera_y, screen_x, screen_y):
     zoom = _get_zoom_factor(world)
-    return camera_x + int(screen_x / zoom), camera_y + int(screen_y / zoom)
+    return camera_x + int(screen_x // zoom), camera_y + int(screen_y // zoom)
 
 
 def _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y):
@@ -238,6 +238,25 @@ def _iter_render_entities(world):
     all_entities = itertools.chain(world.npcs, world.village_npcs, [world.player])
     return sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, "render_order") else 0)
 
+
+def _draw_items(console, world, camera_x, camera_y):
+    for (item_x, item_y), items in world.items_on_map.items():
+        if not items or not is_visible(world, item_x, item_y):
+            continue
+
+        item_key = next(iter(items))
+        item_def = ITEM_DEFINITIONS.get(item_key)
+        if not item_def:
+            continue
+
+        char_val = item_def.get("char", "*")
+        item_char = chr(char_val) if isinstance(char_val, int) else str(char_val)
+        item_color = item_def.get("color", (255, 245, 160))
+
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, item_x, item_y)
+        if screen_point is not None:
+            screen_x, screen_y = screen_point
+            console.print(x=screen_x, y=screen_y, string=item_char, fg=item_color)
 
 def _draw_entities(console, world, camera_x, camera_y):
     for entity in _iter_render_entities(world):
@@ -705,22 +724,6 @@ def _draw_world_markers(console, world, camera_x, camera_y):
     marked = 0
     max_markers = 18
 
-    for (item_x, item_y), items in world.items_on_map.items():
-        if marked >= max_markers:
-            break
-        if not items or not is_visible(world, item_x, item_y):
-            continue
-        if max(abs(world.player.x - item_x), abs(world.player.y - item_y)) > 10:
-            continue
-        marker_world_y = item_y - 1
-        if not _is_overlay_cell_visible(world, item_x, marker_world_y):
-            continue
-        screen_point = _screen_point_for_world(world, camera_x, camera_y, item_x, marker_world_y)
-        if screen_point is not None:
-            screen_x, screen_y = screen_point
-            console.print(x=screen_x, y=screen_y, string="*", fg=(255, 245, 160))
-            marked += 1
-
     for dy in range(-8, 9):
         if marked >= max_markers:
             break
@@ -1143,6 +1146,7 @@ def draw(console, world, camera_x, camera_y):
                     )
 
     _apply_lighting_and_depth(console, world, camera_x, camera_y)
+    _draw_items(console, world, camera_x, camera_y)
     _draw_entities(console, world, camera_x, camera_y)
     # Draw path visualizer
     if hasattr(world.player.state, 'current_path') and world.player.state.current_path:

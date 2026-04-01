@@ -13,6 +13,33 @@ from simulation.careers import (
 )
 
 # Create a dummy World class that bypasses heavy initialization
+class TownBoardStub:
+    def __init__(self):
+        self.tasks = []
+        self.next_id = 1
+    def get_open_employment_tasks(self, building_id=None):
+        if building_id:
+            return [t for t in self.tasks if getattr(t, 'target_building_id', None) == building_id]
+        return self.tasks
+    def post_employment(self, building_id, role, wage):
+        task = MagicMock()
+        task.id = self.next_id
+        task.target_building_id = building_id
+        task.role = role
+        task.wage = wage
+        task.profession_role = role
+        task.daily_wage = wage
+        self.tasks.append(task)
+        self.next_id += 1
+        return task
+    def remove_employment_task(self, task_id):
+        self.tasks = [t for t in self.tasks if t.id != task_id]
+    def claim_employment_task(self, task, npc_id):
+        self.remove_employment_task(task.id)
+        return True
+    def complete_employment_task(self, task_id):
+        pass
+
 class MockWorld(World):
     def __init__(self):
         # Bypass World.__init__ to avoid generation
@@ -24,6 +51,7 @@ class MockWorld(World):
         self.chunks = [[MagicMock() for _ in range(1)] for _ in range(1)] # Minimal chunk map
         self.player = MagicMock(spec=Player)
         self.player.id = 1
+        self.town_board = TownBoardStub()
         self.player.world_ref = self
         self.player_fov_map = MagicMock()
         self.player_fov_map.__getitem__ = MagicMock(return_value=False)
@@ -48,9 +76,16 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         # Create a workplace building (e.g., Tavern)
         self.tavern = Building(10, 10, 10, 10, building_type="tavern", category="commercial_workplace")
         self.tavern.id = "tavern_1"
+        self.tavern.settlement_id = getattr(self.village, 'id', None)
         self.tavern.max_workers = 2
         self.tavern.occupants = []
 
+
+        self.village.interaction_points = {"noticeboard": [(15, 15)]}
+
+        # We also need self.world.town_board.get_open_employment_tasks to return our task
+        # But _sync_village_employment_tasks is called inside _update_npc_careers which updates town_board
+        # Actually town_board is a MagicMock, so get_open_employment_tasks() won't return anything real unless configured.
         self.village.buildings.append(self.tavern)
         self.world.buildings_by_id[self.tavern.id] = self.tavern
 
@@ -98,6 +133,7 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         # Start with an unemployed NPC
         set_entity_profession(self.npc, "Unemployed")
         self.npc.schedule.work_building_id = None
+        self.npc.economic.days_unemployed = 2
 
         # Ensure vacancy logic (based on schedule ID, not occupants)
         # No other NPCs are assigned to self.tavern.id in setup

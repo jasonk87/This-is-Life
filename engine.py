@@ -7717,7 +7717,7 @@ class World:
                     # Hired!
                     self.player.economic.job_building_id = work_building.id
                     self.player.economic.days_employed = 0
-                    self.player.economic.job_performance = 50
+                    self.player.economic.work_performance = 50
                     self.player.economic.job_satisfaction = 100
 
                     # Determine profession

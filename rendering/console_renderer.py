@@ -1769,9 +1769,34 @@ def draw_info_menu(console, world):
     stat_y += 1
     console.print(x=x + 2, y=stat_y, string=f"Infamy: {world.player.social.infamy}", fg=(255, 0, 0))
     stat_y += 1
-    if world.player.social.title:
-        console.print(x=x + 2, y=stat_y, string=f"Title: {world.player.social.title}", fg=(0, 255, 255))
-    stat_y += 2
+
+    title = world.player.social.title
+    if not title:
+        # Fallback to career title or profession
+        title = world.player.career.display_title()
+        if not title:
+            prof = str(getattr(world.player.economic, "profession", "Unemployed")).strip()
+            if prof and prof.lower() not in {"unemployed", "creature"}:
+                title = prof
+
+    if title:
+        console.print(x=x + 2, y=stat_y, string=f"Title: {title}", fg=(0, 255, 255))
+        stat_y += 1
+
+    if world.player.economic.job_building_id:
+        village = None
+        building = world.buildings_by_id.get(world.player.economic.job_building_id)
+        if building and building.settlement_id:
+            atlas = getattr(world, "atlas", None)
+            if atlas and hasattr(atlas, "get_village"):
+                village = atlas.get_village(building.settlement_id)
+        wage = world._get_employment_daily_wage(world.player.economic.profession, village=village)
+        if world.player.economic.work_performance > 80:
+            wage += int(wage * 0.2)
+        console.print(x=x + 2, y=stat_y, string=f"Expected Wage: {wage} coins/day", fg=(0, 255, 0))
+        stat_y += 1
+
+    stat_y += 1
 
     # Equipment section
     stat_y += 1

@@ -128,6 +128,7 @@ from simulation.systems.conversation_topics import (
     select_conversation_topic,
 )
 from simulation.systems.tick import run_world_tick
+from simulation.ecology import EcologySystem
 from simulation.systems.work import update_npc_work_sub_tasks
 from simulation.world_model import (
     Building,
@@ -571,6 +572,7 @@ class World:
         self.records = ChronicleArchive(self.history)
         self.knowledge_system = KnowledgeSystem(self.records)
         self.politics = PoliticsTracker()
+        self.ecology = EcologySystem()
         self.chunks = self._initialize_chunks()
         self.npcs = []
         self.village_npcs = []
@@ -12206,6 +12208,7 @@ class World:
 
     def _update_economy(self):
         """Periodically updates the supply and demand of all villages."""
+        from simulation.systems.economy import simulate_village_economy
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
@@ -12222,6 +12225,10 @@ class World:
                     for building in village.buildings:
                         for item_key, quantity in building.building_inventory.items():
                             village.supply[item_key] = village.supply.get(item_key, 0) + quantity
+
+                    # Run advanced macroscopic simulation if tick aligns
+                    if self.game_time % 100 == 0:
+                        simulate_village_economy(self, village)
 
     def get_dynamic_price(self, item_key: str, village: Village, merchant: NPC | None = None) -> int:
         """Calculates the dynamic price of an item based on village supply and demand."""

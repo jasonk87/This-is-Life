@@ -60,6 +60,8 @@ def run_world_tick(world) -> None:
     world._update_npc_ages()
     world._update_npc_careers()
     world._update_player_career()
+    if hasattr(world, "ecology"):
+        world.ecology.process_tick(world)
     world._update_abstract_simulation()
     world._update_political_warrants()
     world._drain_gossip_flavor_text_queue()

@@ -11,6 +11,7 @@ from data.items import ITEM_DEFINITIONS
 from simulation.systems.economy import process_traveling_merchant_village_trade
 from simulation.systems.incidents import run_town_crier_broadcast
 from simulation.systems.social_reaction import evaluate_social_reaction_stance, _calculate_presence_score
+from simulation.systems.utility_ai import evaluate_needs_utility
 
 
 def run_npc_presence_micro_reactions(world, npc) -> bool:
@@ -348,6 +349,11 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
 
     # Check for micro-reactions (like facing/pausing) to nearby presence
     run_npc_presence_micro_reactions(world, npc)
+
+    # 1. Utility-based Needs (Overrides standard schedule if urgent)
+    if evaluate_needs_utility(world, npc):
+        return
+
     current_day = world.game_time // DAY_LENGTH_TICKS
     if run_npc_grudge_suspicion_policy(world, npc, current_day):
         return

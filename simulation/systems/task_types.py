@@ -16,3 +16,6 @@ class TaskType:
     CONVERSING = "conversing"
     TRADING = "trading"
     EATING = "eating"
+    GOING_TO_BUY_FOOD = "going_to_buy_food"
+    FORAGING_FOOD = "foraging_food"
+    GOING_TO_STEAL_FOOD = "going_to_steal_food"

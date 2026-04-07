@@ -105,7 +105,7 @@ def simulate_village_economy(world, village) -> None:
             # Try to gather from ecology if available
             wood_gathered = 1
             if hasattr(world, "ecology") and hasattr(village, "region_id"):
-                wood_gathered = world.ecology.consume_resource(village.region_id, "wood", 3)
+                wood_gathered = world.ecology.consume_resource(world, village.region_id, "wood", 3)
 
             if wood_gathered > 0:
                 storage_building.building_inventory["raw_log"] = storage_building.building_inventory.get("raw_log", 0) + wood_gathered

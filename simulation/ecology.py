@@ -30,15 +30,21 @@ class EcologySystem:
 
         self.regional_resources[region.id] = resources
 
-    def get_resource_availability(self, region_id: str, resource_type: str) -> int:
+    def get_resource_availability(self, world, region_id: str, resource_type: str) -> int:
         if region_id not in self.regional_resources:
-            return 0
+            if hasattr(world, "atlas") and region_id in world.atlas.regions_by_id:
+                self._initialize_region(world.atlas.regions_by_id[region_id])
+            else:
+                return 0
         return self.regional_resources[region_id].get(resource_type, 0)
 
-    def consume_resource(self, region_id: str, resource_type: str, amount: int) -> int:
+    def consume_resource(self, world, region_id: str, resource_type: str, amount: int) -> int:
         """Attempt to consume a resource. Returns the actual amount consumed."""
         if region_id not in self.regional_resources:
-            return 0
+            if hasattr(world, "atlas") and region_id in world.atlas.regions_by_id:
+                self._initialize_region(world.atlas.regions_by_id[region_id])
+            else:
+                return 0
 
         available = self.regional_resources[region_id].get(resource_type, 0)
         consumed = min(available, amount)
@@ -47,12 +53,6 @@ class EcologySystem:
 
     def process_tick(self, world) -> None:
         """Handle regeneration of resources over time."""
-        # Check if we need to initialize any regions
-        if hasattr(world, "atlas"):
-            for region_id, region in world.atlas.regions_by_id.items():
-                if region_id not in self.regional_resources:
-                    self._initialize_region(region)
-
         # Regenerate resources periodically.
         # Assume this is called once per game day or similar macro-tick.
         if world.game_time % 1000 == 0:  # Adjust this interval as needed

@@ -40,6 +40,8 @@ class ChopTreesSubTaskCommand(CompletedWorkSubTaskCommand):
 
         if logs_collected > 0:
             npc.add_item("raw_log", logs_collected)
+            from engine import FloatingTextEffect
+            world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"+{logs_collected} Wood", color=(50, 255, 50)))
         return True
 
 
@@ -62,6 +64,9 @@ class ButcherCarcassSubTaskCommand(CompletedWorkSubTaskCommand):
                         quantity = int(quantity_info)
                     if quantity > 0:
                         npc.add_item(item_key, quantity)
+                        from engine import FloatingTextEffect
+                        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+                        world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"+{quantity} {item_name}", color=(50, 255, 50)))
 
         bones_def = DECORATION_ITEM_DEFINITIONS["bones"]
         world._change_map_tile(npc.sub_task_target_coords, bones_def)
@@ -79,6 +84,9 @@ class AddItemToNpcInventorySubTaskCommand(CompletedWorkSubTaskCommand):
             npc.craft_item(self.item_key, self.quantity)
         else:
             npc.add_item(self.item_key, self.quantity)
+        from engine import FloatingTextEffect
+        item_name = ITEM_DEFINITIONS.get(self.item_key, {}).get("name", self.item_key)
+        world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"+{self.quantity} {item_name}", color=(50, 255, 50)))
         return True
 
 

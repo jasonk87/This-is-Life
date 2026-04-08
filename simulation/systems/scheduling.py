@@ -372,6 +372,12 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
 def run_npc_furniture_interaction_policy(world, npc) -> bool:
     """Occasionally have idle/at_home/at_work NPCs sit on chairs or work at anvils/desks."""
     if npc.schedule.current_task in {TaskType.SITTING, TaskType.FORGING}:
+        if getattr(world, "game_time", 0) % 40 == 0:
+            from engine import FloatingTextEffect
+            if npc.schedule.current_task == TaskType.SITTING:
+                world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*resting*", color=(150, 200, 150)))
+            else:
+                world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*hammering*", color=(200, 200, 200)))
         if npc.leisure_timer > 0:
             npc.leisure_timer -= 1
             if getattr(npc, "is_sitting", False) and npc.schedule.current_task != TaskType.SITTING:
@@ -894,8 +900,12 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             new_task_label = TaskType.GOING_HOME
             destination_coords = dest_coords_temp
 
-    if npc.schedule.current_task == TaskType.SLEEPING and not is_night_time:
-        npc.schedule.current_task = TaskType.AT_HOME
+    if npc.schedule.current_task == TaskType.SLEEPING:
+        if not is_night_time:
+            npc.schedule.current_task = TaskType.AT_HOME
+        elif getattr(world, "game_time", 0) % 50 == 0:
+            from engine import FloatingTextEffect
+            world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "Zzz", color=(100, 100, 255)))
     elif npc.schedule.current_task == "seeking_partner":
         potential_partners = [
             p for p in world.village_npcs

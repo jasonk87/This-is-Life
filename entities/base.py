@@ -15,6 +15,7 @@ from entities.human_behaviors import NPCBrain, NPCTaskState
 from entities.items import EquipmentSlot, Inventory, ItemReference, roll_crafted_item_quality
 from entities.metabolism import MetabolismComponent
 from entities.social import AspirationComponent, AspirationType, GrudgeRecord, KnowledgeComponent, LocalOpinionRecord, TravelComponent
+from simulation.activity import ensure_activity_state
 from simulation.careers import CareerState, infer_career_level, normalize_profession, set_entity_profession
 from simulation.skills import SkillTracker
 
@@ -139,6 +140,9 @@ class SocialState:
     relationships: dict = field(default_factory=dict)
     grudges: dict[int, GrudgeRecord] = field(default_factory=dict)
     local_opinions: dict[int, LocalOpinionRecord] = field(default_factory=dict)
+    recent_social_reactions: list[dict[str, Any]] = field(default_factory=list)
+    opinion_modifiers: dict[int, float] = field(default_factory=dict)
+    reacted_history_fact_ids: set[str] = field(default_factory=set)
     reputation: dict[str, int] = field(default_factory=dict)
     shared_experience_ticks: dict[int, int] = field(default_factory=dict)
     follow_target_id: int | None = None
@@ -260,6 +264,7 @@ class NPC:
         self.skills = SkillTracker()
         self.aspiration = AspirationComponent(aspiration_type=random.choice(list(AspirationType)))
         self.travel = TravelComponent()
+        ensure_activity_state(self)
 
         self.social.personality = personality
         if isinstance(family_ties, str):

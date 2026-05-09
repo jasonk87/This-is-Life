@@ -4,11 +4,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from config import DAY_LENGTH_TICKS
+
 
 @dataclass
 class SocialReactionAssessment:
     stance: str
     threat_score: float
+
+
+VIOLENT_CRIME_TERMS = {
+    "murder",
+    "homicide",
+    "manslaughter",
+    "assault",
+    "attack",
+    "violent",
+    "battery",
+    "robbery",
+    "harm",
+    "killing",
+}
+POSITIVE_EMPLOYMENT_ACTIONS = {"hired", "promoted", "appointed", "service"}
+SOCIAL_INTEREST_RECORD_TYPES = {
+    "npc_birth",
+    "npc_marriage",
+    "npc_migrated",
+    "npc_emigrated",
+}
+EMPLOYMENT_RECORD_TYPES = {
+    "npc_hired",
+    "npc_employment_changed",
+}
 
 
 def evaluate_social_reaction_stance(world, observer, target) -> SocialReactionAssessment:
@@ -41,6 +68,236 @@ def evaluate_social_reaction_stance(world, observer, target) -> SocialReactionAs
     if threat_score >= 40:
         return SocialReactionAssessment("wary", threat_score)
     return SocialReactionAssessment("neutral", threat_score)
+
+
+def apply_known_history_fact_reactions(world, npc) -> int:
+    """Apply one narrow reaction pass over an NPC's known structured history facts."""
+    if npc is None or getattr(getattr(npc, "physical", None), "is_dead", False):
+        return 0
+    knowledge = getattr(npc, "knowledge", None)
+    known_facts = getattr(knowledge, "known_history_facts", {}) if knowledge else {}
+    if not known_facts:
+        return 0
+
+    social = _ensure_history_reaction_state(npc)
+    applied = 0
+    facts = sorted(
+        known_facts.values(),
+        key=lambda fact: (
+            getattr(fact, "known_at_tick", 0),
+            getattr(fact, "source_record_id", ""),
+        ),
+    )
+    for fact in facts:
+        fact_id = getattr(fact, "source_record_id", "")
+        if not fact_id or fact_id in social.reacted_history_fact_ids:
+            continue
+        record = _get_history_record(world, fact_id)
+        reaction = _score_known_history_fact(world, npc, fact, record)
+        social.reacted_history_fact_ids.add(fact_id)
+        if reaction is None:
+            continue
+        _store_history_reaction(world, npc, fact, reaction)
+        applied += 1
+    return applied
+
+
+def _ensure_history_reaction_state(npc):
+    social = getattr(npc, "social", None)
+    if social is None:
+        return None
+    if not hasattr(social, "recent_social_reactions"):
+        social.recent_social_reactions = []
+    if not hasattr(social, "opinion_modifiers"):
+        social.opinion_modifiers = {}
+    if not hasattr(social, "reacted_history_fact_ids"):
+        social.reacted_history_fact_ids = set()
+    return social
+
+
+def _get_history_record(world, record_id: str):
+    history = getattr(world, "history", None)
+    get_event = getattr(history, "get_event", None)
+    if callable(get_event):
+        return get_event(record_id)
+    return None
+
+
+def _score_known_history_fact(world, npc, fact, record) -> dict | None:
+    record_type = str(getattr(fact, "record_type", ""))
+    record_class_name = str(getattr(fact, "record_class_name", ""))
+    if _is_crime_fact(record_type, record_class_name, fact):
+        return _score_crime_fact(npc, fact, record)
+    if record_type == "entity_death" or record_class_name == "DeathRecord":
+        return _score_death_fact(npc, fact, record)
+    if record_type in EMPLOYMENT_RECORD_TYPES or record_class_name == "EmploymentRecord":
+        return _score_employment_fact(npc, fact, record)
+    if record_type in SOCIAL_INTEREST_RECORD_TYPES or record_class_name in {
+        "BirthRecord",
+        "MarriageRecord",
+        "MigrationRecord",
+    }:
+        return _score_social_interest_fact(npc, fact, record)
+    return None
+
+
+def _is_crime_fact(record_type: str, record_class_name: str, fact) -> bool:
+    tags = {str(tag).lower() for tag in getattr(fact, "tags", ()) or ()}
+    return record_class_name == "CrimeRecord" or "crime" in record_type or "crime" in tags
+
+
+def _score_crime_fact(npc, fact, record) -> dict | None:
+    suspect_id = getattr(record, "suspect_id", None)
+    victim_id = getattr(record, "victim_id", None)
+    crime_kind = str(
+        getattr(record, "crime_kind", "") or getattr(fact, "record_type", "")
+    ).lower()
+    if suspect_id is None:
+        entity_ids = list(getattr(fact, "subject_entity_ids", ()) or ())
+        suspect_id = entity_ids[0] if entity_ids else None
+    if suspect_id in {None, getattr(npc, "id", None)}:
+        return None
+    if not _is_violent_crime(crime_kind):
+        return None
+    confidence = _fact_confidence(fact)
+    return {
+        "reaction_type": "fear",
+        "target_entity_id": suspect_id,
+        "related_entity_id": victim_id,
+        "score": -round(35.0 * confidence, 2),
+        "reason": "known_violent_crime",
+        "grudge_severity": int(45 + (35 * confidence)),
+    }
+
+
+def _is_violent_crime(crime_kind: str) -> bool:
+    return any(term in crime_kind for term in VIOLENT_CRIME_TERMS)
+
+
+def _score_death_fact(npc, fact, record) -> dict | None:
+    deceased_id = getattr(record, "deceased_id", None)
+    if deceased_id is None:
+        entity_ids = list(getattr(fact, "subject_entity_ids", ()) or ())
+        deceased_id = entity_ids[0] if entity_ids else None
+    if deceased_id in {None, getattr(npc, "id", None)}:
+        return None
+    if not _is_close_relation(npc, deceased_id):
+        return None
+    return {
+        "reaction_type": "grief",
+        "target_entity_id": deceased_id,
+        "score": -round(25.0 * _fact_confidence(fact), 2),
+        "reason": "known_close_death",
+    }
+
+
+def _score_employment_fact(npc, fact, record) -> dict | None:
+    worker_id = getattr(record, "worker_id", None)
+    action = str(getattr(record, "employment_action", "") or "").lower()
+    profession = str(getattr(record, "profession", "") or "").lower()
+    if worker_id is None:
+        entity_ids = list(getattr(fact, "subject_entity_ids", ()) or ())
+        worker_id = entity_ids[0] if entity_ids else None
+    if worker_id in {None, getattr(npc, "id", None)}:
+        return None
+    if action not in POSITIVE_EMPLOYMENT_ACTIONS and "guard" not in profession:
+        return None
+    confidence = _fact_confidence(fact)
+    return {
+        "reaction_type": "respect",
+        "target_entity_id": worker_id,
+        "score": round(8.0 * confidence, 2),
+        "reason": "known_service_work",
+    }
+
+
+def _score_social_interest_fact(npc, fact, record) -> dict | None:
+    target_id = _first_other_entity_id(npc, getattr(fact, "subject_entity_ids", ()) or ())
+    if target_id is None:
+        return None
+    return {
+        "reaction_type": "curiosity",
+        "target_entity_id": target_id,
+        "score": round(3.0 * _fact_confidence(fact), 2),
+        "reason": "known_life_event",
+    }
+
+
+def _store_history_reaction(world, npc, fact, reaction: dict) -> None:
+    social = _ensure_history_reaction_state(npc)
+    if social is None:
+        return
+    target_id = reaction.get("target_entity_id")
+    score = float(reaction.get("score", 0.0))
+    if target_id is not None:
+        social.opinion_modifiers[target_id] = (
+            social.opinion_modifiers.get(target_id, 0.0) + score
+        )
+        if reaction["reaction_type"] == "fear":
+            current_day = int(getattr(world, "game_time", 0)) // DAY_LENGTH_TICKS
+            add_grudge = getattr(npc, "add_grudge", None)
+            if callable(add_grudge):
+                add_grudge(
+                    target_id,
+                    reaction.get("reason", "known_history_fact"),
+                    severity=reaction.get("grudge_severity", 60),
+                    current_day=current_day,
+                    decay_days=8,
+                )
+        elif reaction["reaction_type"] == "respect":
+            social.relationships[target_id] = min(
+                100,
+                social.relationships.get(target_id, 50) + int(max(1, score)),
+            )
+        elif reaction["reaction_type"] == "curiosity":
+            social.relationships[target_id] = min(
+                100, social.relationships.get(target_id, 50) + 1
+            )
+
+    social.recent_social_reactions.append(
+        {
+            "source_record_id": getattr(fact, "source_record_id", ""),
+            "reaction_type": reaction["reaction_type"],
+            "target_entity_id": target_id,
+            "related_entity_id": reaction.get("related_entity_id"),
+            "score": score,
+            "reason": reaction.get("reason", "known_history_fact"),
+            "tick": int(getattr(world, "game_time", 0)),
+        }
+    )
+    if len(social.recent_social_reactions) > 12:
+        del social.recent_social_reactions[:-12]
+
+
+def _fact_confidence(fact) -> float:
+    return max(0.0, min(1.0, float(getattr(fact, "confidence", 0.0))))
+
+
+def _is_close_relation(npc, entity_id: int) -> bool:
+    social = getattr(npc, "social", None)
+    if social is None:
+        return False
+    if social.relationships.get(entity_id, 0) >= 70:
+        return True
+    return _family_ties_include(getattr(social, "family_ties", {}) or {}, entity_id)
+
+
+def _family_ties_include(value, entity_id: int) -> bool:
+    if value == entity_id:
+        return True
+    if isinstance(value, dict):
+        return any(_family_ties_include(child, entity_id) for child in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_family_ties_include(child, entity_id) for child in value)
+    return False
+
+
+def _first_other_entity_id(npc, entity_ids) -> int | None:
+    npc_id = getattr(npc, "id", None)
+    for entity_id in entity_ids:
+        if isinstance(entity_id, int) and entity_id != npc_id:
+            return entity_id
+    return None
 
 
 def _mean_incident_confidence(observer, target_id: int | None) -> float:

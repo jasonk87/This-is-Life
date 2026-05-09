@@ -70,6 +70,7 @@ from data.construction import CONSTRUCTION_RECIPES
 from data.dawnlike import get_animal_sprite, get_human_sprite
 from services.llm_gossip import AsyncLLMGossipService
 from ui_requests import (
+    UIRequest,
     close_dialogue_request,
     close_trade_request,
     open_dialogue_request,
@@ -738,7 +739,7 @@ class World:
         self.visual_effects: list[VisualEffect] = []
 
         # UI requests emitted by simulation logic and applied by the main loop.
-        self.ui_requests: list[dict] = []
+        self.ui_requests: list[UIRequest] = []
 
         # Incrementally maintained occupancy map used by pathing/movement.
         self.entity_positions: dict[tuple[int, int], int] = {}
@@ -800,6 +801,14 @@ class World:
     def request_close_trade(self, target_npc: NPC | None = None):
         """Queue a request for the UI layer to close trade."""
         self.ui_requests.append(close_trade_request(target_npc))
+
+    @staticmethod
+    def _is_valid_coordinate_pair(coords) -> bool:
+        return (
+            isinstance(coords, (tuple, list))
+            and len(coords) == 2
+            and all(isinstance(value, int) for value in coords)
+        )
 
     def get_chunk_coords(self, x: int, y: int) -> tuple[int, int]:
         manager = getattr(self, "chunk_manager", None)
@@ -3703,8 +3712,10 @@ class World:
                     ideal_role = "fireplace"
 
                 anchor_coords = work_building.get_anchor_coordinates(anchor_types, None, world=self, requesting_entity=npc, ideal_role=ideal_role)
-                if anchor_coords:
-                    return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                if self._is_valid_coordinate_pair(anchor_coords):
+                    refined_coords = work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                    if self._is_valid_coordinate_pair(refined_coords):
+                        return tuple(refined_coords)
 
             # For other zones (like Woodcutter's log_pile_area), use pre-defined coordinates
             zone_coords_list = work_building.work_zone_tiles.get(target_zone_tag)
@@ -3715,8 +3726,10 @@ class World:
             else:
                 # Fallback to work/service anchors if no zone coordinates defined
                 anchor_coords = work_building.get_anchor_coordinates(["work", "service"], None, world=self, requesting_entity=npc)
-                if anchor_coords:
-                    return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                if self._is_valid_coordinate_pair(anchor_coords):
+                    refined_coords = work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                    if self._is_valid_coordinate_pair(refined_coords):
+                        return tuple(refined_coords)
 
                 # self.add_message_to_chat_log(f"Warning: No coordinates defined for work zone '{target_zone_tag}' in building {work_building.id} for {npc.name}.")
                 return None

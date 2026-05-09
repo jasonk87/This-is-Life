@@ -7,6 +7,7 @@ import random
 from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
 from data.animals import ANIMAL_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
+from data.items import ITEM_DEFINITIONS
 from data.tiles import TILE_DEFINITIONS
 from entities.items import roll_crafted_item_quality
 from entities.tree import Tree

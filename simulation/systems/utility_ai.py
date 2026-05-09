@@ -11,6 +11,14 @@ def evaluate_needs_utility(world, npc) -> bool:
     Evaluate physiological needs and return True if a need-driven task was assigned,
     overriding the standard schedule.
     """
+    protected_tasks = {
+        "seeking_healer", "waiting_for_treatment", "resting_in_bed",
+        "avoiding_social_threat", "fleeing_from_player", "combat_action_flee_from_player",
+        "attacking_player", "going_to_report_crime",
+    }
+    if npc.schedule.current_task in protected_tasks:
+        return False
+
     # Lock active utility tasks to prevent thrashing
     active_utility_tasks = [
         TaskType.GOING_TO_BUY_FOOD, TaskType.FORAGING_FOOD, TaskType.GOING_TO_STEAL_FOOD,

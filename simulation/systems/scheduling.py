@@ -14,6 +14,14 @@ from simulation.systems.social_reaction import evaluate_social_reaction_stance, 
 from simulation.systems.utility_ai import evaluate_needs_utility
 
 
+def _is_coordinate_pair(coords) -> bool:
+    return (
+        isinstance(coords, (tuple, list))
+        and len(coords) == 2
+        and all(isinstance(value, int) for value in coords)
+    )
+
+
 def run_npc_presence_micro_reactions(world, npc) -> bool:
     """Subtle, non-disruptive reactions (facing/pausing) to high-presence nearby entities."""
     if not hasattr(npc, "task_context_data") or not isinstance(npc.task_context_data, dict):
@@ -350,14 +358,15 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
     # Check for micro-reactions (like facing/pausing) to nearby presence
     run_npc_presence_micro_reactions(world, npc)
 
-    # 1. Utility-based Needs (Overrides standard schedule if urgent)
-    if evaluate_needs_utility(world, npc):
-        return
-
     current_day = world.game_time // DAY_LENGTH_TICKS
     if run_npc_grudge_suspicion_policy(world, npc, current_day):
         return
     if run_npc_social_reaction_policy(world, npc):
+        return
+
+    # Utility-based needs can override routine schedules, but not immediate
+    # social-threat reactions or other critical state set before scheduling.
+    if evaluate_needs_utility(world, npc):
         return
     if run_npc_follower_catch_up_policy(world, npc):
         return
@@ -876,8 +885,11 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
             if not sleep_spot_coords:
                 sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
-                if sleep_spot_coords:
-                    sleep_spot_coords = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
+                if _is_coordinate_pair(sleep_spot_coords):
+                    refined_sleep_spot = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
+                    sleep_spot_coords = tuple(refined_sleep_spot) if _is_coordinate_pair(refined_sleep_spot) else tuple(sleep_spot_coords)
+                elif not _is_coordinate_pair(sleep_spot_coords):
+                    sleep_spot_coords = None
             if is_at_home:
                 if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords:
                     npc.schedule.current_task = TaskType.SLEEPING
@@ -901,15 +913,17 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
             home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
             if home_building_obj:
                 sleep_anchor = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
-                if sleep_anchor:
-                    dest_coords_temp = home_building_obj.refine_anchor_coordinates(world, sleep_anchor[0], sleep_anchor[1], requesting_entity=npc)
+                if _is_coordinate_pair(sleep_anchor):
+                    refined_home_coords = home_building_obj.refine_anchor_coordinates(world, sleep_anchor[0], sleep_anchor[1], requesting_entity=npc)
+                    if _is_coordinate_pair(refined_home_coords):
+                        dest_coords_temp = tuple(refined_home_coords)
             new_task_label = TaskType.GOING_HOME
             destination_coords = dest_coords_temp
 
     if npc.schedule.current_task == TaskType.SLEEPING:
         if not is_night_time:
             npc.schedule.current_task = TaskType.AT_HOME
-        elif getattr(world, "game_time", 0) % 50 == 0:
+        elif getattr(world, "game_time", 0) % 50 == 0 and hasattr(world, "visual_effects"):
             from engine import FloatingTextEffect
             world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "Zzz", color=(100, 100, 255)))
     elif npc.schedule.current_task == "seeking_partner":

@@ -84,7 +84,7 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                 sub_task_data = get_sub_task_data(npc.economic.profession, npc.current_sub_task)
                 if sub_task_data:
                     action_verb = sub_task_data.get("action_verb")
-                    if action_verb:
+                    if action_verb and hasattr(world, "visual_effects"):
                         from engine import FloatingTextEffect
                         world.visual_effects.append(
                             FloatingTextEffect(npc.x, npc.y, f"*{action_verb}*", color=(200, 200, 200))

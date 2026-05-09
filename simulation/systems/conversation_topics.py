@@ -221,7 +221,17 @@ def _choose_incident_payload(world, speaker, *, min_confidence: float = 0.35) ->
     }
 
 
-def _choose_reflection_payload(world, speaker, listener) -> dict | None:
+def _choose_reflection_payload(world, speaker=None, listener=None) -> dict | None:
+    """Choose a reflection memory for a conversation.
+
+    Accepts both the current ``(world, speaker, listener)`` call shape and the
+    older test/helper shape ``(speaker, listener)``.
+    """
+    if listener is None and speaker is not None:
+        listener = speaker
+        speaker = world
+        world = None
+
     known_memories = list(getattr(getattr(speaker, "knowledge", None), "known_memories", {}).values())
     if known_memories:
         shared_memories = []

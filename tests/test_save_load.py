@@ -1,3 +1,5 @@
+import os
+import pickle
 import unittest
 from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
@@ -9,7 +11,7 @@ import engine
 from engine import World
 import main
 import rendering.console_renderer as console_renderer
-from save_manager import save_game, load_game
+from save_manager import SAVE_FORMAT_VERSION, load_game, save_game
 from data.items import ITEM_DEFINITIONS
 import config
 from tcod_compat import tcod
@@ -26,15 +28,12 @@ class TestSaveLoadSystem(unittest.TestCase):
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
-        import os
         if os.path.exists(f"saves/{self.test_save_file}"):
             os.remove(f"saves/{self.test_save_file}")
         if os.path.exists("saves") and not os.listdir("saves"):
             os.rmdir("saves")
 
     def test_save_and_load(self):
-        from save_manager import save_game, load_game
-
         # Modify world state
         self.world.player.economic.money = 9999
         self.world.game_time = 12345
@@ -42,6 +41,11 @@ class TestSaveLoadSystem(unittest.TestCase):
         # Save
         success = save_game(self.world, self.test_save_file)
         self.assertTrue(success, "Game should save successfully.")
+
+        with open(f"saves/{self.test_save_file}", "rb") as f:
+            save_data = pickle.load(f)
+        self.assertEqual(save_data["version"], SAVE_FORMAT_VERSION)
+        self.assertIsNotNone(save_data["world"])
 
         # Load
         loaded_world = load_game(self.test_save_file)
@@ -53,8 +57,6 @@ class TestSaveLoadSystem(unittest.TestCase):
         self.assertEqual(len(loaded_world.chunks), len(self.world.chunks))
 
     def test_save_and_load_ignores_unpicklable_generator_noise(self):
-        from save_manager import save_game, load_game
-
         self.world.generator.noise = lambda: None
 
         success = save_game(self.world, self.test_save_file)
@@ -63,3 +65,21 @@ class TestSaveLoadSystem(unittest.TestCase):
         loaded_world = load_game(self.test_save_file)
         self.assertIsNotNone(loaded_world, "Game should load successfully.")
         self.assertIsNotNone(loaded_world.generator.noise)
+
+    def test_load_rejects_unsupported_save_version(self):
+        os.makedirs("saves", exist_ok=True)
+        with open(f"saves/{self.test_save_file}", "wb") as f:
+            pickle.dump({"version": SAVE_FORMAT_VERSION + 1, "world": self.world}, f)
+
+        loaded_world = load_game(self.test_save_file)
+
+        self.assertIsNone(loaded_world)
+
+    def test_load_rejects_unversioned_save_payload(self):
+        os.makedirs("saves", exist_ok=True)
+        with open(f"saves/{self.test_save_file}", "wb") as f:
+            pickle.dump(self.world, f)
+
+        loaded_world = load_game(self.test_save_file)
+
+        self.assertIsNone(loaded_world)

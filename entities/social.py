@@ -62,10 +62,94 @@ class LocalOpinionRecord:
 
 
 @dataclass
+class HistoryFactReactionState:
+    """Tracks how strongly an NPC has already reacted to a known history fact."""
+
+    reacted_confidence: float = 0.0
+    reacted_source_type: str = ""
+    last_reaction_tick: int = 0
+    applied_reaction_strength: float = 0.0
+
+
+@dataclass(frozen=True)
+class KnownHistoryFact:
+    """A holder's structured knowledge of a HistoryLedger record."""
+
+    source_record_id: str
+    record_type: str
+    subject_entity_ids: tuple[int, ...]
+    known_at_tick: int
+    source_type: str
+    confidence: float
+    settlement_id: str | None = None
+    region_id: str | None = None
+    tags: tuple[str, ...] = ()
+    record_class_name: str = ""
+
+
+def _record_id(record: Any) -> str:
+    return str(
+        getattr(record, "id", None)
+        or getattr(record, "record_id", None)
+        or ""
+    )
+
+
+def _record_type(record: Any) -> str:
+    return str(
+        getattr(record, "type", None)
+        or getattr(record, "event_type", None)
+        or type(record).__name__
+    )
+
+
+def _record_subject_entity_ids(record: Any) -> tuple[int, ...]:
+    entity_ids: list[int] = []
+    participant_ids = getattr(record, "participant_ids", None)
+    if participant_ids is not None:
+        entity_ids.extend(
+            participant_id
+            for participant_id in participant_ids
+            if isinstance(participant_id, int)
+        )
+    for attr_name in (
+        "subject_id",
+        "target_id",
+        "child_id",
+        "deceased_id",
+        "killer_id",
+        "suspect_id",
+        "victim_id",
+        "traveler_id",
+        "worker_id",
+    ):
+        attr_value = getattr(record, attr_name, None)
+        if isinstance(attr_value, int):
+            entity_ids.append(attr_value)
+    for attr_name in ("parent_ids", "spouse_ids", "witness_ids"):
+        attr_value = getattr(record, attr_name, ()) or ()
+        entity_ids.extend(
+            entity_id for entity_id in attr_value if isinstance(entity_id, int)
+        )
+    return tuple(dict.fromkeys(entity_ids))
+
+
+def _record_scope_value(record: Any, key: str) -> str | None:
+    value = getattr(record, key, None)
+    if value is None:
+        metadata = getattr(record, "metadata", {}) or {}
+        value = metadata.get(key)
+    if value is None:
+        return None
+    return str(value)
+
+
+@dataclass
 class KnowledgeComponent:
     """Bounded structured knowledge used by both players and NPCs."""
 
     known_events: dict[str, Any] = field(default_factory=dict)
+    known_history_facts: dict[str, KnownHistoryFact] = field(default_factory=dict)
     known_memories: dict[str, MemoryEvent] = field(default_factory=dict)
     known_harmful_incidents: dict[str, Any] = field(default_factory=dict)
     reacted_to_event_ids: set[str] = field(default_factory=set)
@@ -79,10 +163,74 @@ class KnowledgeComponent:
     completed_quests: list[str] = field(default_factory=list)
     claimed_tasks: list[str] = field(default_factory=list)
     known_books: set[str] = field(default_factory=set)
+    recently_spoken_topic_ids: list[str] = field(default_factory=list)
+    last_spoken_topic_tick: dict[str, int] = field(default_factory=dict)
+    spoken_topic_counts: dict[str, int] = field(default_factory=dict)
+    fact_share_pair_cooldowns: dict[str, int] = field(default_factory=dict)
+    shared_fact_listener_ids: dict[str, set[int]] = field(default_factory=dict)
     lockpicking_skill: int = 3
     max_memory_events: int = 50
     chronicle_pending_memory_ids: set[str] = field(default_factory=set)
     chronicle_written_memory_ids: set[str] = field(default_factory=set)
+
+    def learn_history_record(
+        self,
+        record: Any,
+        source_type: str,
+        confidence: float,
+        tick: int,
+    ) -> bool:
+        if record is None:
+            return False
+        source_record_id = _record_id(record)
+        if not source_record_id:
+            return False
+        confidence = max(0.0, min(1.0, float(confidence)))
+        existing = self.known_history_facts.get(source_record_id)
+        if existing is not None and existing.confidence >= confidence:
+            return False
+        tags = tuple(getattr(record, "tags", ()) or ())
+        fact = KnownHistoryFact(
+            source_record_id=source_record_id,
+            record_type=_record_type(record),
+            subject_entity_ids=_record_subject_entity_ids(record),
+            known_at_tick=int(tick),
+            source_type=str(source_type),
+            confidence=confidence,
+            settlement_id=_record_scope_value(record, "settlement_id"),
+            region_id=_record_scope_value(record, "region_id"),
+            tags=tags,
+            record_class_name=type(record).__name__,
+        )
+        self.known_history_facts[source_record_id] = fact
+        return True
+
+    def knows_record(self, record_id: str) -> bool:
+        return str(record_id) in self.known_history_facts
+
+    def get_known_records_by_type(
+        self, record_type: str | type
+    ) -> list[KnownHistoryFact]:
+        if isinstance(record_type, type):
+            return [
+                fact
+                for fact in self.known_history_facts.values()
+                if fact.record_class_name == record_type.__name__
+            ]
+        record_type_name = str(record_type)
+        return [
+            fact
+            for fact in self.known_history_facts.values()
+            if fact.record_type == record_type_name
+            or fact.record_class_name == record_type_name
+        ]
+
+    def get_known_records_about_entity(self, entity_id: int) -> list[KnownHistoryFact]:
+        return [
+            fact
+            for fact in self.known_history_facts.values()
+            if entity_id in fact.subject_entity_ids
+        ]
 
     REPUTATION_EVENT_SCORES = {
         "murder": -50,

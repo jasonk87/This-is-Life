@@ -1,6 +1,7 @@
 """Work-task progression system for structured NPC profession sub-tasks."""
 
 from __future__ import annotations
+from simulation.activity import advance_activity, start_activity
 from simulation.systems.task_types import TaskType
 
 from data.professions import get_profession_data, get_sub_task_data
@@ -76,15 +77,37 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
         else:
             npc.schedule.current_path = []
             npc.schedule.current_destination_coords = None
-            npc.sub_task_timer -= 1
             npc.schedule.current_task = TaskType.AT_WORK
+            activity_type = f"work:{npc.current_sub_task}"
+            current_activity = getattr(npc, "current_activity", None)
+            if current_activity is None and npc.sub_task_timer > 0:
+                sub_task_data = get_sub_task_data(npc.economic.profession, npc.current_sub_task) or {}
+                start_activity(
+                    npc,
+                    activity_type,
+                    npc.sub_task_timer,
+                    world=world,
+                    location=(npc.x, npc.y),
+                    anchor_coords=npc.sub_task_target_coords,
+                    allows_conversation=bool(sub_task_data.get("allows_conversation", True)),
+                    allows_observation=True,
+                    allows_social_sharing=True,
+                    interruptible=True,
+                    metadata={"profession": npc.economic.profession, "sub_task_id": npc.current_sub_task},
+                )
+                current_activity = getattr(npc, "current_activity", None)
+                advance_activity(npc, world)
+                current_activity = getattr(npc, "current_activity", None)
+
+            if current_activity is not None and getattr(current_activity, "activity_type", None) == activity_type:
+                npc.sub_task_timer = max(0, current_activity.duration_ticks - current_activity.progress_ticks)
 
             # Emit a visual sub-task action randomly while performing it
             if npc.sub_task_timer > 0 and getattr(world, "game_time", 0) % 30 == 0:
                 sub_task_data = get_sub_task_data(npc.economic.profession, npc.current_sub_task)
                 if sub_task_data:
                     action_verb = sub_task_data.get("action_verb")
-                    if action_verb:
+                    if action_verb and hasattr(world, "visual_effects"):
                         from engine import FloatingTextEffect
                         world.visual_effects.append(
                             FloatingTextEffect(npc.x, npc.y, f"*{action_verb}*", color=(200, 200, 200))

@@ -17,6 +17,12 @@ from data.environment import WEATHER_DEFINITIONS
 from data.dawnlike import get_entity_sprite
 from entities.animal import Animal
 from engine import Player
+from presentation.social_feedback import (
+    collect_visible_social_indicators,
+    social_hover_summary,
+    social_marker_for_entity,
+    social_tags_for_entity,
+)
 
 TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
 
@@ -287,13 +293,16 @@ def _draw_entities(console, world, camera_x, camera_y):
             screen_x, screen_y = screen_point
             console.print(x=screen_x, y=screen_y, string=chr(get_entity_sprite(entity)), fg=fg)
 
-def _get_entity_marker(entity):
+def _get_entity_marker(entity, world=None):
     if getattr(getattr(entity, "physical", None), "is_dead", False):
         return None
     if getattr(getattr(entity, "combat", None), "is_hostile_to_player", False):
         return "!", (255, 120, 120)
     if hasattr(entity, "active_quest") and getattr(entity, "active_quest", None):
         return "?", (255, 215, 120)
+    social_marker = social_marker_for_entity(entity, world)
+    if social_marker is not None:
+        return social_marker
     profession = getattr(getattr(entity, "economic", None), "profession", "")
     if profession in TRADE_CAPABLE_PROFESSIONS:
         return "$", (120, 255, 160)
@@ -368,7 +377,11 @@ def _get_entity_overhead_label(world, entity, focus, *, hovered=False):
     focused_entity = focus.get("entity") if isinstance(focus, dict) else None
     if hovered or focused_entity is entity:
         return full_name[:18]
-    return first_name[:10]
+    label = first_name[:10]
+    tags = social_tags_for_entity(entity, world, limit=1)
+    if tags and len(label) <= 8:
+        label = f"{label} {tags[0][:1]}"
+    return label
 
 
 def _is_overlay_cell_visible(world, overlay_x, overlay_y):
@@ -452,6 +465,7 @@ def _get_hover_inspect(world, camera_x, camera_y):
     if inspect["object"] is None and _is_feature_tile_name(tile.name):
         inspect["object"] = tile.name
 
+    inspect["social"] = social_hover_summary(world, (world_x, world_y))
     return inspect
 
 
@@ -474,6 +488,9 @@ def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, pa
         y += 1
     if inspect["object"]:
         console.print(x=panel_x + 1, y=y, string=f"Object: {inspect['object']}"[:panel_inner], fg=(170, 210, 255))
+        y += 1
+    if inspect.get("social"):
+        console.print(x=panel_x + 1, y=y, string=f"Social: {inspect['social']}"[:panel_inner], fg=(210, 190, 230))
         y += 1
     return y
 
@@ -709,7 +726,7 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
         focused_entity = focus.get("entity") if isinstance(focus, dict) else None
         if focused_entity is not entity:
             continue
-        marker = _get_entity_marker(entity)
+        marker = _get_entity_marker(entity, world)
         marker_world_y = entity.y - 1
         if marker is None or not _is_entity_overlay_visible(world, entity, marker_world_y):
             continue
@@ -720,7 +737,29 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
             screen_x, screen_y = screen_point
             console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
 
+def _draw_social_indicators(console, world, camera_x, camera_y, max_markers=8):
+    marked = 0
+    for indicator in collect_visible_social_indicators(world, visibility_fn=is_visible):
+        if marked >= max_markers:
+            break
+        marker_world_y = indicator.location[1] - 1
+        marker_x = indicator.location[0]
+        if not _is_overlay_cell_visible(world, marker_x, marker_world_y):
+            marker_world_y = indicator.location[1]
+        if not _is_overlay_cell_visible(world, marker_x, marker_world_y):
+            continue
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, marker_x, marker_world_y)
+        if screen_point is None:
+            continue
+        screen_x, screen_y = screen_point
+        console.print(x=screen_x, y=screen_y, string=indicator.glyph, fg=indicator.color)
+        if indicator.density in {"cluster", "crowd"} and screen_x + 1 < MAP_WIDTH:
+            console.print(x=screen_x + 1, y=screen_y, string="'", fg=_dim_color(indicator.color, 0.75))
+        marked += 1
+
+
 def _draw_world_markers(console, world, camera_x, camera_y):
+    _draw_social_indicators(console, world, camera_x, camera_y)
     marked = 0
     max_markers = 18
 

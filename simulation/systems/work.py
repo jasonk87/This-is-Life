@@ -36,7 +36,9 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
 
     # Delegated Labor: Owners do management if they have workers
     if getattr(work_building, "owner_id", None) == npc.id:
-        current_workers = sum(1 for n in world.village_npcs if getattr(n.schedule, "work_building_id", None) == work_building.id and n.id != npc.id and not n.physical.is_dead)
+        current_workers = world._count_active_workers_for_building(work_building)
+        if npc.schedule.work_building_id == work_building.id:
+            current_workers -= 1
         if current_workers > 0:
             # Inject management sub-tasks instead
             sub_task_sequence = ["manage_business_inspect", "manage_business_supervise"]

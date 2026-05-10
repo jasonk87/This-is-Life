@@ -4316,11 +4316,26 @@ class World:
         supported_workstations = self._get_supported_workstations_for_building(work_building)
         if supported_workstations:
             missing_inputs = []
+
+            # Determine what we actually want to craft based on building type defaults to prevent hoarding random junk
+            target_products = []
+            if work_building.building_type == "lumber_mill": target_products = ["wooden_plank"]
+            elif work_building.building_type == "blacksmith_shop": target_products = ["iron_ingot", "iron_sword"]
+            elif work_building.building_type == "bakery": target_products = ["bread"]
+            elif work_building.building_type == "mill": target_products = ["flour"]
+            else:
+                # Fallback to anything they have at least 1 ingredient for or are defined to make
+                pass
+
             for item_key, item_def in ITEM_DEFINITIONS.items():
                 recipe = item_def.get("crafting_recipe") or {}
                 required_workstation = item_def.get("required_workstation")
                 if not recipe or required_workstation not in supported_workstations:
                     continue
+
+                if target_products and item_key not in target_products:
+                    continue
+
                 # If we have a recipe we *want* to make but don't have ingredients for
                 for ingredient_key, required_qty in recipe.items():
                     if work_building.building_inventory.get(ingredient_key, 0) < required_qty:
@@ -4335,6 +4350,7 @@ class World:
                         if b.building_type in ["general_store", "warehouse", "market"] and b.id != work_building.id:
                             if b.building_inventory.get(missing_item, 0) > 0:
                                 # Buy/Transfer it
+                                from entities.items import ItemReference
                                 price = self.quote_item_reference_price(ItemReference(missing_item), village=village)
                                 # Transfer money and item
                                 if work_building.building_inventory.get("money", 0) >= price or getattr(work_building, "owner_id", None) is None:

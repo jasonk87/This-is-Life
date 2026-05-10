@@ -16,6 +16,7 @@ from simulation.careers import (
 class TownBoardStub:
     def __init__(self):
         self.tasks = []
+        self.economic_needs = []
         self.next_id = 1
     def get_open_employment_tasks(self, building_id=None):
         if building_id:

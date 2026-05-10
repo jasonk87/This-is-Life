@@ -3712,6 +3712,15 @@ class World:
         if target_zone_tag == "corpse":
             return self._find_nearest_corpse(npc)
 
+
+        if target_zone_tag == "manager_spot":
+            manager_spots = work_building.work_zone_tiles.get("manager_spot", [])
+            if manager_spots:
+                import random
+                return random.choice(manager_spots)
+            else:
+                return (work_building.global_center_x, work_building.global_center_y)
+
         if target_zone_tag == "scout_route":
             # For scouting, pick a random point in a wider radius around the village/workplace
             # to simulate patrolling the wilderness.
@@ -4176,6 +4185,7 @@ class World:
         if not building_type:
             return supported_workstations
         building_type_defaults = {
+            "manager_spot": {"manager_spot"},
             "lumber_mill": {"workbench"},
             "blacksmith_shop": {"forge", "anvil"},
             "bakery": {"fire"},
@@ -4301,12 +4311,75 @@ class World:
     def _attempt_workplace_supply_chain_actions(self, npc: NPC, work_building: Building) -> bool:
         if not getattr(work_building, "building_type", None):
             return False
+
+        # 1. Check for shortages first
+        supported_workstations = self._get_supported_workstations_for_building(work_building)
+        if supported_workstations:
+            missing_inputs = []
+
+            # Determine what we actually want to craft based on building type defaults to prevent hoarding random junk
+            target_products = []
+            if work_building.building_type == "lumber_mill": target_products = ["wooden_plank"]
+            elif work_building.building_type == "blacksmith_shop": target_products = ["iron_ingot", "iron_sword"]
+            elif work_building.building_type == "bakery": target_products = ["bread"]
+            elif work_building.building_type == "mill": target_products = ["flour"]
+            else:
+                # Fallback to anything they have at least 1 ingredient for or are defined to make
+                pass
+
+            for item_key, item_def in ITEM_DEFINITIONS.items():
+                recipe = item_def.get("crafting_recipe") or {}
+                required_workstation = item_def.get("required_workstation")
+                if not recipe or required_workstation not in supported_workstations:
+                    continue
+
+                if target_products and item_key not in target_products:
+                    continue
+
+                # If we have a recipe we *want* to make but don't have ingredients for
+                for ingredient_key, required_qty in recipe.items():
+                    if work_building.building_inventory.get(ingredient_key, 0) < required_qty:
+                        missing_inputs.append(ingredient_key)
+
+            if missing_inputs:
+                missing_item = missing_inputs[0]
+                # Attempt to procure it from the general store/village storage
+                village = self._get_village_for_npc(npc, by_coords=True)
+                if village:
+                    for b in village.buildings:
+                        if b.building_type in ["general_store", "warehouse", "market"] and b.id != work_building.id:
+                            if b.building_inventory.get(missing_item, 0) > 0:
+                                # Buy/Transfer it
+                                from entities.items import ItemReference
+                                price = self.quote_item_reference_price(ItemReference(missing_item), village=village)
+                                # Transfer money and item
+                                if work_building.building_inventory.get("money", 0) >= price or getattr(work_building, "owner_id", None) is None:
+                                    if getattr(work_building, "owner_id", None) is not None:
+                                        work_building.building_inventory["money"] -= price
+                                        b.building_inventory["money"] = b.building_inventory.get("money", 0) + price
+
+                                    # physically transfer 1 ref
+                                    ref = b.building_inventory.pop_item_reference(missing_item)
+                                    if ref:
+                                        work_building.building_inventory.add_item_reference(ref)
+                                        # Show hauling action
+                                        if hasattr(self, "visual_effects"):
+                                            # Avoid direct engine import per nitpicks, already in engine anyway
+                                            self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"*hauling {missing_item}*", color=(200, 200, 100)))
+                                        return True
+
+                # If we get here, we are truly stalled on inputs.
+                if hasattr(self, "visual_effects") and self.game_time % 60 == 0:
+                    self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"*short on {missing_item}*", color=(200, 100, 100)))
+
+        # 2. Try Crafting
         crafted_anything = False
         for recipe_item_key in self._get_workplace_recipe_candidates(npc, work_building):
             if self._craft_recipe_at_workplace(npc, work_building, recipe_item_key):
                 crafted_anything = True
                 break
 
+        # 3. Try Exporting
         exported_anything = self._attempt_workplace_export(npc, work_building) > 0
         return crafted_anything or exported_anything
 
@@ -6166,7 +6239,7 @@ class World:
     def _sync_building_employment_tasks(self, building: Building | None) -> None:
         if building is None or "workplace" not in str(getattr(building, "category", "")):
             return
-        if self._is_player_owned_workplace(building):
+        if getattr(building, "owner_id", None) is not None:
             return
 
         current_workers = self._count_active_workers_for_building(building)
@@ -11600,7 +11673,7 @@ class World:
             if getattr(npc.economic, "work_performance", 50) > 80:
                 wage += int(wage * 0.2) # 20% bonus
 
-            if self._is_player_owned_workplace(work_building):
+            if getattr(work_building, "owner_id", None) is not None:
                 building_balance = self._get_trade_money_balance(work_building)
                 if building_balance < wage:
                     owner_name = "your business" if getattr(work_building, "owner_id", None) == self.player.id else "the business"
@@ -11786,6 +11859,42 @@ class World:
                         self._assign_job(npc, best_new_job)
                         self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} left their job as {old_profession} to become a {npc.economic.profession}.")
 
+
+
+        # --- Business Ownership & Hiring Logic ---
+        processed_villages = set()
+        for npc in list(self.village_npcs):
+            if npc.physical.is_dead:
+                continue
+            village = self._get_village_for_npc(npc)
+            if not village:
+                continue
+
+            # Check if this NPC owns any buildings in the village
+            for building in village.buildings:
+                if getattr(building, "owner_id", None) == npc.id and "workplace" in building.category:
+                    # They are an owner, they should act as the boss
+                    if npc.schedule.work_building_id != building.id:
+                        # Owner should also work there if they don't already
+                        self._assign_job(npc, building, profession=self._resolve_profession_for_work_building(building, exclude_entity=None), reason="business_owner")
+
+                    current_workers_count = self._count_active_workers_for_building(building)
+                    if current_workers_count < building.max_workers:
+                        # Check if a job is already posted
+                        open_tasks = self.town_board.get_open_employment_tasks(building.id)
+                        if not open_tasks:
+                            role = self._resolve_profession_for_work_building(building, exclude_entity=npc)
+                            base_wage = self._get_employment_daily_wage(role, village=village)
+                            # Maybe pay a bit more if they are really short
+                            if current_workers_count == 0:
+                                base_wage = int(base_wage * 1.2)
+
+                            self.town_board.post_employment(
+                                target_building_id=building.id,
+                                profession_role=role,
+                                daily_wage=max(1, base_wage),
+                                poster_entity_id=npc.id
+                            )
 
         # --- Immigration Logic ---
         # Check overall vacancies in villages and spawn new migrants

@@ -42,9 +42,9 @@ The refactor improved behavior, but it also concentrated too many responsibiliti
 
 `engine.py` is still the highest-risk file for regressions and merge conflicts.
 
-### 2. Stringly-typed UI requests
+### 2. UI request boundary compatibility
 
-The UI queue is a good abstraction, but request payloads are still raw dictionaries with string `"type"` values.
+The UI queue now uses typed request objects in the shared dispatcher. A small compatibility shim still accepts older queued dictionary payloads at the boundary so existing saves or tests do not break abruptly.
 
 ### 3. Persistence remains implicit
 
@@ -91,14 +91,14 @@ Replace ad-hoc UI request dictionaries with explicit request objects.
 
 ### Tasks
 
-- [ ] Introduce typed request objects (e.g. `OpenDialogueRequest`, `CloseDialogueRequest`, `OpenTradeRequest`, `CloseTradeRequest`).
-- [ ] Update `World` request emitters to construct typed requests.
-- [ ] Update `main.apply_ui_requests` to dispatch on typed request objects instead of raw strings.
-- [ ] Add focused tests for request application and invalid request handling.
+- [x] Introduce typed request objects (e.g. `OpenDialogueRequest`, `CloseDialogueRequest`, `OpenTradeRequest`, `CloseTradeRequest`).
+- [x] Update `World` request emitters to construct typed requests.
+- [x] Update `main.apply_ui_requests` to dispatch on typed request objects instead of raw strings.
+- [x] Add focused tests for request application and invalid request handling.
 
 ### Exit criteria
 
-- No raw `"type"`-based request dispatch remains in the core path.
+- No raw `"type"`-based request dispatch remains in the core typed dispatch path. Legacy dictionary payloads are normalized once at the UI boundary.
 - Engine/UI boundary is easier to refactor safely.
 
 ---
@@ -111,14 +111,14 @@ Move from "pickle the whole world" toward a clearer persistence boundary.
 
 ### Tasks
 
-- [ ] Add explicit save format version metadata.
+- [x] Add explicit save format version metadata.
 - [ ] Centralize serialization exclusions for runtime-only objects.
 - [ ] Decide whether the short-term path remains pickle-based or moves toward an explicit save model.
 - [ ] Add regression coverage for versioning and migration behavior.
 
 ### Exit criteria
 
-- Save/load no longer depends on implicit runtime object behavior alone.
+- Save/load no longer depends on implicit runtime object behavior alone for version detection.
 - Persistence changes are testable in isolation.
 
 ---
@@ -168,7 +168,7 @@ This is the highest-leverage path because it reduces future review friction with
 
 ### Current recommendation
 
-**Current extraction progress:** `WorldGenerator`, shared UI request helpers, and work sub-task commands now live in dedicated modules; the next actionable slice is test splitting.
+**Current extraction progress:** `WorldGenerator`, shared UI request helpers, and work sub-task commands now live in dedicated modules. UI requests now use typed request objects in the shared dispatcher; the next actionable slice is persistence hardening or further `engine.py` boundary extraction.
 
 ### Owner
 

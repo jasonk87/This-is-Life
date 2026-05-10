@@ -9,6 +9,14 @@ import numpy as np
 import engine
 from engine import World
 import main
+from ui_requests import (
+    CloseTradeRequest,
+    OpenDialogueRequest,
+    OpenTradeRequest,
+    close_trade_request,
+    coerce_ui_request,
+    open_trade_request,
+)
 import rendering.console_renderer as console_renderer
 from save_manager import save_game, load_game
 from data.items import ITEM_DEFINITIONS
@@ -292,7 +300,7 @@ class TestMainInputHelpers(unittest.TestCase):
             ui_requests=[],
             initialize_trade_session=unittest.mock.Mock(),
             add_message_to_chat_log=unittest.mock.Mock(),
-            request_open_trade=lambda trade_npc: world.ui_requests.append({"type": "open_trade", "npc": trade_npc}),
+            request_open_trade=lambda trade_npc: world.ui_requests.append(open_trade_request(trade_npc)),
         )
 
         main.start_trade(world, npc)
@@ -313,7 +321,7 @@ class TestMainInputHelpers(unittest.TestCase):
             needs_text_input=False,
             game_state="TRADE_MENU",
             ui_requests=[],
-            request_close_trade=lambda target_npc=None: world.ui_requests.append({"type": "close_trade", "npc": target_npc}),
+            request_close_trade=lambda target_npc=None: world.ui_requests.append(close_trade_request(target_npc)),
         )
         event = SimpleNamespace(sym=tcod.event.KeySym.ESCAPE)
 
@@ -349,7 +357,7 @@ class TestMainInputHelpers(unittest.TestCase):
             stop_text_input=unittest.mock.Mock(),
         )
         world = SimpleNamespace(
-            ui_requests=[{"type": "open_dialogue", "npc": npc, "mode": "talk"}],
+            ui_requests=[OpenDialogueRequest(npc=npc, mode="talk")],
             game_state="PLAYING",
             chat_ui_target_npc=None,
             chat_ui_mode=None,
@@ -380,7 +388,7 @@ class TestMainInputHelpers(unittest.TestCase):
             stop_text_input=unittest.mock.Mock(),
         )
         world = SimpleNamespace(
-            ui_requests=[{"type": "close_trade", "npc": npc}],
+            ui_requests=[CloseTradeRequest(npc=npc)],
             game_state="TRADE_MENU",
             chat_ui_target_npc=None,
             chat_ui_mode=None,
@@ -400,6 +408,21 @@ class TestMainInputHelpers(unittest.TestCase):
         context_handler.start_text_input.assert_not_called()
         self.assertEqual(world.ui_requests, [])
 
+    def test_coerce_ui_request_converts_legacy_dict_payloads(self):
+        npc = object()
+
+        request = coerce_ui_request({"type": "open_trade", "npc": npc})
+
+        self.assertEqual(request, OpenTradeRequest(npc=npc))
+
+    def test_apply_ui_requests_rejects_unsupported_request_objects(self):
+        world = SimpleNamespace(ui_requests=[{"type": "unknown", "npc": object()}])
+
+        with self.assertRaisesRegex(TypeError, "Unsupported UI request"):
+            main.apply_ui_requests(world)
+
+        self.assertEqual(world.ui_requests, [])
+
     def test_handle_events_prioritizes_dialogue_over_stale_interaction_menu(self):
         world = SimpleNamespace(
             game_state="DIALOGUE",
@@ -414,7 +437,7 @@ class TestMainInputHelpers(unittest.TestCase):
         original_handle_dialogue_input = main.handle_dialogue_input
         original_handle_interaction_input = main.handle_interaction_input
         try:
-            tcod.event.get = lambda: [tcod.event.KeyDown(0, tcod.event.KeySym.A, 0)]
+            tcod.event.get = lambda: [tcod.event.KeyDown(scancode=0, sym=tcod.event.KeySym.A, mod=0)]
             main.handle_dialogue_input = unittest.mock.Mock()
             main.handle_interaction_input = unittest.mock.Mock(return_value=False)
 
@@ -445,7 +468,7 @@ class TestMainInputHelpers(unittest.TestCase):
             continue_npc_dialogue=unittest.mock.Mock(),
             ui_requests=[],
         )
-        event = tcod.event.KeyDown(0, tcod.event.KeySym.RETURN, 0)
+        event = tcod.event.KeyDown(scancode=0, sym=tcod.event.KeySym.RETURN, mod=0)
 
         main.handle_dialogue_input(event, world, SimpleNamespace())
 
@@ -463,7 +486,7 @@ class TestMainInputHelpers(unittest.TestCase):
 
         engine.World._handle_npc_goal(world, npc, "start_trade", "")
 
-        self.assertEqual(world.ui_requests, [{"type": "open_trade", "npc": npc}])
+        self.assertEqual(world.ui_requests, [OpenTradeRequest(npc=npc)])
         self.assertTrue(world.chat_ui_active)
         self.assertFalse(world.trade_ui_active)
         self.assertEqual(world.game_state, "DIALOGUE")
@@ -489,7 +512,7 @@ class TestMainInputHelpers(unittest.TestCase):
             game_state="PLAYING",
             initialize_trade_session=unittest.mock.Mock(),
             add_message_to_chat_log=unittest.mock.Mock(),
-            request_open_trade=lambda trade_npc: world.ui_requests.append({"type": "open_trade", "npc": trade_npc}),
+            request_open_trade=lambda trade_npc: world.ui_requests.append(open_trade_request(trade_npc)),
         )
 
         took_turn = main.execute_interaction(world, context_handler=SimpleNamespace())
@@ -1436,7 +1459,7 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves (Farmer)", "I've been alright."))
 
-    def test_npc_conversation_logs_overheard_line_and_applies_social_goal(self):
+    def test_npc_conversation_publishes_ambient_speech_and_applies_social_goal(self):
         speaker = engine.NPC(10, 10, name="A")
         listener = engine.NPC(11, 10, name="B")
         speaker.schedule.home_building_id = "home_1"
@@ -1455,7 +1478,8 @@ class TestDialogueStateRegression(unittest.TestCase):
         self.world._continue_npc_conversation(speaker, listener)
 
         self.assertEqual(speaker.schedule.current_task, "going_home")
-        self.assertEqual(self.world.chat_log[-1], "You overhear A tell B: Come by later.")
+        self.assertEqual(self.world.active_ambient_speech[-1].text, "Come by later.")
+        self.assertNotEqual(self.world.chat_log[-1], "You overhear A tell B: Come by later.")
 
     def test_distant_npc_conversation_uses_fallback_without_llm_task(self):
         speaker = engine.NPC(40, 40, name="A")

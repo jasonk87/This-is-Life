@@ -17,6 +17,16 @@ from data.environment import WEATHER_DEFINITIONS
 from data.dawnlike import get_entity_sprite
 from entities.animal import Animal
 from engine import Player
+from presentation.ambient_speech import (
+    format_ambient_speech_for_player,
+    visible_ambient_speech_lines,
+)
+from presentation.social_feedback import (
+    collect_visible_social_indicators,
+    social_hover_summary,
+    social_marker_for_entity,
+    social_tags_for_entity,
+)
 
 TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
 
@@ -287,13 +297,16 @@ def _draw_entities(console, world, camera_x, camera_y):
             screen_x, screen_y = screen_point
             console.print(x=screen_x, y=screen_y, string=chr(get_entity_sprite(entity)), fg=fg)
 
-def _get_entity_marker(entity):
+def _get_entity_marker(entity, world=None):
     if getattr(getattr(entity, "physical", None), "is_dead", False):
         return None
     if getattr(getattr(entity, "combat", None), "is_hostile_to_player", False):
         return "!", (255, 120, 120)
     if hasattr(entity, "active_quest") and getattr(entity, "active_quest", None):
         return "?", (255, 215, 120)
+    social_marker = social_marker_for_entity(entity, world)
+    if social_marker is not None:
+        return social_marker
     profession = getattr(getattr(entity, "economic", None), "profession", "")
     if profession in TRADE_CAPABLE_PROFESSIONS:
         return "$", (120, 255, 160)
@@ -368,7 +381,11 @@ def _get_entity_overhead_label(world, entity, focus, *, hovered=False):
     focused_entity = focus.get("entity") if isinstance(focus, dict) else None
     if hovered or focused_entity is entity:
         return full_name[:18]
-    return first_name[:10]
+    label = first_name[:10]
+    tags = social_tags_for_entity(entity, world, limit=1)
+    if tags and len(label) <= 8:
+        label = f"{label} {tags[0][:1]}"
+    return label
 
 
 def _is_overlay_cell_visible(world, overlay_x, overlay_y):
@@ -452,6 +469,7 @@ def _get_hover_inspect(world, camera_x, camera_y):
     if inspect["object"] is None and _is_feature_tile_name(tile.name):
         inspect["object"] = tile.name
 
+    inspect["social"] = social_hover_summary(world, (world_x, world_y))
     return inspect
 
 
@@ -474,6 +492,9 @@ def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, pa
         y += 1
     if inspect["object"]:
         console.print(x=panel_x + 1, y=y, string=f"Object: {inspect['object']}"[:panel_inner], fg=(170, 210, 255))
+        y += 1
+    if inspect.get("social"):
+        console.print(x=panel_x + 1, y=y, string=f"Social: {inspect['social']}"[:panel_inner], fg=(210, 190, 230))
         y += 1
     return y
 
@@ -665,6 +686,74 @@ def _draw_minimap_panel(console, world, panel_x, start_y, width, height):
 
     return start_y + height
 
+
+def _ambient_speech_color(line):
+    source_type = str(getattr(line, "source_type", "small_talk") or "small_talk")
+    tone = str(getattr(line, "scene_tone", "") or "")
+    if source_type == "warning" or tone in {"tense", "fearful"}:
+        return (255, 150, 110)
+    if source_type == "celebration" or tone == "celebratory":
+        return (255, 225, 120)
+    if tone in {"grieving", "somber"}:
+        return (175, 175, 210)
+    if source_type == "known_fact":
+        return (180, 220, 255)
+    if source_type == "social_reaction":
+        return (220, 185, 230)
+    return (190, 190, 205)
+
+
+def _speech_fade_ratio(world, line):
+    ttl = max(1, int(getattr(line, "expires_tick", 0)) - int(getattr(line, "created_tick", 0)))
+    age = max(0, int(getattr(world, "game_time", 0)) - int(getattr(line, "created_tick", 0)))
+    remaining = max(0, int(getattr(line, "expires_tick", 0)) - int(getattr(world, "game_time", 0)))
+    fade_in = min(1.0, age / max(1, ttl * 0.2))
+    fade_out = min(1.0, remaining / max(1, ttl * 0.35))
+    return max(0.35, min(1.0, fade_in, fade_out))
+
+
+def _draw_ambient_speech(console, world, camera_x, camera_y, max_world_lines=3):
+    lines = visible_ambient_speech_lines(
+        world,
+        visibility_fn=is_visible,
+        max_lines=max_world_lines + 2,
+    )
+    drawn_at: dict[tuple[int, int], int] = {}
+    for line in lines[:max_world_lines]:
+        text = format_ambient_speech_for_player(line, world.player, max_width=34)
+        if not text:
+            continue
+        world_x, world_y = getattr(line, "position", (0, 0))
+        stack_count = drawn_at.get((world_x, world_y), 0)
+        marker_y = int(world_y) - 2 - stack_count
+        if not _is_overlay_cell_visible(world, int(world_x), marker_y):
+            marker_y = int(world_y) - 1 - stack_count
+        if not _is_overlay_cell_visible(world, int(world_x), marker_y):
+            continue
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, int(world_x), marker_y)
+        if screen_point is None:
+            continue
+        screen_x, screen_y = screen_point
+        draw_x = max(0, min(MAP_WIDTH - len(text), screen_x - (len(text) // 2)))
+        color = _dim_color(_ambient_speech_color(line), _speech_fade_ratio(world, line))
+        console.print(x=draw_x, y=screen_y, string=text, fg=color)
+        drawn_at[(world_x, world_y)] = stack_count + 1
+
+
+def _draw_chatter_panel(console, world, panel_y):
+    lines = visible_ambient_speech_lines(world, visibility_fn=is_visible, max_lines=3)
+    if not lines:
+        return panel_y
+    y = max(2, panel_y - len(lines) - 2)
+    console.print(x=1, y=y, string="Nearby chatter", fg=(160, 160, 175), bg=(0, 0, 0))
+    y += 1
+    for line in lines:
+        text = format_ambient_speech_for_player(line, world.player, max_width=MAP_WIDTH - 5)
+        color = _dim_color(_ambient_speech_color(line), _speech_fade_ratio(world, line))
+        console.print(x=2, y=y, string=("• " + text)[:MAP_WIDTH - 4], fg=color, bg=(0, 0, 0))
+        y += 1
+    return y
+
 def _light_radius_for_world(world):
     return max(3, int(getattr(world, "current_fov_radius", 15)))
 
@@ -709,7 +798,7 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
         focused_entity = focus.get("entity") if isinstance(focus, dict) else None
         if focused_entity is not entity:
             continue
-        marker = _get_entity_marker(entity)
+        marker = _get_entity_marker(entity, world)
         marker_world_y = entity.y - 1
         if marker is None or not _is_entity_overlay_visible(world, entity, marker_world_y):
             continue
@@ -720,7 +809,29 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
             screen_x, screen_y = screen_point
             console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
 
+def _draw_social_indicators(console, world, camera_x, camera_y, max_markers=8):
+    marked = 0
+    for indicator in collect_visible_social_indicators(world, visibility_fn=is_visible):
+        if marked >= max_markers:
+            break
+        marker_world_y = indicator.location[1] - 1
+        marker_x = indicator.location[0]
+        if not _is_overlay_cell_visible(world, marker_x, marker_world_y):
+            marker_world_y = indicator.location[1]
+        if not _is_overlay_cell_visible(world, marker_x, marker_world_y):
+            continue
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, marker_x, marker_world_y)
+        if screen_point is None:
+            continue
+        screen_x, screen_y = screen_point
+        console.print(x=screen_x, y=screen_y, string=indicator.glyph, fg=indicator.color)
+        if indicator.density in {"cluster", "crowd"} and screen_x + 1 < MAP_WIDTH:
+            console.print(x=screen_x + 1, y=screen_y, string="'", fg=_dim_color(indicator.color, 0.75))
+        marked += 1
+
+
 def _draw_world_markers(console, world, camera_x, camera_y):
+    _draw_social_indicators(console, world, camera_x, camera_y)
     marked = 0
     max_markers = 18
 
@@ -1163,6 +1274,7 @@ def draw(console, world, camera_x, camera_y):
     focus = _get_focus_target(world, camera_x, camera_y)
     _draw_entity_markers(console, world, camera_x, camera_y, focus)
     _draw_world_markers(console, world, camera_x, camera_y)
+    _draw_ambient_speech(console, world, camera_x, camera_y)
     for distance, entity in _get_visible_nearby_entities(world, limit=3):
         if not _should_draw_entity_label(distance, focus, entity):
             continue
@@ -1243,6 +1355,7 @@ def draw(console, world, camera_x, camera_y):
 
     # Draw chat log at the bottom
     y = SCREEN_HEIGHT - 6
+    _draw_chatter_panel(console, world, y)
     console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
                        clear=True, fg=(255, 255, 255), bg=(6, 8, 12))
     for i, message in enumerate(world.chat_log[-4:]):

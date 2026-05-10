@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from entities.social import MEMORY_DECAY_INTERVAL_TICKS, decay_known_facts
+from presentation.ambient_speech import cleanup_ambient_speech
+from simulation.activity import advance_activity
 from simulation.systems import survival
 
 
@@ -38,6 +41,7 @@ def run_world_tick(world) -> None:
     advance_player_auto_movement(world)
 
     world.game_time += 1
+    cleanup_ambient_speech(world)
     world._update_season()
     world._update_weather()
     world._update_light_level_and_fov()
@@ -46,6 +50,12 @@ def run_world_tick(world) -> None:
     survival.apply_temperature_effects(world, world.player, is_player=True)
     survival.update_player_wetness(world)
     survival.update_player_needs(world)
+    for actor in [world.player, *world.all_npcs]:
+        if not getattr(getattr(actor, "physical", None), "is_dead", False):
+            advance_activity(actor, world)
+    if world.game_time % max(1, MEMORY_DECAY_INTERVAL_TICKS) == 0:
+        for actor in [world.player, *world.all_npcs]:
+            decay_known_facts(getattr(actor, "knowledge", None), world.game_time)
     for npc in world.all_npcs:
         if not npc.physical.is_dead:
             survival.update_npc_survival(world, npc)
@@ -70,6 +80,8 @@ def run_world_tick(world) -> None:
     world._trigger_event_driven_conversation()
     world._handle_npc_speech()
     world._handle_npc_conversations()
+    if hasattr(world, "_handle_ambient_activity_interactions"):
+        world._handle_ambient_activity_interactions()
     world._update_entity_titles()
     world._update_npc_reputations()
     world._handle_reputation_based_reactions()

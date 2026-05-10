@@ -470,6 +470,37 @@ def _get_hover_inspect(world, camera_x, camera_y):
         inspect["object"] = tile.name
 
     inspect["social"] = social_hover_summary(world, (world_x, world_y))
+
+    if getattr(world, "show_autonomy_overlay", False):
+        for npc in world.all_npcs:
+            if npc.x == world_x and npc.y == world_y and not getattr(npc, "is_sleeping", False) and not npc.physical.is_dead:
+                debug_data = getattr(npc, "debug_autonomy", {})
+                task = str(debug_data.get("last_task", "unknown") or "unknown")
+                path_status = debug_data.get("path_status", "none")
+                moved = debug_data.get("moved_this_tick", False)
+                path_len = len(npc.schedule.current_path) if npc.schedule.current_path else 0
+
+                parts = []
+                parts.append(f"{task.replace('_', ' ').capitalize()}")
+
+                if path_status == "blocked":
+                    parts.append(f"Blocked (dest: {npc.schedule.current_destination_coords})")
+                elif path_status == "failed":
+                    parts.append("Path failed")
+                elif path_status == "moving":
+                    parts.append(f"Moving (path {path_len})")
+                elif path_status == "pathing":
+                    parts.append(f"Has path ({path_len}), didn't move")
+                else:
+                    if task == "idle":
+                        parts.append("No destination")
+                    elif task in {"working", "sleeping", "visiting_friend", "socializing", "gathering_social"}:
+                        timer = getattr(npc, "task_timer", 0)
+                        parts.append(f"{timer} ticks left")
+
+                inspect["autonomy_summary"] = ", ".join(parts)
+                break
+
     return inspect
 
 
@@ -495,6 +526,9 @@ def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, pa
         y += 1
     if inspect.get("social"):
         console.print(x=panel_x + 1, y=y, string=f"Social: {inspect['social']}"[:panel_inner], fg=(210, 190, 230))
+        y += 1
+    if inspect.get("autonomy_summary"):
+        console.print(x=panel_x + 1, y=y, string=f"Auto: {inspect['autonomy_summary']}"[:panel_inner], fg=(255, 100, 255))
         y += 1
     return y
 
@@ -1032,6 +1066,19 @@ def draw_status_panel(console, world, camera_x, camera_y):
         y += 1
 
     y = _draw_minimap_panel(console, world, panel_x, y, panel_width, 12) + 1
+
+    if getattr(world, "show_autonomy_overlay", False):
+        console.print(x=panel_x + 1, y=y, string="Autonomy Audit", fg=(255, 100, 255))
+        y += 1
+        counters = getattr(world, "autonomy_counters", {})
+        console.print(x=panel_x + 2, y=y, string=f"Vis/Act: {counters.get('visible', 0)}/{counters.get('active', 0)}"[:panel_inner], fg=(200, 200, 200))
+        y += 1
+        console.print(x=panel_x + 2, y=y, string=f"Path/Mov: {counters.get('with_path', 0)}/{counters.get('moved', 0)}"[:panel_inner], fg=(200, 200, 200))
+        y += 1
+        console.print(x=panel_x + 2, y=y, string=f"Idle/Wrk: {counters.get('idle', 0)}/{counters.get('at_work_home', 0)}"[:panel_inner], fg=(200, 200, 200))
+        y += 1
+        console.print(x=panel_x + 2, y=y, string=f"Wait/Fail: {counters.get('in_timed_activity', 0)}/{counters.get('blocked_path_failed', 0)}"[:panel_inner], fg=(200, 200, 200))
+        y += 1
 
     console.print(x=panel_x + 1, y=y, string="Vitals", fg=(255, 215, 120))
     y += 1
@@ -1632,6 +1679,13 @@ def draw_noticeboard_menu(console, world):
             building_name = str(getattr(building, "building_type", "Unknown")).replace("_", " ")
             line = f"JOB: {job_task.profession_role} @ {building_name} - {job_task.daily_wage}/day"
             color = (0, 255, 255) if list_index == selected_index else (144, 220, 255)
+        elif notice_id.startswith("need:"):
+            need_id = notice_id.split(":", 1)[1]
+            need = next((n for n in getattr(world.town_board, "economic_needs", []) if n.id == need_id), None)
+            if need is None:
+                continue
+            line = f"NEED: {need.description}"
+            color = (0, 255, 255) if list_index == selected_index else (255, 100, 100)
         else:
             task = world.town_board.get_task(notice_id.split(":", 1)[1] if ":" in notice_id else notice_id)
             if task is None:

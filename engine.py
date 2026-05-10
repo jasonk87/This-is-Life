@@ -776,6 +776,10 @@ class World:
         self.explored_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), fill_value=False, order="F")
         self.transparency_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), fill_value=True, order="F")
 
+        # Autonomy Audit
+        self.show_autonomy_overlay = False
+        self.autonomy_counters = {}
+
         # Sound events list for the current tick
         self.sound_events: list[dict] = [] # Each dict: {"x", "y", "type", "volume", "source_id"(optional)}
 
@@ -1005,6 +1009,8 @@ class World:
             entries.append(("haul", task.id))
         for task in self.town_board.get_open_employment_tasks():
             entries.append(("job", task.id))
+        for need in getattr(self.town_board, "economic_needs", []):
+            entries.append(("need", need.id))
         return entries
 
     def _get_player_owned_buildings(self) -> list[Building]:
@@ -1062,6 +1068,24 @@ class World:
         return self.town_board.get_task(task_id)
 
     def claim_noticeboard_task(self, task_id: str | None) -> bool:
+        need = next((n for n in self.town_board.economic_needs if n.id == task_id), None)
+        if need is not None:
+            if need.type == "service":
+                self._set_entity_profession(self.player, need.target_key, reason="town_need")
+                self.town_board.economic_needs.remove(need)
+                self.add_message_to_chat_log(f"You have stepped up to become the town's {need.target_key}.")
+            elif need.type == "shortage":
+                self.player.knowledge.active_quests[need.id] = {
+                    "title": f"Supply {need.target_key.replace('_', ' ').title()}",
+                    "description": need.description,
+                    "type": "fetch",
+                    "item_to_fetch_key": need.target_key,
+                    "item_fetch_count": 5  # Arbitrary amount to resolve it for the player
+                }
+                self.add_message_to_chat_log(f"You agree to help supply the town with {need.target_key}.")
+            self.open_noticeboard_menu()
+            return True
+
         task = self._get_noticeboard_task(task_id)
         if task is None:
             self.add_message_to_chat_log("That notice is no longer available.")
@@ -1934,6 +1958,13 @@ class World:
             elif wealth_tier == "rich":
                 base_wage = int(base_wage * 1.5)
 
+            # Check if this town is desperate for this role
+            if hasattr(self, "town_board") and getattr(self.town_board, "economic_needs", None):
+                for need in self.town_board.economic_needs:
+                    if need.settlement_id == village.id and need.type == "service" and need.target_key == profession_role:
+                        base_wage = int(base_wage * 1.5)
+                        break
+
         return base_wage
 
     def _is_player_owned_workplace(self, building: Building | None) -> bool:
@@ -1991,11 +2022,32 @@ class World:
             if (building := self.buildings_by_id.get(task.target_building_id)) is not None
             and (village is None or getattr(building, "settlement_id", None) in {None, village_id})
         ]
-        if not noticeboard_points or not available_jobs:
+
+        # Check for economic needs they can fulfill
+        open_service_needs = []
+        if village_id:
+            open_service_needs = [
+                need for need in self.town_board.economic_needs
+                if need.settlement_id == village_id and need.type == "service"
+            ]
+
+        if not noticeboard_points or (not available_jobs and not open_service_needs):
             return False
 
         board_x, board_y = noticeboard_points[0]
         if (npc.x, npc.y) == (board_x, board_y):
+            # First, check if they can just take an open service role to fulfill a town need
+            if open_service_needs:
+                for need in open_service_needs:
+                    # Very simple evaluation: take the job if we're unemployed
+                    self._set_entity_profession(npc, need.target_key, reason="town_need")
+                    self.town_board.economic_needs.remove(need)
+                    npc.schedule.current_task = TaskType.IDLE
+                    npc.schedule.current_path = []
+                    npc.schedule.current_destination_coords = None
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} stepped up to become a {need.target_key} for the town.")
+                    return True
+
             task = self._find_best_employment_task_for_npc(npc)
             if task and self._hire_npc_from_employment_task(npc, task):
                 npc.schedule.current_task = TaskType.IDLE
@@ -10626,6 +10678,86 @@ class World:
     def update(self):
         """Main update function for the world, called once per game tick."""
         run_world_tick(self)
+        self._update_autonomy_audit()
+
+    def _update_autonomy_audit(self):
+        """Audit the NPCs for autonomy tracking."""
+        counters = {
+            "visible": 0,
+            "active": 0,
+            "with_path": 0,
+            "moved": 0,
+            "idle": 0,
+            "at_work_home": 0,
+            "in_timed_activity": 0,
+            "blocked_path_failed": 0
+        }
+
+        # Visibility check uses FOV
+        fov_map = getattr(self, "player_fov_map", None)
+
+        for npc in self.all_npcs:
+            if npc.physical.is_dead or getattr(npc, "is_sleeping", False):
+                continue
+
+            counters["active"] += 1
+
+            if fov_map is not None and 0 <= npc.y < WORLD_HEIGHT and 0 <= npc.x < WORLD_WIDTH and fov_map[npc.y, npc.x]:
+                counters["visible"] += 1
+
+            # State tracking
+            if not hasattr(npc, "debug_autonomy"):
+                npc.debug_autonomy = {}
+
+            # Detect movement
+            last_x = npc.debug_autonomy.get("last_x")
+            last_y = npc.debug_autonomy.get("last_y")
+            moved = False
+            if last_x is not None and last_y is not None:
+                if last_x != npc.x or last_y != npc.y:
+                    moved = True
+                    counters["moved"] += 1
+                    npc.debug_autonomy["last_move_tick"] = self.game_time
+            npc.debug_autonomy["last_x"] = npc.x
+            npc.debug_autonomy["last_y"] = npc.y
+            npc.debug_autonomy["moved_this_tick"] = moved
+
+            # Path tracking
+            has_path = bool(npc.schedule.current_path)
+            if has_path:
+                counters["with_path"] += 1
+
+            dest = npc.schedule.current_destination_coords
+            path_failed = dest is not None and not has_path
+            path_blocked = has_path and not moved and npc.schedule.path_blocked_turns > 0
+            if path_failed or path_blocked:
+                counters["blocked_path_failed"] += 1
+                npc.debug_autonomy["path_status"] = "blocked" if path_blocked else "failed"
+            elif has_path:
+                npc.debug_autonomy["path_status"] = "moving" if moved else "pathing"
+            else:
+                npc.debug_autonomy["path_status"] = "none"
+
+            # Task tracking
+            current_task = npc.schedule.current_task
+            last_task = npc.debug_autonomy.get("last_task")
+            if current_task != last_task:
+                npc.debug_autonomy["previous_task"] = last_task
+                npc.debug_autonomy["task_start_tick"] = self.game_time
+            npc.debug_autonomy["last_task"] = current_task
+
+            if current_task == "idle" or current_task == TaskType.IDLE:
+                counters["idle"] += 1
+
+            if current_task in {"working", "sleeping", "visiting_friend", "socializing", "gathering_social"}:
+                counters["in_timed_activity"] += 1
+
+            is_at_work = npc.schedule.work_building_id and getattr(self.buildings_by_id.get(npc.schedule.work_building_id), "contains_global_coords", lambda x, y: False)(npc.x, npc.y)
+            is_at_home = npc.schedule.home_building_id and getattr(self.buildings_by_id.get(npc.schedule.home_building_id), "contains_global_coords", lambda x, y: False)(npc.x, npc.y)
+            if is_at_work or is_at_home:
+                counters["at_work_home"] += 1
+
+        self.autonomy_counters = counters
 
     def _cleanup_dead_entities(self):
         """Periodically removes dead NPCs to maintain performance."""

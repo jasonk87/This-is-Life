@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from data.items import ITEM_DEFINITIONS
+from simulation.world_model import TownEconomicNeed
 
 
 def process_traveling_merchant_village_trade(world, npc, village) -> None:
@@ -124,3 +125,80 @@ def simulate_village_economy(world, village) -> None:
             village.demand[item] -= 0.1 # Slow decay
             if village.demand[item] < 1:
                 village.demand[item] = 1
+
+    _update_village_economic_needs(world, village)
+
+
+def _update_village_economic_needs(world, village) -> None:
+    """Evaluate shortages and unmet needs, updating the TownBoard."""
+
+    # 1. Clean up old or resolved needs
+    resolved_needs = []
+    for need in world.town_board.economic_needs:
+        if need.settlement_id != village.id:
+            continue
+
+        if need.type == "shortage":
+            # Is it still a shortage?
+            if village.supply.get(need.target_key, 0) >= village.demand.get(need.target_key, 0) * 1.5:
+                resolved_needs.append(need)
+        elif need.type == "service":
+            # Is the service now provided?
+            workers = sum(1 for v in world.village_npcs if getattr(v.schedule, "work_building_id", None) and world.buildings_by_id.get(v.schedule.work_building_id, None) and world.buildings_by_id[v.schedule.work_building_id].settlement_id == village.id and v.economic.profession == need.target_key)
+            if workers > 0:
+                resolved_needs.append(need)
+
+    for need in resolved_needs:
+        world.town_board.economic_needs.remove(need)
+
+    # 2. Detect new shortages
+    # Define essential resources
+    essentials = ["raw_log", "wheat", "stone_chunk", "bread", "raw_meat"]
+
+    for item in essentials:
+        supply = village.supply.get(item, 0)
+        demand = village.demand.get(item, 1)
+
+        if supply < demand * 0.5 and demand > 5: # Real shortage
+            # Check if need already exists
+            existing = next((n for n in world.town_board.economic_needs if n.settlement_id == village.id and n.target_key == item), None)
+            if not existing:
+                need = TownEconomicNeed(
+                    type="shortage",
+                    target_key=item,
+                    severity=min(100, int((demand - supply) / max(1, demand) * 100)),
+                    settlement_id=village.id,
+                    creation_tick=world.game_time,
+                    description=f"The town seeks a supplier of {ITEM_DEFINITIONS.get(item, {}).get('name', item)}."
+                )
+                world.town_board.economic_needs.append(need)
+                world.add_message_to_chat_log(f"Economic Need: {village.id[:4]} is short on {item}.")
+
+    # 3. Detect missing critical services
+    critical_services = ["Blacksmith", "Tavern Keeper", "Merchant", "Farmer", "Woodcutter"]
+    for service in critical_services:
+        workers = sum(1 for v in world.village_npcs if getattr(v.schedule, "work_building_id", None) and world.buildings_by_id.get(v.schedule.work_building_id, None) and world.buildings_by_id[v.schedule.work_building_id].settlement_id == village.id and v.economic.profession == service)
+
+        # Determine if we have the building for it
+        building_reqs = {
+            "Blacksmith": "blacksmith_shop",
+            "Tavern Keeper": "tavern",
+            "Merchant": "general_store",
+            "Farmer": "farm",
+            "Woodcutter": "lumber_mill"
+        }
+
+        has_building = any(b.building_type == building_reqs[service] for b in village.buildings)
+
+        if has_building and workers == 0:
+            existing = next((n for n in world.town_board.economic_needs if n.settlement_id == village.id and n.target_key == service), None)
+            if not existing:
+                need = TownEconomicNeed(
+                    type="service",
+                    target_key=service,
+                    severity=80,
+                    settlement_id=village.id,
+                    creation_tick=world.game_time,
+                    description=f"The town seeks a {service}."
+                )
+                world.town_board.economic_needs.append(need)

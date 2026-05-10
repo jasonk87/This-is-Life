@@ -231,6 +231,8 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
             world.add_message_to_chat_log("There's no one nearby to talk to.")
     elif event.sym in (tcod.event.KeySym.QUESTION, tcod.event.KeySym.SLASH):
         world.game_state = "HELP_MENU"
+    elif event.sym == tcod.event.KeySym.F3:
+        world.show_autonomy_overlay = not getattr(world, "show_autonomy_overlay", False)
     elif event.sym == tcod.event.KeySym.ESCAPE:
         # Show in-game menu or save prompt
         save_game(world)
@@ -314,6 +316,8 @@ def handle_noticeboard_menu_input(event: tcod.event.KeyDown, world: World):
     elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx.get("selected_task_index", 0) < len(task_ids):
         selected_notice = task_ids[ctx["selected_task_index"]]
         if selected_notice.startswith("haul:"):
+            world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
+        elif selected_notice.startswith("need:"):
             world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
 
 def handle_company_ledger_menu_input(event: tcod.event.KeyDown, world: World):

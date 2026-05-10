@@ -81,6 +81,7 @@ from ui_requests import (
     open_trade_request,
 )
 from presentation.text_formatter import WorldTextFormatter
+from presentation.social_feedback import describe_social_scene
 from presentation.dialogue_surface import (
     build_dialogue_topic_from_fact,
     get_contextual_dialogue_lines,
@@ -260,6 +261,22 @@ class FloatingTextEffect(VisualEffect):
         self.y -= self.speed * dt
         self.elapsed += dt
         return self.elapsed >= self.duration
+
+
+def _ambient_social_float_text(scene_indicator) -> str:
+    if scene_indicator is None:
+        return "*murmurs*"
+    if scene_indicator.kind in {"warning", "accusation"} or scene_indicator.tone in {"tense", "fearful"}:
+        return "*warning*"
+    if scene_indicator.kind == "funeral" or scene_indicator.tone == "grieving":
+        return "*hushed*"
+    if scene_indicator.kind == "celebration" or scene_indicator.tone == "celebratory":
+        return "*cheers*"
+    if scene_indicator.kind == "market_concern" or scene_indicator.tone == "concerned":
+        return "*concern*"
+    if scene_indicator.participant_count >= 4:
+        return "*chatter*"
+    return "*murmurs*"
 
 
 class ProjectileEffect(VisualEffect):
@@ -6816,7 +6833,9 @@ class World:
                 f"You overhear {self.get_entity_display_name(speaker)} tell {self.get_entity_display_name(listener)}{activity_text}: {line}"
             )
         elif hasattr(self, "visual_effects"):
-            self.visual_effects.append(FloatingTextEffect(speaker.x, speaker.y, "*murmurs*", color=(180, 180, 220)))
+            scene_indicator = describe_social_scene(scene) if scene is not None else None
+            ambient_text = _ambient_social_float_text(scene_indicator)
+            self.visual_effects.append(FloatingTextEffect(speaker.x, speaker.y, ambient_text, color=(180, 180, 220)))
 
     def _continue_npc_conversation(self, speaker, listener):
         group_participants = [speaker, listener]

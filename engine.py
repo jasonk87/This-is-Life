@@ -10698,7 +10698,7 @@ class World:
                 npc.debug_autonomy["task_start_tick"] = self.game_time
             npc.debug_autonomy["last_task"] = current_task
 
-            if current_task == TaskType.IDLE:
+            if current_task == "idle" or current_task == TaskType.IDLE:
                 counters["idle"] += 1
 
             if current_task in {"working", "sleeping", "visiting_friend", "socializing", "gathering_social"}:

@@ -290,6 +290,7 @@ class NPC:
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []
         self.defense_bonus = 0
+        self.debug_autonomy: dict = {}
         set_entity_profession(self, self.economic.profession, reason="spawn")
 
     def _task_state_holder(self):

@@ -1,0 +1,60 @@
+--- simulation/systems/economy.py
++++ simulation/systems/economy.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+
+ from data.items import ITEM_DEFINITIONS
++from simulation.world_model import TownEconomicNeed
+
+
+ def process_traveling_merchant_village_trade(world, npc, village) -> None:
+@@ -124,3 +125,50 @@
+             village.demand[item] -= 0.1 # Slow decay
+             if village.demand[item] < 1:
+                 village.demand[item] = 1
++
++    _update_village_economic_needs(world, village)
++
++
++def _update_village_economic_needs(world, village) -> None:
++    """Evaluate shortages and unmet needs, updating the TownBoard."""
++
++    # 1. Clean up old or resolved needs
++    resolved_needs = []
++    for need in world.town_board.economic_needs:
++        if need.settlement_id != village.id:
++            continue
++
++        if need.type == "shortage":
++            # Is it still a shortage?
++            if village.supply.get(need.target_key, 0) >= village.demand.get(need.target_key, 0) * 1.5:
++                resolved_needs.append(need)
++
++    for need in resolved_needs:
++        world.town_board.economic_needs.remove(need)
++
++    # 2. Detect new shortages
++    # Define essential resources
++    essentials = ["raw_log", "wheat", "stone_chunk", "bread", "raw_meat"]
++
++    for item in essentials:
++        supply = village.supply.get(item, 0)
++        demand = village.demand.get(item, 1)
++
++        if supply < demand * 0.5 and demand > 5: # Real shortage
++            # Check if need already exists
++            existing = next((n for n in world.town_board.economic_needs if n.settlement_id == village.id and n.target_key == item), None)
++            if not existing:
++                need = TownEconomicNeed(
++                    type="shortage",
++                    target_key=item,
++                    severity=min(100, int((demand - supply) / max(1, demand) * 100)),
++                    settlement_id=village.id,
++                    creation_tick=world.game_time,
++                    description=f"The town is facing a severe shortage of {ITEM_DEFINITIONS.get(item, {}).get('name', item)}."
++                )
++                world.town_board.economic_needs.append(need)
++
++                # Post an opportunity
++                # For now, just log the need.
++                # world.add_message_to_chat_log(f"Economic Need: {village.id[:4]} is short on {item}.")

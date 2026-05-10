@@ -1,0 +1,27 @@
+--- simulation/world_model.py
++++ simulation/world_model.py
+@@ -198,6 +198,16 @@
+         self.status = "open"  # open, claimed, complete
+
+
++@dataclass
++class TownEconomicNeed:
++    id: str = field(default_factory=lambda: str(uuid.uuid4()))
++    type: str = "shortage" # shortage, surplus, service
++    target_key: str = "" # e.g. "wood", "blacksmith"
++    severity: int = 1 # 1-100
++    settlement_id: str | None = None
++    creation_tick: int = 0
++    description: str = ""
++
+ @dataclass
+ class PoliticalOffice:
+     name: str
+@@ -237,6 +247,7 @@
+     def __init__(self):
+         self.haul_tasks: list[HaulTask] = []
+         self.employment_tasks: list[EmploymentTask] = []
++        self.economic_needs: list[TownEconomicNeed] = []
+
+     def post_blueprint(self, blueprint: ConstructionBlueprint) -> None:
+         for item_key, remaining_qty in blueprint.remaining_materials().items():

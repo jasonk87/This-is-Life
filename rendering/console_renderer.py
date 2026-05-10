@@ -1679,6 +1679,13 @@ def draw_noticeboard_menu(console, world):
             building_name = str(getattr(building, "building_type", "Unknown")).replace("_", " ")
             line = f"JOB: {job_task.profession_role} @ {building_name} - {job_task.daily_wage}/day"
             color = (0, 255, 255) if list_index == selected_index else (144, 220, 255)
+        elif notice_id.startswith("need:"):
+            need_id = notice_id.split(":", 1)[1]
+            need = next((n for n in getattr(world.town_board, "economic_needs", []) if n.id == need_id), None)
+            if need is None:
+                continue
+            line = f"NEED: {need.description}"
+            color = (0, 255, 255) if list_index == selected_index else (255, 100, 100)
         else:
             task = world.town_board.get_task(notice_id.split(":", 1)[1] if ":" in notice_id else notice_id)
             if task is None:

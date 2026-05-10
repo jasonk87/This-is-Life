@@ -1009,6 +1009,8 @@ class World:
             entries.append(("haul", task.id))
         for task in self.town_board.get_open_employment_tasks():
             entries.append(("job", task.id))
+        for need in getattr(self.town_board, "economic_needs", []):
+            entries.append(("need", need.id))
         return entries
 
     def _get_player_owned_buildings(self) -> list[Building]:

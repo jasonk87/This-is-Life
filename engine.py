@@ -13,6 +13,10 @@ import time
 import pickle
 import os
 from typing import Any
+from simulation.activity import (
+    ensure_activity_state,
+    start_activity,
+)
 from entities.base import (
     CombatStats,
     DireWolf,
@@ -70,12 +74,40 @@ from data.construction import CONSTRUCTION_RECIPES
 from data.dawnlike import get_animal_sprite, get_human_sprite
 from services.llm_gossip import AsyncLLMGossipService
 from ui_requests import (
+    UIRequest,
     close_dialogue_request,
     close_trade_request,
     open_dialogue_request,
     open_trade_request,
 )
 from presentation.text_formatter import WorldTextFormatter
+from presentation.ambient_speech import (
+    add_ambient_speech,
+    add_dialogue_line_as_ambient_speech,
+    ensure_ambient_speech_state,
+)
+from presentation.dialogue_surface import (
+    build_dialogue_topic_from_fact,
+    get_contextual_dialogue_lines,
+    remember_dialogue_topic_spoken,
+    render_history_fact_dialogue_line,
+)
+from simulation.systems.ambient_info import (
+    choose_ambient_conversation_pair,
+    choose_shareable_fact,
+    mark_ambient_conversation_started,
+    mark_share_cooldowns,
+    share_known_fact,
+)
+from simulation.social_scene import (
+    choose_scene_interaction_pair,
+    choose_strongest_social_scene,
+    create_public_event_seed_from_record,
+    find_scene_for_pair,
+    record_scene_topic,
+    share_fact_with_scene_overhearers,
+    update_social_scenes,
+)
 from simulation.careers import (
     CareerState,
     entity_has_any_profession,
@@ -90,6 +122,7 @@ from simulation.careers import (
 from simulation.history import (
     BirthRecord,
     Book,
+    CrimeRecord,
     DeathRecord,
     EmploymentRecord,
     Event,
@@ -234,6 +267,22 @@ class FloatingTextEffect(VisualEffect):
         return self.elapsed >= self.duration
 
 
+def _ambient_social_float_text(scene_indicator) -> str:
+    if scene_indicator is None:
+        return "*murmurs*"
+    if scene_indicator.kind in {"warning", "accusation"} or scene_indicator.tone in {"tense", "fearful"}:
+        return "*warning*"
+    if scene_indicator.kind == "funeral" or scene_indicator.tone == "grieving":
+        return "*hushed*"
+    if scene_indicator.kind == "celebration" or scene_indicator.tone == "celebratory":
+        return "*cheers*"
+    if scene_indicator.kind == "market_concern" or scene_indicator.tone == "concerned":
+        return "*concern*"
+    if scene_indicator.participant_count >= 4:
+        return "*chatter*"
+    return "*murmurs*"
+
+
 class ProjectileEffect(VisualEffect):
     """A simple projectile animation."""
     effect_type = "projectile"
@@ -310,6 +359,7 @@ class Player:
         self.schedule = Schedule()
         self.career = CareerState()
         self.skills = SkillTracker()
+        ensure_activity_state(self)
 
         self.state.original_char = self.char
         self.combat.hp = self.combat.max_hp
@@ -737,8 +787,13 @@ class World:
         # Visual Effects
         self.visual_effects: list[VisualEffect] = []
 
+        # Lightweight nearby speech layer for audible NPC chatter.
+        self.active_ambient_speech = []
+        self.recent_speech_ids = []
+        ensure_ambient_speech_state(self)
+
         # UI requests emitted by simulation logic and applied by the main loop.
-        self.ui_requests: list[dict] = []
+        self.ui_requests: list[UIRequest] = []
 
         # Incrementally maintained occupancy map used by pathing/movement.
         self.entity_positions: dict[tuple[int, int], int] = {}
@@ -800,6 +855,14 @@ class World:
     def request_close_trade(self, target_npc: NPC | None = None):
         """Queue a request for the UI layer to close trade."""
         self.ui_requests.append(close_trade_request(target_npc))
+
+    @staticmethod
+    def _is_valid_coordinate_pair(coords) -> bool:
+        return (
+            isinstance(coords, (tuple, list))
+            and len(coords) == 2
+            and all(isinstance(value, int) for value in coords)
+        )
 
     def get_chunk_coords(self, x: int, y: int) -> tuple[int, int]:
         manager = getattr(self, "chunk_manager", None)
@@ -3703,8 +3766,10 @@ class World:
                     ideal_role = "fireplace"
 
                 anchor_coords = work_building.get_anchor_coordinates(anchor_types, None, world=self, requesting_entity=npc, ideal_role=ideal_role)
-                if anchor_coords:
-                    return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                if self._is_valid_coordinate_pair(anchor_coords):
+                    refined_coords = work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                    if self._is_valid_coordinate_pair(refined_coords):
+                        return tuple(refined_coords)
 
             # For other zones (like Woodcutter's log_pile_area), use pre-defined coordinates
             zone_coords_list = work_building.work_zone_tiles.get(target_zone_tag)
@@ -3715,8 +3780,10 @@ class World:
             else:
                 # Fallback to work/service anchors if no zone coordinates defined
                 anchor_coords = work_building.get_anchor_coordinates(["work", "service"], None, world=self, requesting_entity=npc)
-                if anchor_coords:
-                    return work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                if self._is_valid_coordinate_pair(anchor_coords):
+                    refined_coords = work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
+                    if self._is_valid_coordinate_pair(refined_coords):
+                        return tuple(refined_coords)
 
                 # self.add_message_to_chat_log(f"Warning: No coordinates defined for work zone '{target_zone_tag}' in building {work_building.id} for {npc.name}.")
                 return None
@@ -4938,6 +5005,23 @@ class World:
 
         npc.physical.hunger = max(0, npc.physical.hunger - on_use.get("reduces_hunger", 0))
         npc.physical.thirst = max(0, npc.physical.thirst - on_use.get("reduces_thirst", 0))
+        start_activity(
+            npc,
+            "eating" if on_use.get("reduces_hunger", 0) >= on_use.get("reduces_thirst", 0) else "drinking",
+            3,
+            world=self,
+            location=(npc.x, npc.y),
+            allows_conversation=False,
+            allows_observation=True,
+            allows_social_sharing=False,
+            interruptible=True,
+            metadata={
+                "item_key": item_key,
+                "reduces_hunger": on_use.get("reduces_hunger", 0),
+                "reduces_thirst": on_use.get("reduces_thirst", 0),
+                "needs_already_applied": True,
+            },
+        )
         return True
 
     def _npc_consume_from_inventory(self, npc: NPC, inventory, *, need_type: str, desperate: bool = False) -> tuple[bool, bool]:
@@ -5219,6 +5303,10 @@ class World:
     def _handle_npc_survival_need(self, npc: NPC, *, need_type: str, urgent_threshold: int, desperate_threshold: int) -> bool:
         current_value = getattr(npc.physical, need_type, 0)
         seeking_task = "seeking_water" if need_type == "thirst" else "seeking_food"
+        current_activity = getattr(npc, "current_activity", None)
+        if current_activity and getattr(current_activity, "activity_type", None) in {"eating", "drinking"}:
+            npc.schedule.current_task = seeking_task
+            return True
 
         if current_value < urgent_threshold and npc.schedule.current_task == seeking_task:
             self._resume_npc_after_survival_need(npc)
@@ -6567,6 +6655,19 @@ class World:
             if interaction_hint == "sit":
                 self.player.state.is_sitting = True
                 self.player.state.sitting_on_object_at = (target_x, target_y)
+                start_activity(
+                    self.player,
+                    "sitting",
+                    30,
+                    world=self,
+                    location=(self.player.x, self.player.y),
+                    anchor_coords=(target_x, target_y),
+                    allows_conversation=True,
+                    allows_observation=True,
+                    allows_social_sharing=True,
+                    interruptible=True,
+                    metadata={"clear_sitting_on_complete": True},
+                )
                 self.add_message_to_chat_log(f"You sit down on the {target_tile.name}.")
             else:
                 # self.add_message_to_chat_log("You can't sit there.") # Only message if no other interaction found by 'E'
@@ -6580,6 +6681,7 @@ class World:
         """Handles the player standing up."""
         if self.player.state.is_sitting:
             self.player.state.is_sitting = False
+            self.player.current_activity = None
             self.add_message_to_chat_log("You stand up.")
             self.player.state.sitting_on_object_at = None
         # No message if not sitting, or handled by caller
@@ -6688,6 +6790,61 @@ class World:
                 else:
                     npc.conversation_partner_id = None
 
+
+    def _handle_ambient_activity_interactions(self):
+        """Emit occasional lightweight dialogue around conversational activities."""
+        if getattr(self, "game_state", "PLAYING") != "PLAYING":
+            return
+        if getattr(self, "chat_ui_active", False):
+            return
+
+        update_social_scenes(self)
+        scene = choose_strongest_social_scene(self)
+        pair = choose_scene_interaction_pair(scene, self) if scene is not None else None
+        if pair is None:
+            pair = choose_ambient_conversation_pair(self)
+            if pair is None:
+                return
+            scene = find_scene_for_pair(self, pair[0], pair[1])
+        speaker, listener = pair
+        activity = getattr(speaker, "current_activity", None)
+
+        shared_fact = choose_shareable_fact(speaker, listener, self)
+        dialogue_line = None
+        line = ""
+        if shared_fact is not None:
+            shared_line = render_history_fact_dialogue_line(speaker, listener, self, shared_fact, scene=scene)
+            topic = build_dialogue_topic_from_fact(shared_fact, self)
+            if (
+                shared_line is not None
+                and topic is not None
+                and share_known_fact(speaker, listener, shared_fact, source_type="told", current_tick=int(getattr(self, "game_time", 0)))
+            ):
+                dialogue_line = shared_line
+                line = shared_line.text
+                remember_dialogue_topic_spoken(speaker, topic, self)
+                mark_share_cooldowns(speaker, listener, self)
+                record_scene_topic(scene, topic, self)
+                share_fact_with_scene_overhearers(self, scene, speaker, listener, shared_fact)
+
+        if not line:
+            lines = get_contextual_dialogue_lines(speaker, listener, self, limit=1, scene=scene)
+            if not lines:
+                return
+            dialogue_line = lines[0]
+            line = dialogue_line.text
+
+        mark_ambient_conversation_started(speaker, listener, self)
+        speaker.ambient_activity_next_talk_tick = int(getattr(self, "game_time", 0)) + 60
+        listener.ambient_activity_next_talk_tick = int(getattr(self, "game_time", 0)) + 30
+        speaker.conversation_cooldown = max(getattr(speaker, "conversation_cooldown", 0), 20)
+        listener.conversation_cooldown = max(getattr(listener, "conversation_cooldown", 0), 20)
+        publish_dialogue = getattr(self, "_publish_ambient_dialogue_line", None)
+        if callable(publish_dialogue):
+            publish_dialogue(speaker, listener, dialogue_line, scene=scene, activity=activity)
+        else:
+            World._publish_ambient_dialogue_line(self, speaker, listener, dialogue_line, scene=scene, activity=activity)
+
     def _continue_npc_conversation(self, speaker, listener):
         group_participants = [speaker, listener]
         for p in self.village_npcs:
@@ -6709,6 +6866,7 @@ class World:
                 break
 
         other_participants = [p for p in group_participants if p.id != speaker.id]
+        scene = find_scene_for_pair(self, speaker, listener)
 
         profile = self.evaluate_conversation_foundation(speaker, listener, max_distance=6)
         if not profile.can_start:
@@ -6719,14 +6877,36 @@ class World:
             return
 
         if len(speaker.current_conversation) >= 6:
-            if self._can_player_overhear(speaker):
-                self.add_message_to_chat_log(f"You overhear {self.get_entity_display_name(speaker)} and the group wrap up their conversation.")
+            self._publish_ambient_text(speaker, listener, "We should get back to it.", scene=scene, source_type="activity")
             for p in group_participants:
                 if p.conversation_partner_id == speaker.id or p.conversation_partner_id == listener.id or p.id in (speaker.id, listener.id):
                     p.conversation_partner_id = None
                     p.current_conversation = []
                     p.conversation_cooldown = random.randint(100, 200)
             return
+
+        shared_fact = choose_shareable_fact(speaker, listener, self)
+        if shared_fact is not None:
+            shared_line = render_history_fact_dialogue_line(speaker, listener, self, shared_fact, scene=scene)
+            topic = build_dialogue_topic_from_fact(shared_fact, self)
+            if (
+                shared_line is not None
+                and topic is not None
+                and share_known_fact(speaker, listener, shared_fact, source_type="told", current_tick=int(getattr(self, "game_time", 0)))
+            ):
+                spoken_line = shared_line.text
+                remember_dialogue_topic_spoken(speaker, topic, self)
+                mark_share_cooldowns(speaker, listener, self)
+                record_scene_topic(scene, topic, self)
+                self._publish_ambient_dialogue_line(speaker, listener, shared_line, scene=scene)
+                line_formatted = f"{speaker.name}: {spoken_line}"
+                speaker.current_conversation.append(line_formatted)
+                for p in other_participants:
+                    p.current_conversation = list(speaker.current_conversation)
+                    self.propagate_npc_harmful_incident_gossip(speaker, p)
+                speaker.last_conversation_time = self.game_time
+                listener.last_conversation_time = self.game_time
+                return
 
         event_summary = "the weather"
         if speaker.knowledge.known_events:
@@ -6739,6 +6919,13 @@ class World:
             self._cancel_background_llm_task(task_key)
             spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants, max_distance=6)
 
+            self._publish_ambient_text(
+                speaker,
+                listener,
+                spoken_line,
+                scene=scene,
+                source_type="small_talk",
+            )
             line_formatted = f"{speaker.name}: {spoken_line}"
             speaker.current_conversation.append(line_formatted)
             for p in other_participants:
@@ -6779,10 +6966,13 @@ class World:
             if not spoken_line:
                 spoken_line, goal = self._fallback_npc_social_line(speaker, listener, group_listeners=other_participants, max_distance=6)
 
-            if self._can_player_overhear(speaker):
-                self.add_message_to_chat_log(
-                    f"You overhear {self.get_entity_display_name(speaker)} tell {self.get_entity_display_name(listener)}: {spoken_line}"
-                )
+            self._publish_ambient_text(
+                speaker,
+                listener,
+                spoken_line,
+                scene=scene,
+                source_type="small_talk",
+            )
             line_formatted = f"{speaker.name}: {spoken_line}"
             speaker.current_conversation.append(line_formatted)
             for p in other_participants:
@@ -7773,13 +7963,20 @@ class World:
 
         gossip_keywords = ["gossip", "rumors", "news", "hear anything"]
         if any(keyword in player_input_text.lower() for keyword in gossip_keywords):
-            if not npc_target.knowledge.known_events:
+            known_lines = get_contextual_dialogue_lines(
+                npc_target,
+                self.player,
+                self,
+                limit=1,
+            )
+            if known_lines and known_lines[0].topic_type != "small_talk":
+                self.chat_ui_history.append((npc_display_name, known_lines[0].text))
+            elif not npc_target.knowledge.known_events:
                 self.chat_ui_history.append((npc_display_name, "I haven't heard anything interesting lately."))
             else:
-                # Select a random event to gossip about
+                # Legacy generic event gossip still uses the existing prompt path.
                 event_to_share = random.choice(list(npc_target.knowledge.known_events.values()))
 
-                # Get names and relationships for the prompt
                 subject = next((n for n in self.all_npcs if n.id == event_to_share.subject_id), self.player if event_to_share.subject_id == self.player.id else None)
                 target = next((n for n in self.all_npcs if n.id == event_to_share.target_id), self.player if event_to_share.target_id == self.player.id else None) if event_to_share.target_id else None
 
@@ -8325,6 +8522,14 @@ class World:
             if can_hear:
                 self.add_message_to_chat_log(f"{self.get_entity_display_name(speaker)}: {result.text}")
 
+    def _history_scope_for_location(self, location: tuple[int, int] | None = None) -> tuple[str | None, str | None]:
+        if location is None:
+            return None, None
+        village = self._get_village_at_coords(location[0], location[1])
+        if village is None:
+            return None, None
+        return getattr(village, "id", None), getattr(village, "region_id", None)
+
     def record_birth_event(
         self,
         *,
@@ -8335,6 +8540,9 @@ class World:
         settlement_id: str | None = None,
         region_id: str | None = None,
     ) -> BirthRecord:
+        inferred_settlement_id, inferred_region_id = self._history_scope_for_location(location)
+        settlement_id = settlement_id or inferred_settlement_id
+        region_id = region_id or inferred_region_id
         birth_record = self.history.record_birth(
             child_id=child.id,
             parent_ids=parent_ids,
@@ -8353,6 +8561,7 @@ class World:
             birth_record.location,
             event=birth_record,
         )
+        create_public_event_seed_from_record(self, birth_record)
         return birth_record
 
     def record_death_event(
@@ -8363,7 +8572,12 @@ class World:
         killer_id: int | None = None,
         location: tuple[int, int] | None = None,
         cause_of_death: str = "",
+        settlement_id: str | None = None,
+        region_id: str | None = None,
     ) -> DeathRecord:
+        inferred_settlement_id, inferred_region_id = self._history_scope_for_location(location)
+        settlement_id = settlement_id or inferred_settlement_id
+        region_id = region_id or inferred_region_id
         death_record = self.history.record_death(
             deceased_id=deceased.id,
             description=description,
@@ -8371,6 +8585,8 @@ class World:
             killer_id=killer_id,
             location=location,
             cause_of_death=cause_of_death,
+            settlement_id=settlement_id,
+            region_id=region_id,
         )
         self.log_event(
             death_record.type,
@@ -8380,6 +8596,7 @@ class World:
             death_record.location,
             event=death_record,
         )
+        create_public_event_seed_from_record(self, death_record)
         return death_record
 
     def record_marriage_event(
@@ -8389,12 +8606,19 @@ class World:
         spouse_b: NPC,
         description: str,
         location: tuple[int, int] | None = None,
+        settlement_id: str | None = None,
+        region_id: str | None = None,
     ) -> MarriageRecord:
+        inferred_settlement_id, inferred_region_id = self._history_scope_for_location(location)
+        settlement_id = settlement_id or inferred_settlement_id
+        region_id = region_id or inferred_region_id
         marriage_record = self.history.record_marriage(
             spouse_ids=(spouse_a.id, spouse_b.id),
             description=description,
             game_time=self.game_time,
             location=location,
+            settlement_id=settlement_id,
+            region_id=region_id,
         )
         self.log_event(
             marriage_record.type,
@@ -8404,6 +8628,7 @@ class World:
             marriage_record.location,
             event=marriage_record,
         )
+        create_public_event_seed_from_record(self, marriage_record)
         return marriage_record
 
     def record_employment_event(
@@ -8415,7 +8640,17 @@ class World:
         description: str,
         location: tuple[int, int] | None = None,
         building_id: str | None = None,
+        settlement_id: str | None = None,
+        region_id: str | None = None,
     ) -> EmploymentRecord:
+        building = self.buildings_by_id.get(building_id) if building_id else None
+        settlement_id = settlement_id or getattr(building, "settlement_id", None)
+        region_id = region_id or getattr(building, "region_id", None)
+        if settlement_id is None or region_id is None:
+            inferred_settlement_id, inferred_region_id = self._history_scope_for_location(location)
+            settlement_id = settlement_id or inferred_settlement_id
+            region_id = region_id or inferred_region_id
+
         if not hasattr(self, "history") or self.history is None:
             return EmploymentRecord(
                 event_type="npc_employment_changed",
@@ -8427,6 +8662,8 @@ class World:
                 employment_action=employment_action,
                 location=location,
                 building_id=building_id,
+                settlement_id=settlement_id,
+                region_id=region_id,
             )
 
         employment_record = self.history.record_employment_change(
@@ -8437,6 +8674,8 @@ class World:
             game_time=self.game_time,
             location=location,
             building_id=building_id,
+            settlement_id=settlement_id,
+            region_id=region_id,
         )
         self.log_event(
             employment_record.type,
@@ -8446,7 +8685,46 @@ class World:
             employment_record.location,
             event=employment_record,
         )
+        create_public_event_seed_from_record(self, employment_record)
         return employment_record
+
+    def record_crime_event(
+        self,
+        *,
+        crime_kind: str,
+        suspect_id: int,
+        description: str,
+        victim_id: int | None = None,
+        witness_ids: tuple[int, ...] = (),
+        location: tuple[int, int] | None = None,
+        settlement_id: str | None = None,
+        region_id: str | None = None,
+    ) -> CrimeRecord:
+        inferred_settlement_id, inferred_region_id = self._history_scope_for_location(location)
+        settlement_id = settlement_id or inferred_settlement_id
+        region_id = region_id or inferred_region_id
+        crime_record = self.history.record_crime(
+            crime_kind=crime_kind,
+            suspect_id=suspect_id,
+            victim_id=victim_id,
+            witness_ids=witness_ids,
+            description=description,
+            game_time=self.game_time,
+            location=location,
+            settlement_id=settlement_id,
+            region_id=region_id,
+            event_type="crime_witnessed",
+        )
+        self.log_event(
+            crime_record.type,
+            crime_record.description,
+            crime_record.subject_id,
+            crime_record.target_id,
+            crime_record.location,
+            event=crime_record,
+        )
+        create_public_event_seed_from_record(self, crime_record)
+        return crime_record
 
     def record_migration_event(
         self,
@@ -8457,7 +8735,12 @@ class World:
         location: tuple[int, int] | None = None,
         origin_label: str | None = None,
         destination_label: str | None = None,
+        settlement_id: str | None = None,
+        region_id: str | None = None,
     ) -> MigrationRecord:
+        inferred_settlement_id, inferred_region_id = self._history_scope_for_location(location)
+        settlement_id = settlement_id or inferred_settlement_id
+        region_id = region_id or inferred_region_id
         migration_record = self.history.record_migration(
             traveler_id=npc.id,
             migration_kind=migration_kind,
@@ -8466,6 +8749,8 @@ class World:
             location=location,
             origin_label=origin_label,
             destination_label=destination_label,
+            settlement_id=settlement_id,
+            region_id=region_id,
         )
         self.log_event(
             migration_record.type,
@@ -8475,6 +8760,7 @@ class World:
             migration_record.location,
             event=migration_record,
         )
+        create_public_event_seed_from_record(self, migration_record)
         return migration_record
 
     def _find_nearest_heat_source(self, npc: NPC) -> tuple[int, int] | None:
@@ -10489,6 +10775,44 @@ class World:
                             )
                             npc.schedule.current_path = [] # Force path recalculation
 
+    def teach_entity_history_record(
+        self,
+        entity,
+        record,
+        source_type: str = "witnessed",
+        confidence: float = 1.0,
+        tick: int | None = None,
+    ) -> bool:
+        """Teach an entity a structured history record through the knowledge system."""
+        if entity is None or record is None:
+            return False
+        knowledge_system = getattr(self, "knowledge_system", None)
+        if knowledge_system is None:
+            return False
+        if tick is None:
+            tick = getattr(self, "game_time", 0)
+        return knowledge_system.learn_history_record(
+            entity,
+            record,
+            source_type=source_type,
+            confidence=confidence,
+            tick=tick,
+        )
+
+    def share_history_record_between_entities(
+        self, source, target, record_id: str
+    ) -> bool:
+        """Share one known history record from one entity to another."""
+        if source is None or target is None or not record_id:
+            return False
+        record = self.history.get_event(record_id)
+        if record is None:
+            return False
+        knowledge_system = getattr(self, "knowledge_system", None)
+        if knowledge_system is None:
+            return False
+        return knowledge_system.share_event(source, target, record)
+
     def get_entity_by_id(self, entity_id: int):
         """Finds an entity (player or NPC) by its ID."""
         if not isinstance(entity_id, int):
@@ -10748,6 +11072,10 @@ class World:
             return ("I'll wait here then.", "stop_following")
         if "trade" in text and npc_target.economic.profession in {"Merchant", "Miller", "Scribe", "Traveling Merchant"}:
             return ("Let's see what we can trade.", "start_trade")
+        contextual_lines = get_contextual_dialogue_lines(npc_target, self.player, self, limit=1)
+        if contextual_lines and contextual_lines[0].topic_type != "small_talk":
+            return (contextual_lines[0].text, "continue_conversation")
+
         profile = evaluate_conversation_foundation(self, npc_target, self.player, max_distance=9999)
         topic_line, topic_goal, _topic_choice = self._resolve_conversation_topic(npc_target, self.player, profile)
         if topic_line:
@@ -10768,6 +11096,64 @@ class World:
             if entity and self._can_player_overhear(entity):
                 return True
         return False
+
+    def _is_ambient_speech_local_to_player(self, speaker, audible_radius: int | None = None) -> bool:
+        if not speaker or not getattr(self, "player", None):
+            return False
+        distance_to_player = abs(int(getattr(speaker, "x", 0)) - int(getattr(self.player, "x", 0))) + abs(int(getattr(speaker, "y", 0)) - int(getattr(self.player, "y", 0)))
+        hearing_radius = int(getattr(getattr(self.player, "physical", None), "hearing_radius", DEFAULT_HEARING_RADIUS) or DEFAULT_HEARING_RADIUS)
+        if audible_radius is None:
+            audible_radius = int(getattr(speaker, "speech_volume", DEFAULT_SPEECH_VOLUME) or DEFAULT_SPEECH_VOLUME)
+        return distance_to_player <= min(max(1, audible_radius), max(1, hearing_radius))
+
+    def _ambient_speech_radius_for_scene(self, speaker, scene=None) -> int:
+        base_radius = int(getattr(speaker, "speech_volume", DEFAULT_SPEECH_VOLUME) or DEFAULT_SPEECH_VOLUME)
+        scene_type = str(getattr(scene, "scene_type", "") or "")
+        scene_tone = str(getattr(scene, "tone", "") or "")
+        if scene_type == "tavern":
+            return max(base_radius, 10)
+        if scene_type == "celebration" or scene_tone == "celebratory":
+            return max(base_radius, 12)
+        if scene_type == "funeral" or scene_tone in {"grieving", "somber"}:
+            return max(4, min(base_radius, 6))
+        if scene_type in {"warning", "accusation"} or scene_tone in {"tense", "fearful"}:
+            return max(6, min(max(base_radius, 8), 10))
+        return max(1, base_radius)
+
+    def _publish_ambient_dialogue_line(self, speaker, listener, dialogue_line, *, scene=None, activity=None):
+        if dialogue_line is None:
+            return None
+        audible_radius = World._ambient_speech_radius_for_scene(self, speaker, scene)
+        if not World._is_ambient_speech_local_to_player(self, speaker, audible_radius):
+            return None
+        line = add_dialogue_line_as_ambient_speech(
+            self,
+            speaker,
+            listener,
+            dialogue_line,
+            scene=scene,
+        )
+        if line is not None and hasattr(self, "visual_effects"):
+            self.visual_effects.append(FloatingTextEffect(speaker.x, speaker.y, "“…”", color=(190, 190, 220), duration=1.2, speed=0.35))
+        return line
+
+    def _publish_ambient_text(self, speaker, listener, text: str, *, scene=None, source_type="small_talk", source_record_id=None):
+        audible_radius = World._ambient_speech_radius_for_scene(self, speaker, scene)
+        if not World._is_ambient_speech_local_to_player(self, speaker, audible_radius):
+            return None
+        line = add_ambient_speech(
+            self,
+            speaker=speaker,
+            listener=listener,
+            text=text,
+            source_type=source_type,
+            source_record_id=source_record_id,
+            audible_radius=audible_radius,
+            scene=scene,
+        )
+        if line is not None and hasattr(self, "visual_effects"):
+            self.visual_effects.append(FloatingTextEffect(speaker.x, speaker.y, "“…”", color=(190, 190, 220), duration=1.2, speed=0.35))
+        return line
 
     def _coerce_dialogue_goal_by_profile(self, profile, goal: str) -> str:
         """Constrain freeform goals to simulation-approved outcomes for this turn."""
@@ -11969,11 +12355,13 @@ class World:
                     for elder in elderly_npcs:
                         # Chance of dying increases with age
                         if random.random() < (elder.age - 70) / 100.0:
-                            self.log_event(
-                                event_type="entity_death",
-                                description=f"{elder.name} died of old age.",
-                                subject_id=elder.id,
-                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE)
+                            self.record_death_event(
+                                deceased=elder,
+                                description="{subject} died of old age.",
+                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
+                                cause_of_death="old_age",
+                                settlement_id=getattr(village, "id", None),
+                                region_id=getattr(village, "region_id", None),
                             )
                             # In a full abstract sim, we would remove the NPC from the world here.
                             # For now, we just log it. A more complex system would be needed to truly remove them.
@@ -12137,13 +12525,14 @@ class World:
         else:
             self.add_message_to_chat_log(f"{self.get_entity_display_name(criminal)}'s infamy has increased by 5.")
 
-        # Log the crime event itself
-        self.log_event(
-            event_type="crime_witnessed",
+        # Record the crime as structured history.
+        self.record_crime_event(
+            crime_kind=crime_type,
+            suspect_id=visible_criminal_id,
+            victim_id=victim.id if victim else None,
+            witness_ids=(witness.id,),
             description=f"{{subject}} was witnessed by {witness.name} committing the crime of {crime_type}.",
-            subject_id=visible_criminal_id,
-            target_id=victim.id if victim else None,
-            location=(witness.x, witness.y) # Location is where the witness was
+            location=(witness.x, witness.y),
         )
 
         prompt = LLM_PROMPTS["npc_witness_reaction"].format(

@@ -1,39 +1,64 @@
-import pickle
 import os
+import pickle
+
+SAVE_DIR = "saves"
+SAVE_FORMAT_VERSION = 1
+
+
+def _save_path(filename: str) -> str:
+    return os.path.join(SAVE_DIR, filename)
+
+
+def _build_save_envelope(world) -> dict:
+    """Wrap the world in explicit save metadata before serialization."""
+    return {
+        "version": SAVE_FORMAT_VERSION,
+        "world": world,
+    }
+
+
+def _extract_world_from_envelope(save_data):
+    """Validate a save envelope and return its world payload."""
+    if not isinstance(save_data, dict):
+        raise ValueError("Save file does not contain a versioned save envelope.")
+
+    version = save_data.get("version")
+    if version != SAVE_FORMAT_VERSION:
+        raise ValueError(f"Unsupported save format version: {version!r}")
+
+    if "world" not in save_data:
+        raise ValueError("Save file is missing its world payload.")
+
+    return save_data["world"]
+
 
 def save_game(world, filename="savegame.sav"):
-    """Saves the game world to a file."""
-    if not os.path.exists("saves"):
-        os.makedirs("saves")
+    """Saves the game world to a versioned save file."""
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR)
 
-    filepath = os.path.join("saves", filename)
+    filepath = _save_path(filename)
     try:
-        # We need to be careful with what we pickle.
-        # tcod objects might not be picklable.
-        # Specifically tcod.noise.Noise and numpy arrays are usually fine, but C-structs might be issues.
-        # Let's try simple pickle first.
-
-        # Temporarily remove unpicklable objects if any (e.g. tcod context if stored in world, but it shouldn't be)
-        # The generator has tcod.noise.Noise. Let's see if that pickles.
-
         with open(filepath, "wb") as f:
-            pickle.dump(world, f)
+            pickle.dump(_build_save_envelope(world), f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"Game saved to {filepath}")
         return True
     except Exception as e:
         print(f"Error saving game: {e}")
         return False
 
+
 def load_game(filename="savegame.sav"):
-    """Loads the game world from a file."""
-    filepath = os.path.join("saves", filename)
+    """Loads the game world from a versioned save file."""
+    filepath = _save_path(filename)
     if not os.path.exists(filepath):
         print(f"Save file {filepath} not found.")
         return None
 
     try:
         with open(filepath, "rb") as f:
-            world = pickle.load(f)
+            save_data = pickle.load(f)
+        world = _extract_world_from_envelope(save_data)
         print(f"Game loaded from {filepath}")
         return world
     except Exception as e:

@@ -5,6 +5,7 @@ from simulation.activity import advance_activity, start_activity
 from simulation.systems.task_types import TaskType
 
 from data.professions import get_profession_data, get_sub_task_data
+from simulation.systems.business import get_business, operate_business_tick, should_owner_delegate_low_labor
 
 
 def update_npc_work_sub_tasks(world, npc) -> bool:
@@ -15,6 +16,12 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
     work_building = world.buildings_by_id.get(npc.schedule.work_building_id)
     if not work_building:
         npc.schedule.current_task = "idle_confused"
+        return True
+
+    business = get_business(world, getattr(work_building, "business_id", None))
+    if business is not None and business.owner_id == getattr(npc, "id", None) and should_owner_delegate_low_labor(world, npc, business):
+        npc.schedule.current_task = "inspecting_workers"
+        business.visible_status = "Inspecting workers."
         return True
 
     profession_data = get_profession_data(npc.economic.profession)
@@ -114,6 +121,8 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                         )
 
             if npc.sub_task_timer <= 0:
+                if business is not None:
+                    operate_business_tick(world, business, worker=npc)
                 npc.economic.work_performance = min(100, npc.economic.work_performance + 5)
                 if hasattr(getattr(npc, "skills", None), "gain_experience"):
                     npc.skills.gain_experience("labor", 3)

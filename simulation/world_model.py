@@ -34,6 +34,7 @@ class Building:
         self.region_id: str | None = None
         self.settlement_id: str | None = None
         self.anchors: list[dict[str, Any]] = []
+        self.business_id: str | None = None
 
     def __setattr__(self, name, value):
         if name == "building_inventory" and not isinstance(value, Inventory):
@@ -128,6 +129,36 @@ class Building:
             return candidates[0][1], candidates[0][2]
 
         return start_x, start_y
+
+
+@dataclass
+class Business:
+    """Lightweight business state shared by NPC and player-owned workplaces."""
+
+    owner_id: int | None
+    profession_type: str
+    business_type: str
+    production_role: str
+    workplace_building_id: str
+    operating_status: str = "startup"
+    wages: dict[str, int] = field(default_factory=dict)
+    worker_ids: list[int] = field(default_factory=list)
+    inventory_storage_id: str | None = None
+    inventory_snapshot: dict[str, int] = field(default_factory=dict)
+    demand_pressure: int = 0
+    active_contract_ids: list[str] = field(default_factory=list)
+    current_shortages: set[str] = field(default_factory=set)
+    open_job_ids: list[str] = field(default_factory=list)
+    progress_ticks: int = 0
+    completed_batches: int = 0
+    visible_status: str = "Opening."
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def has_worker(self, entity_id: int | None) -> bool:
+        return entity_id is not None and entity_id in self.worker_ids
+
+    def is_owner(self, entity_id: int | None) -> bool:
+        return entity_id is not None and entity_id == self.owner_id
 
 
 @dataclass
@@ -427,6 +458,7 @@ class WorldAtlas:
     def __init__(self):
         self.villages: list[Village] = []
         self.buildings_by_id: dict[str, Building] = {}
+        self.businesses_by_id: dict[str, Business] = {}
         self.regions_by_id: dict[str, Region] = {}
         self.region_by_chunk: dict[tuple[int, int], str] = {}
         self.ruins_by_id: dict[str, Ruin] = {}

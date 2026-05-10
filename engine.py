@@ -138,6 +138,16 @@ from simulation.systems.survival import (
     update_player_needs as update_player_needs_system,
 )
 from simulation.systems.medical import update_npc_medical_state
+from simulation.systems.business import (
+    actor_business_role,
+    create_business_for_building,
+    ensure_world_business_registry,
+    evaluate_worker_for_job,
+    get_business,
+    operate_business_tick,
+    post_business_openings,
+    sync_business_from_world,
+)
 from simulation.systems.perception import update_npc_sound_perception
 from simulation.systems.incidents import (
     create_harmful_incident,
@@ -167,6 +177,7 @@ from simulation.world_model import (
     Building,
     Chunk,
     ConstructionBlueprint,
+    Business,
     EmploymentTask,
     PoliticalWarrant,
     PoliticsTracker,
@@ -628,6 +639,7 @@ class World:
         self.village_npcs = []
         self.villages = self.atlas.villages
         self.buildings_by_id = self.atlas.buildings_by_id
+        self.businesses_by_id = self.atlas.businesses_by_id
         self.regions_by_id = self.atlas.regions_by_id
         self.mouse_x = 0
         self.mouse_y = 0
@@ -1158,11 +1170,97 @@ class World:
         owner_id = getattr(building, "owner_id", None)
         return owner_id == self.player.id or bool(getattr(building, "player_owned", False))
 
+    def create_business_for_building(self, building: Building, owner=None, business_type: str | None = None) -> Business:
+        business = create_business_for_building(self, building, owner, business_type)
+        sync_business_from_world(self, business)
+        return business
+
+    def get_business_for_building(self, building: Building | None) -> Business | None:
+        if building is None:
+            return None
+        return get_business(self, getattr(building, "business_id", None))
+
+    def sync_business(self, business: Business) -> Business:
+        return sync_business_from_world(self, business)
+
+    def operate_business_tick(self, business: Business, *, worker=None) -> bool:
+        return operate_business_tick(self, business, worker=worker)
+
+    def get_actor_business_role(self, npc: NPC, business: Business | None = None) -> str:
+        return actor_business_role(self, npc, business)
+
+    def player_start_business(self, building: Building, business_type: str | None = None) -> Business | None:
+        if building is None:
+            return None
+        if getattr(building, "owner_id", None) not in {None, self.player.id}:
+            self.add_message_to_chat_log("Someone else already owns that business.")
+            return None
+        self._set_building_owner(building, self.player)
+        business = create_business_for_building(self, building, self.player, business_type)
+        post_business_openings(self, business)
+        self.add_message_to_chat_log(f"You start a {business.business_type.replace('_', ' ')}.")
+        return business
+
+    def npc_pursue_business_opportunity(self, npc: NPC, village: Village | None = None) -> Business | None:
+        if npc is None or getattr(getattr(npc, "physical", None), "is_dead", False):
+            return None
+        village = village or self._get_village_for_npc(npc)
+        if village is None:
+            return None
+        if getattr(getattr(npc, "economic", None), "money", 0) < 20 and normalize_profession(getattr(npc.economic, "profession", "")) != "Unemployed":
+            return None
+
+        service_to_building = {
+            "Blacksmith": "blacksmith_shop",
+            "Tavern Keeper": "tavern",
+            "Farmer": "farm",
+            "Woodcutter": "lumber_mill",
+            "Merchant": "general_store",
+        }
+        shortage_to_building = {
+            "raw_log": "lumber_mill",
+            "wooden_plank": "lumber_mill",
+            "wheat": "farm",
+            "bread": "tavern",
+            "iron_ingot": "blacksmith_shop",
+        }
+        target_type = None
+        chosen_need = None
+        for need in getattr(self.town_board, "economic_needs", []):
+            if need.settlement_id != village.id:
+                continue
+            if need.type == "service":
+                target_type = service_to_building.get(need.target_key)
+            elif need.type == "shortage":
+                target_type = shortage_to_building.get(need.target_key)
+            if target_type:
+                chosen_need = need
+                break
+        if target_type is None:
+            return None
+
+        candidates = [building for building in village.buildings if building.building_type == target_type and getattr(building, "owner_id", None) in {None, npc.id}]
+        if not candidates:
+            return None
+        building = candidates[0]
+        self._set_building_owner(building, npc)
+        business = create_business_for_building(self, building, npc)
+        role = business.profession_type
+        self._assign_job(npc, building, profession=role, reason="founded_business")
+        business.demand_pressure = max(business.demand_pressure, 60)
+        post_business_openings(self, business)
+        if chosen_need in getattr(self.town_board, "economic_needs", []):
+            self.town_board.economic_needs.remove(chosen_need)
+        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} starts a {business.business_type.replace('_', ' ')} to answer town demand.")
+        return business
+
     def _set_building_owner(self, building: Building | None, owner) -> bool:
         if building is None or owner is None:
             return False
         building.owner_id = getattr(owner, "id", None)
         building.player_owned = owner is self.player
+        if "workplace" in str(getattr(building, "category", "")):
+            create_business_for_building(self, building, owner)
         return True
 
     def _get_living_family_heirs(self, npc: NPC | None) -> list[NPC]:
@@ -1965,6 +2063,11 @@ class World:
                         base_wage = int(base_wage * 1.5)
                         break
 
+        for business in ensure_world_business_registry(self).values():
+            if business.profession_type == profession_role and (business.demand_pressure >= 70 or business.operating_status in {"understaffed", "stalled"}):
+                base_wage = int(base_wage * 1.25) + 1
+                break
+
         return base_wage
 
     def _is_player_owned_workplace(self, building: Building | None) -> bool:
@@ -1983,7 +2086,8 @@ class World:
                 continue
             if self._count_active_workers_for_building(building) >= building.max_workers:
                 continue
-            score = self._evaluate_job_suitability(npc, building) + task.daily_wage
+            business = self.get_business_for_building(building) or create_business_for_building(self, building, getattr(building, "owner_id", None))
+            score = self._evaluate_job_suitability(npc, building) + evaluate_worker_for_job(self, npc, business, task.profession_role, task.daily_wage)
             if best_score is None or score > best_score:
                 best_score = score
                 best_task = task
@@ -2027,7 +2131,7 @@ class World:
         open_service_needs = []
         if village_id:
             open_service_needs = [
-                need for need in self.town_board.economic_needs
+                need for need in getattr(self.town_board, "economic_needs", [])
                 if need.settlement_id == village_id and need.type == "service"
             ]
 
@@ -2036,6 +2140,11 @@ class World:
 
         board_x, board_y = noticeboard_points[0]
         if (npc.x, npc.y) == (board_x, board_y):
+            if self.npc_pursue_business_opportunity(npc, village):
+                npc.schedule.current_task = TaskType.IDLE
+                npc.schedule.current_path = []
+                npc.schedule.current_destination_coords = None
+                return True
             # First, check if they can just take an open service role to fulfill a town need
             if open_service_needs:
                 for need in open_service_needs:
@@ -6169,6 +6278,7 @@ class World:
         if self._is_player_owned_workplace(building):
             return
 
+        business = self.get_business_for_building(building) or create_business_for_building(self, building, getattr(building, "owner_id", None))
         current_workers = self._count_active_workers_for_building(building)
         open_tasks = self.town_board.get_open_employment_tasks(building.id)
         vacancies = max(0, int(getattr(building, "max_workers", 0)) - current_workers)
@@ -6177,10 +6287,9 @@ class World:
             task_to_remove = open_tasks.pop()
             self.town_board.remove_employment_task(task_to_remove.id)
 
-        role = self._resolve_profession_for_work_building(building)
-        wage = self._get_employment_daily_wage(role)
-        while len(open_tasks) < vacancies:
-            open_tasks.append(self.town_board.post_employment(building.id, role, wage))
+        if len(open_tasks) < vacancies:
+            post_business_openings(self, business)
+        sync_business_from_world(self, business)
 
     def _sync_village_employment_tasks(self, village: Village | None) -> None:
         if village is None:
@@ -11850,6 +11959,10 @@ class World:
             npc.social.relationships[boss.id] = min(100, npc.social.relationships.get(boss.id, 50) + 20)
             # Boss likes the new hire too
             boss.social.relationships[npc.id] = min(100, boss.social.relationships.get(npc.id, 50) + 10)
+
+        business = self.get_business_for_building(work_building) or create_business_for_building(self, work_building, getattr(work_building, "owner_id", None))
+        business.wages[new_profession] = npc.economic.daily_wage
+        sync_business_from_world(self, business)
 
         self.record_employment_event(
             npc=npc,

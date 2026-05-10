@@ -469,6 +469,13 @@ def _get_hover_inspect(world, camera_x, camera_y):
     if inspect["object"] is None and _is_feature_tile_name(tile.name):
         inspect["object"] = tile.name
 
+    if building is not None:
+        business = getattr(world, "get_business_for_building", lambda _building: None)(building)
+        if business is not None:
+            status = getattr(business, "visible_status", "") or getattr(business, "operating_status", "")
+            workers = len(getattr(business, "worker_ids", []) or [])
+            inspect["business"] = f"{status} ({workers} workers)"
+
     inspect["social"] = social_hover_summary(world, (world_x, world_y))
 
     if getattr(world, "show_autonomy_overlay", False):
@@ -523,6 +530,9 @@ def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, pa
         y += 1
     if inspect["object"]:
         console.print(x=panel_x + 1, y=y, string=f"Object: {inspect['object']}"[:panel_inner], fg=(170, 210, 255))
+        y += 1
+    if inspect.get("business"):
+        console.print(x=panel_x + 1, y=y, string=f"Business: {inspect['business']}"[:panel_inner], fg=(255, 220, 120))
         y += 1
     if inspect.get("social"):
         console.print(x=panel_x + 1, y=y, string=f"Social: {inspect['social']}"[:panel_inner], fg=(210, 190, 230))

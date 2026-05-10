@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from data.items import ITEM_DEFINITIONS
 from simulation.world_model import TownEconomicNeed
+from simulation.systems.business import sync_businesses_for_village, update_business_economic_needs
 
 
 def process_traveling_merchant_village_trade(world, npc, village) -> None:
@@ -91,7 +92,15 @@ def simulate_village_economy(world, village) -> None:
         for item in ["bread", "raw_meat"]:
             village.demand[item] = village.demand.get(item, 1) + 1
 
-    # 2. Production (Abstracted)
+    # 2. Production (Business-aware first pass). Businesses with assigned labor
+    # produce through their own inventories; legacy abstract production remains
+    # as a low-detail fallback for towns/buildings not yet staffed.
+    for business in sync_businesses_for_village(world, village):
+        if business.worker_ids:
+            world_operate = getattr(world, "operate_business_tick", None)
+            if callable(world_operate):
+                world_operate(business)
+
     if storage_building:
         has_farm = any(b.building_type == "farm" for b in village.buildings)
         has_lumber = any(b.building_type == "lumber_mill" for b in village.buildings)
@@ -127,6 +136,7 @@ def simulate_village_economy(world, village) -> None:
                 village.demand[item] = 1
 
     _update_village_economic_needs(world, village)
+    update_business_economic_needs(world, village)
 
 
 def _update_village_economic_needs(world, village) -> None:

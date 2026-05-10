@@ -1068,6 +1068,24 @@ class World:
         return self.town_board.get_task(task_id)
 
     def claim_noticeboard_task(self, task_id: str | None) -> bool:
+        need = next((n for n in self.town_board.economic_needs if n.id == task_id), None)
+        if need is not None:
+            if need.type == "service":
+                self._set_entity_profession(self.player, need.target_key, reason="town_need")
+                self.town_board.economic_needs.remove(need)
+                self.add_message_to_chat_log(f"You have stepped up to become the town's {need.target_key}.")
+            elif need.type == "shortage":
+                self.player.knowledge.active_quests[need.id] = {
+                    "title": f"Supply {need.target_key.replace('_', ' ').title()}",
+                    "description": need.description,
+                    "type": "fetch",
+                    "item_to_fetch_key": need.target_key,
+                    "item_fetch_count": 5  # Arbitrary amount to resolve it for the player
+                }
+                self.add_message_to_chat_log(f"You agree to help supply the town with {need.target_key}.")
+            self.open_noticeboard_menu()
+            return True
+
         task = self._get_noticeboard_task(task_id)
         if task is None:
             self.add_message_to_chat_log("That notice is no longer available.")
@@ -1940,6 +1958,13 @@ class World:
             elif wealth_tier == "rich":
                 base_wage = int(base_wage * 1.5)
 
+            # Check if this town is desperate for this role
+            if hasattr(self, "town_board") and getattr(self.town_board, "economic_needs", None):
+                for need in self.town_board.economic_needs:
+                    if need.settlement_id == village.id and need.type == "service" and need.target_key == profession_role:
+                        base_wage = int(base_wage * 1.5)
+                        break
+
         return base_wage
 
     def _is_player_owned_workplace(self, building: Building | None) -> bool:
@@ -1997,11 +2022,32 @@ class World:
             if (building := self.buildings_by_id.get(task.target_building_id)) is not None
             and (village is None or getattr(building, "settlement_id", None) in {None, village_id})
         ]
-        if not noticeboard_points or not available_jobs:
+
+        # Check for economic needs they can fulfill
+        open_service_needs = []
+        if village_id:
+            open_service_needs = [
+                need for need in self.town_board.economic_needs
+                if need.settlement_id == village_id and need.type == "service"
+            ]
+
+        if not noticeboard_points or (not available_jobs and not open_service_needs):
             return False
 
         board_x, board_y = noticeboard_points[0]
         if (npc.x, npc.y) == (board_x, board_y):
+            # First, check if they can just take an open service role to fulfill a town need
+            if open_service_needs:
+                for need in open_service_needs:
+                    # Very simple evaluation: take the job if we're unemployed
+                    self._set_entity_profession(npc, need.target_key, reason="town_need")
+                    self.town_board.economic_needs.remove(need)
+                    npc.schedule.current_task = TaskType.IDLE
+                    npc.schedule.current_path = []
+                    npc.schedule.current_destination_coords = None
+                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} stepped up to become a {need.target_key} for the town.")
+                    return True
+
             task = self._find_best_employment_task_for_npc(npc)
             if task and self._hire_npc_from_employment_task(npc, task):
                 npc.schedule.current_task = TaskType.IDLE

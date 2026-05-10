@@ -317,6 +317,8 @@ def handle_noticeboard_menu_input(event: tcod.event.KeyDown, world: World):
         selected_notice = task_ids[ctx["selected_task_index"]]
         if selected_notice.startswith("haul:"):
             world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
+        elif selected_notice.startswith("need:"):
+            world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
 
 def handle_company_ledger_menu_input(event: tcod.event.KeyDown, world: World):
     """Handle keyboard input for the company ledger menu."""

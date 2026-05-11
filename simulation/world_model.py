@@ -10,7 +10,7 @@ from entities.items import Inventory
 
 
 class Building:
-    def __init__(self, x, y, width, height, building_type="house", category="residential", global_chunk_x_start=0, global_chunk_y_start=0):
+    def __init__(self, x, y, width, height, building_type="house", category="residential", global_chunk_x_start=0, global_chunk_y_start=0, variant_id=None):
         self.id = str(uuid.uuid4())
         self.x = x
         self.y = y
@@ -18,6 +18,7 @@ class Building:
         self.height = height
         self.building_type = building_type
         self.category = category
+        self.variant_id = variant_id
         self.interior_decorated = False
         self.occupants = []
         self.residents = []
@@ -157,6 +158,7 @@ class ConstructionBlueprint:
     territory_claim_id: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deposited_inventory: Inventory = field(default_factory=Inventory)
+    variant_id: str | None = None
 
     STAGES: ClassVar[tuple[str, ...]] = ("planning", "foundation", "framing", "finishing", "complete")
 

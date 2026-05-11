@@ -18,6 +18,16 @@ class RoomArchetype:
     placement_rules: Dict[str, str] = field(default_factory=dict)
 
 @dataclass
+class BlueprintVariant:
+    id: str
+    width: int
+    height: int
+    room_types: List[str] = field(default_factory=list)
+    optional_room_types: List[str] = field(default_factory=list)
+    fenced_yard_size: int = 0
+    attachments: List[str] = field(default_factory=list)
+
+@dataclass
 class BuildingArchetype:
     id: str
     category: str
@@ -25,6 +35,25 @@ class BuildingArchetype:
     room_types: List[str] = field(default_factory=list)  # required room types
     optional_room_types: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    variants: List[BlueprintVariant] = field(default_factory=list)
+
+    def get_variant(self, wealth_tier: str) -> BlueprintVariant:
+        if not self.variants:
+            # Fallback to a default variant if none are defined
+            width = int(self.size_range[0] ** 0.5)
+            height = int(self.size_range[0] / width)
+            return BlueprintVariant("default", width, height, self.room_types, self.optional_room_types)
+
+        # Try to find a variant matching the wealth tier by ID
+        for variant in self.variants:
+            if wealth_tier in variant.id:
+                return variant
+
+        # If no specific variant matches, try to find a generic one, or return the first
+        for variant in self.variants:
+            if "default" in variant.id or "base" in variant.id:
+                return variant
+        return self.variants[0]
 
 # Global Registry
 FURNITURE_ROLES = {
@@ -55,18 +84,47 @@ ROOM_ARCHETYPES = {
 }
 
 BUILDING_ARCHETYPES = {
-    "shack": BuildingArchetype("shack", "residential", (16, 25), ["shared_sleeping"], [], ["poor"]),
-    "house": BuildingArchetype("house", "residential", (36, 49), ["bedroom", "dining"], ["storage"], ["middle"]),
-    "common_house": BuildingArchetype("common_house", "residential", (25, 49), ["shared_sleeping"], ["dining", "storage"], ["middle"]),
-    "large_house": BuildingArchetype("large_house", "residential", (49, 81), ["bedroom", "bedroom", "dining"], ["storage", "office"], ["rich"]),
-    "tavern": BuildingArchetype("tavern", "commercial", (49, 100), ["tavern_floor"], ["storage", "bedroom"], ["middle"]),
-    "city_hall": BuildingArchetype("city_hall", "civic", (49, 81), ["office", "dining"], ["storage"], ["rich"]),
-    "guard_post": BuildingArchetype("guard_post", "civic", (25, 49), ["office"], ["storage"], ["middle"]),
-    "barracks": BuildingArchetype("barracks", "civic", (36, 64), ["shared_sleeping", "storage"], [], ["middle"]),
-    "storage_building": BuildingArchetype("storage_building", "industrial", (25, 49), ["storage"], [], ["poor"]),
-    "lumber_shed": BuildingArchetype("lumber_shed", "industrial", (25, 49), ["workshop"], ["storage"], ["poor"]),
-    "carpenter_shop": BuildingArchetype("carpenter_shop", "industrial", (36, 64), ["workshop"], ["storage"], ["middle"]),
-    "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"])
+    "shack": BuildingArchetype("shack", "residential", (16, 25), ["shared_sleeping"], [], ["poor"], [
+        BlueprintVariant("shack_poor", 4, 4, ["shared_sleeping"], [], 1, [])
+    ]),
+    "house": BuildingArchetype("house", "residential", (36, 49), ["bedroom", "dining"], ["storage"], ["middle"], [
+        BlueprintVariant("house_poor", 6, 6, ["bedroom", "dining"], [], 2, []),
+        BlueprintVariant("house_middle", 7, 7, ["bedroom", "dining"], ["storage"], 3, []),
+        BlueprintVariant("house_rich", 8, 8, ["bedroom", "dining"], ["storage"], 4, []),
+    ]),
+    "common_house": BuildingArchetype("common_house", "residential", (25, 49), ["shared_sleeping"], ["dining", "storage"], ["middle"], [
+        BlueprintVariant("common_house_base", 6, 6, ["shared_sleeping"], ["dining", "storage"], 2, [])
+    ]),
+    "large_house": BuildingArchetype("large_house", "residential", (49, 81), ["bedroom", "bedroom", "dining"], ["storage", "office"], ["rich"], [
+        BlueprintVariant("large_house_middle", 8, 8, ["bedroom", "bedroom", "dining"], ["storage"], 4, []),
+        BlueprintVariant("large_house_rich", 10, 10, ["bedroom", "bedroom", "dining"], ["storage", "office"], 5, [])
+    ]),
+    "tavern": BuildingArchetype("tavern", "commercial", (49, 100), ["tavern_floor"], ["storage", "bedroom"], ["middle"], [
+        BlueprintVariant("tavern_poor", 7, 7, ["tavern_floor"], ["storage"], 2, []),
+        BlueprintVariant("tavern_middle", 9, 9, ["tavern_floor"], ["storage", "bedroom"], 3, []),
+        BlueprintVariant("tavern_rich", 11, 11, ["tavern_floor"], ["storage", "bedroom"], 4, [])
+    ]),
+    "city_hall": BuildingArchetype("city_hall", "civic", (49, 81), ["office", "dining"], ["storage"], ["rich"], [
+        BlueprintVariant("city_hall_base", 9, 9, ["office", "dining"], ["storage"], 5, [])
+    ]),
+    "guard_post": BuildingArchetype("guard_post", "civic", (25, 49), ["office"], ["storage"], ["middle"], [
+        BlueprintVariant("guard_post_base", 6, 6, ["office"], ["storage"], 2, [])
+    ]),
+    "barracks": BuildingArchetype("barracks", "civic", (36, 64), ["shared_sleeping", "storage"], [], ["middle"], [
+        BlueprintVariant("barracks_base", 8, 8, ["shared_sleeping", "storage"], [], 3, [])
+    ]),
+    "storage_building": BuildingArchetype("storage_building", "industrial", (25, 49), ["storage"], [], ["poor"], [
+        BlueprintVariant("storage_building_base", 6, 6, ["storage"], [], 1, [])
+    ]),
+    "lumber_shed": BuildingArchetype("lumber_shed", "industrial", (25, 49), ["workshop"], ["storage"], ["poor"], [
+        BlueprintVariant("lumber_shed_base", 6, 6, ["workshop"], ["storage"], 2, ["logs"])
+    ]),
+    "carpenter_shop": BuildingArchetype("carpenter_shop", "industrial", (36, 64), ["workshop"], ["storage"], ["middle"], [
+        BlueprintVariant("carpenter_shop_base", 7, 7, ["workshop"], ["storage"], 3, ["lumber"])
+    ]),
+    "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"], [
+        BlueprintVariant("clinic_base", 7, 7, ["clinic_room", "office"], ["storage"], 2, [])
+    ])
 }
 
 FURNITURE_ANCHORS = {

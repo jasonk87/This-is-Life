@@ -6935,18 +6935,33 @@ class World:
         settlement_id = getattr(village, "id", None)
         if settlement_id is not None:
             self.ensure_settlement_territory(village)
-        if not self._can_reserve_land_for_construction(recipe_key, x, y, settlement_id):
+        blueprint_width = int(recipe.get("width", 1))
+        blueprint_height = int(recipe.get("height", 1))
+        variant_id = None
+        if recipe.get("source") == "building":
+            from simulation.systems.architecture import BUILDING_ARCHETYPES
+            if recipe_key in BUILDING_ARCHETYPES:
+                wealth_tier = self._get_owner_wealth_tier(owner_id)
+                variant = BUILDING_ARCHETYPES[recipe_key].get_variant(wealth_tier)
+                if variant:
+                    variant_id = variant.id
+                    blueprint_width = variant.width
+                    blueprint_height = variant.height
+
+        if not self._can_reserve_land_for_construction(recipe_key, x, y, settlement_id, variant_id):
             return None
+
         reservation = self.create_land_claim(
             "construction_reservation",
             set(),
-            reserved_tiles=self._construction_footprint_tiles(recipe_key, x, y),
+            reserved_tiles=self._construction_footprint_tiles(recipe_key, x, y, variant_id),
             owner_type="construction",
             owner_id=None,
             settlement_id=settlement_id,
             priority=9,
             metadata={"target_build": recipe_key, "x": x, "y": y},
         )
+
         blueprint = ConstructionBlueprint(
             x=x,
             y=y,
@@ -6954,8 +6969,8 @@ class World:
             required_materials=dict(recipe.get("materials", {})),
             source=recipe.get("source", "decoration"),
             tile_def_key=recipe.get("tile_def_key"),
-            width=int(recipe.get("width", 1)),
-            height=int(recipe.get("height", 1)),
+            width=blueprint_width,
+            height=blueprint_height,
             category=recipe.get("category", "player_construction"),
             settlement_id=settlement_id,
             region_id=getattr(village, "region_id", None),
@@ -6963,6 +6978,7 @@ class World:
             requester_id=requester_id,
             required_work=int(recipe.get("required_work", 100)),
             territory_claim_id=getattr(reservation, "id", None),
+            variant_id=variant_id,
         )
         if reservation is not None:
             reservation.owner_id = blueprint.id
@@ -7076,6 +7092,7 @@ class World:
                 category=blueprint.category,
                 global_chunk_x_start=chunk_x * CHUNK_SIZE,
                 global_chunk_y_start=chunk_y * CHUNK_SIZE,
+                variant_id=getattr(blueprint, "variant_id", None)
             )
             new_building.owner_id = getattr(blueprint, "owner_id", None)
             new_building.requester_id = getattr(blueprint, "requester_id", None)
@@ -10962,35 +10979,62 @@ class World:
             return "mixed"
 
         # Helper to place building
-        def try_place_building(b_type, category, width, height, x_hint=None, y_hint=None, max_workers=2):
+        def try_place_building(b_type, category, default_width, default_height, x_hint=None, y_hint=None, max_workers=2, owner_wealth=None):
+            # Extract wealth tier for bias scoring and variant selection
+            from simulation.systems.architecture import BUILDING_ARCHETYPES
+            wealth_tier = owner_wealth if owner_wealth else "middle"
+            variant_id = None
+            width = default_width
+            height = default_height
+
+            yard_size = 0
+            if b_type in BUILDING_ARCHETYPES:
+                archetype = BUILDING_ARCHETYPES[b_type]
+                tags = archetype.tags
+                if not owner_wealth:
+                    if "poor" in tags: wealth_tier = "poor"
+                    elif "rich" in tags: wealth_tier = "rich"
+
+                # Query BlueprintVariant to override default dimensions
+                variant = archetype.get_variant(wealth_tier)
+                if variant:
+                    variant_id = variant.id
+                    width = variant.width
+                    height = variant.height
+                    yard_size = variant.fenced_yard_size
+
+            total_w = width + yard_size * 2
+            total_h = height + yard_size * 2
+
             # 1. Try exact hint first (existing exact behavior)
             if x_hint is not None and y_hint is not None:
-                if 0 <= x_hint < CHUNK_SIZE - width and 0 <= y_hint < CHUNK_SIZE - height:
+                # Hint centers on the building, check layout taking yard into account
+                start_x = max(1, x_hint - yard_size)
+                start_y = max(1, y_hint - yard_size)
+
+                if 0 <= start_x < CHUNK_SIZE - total_w and 0 <= start_y < CHUNK_SIZE - total_h:
                     overlap = False
-                    for i in range(height):
-                        for j in range(width):
-                            if layout_grid[y_hint + i][x_hint + j] == 1:
+                    for i in range(total_h):
+                        for j in range(total_w):
+                            if layout_grid[start_y + i][start_x + j] == 1:
                                 overlap = True
                                 break
                         if overlap: break
                     if not overlap:
-                        for i in range(height):
-                            for j in range(width):
-                                layout_grid[y_hint + i][x_hint + j] = 1
-                        building = Building(x_hint, y_hint, width, height, building_type=b_type, category=category,
-                                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+                        # Mark territory and building footprint
+                        for i in range(total_h):
+                            for j in range(total_w):
+                                layout_grid[start_y + i][start_x + j] = 1
+
+                        # Actual building coordinates (inside the yard)
+                        bx = start_x + yard_size
+                        by = start_y + yard_size
+                        building = Building(bx, by, width, height, building_type=b_type, category=category,
+                                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y, variant_id=variant_id)
                         building.max_workers = max_workers
                         chunk.village.add_building(building)
                         self.atlas.register_building(building)
                         return building
-
-            # 2. Extract wealth tier for bias scoring
-            from simulation.systems.architecture import BUILDING_ARCHETYPES
-            wealth_tier = "middle"
-            if b_type in BUILDING_ARCHETYPES:
-                tags = BUILDING_ARCHETYPES[b_type].tags
-                if "poor" in tags: wealth_tier = "poor"
-                elif "rich" in tags: wealth_tier = "rich"
 
             bias = _get_building_placement_bias(b_type, category, wealth_tier)
 
@@ -11022,13 +11066,13 @@ class World:
                 by = center_y + dy
 
                 # Check bounds
-                if not (1 <= bx < CHUNK_SIZE - width - 1 and 1 <= by < CHUNK_SIZE - height - 1):
+                if not (1 <= bx < CHUNK_SIZE - total_w - 1 and 1 <= by < CHUNK_SIZE - total_h - 1):
                     continue
 
                 # Check collision
                 overlap = False
-                for i in range(height):
-                    for j in range(width):
+                for i in range(total_h):
+                    for j in range(total_w):
                         if layout_grid[by + i][bx + j] == 1:
                             overlap = True
                             break
@@ -11040,14 +11084,14 @@ class World:
             if not valid_candidates:
                 # Fallback to random placement attempts if all deterministic offsets fail
                 for attempt in range(20):
-                    bx = random.randint(1, CHUNK_SIZE - width - 1)
-                    by = random.randint(1, CHUNK_SIZE - height - 1)
+                    bx = random.randint(1, CHUNK_SIZE - total_w - 1)
+                    by = random.randint(1, CHUNK_SIZE - total_h - 1)
                     # Check bounds
-                    if not (1 <= bx < CHUNK_SIZE - width - 1 and 1 <= by < CHUNK_SIZE - height - 1):
+                    if not (1 <= bx < CHUNK_SIZE - total_w - 1 and 1 <= by < CHUNK_SIZE - total_h - 1):
                         continue
                     overlap = False
-                    for i in range(height):
-                        for j in range(width):
+                    for i in range(total_h):
+                        for j in range(total_w):
                             if layout_grid[by + i][bx + j] == 1:
                                 overlap = True
                                 break
@@ -11101,12 +11145,16 @@ class World:
 
             # 5. Place building
             final_bx, final_by = best_candidate
-            for i in range(height):
-                for j in range(width):
+            for i in range(total_h):
+                for j in range(total_w):
                     layout_grid[final_by + i][final_bx + j] = 1
 
-            building = Building(final_bx, final_by, width, height, building_type=b_type, category=category,
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y)
+            # Determine actual building coordinates inside the yard reservation
+            actual_bx = final_bx + yard_size
+            actual_by = final_by + yard_size
+
+            building = Building(actual_bx, actual_by, width, height, building_type=b_type, category=category,
+                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y, variant_id=variant_id)
             building.max_workers = max_workers
             chunk.village.add_building(building)
             self.atlas.register_building(building)
@@ -13234,14 +13282,49 @@ class World:
                     return True
         return False
 
-    def _construction_footprint_tiles(self, recipe_key: str, x: int, y: int) -> set[tuple[int, int]]:
+    def _get_owner_wealth_tier(self, owner_id: int | None) -> str:
+        if owner_id is None:
+            return "middle"
+        owner = self.get_entity_by_id(owner_id)
+        if not owner:
+            return "middle"
+        # Player is assumed middle/rich based on wealth if we implement that, for now let's just use money
+        money = getattr(owner.inventory, "money", 0) if hasattr(owner, "inventory") else 0
+        if money > 500: return "rich"
+        if money < 50: return "poor"
+        return "middle"
+
+    def _construction_footprint_tiles(self, recipe_key: str, x: int, y: int, variant_id: str | None = None) -> set[tuple[int, int]]:
         recipe = CONSTRUCTION_RECIPES.get(recipe_key, {})
         if recipe.get("source") == "building":
-            return self._claim_rect_tiles(x, y, int(recipe.get("width", 1)), int(recipe.get("height", 1)))
+            from simulation.systems.architecture import BUILDING_ARCHETYPES
+            width = int(recipe.get("width", 1))
+            height = int(recipe.get("height", 1))
+            yard_size = 0
+            if recipe_key in BUILDING_ARCHETYPES:
+                archetype = BUILDING_ARCHETYPES[recipe_key]
+                variant = None
+                if variant_id:
+                    for v in archetype.variants:
+                        if v.id == variant_id:
+                            variant = v
+                            break
+                if not variant:
+                    variant = archetype.get_variant("middle")
+                if variant:
+                    width = variant.width
+                    height = variant.height
+                    yard_size = variant.fenced_yard_size
+
+            total_w = width + yard_size * 2
+            total_h = height + yard_size * 2
+            start_x = max(1, x - yard_size)
+            start_y = max(1, y - yard_size)
+            return self._claim_rect_tiles(start_x, start_y, total_w, total_h)
         return {(x, y)}
 
-    def _can_reserve_land_for_construction(self, recipe_key: str, x: int, y: int, settlement_id: str | None) -> bool:
-        footprint = self._construction_footprint_tiles(recipe_key, x, y)
+    def _can_reserve_land_for_construction(self, recipe_key: str, x: int, y: int, settlement_id: str | None, variant_id: str | None = None) -> bool:
+        footprint = self._construction_footprint_tiles(recipe_key, x, y, variant_id)
         if any(not self._is_claimable_terrain(tx, ty) for tx, ty in footprint):
             return False
         return not self._claim_tiles_have_conflict(footprint, "construction_reservation", settlement_id)

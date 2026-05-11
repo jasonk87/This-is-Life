@@ -44,3 +44,40 @@ class TestBlueprintVariants(unittest.TestCase):
         # Placing at 21, 21 should succeed
         blueprint3 = self.world.place_construction_blueprint("house", 24, 24)
         self.assertIsNotNone(blueprint3)
+
+    def test_building_serialization_preserves_variant_id(self):
+        # We test that variant_id persists using pickling natively via save envelope tests, but since save_manager relies on pickle, we test pickling the building itself.
+        import pickle
+        blueprint = self.world.place_construction_blueprint("house", 5, 5)
+        # fully supply and complete
+        for item, count in blueprint.required_materials.items():
+            for _ in range(count):
+                blueprint.deposit_item_reference(None)
+        blueprint.deposited_inventory = dict(blueprint.required_materials)
+
+        self.world._complete_construction_blueprint(blueprint)
+        building = [b for b in self.world.buildings_by_id.values() if b.building_type == "house"][-1]
+
+        pickled_building = pickle.dumps(building)
+        loaded_building = pickle.loads(pickled_building)
+
+        self.assertEqual(loaded_building.variant_id, blueprint.variant_id)
+
+    def test_get_variant_fallback_behavior(self):
+        from simulation.systems.architecture import BuildingArchetype, BlueprintVariant
+        # Create an archetype with some variants
+        arch = BuildingArchetype("test", "test", (10, 10), [], [], [], [
+            BlueprintVariant("test_rich", 10, 10, [], [], 0, [], "rich"),
+            BlueprintVariant("test_middle", 10, 10, [], [], 0, [], "middle")
+        ])
+
+        # Test unknown tier "poor" returns the first variant defined
+        variant = arch.get_variant("poor")
+        self.assertEqual(variant.id, "test_rich")
+
+        # Test an empty archetype returns a generated deterministic default
+        arch_empty = BuildingArchetype("test_empty", "test", (16, 16))
+        variant_empty = arch_empty.get_variant("poor")
+        self.assertEqual(variant_empty.id, "default")
+        self.assertEqual(variant_empty.width, 4)
+        self.assertEqual(variant_empty.height, 4)

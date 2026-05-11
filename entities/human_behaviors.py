@@ -91,19 +91,44 @@ class HaulingBehavior(JobBehavior):
 
     def take_turn(self, entity, world) -> bool:
         current_task = getattr(getattr(entity, "schedule", None), "current_task", "") or ""
-        if current_task in {"hauling_to_source", "hauling_to_blueprint"}:
-            if not hasattr(world, "_handle_npc_hauling_task"):
-                return False
-            return world._handle_npc_hauling_task(entity)
 
-        is_unemployed = str(getattr(getattr(entity, "economic", None), "profession", "") or "").strip().lower() == "unemployed"
+        if current_task in {"hauling_to_source", "hauling_to_delivery_destination"}:
+            if hasattr(world, "_handle_npc_delivery_task"):
+                if world._handle_npc_delivery_task(entity):
+                    return True
+
+        if current_task in {"hauling_to_source", "hauling_to_blueprint"}:
+            if hasattr(world, "_handle_npc_hauling_task"):
+                if world._handle_npc_hauling_task(entity):
+                    return True
+            return False
+
+        profession = str(getattr(getattr(entity, "economic", None), "profession", "") or "").strip().lower()
+        is_unemployed = profession == "unemployed"
+        is_laborer = profession in {"laborer", "helper", "porter"}
+
+        # We allow laborers/unemployed to haul during any free time,
+        # and skilled workers to haul only if they are not actively doing something else,
+        # BUT we prioritize laborers.
+
         if not is_unemployed and current_task not in self.FREE_TIME_TASKS:
             return False
+
         if getattr(getattr(entity, "schedule", None), "current_path", None):
             return False
-        if not hasattr(world, "_assign_haul_task_to_npc"):
-            return False
-        return world._assign_haul_task_to_npc(entity)
+
+        # Try delivery tasks first
+        if hasattr(world, "_assign_delivery_task_to_npc"):
+            tasks = world.town_board.get_open_delivery_tasks()
+            if tasks:
+                if world._assign_delivery_task_to_npc(entity):
+                    return True
+
+        if hasattr(world, "_assign_haul_task_to_npc"):
+            if world._assign_haul_task_to_npc(entity):
+                return True
+
+        return False
 
 
 class GossipBehavior(JobBehavior):

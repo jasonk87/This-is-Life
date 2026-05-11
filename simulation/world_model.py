@@ -187,6 +187,18 @@ class HaulTask:
 
 
 @dataclass
+class DeliveryTask:
+    source_building_id: str
+    destination_building_id: str
+    item_key: str
+    quantity: int
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    assigned_entity_id: int | None = None
+    status: str = "open" # open, claimed, complete, failed
+    created_tick: int = 0
+
+
+@dataclass
 class EmploymentTask:
     target_building_id: str
     profession_role: str
@@ -248,6 +260,7 @@ class TownBoard:
         self.haul_tasks: list[HaulTask] = []
         self.employment_tasks: list[EmploymentTask] = []
         self.economic_needs: list[TownEconomicNeed] = []
+        self.delivery_tasks: list[DeliveryTask] = []
 
     def post_blueprint(self, blueprint: ConstructionBlueprint) -> None:
         for item_key, remaining_qty in blueprint.remaining_materials().items():
@@ -295,6 +308,55 @@ class TownBoard:
         if not task_id:
             return None
         return next((task for task in self.haul_tasks if task.id == task_id), None)
+
+    def post_delivery_task(self, source_building_id: str, destination_building_id: str, item_key: str, quantity: int, created_tick: int) -> DeliveryTask:
+        task = DeliveryTask(
+            source_building_id=source_building_id,
+            destination_building_id=destination_building_id,
+            item_key=item_key,
+            quantity=quantity,
+            created_tick=created_tick,
+        )
+        self.delivery_tasks.append(task)
+        return task
+
+    def get_open_delivery_tasks(self, destination_building_id: str | None = None) -> list[DeliveryTask]:
+        tasks = [task for task in self.delivery_tasks if task.status == "open"]
+        if destination_building_id is not None:
+            tasks = [task for task in tasks if task.destination_building_id == destination_building_id]
+        return tasks
+
+    def get_active_delivery_tasks(self, destination_building_id: str | None = None) -> list[DeliveryTask]:
+        """Returns both open and claimed tasks to prevent deduplication bugs."""
+        tasks = [task for task in self.delivery_tasks if task.status in {"open", "claimed"}]
+        if destination_building_id is not None:
+            tasks = [task for task in tasks if task.destination_building_id == destination_building_id]
+        return tasks
+
+    def claim_delivery_task(self, task: DeliveryTask, entity_id: int) -> bool:
+        if task.status != "open":
+            return False
+        task.status = "claimed"
+        task.assigned_entity_id = entity_id
+        return True
+
+    def release_delivery_task(self, task_id: str) -> None:
+        for task in self.delivery_tasks:
+            if task.id == task_id and task.status == "claimed":
+                task.status = "open"
+                task.assigned_entity_id = None
+                return
+
+    def complete_delivery_task(self, task_id: str) -> None:
+        self.delivery_tasks = [task for task in self.delivery_tasks if task.id != task_id]
+
+    def fail_delivery_task(self, task_id: str) -> None:
+        self.delivery_tasks = [task for task in self.delivery_tasks if task.id != task_id]
+
+    def get_delivery_task(self, task_id: str | None) -> DeliveryTask | None:
+        if not task_id:
+            return None
+        return next((task for task in self.delivery_tasks if task.id == task_id), None)
 
     def post_employment(self, target_building_id: str, profession_role: str, daily_wage: int, *, poster_entity_id: int | None = None) -> EmploymentTask:
         task = EmploymentTask(

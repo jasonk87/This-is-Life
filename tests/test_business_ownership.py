@@ -112,6 +112,9 @@ class TestBusinessOwnership(unittest.TestCase):
         blacksmith.building_inventory["money"] = 100
         blacksmith.owner_id = self.npc.id # NPC owns it
 
+        # Ensure chunk is INACTIVE so it uses abstract fallback transfer
+        self.world._is_building_active = lambda b: False
+
         # Trigger work chain
         self.world._attempt_workplace_supply_chain_actions(smith, blacksmith)
 
@@ -120,6 +123,45 @@ class TestBusinessOwnership(unittest.TestCase):
 
         total_smith = blacksmith.building_inventory.get("iron_ore", 0) + blacksmith.building_inventory.get("coal", 0)
         self.assertTrue(total_smith > 0)
+
+    def test_production_stalls_and_creates_delivery_task_when_active(self):
+        # Setup a blacksmith that needs iron_ore
+        blacksmith = Building(0, 0, 5, 5, building_type="blacksmith_shop", category="commercial_workplace")
+        self.village.add_building(blacksmith)
+        self.world.buildings_by_id[blacksmith.id] = blacksmith
+
+        # Add a worker
+        smith = NPC(0, 0, name="Smith")
+        smith.schedule.work_building_id = blacksmith.id
+        smith.economic.profession = "Blacksmith"
+        self.world.village_npcs.append(smith)
+
+        # Setup a general store with iron_ore
+        store = Building(10, 10, 5, 5, building_type="general_store", category="commercial_workplace")
+        self.village.add_building(store)
+        self.world.buildings_by_id[store.id] = store
+
+        from entities.items import ItemReference
+        store.building_inventory.add_item_reference(ItemReference("iron_ore"))
+
+        blacksmith.building_inventory["money"] = 100
+        blacksmith.owner_id = self.npc.id
+
+        # Ensure chunk IS ACTIVE
+        self.world._is_building_active = lambda b: True
+
+        # Trigger work chain
+        self.world._attempt_workplace_supply_chain_actions(smith, blacksmith)
+
+        # In active mode, inventory should NOT transfer instantly
+        self.assertEqual(store.building_inventory.get("iron_ore", 0), 1)
+        self.assertEqual(blacksmith.building_inventory.get("iron_ore", 0), 0)
+
+        # Instead, a delivery task should be created
+        tasks = self.world.town_board.get_open_delivery_tasks(blacksmith.id)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].item_key, "iron_ore")
+        self.assertEqual(tasks[0].source_building_id, store.id)
 
 if __name__ == '__main__':
     unittest.main()

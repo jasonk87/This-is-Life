@@ -18,6 +18,17 @@ class RoomArchetype:
     placement_rules: Dict[str, str] = field(default_factory=dict)
 
 @dataclass
+class BlueprintVariant:
+    id: str
+    width: int
+    height: int
+    room_types: List[str] = field(default_factory=list)
+    optional_room_types: List[str] = field(default_factory=list)
+    fenced_yard_size: int = 0
+    attachments: List[str] = field(default_factory=list)
+    wealth_tier: str = "middle"
+
+@dataclass
 class BuildingArchetype:
     id: str
     category: str
@@ -25,6 +36,21 @@ class BuildingArchetype:
     room_types: List[str] = field(default_factory=list)  # required room types
     optional_room_types: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    variants: List[BlueprintVariant] = field(default_factory=list)
+
+    def get_variant(self, wealth_tier: str) -> BlueprintVariant:
+        if not self.variants:
+            # Fallback to a default variant if none are defined
+            width = int(self.size_range[0] ** 0.5)
+            height = int(self.size_range[0] / width)
+            return BlueprintVariant("default", width, height, self.room_types, self.optional_room_types, wealth_tier=wealth_tier)
+
+        # Try to find a variant matching the explicit wealth tier
+        for variant in self.variants:
+            if variant.wealth_tier == wealth_tier:
+                return variant
+
+        return self.variants[0]
 
 # Global Registry
 FURNITURE_ROLES = {
@@ -55,18 +81,47 @@ ROOM_ARCHETYPES = {
 }
 
 BUILDING_ARCHETYPES = {
-    "shack": BuildingArchetype("shack", "residential", (16, 25), ["shared_sleeping"], [], ["poor"]),
-    "house": BuildingArchetype("house", "residential", (36, 49), ["bedroom", "dining"], ["storage"], ["middle"]),
-    "common_house": BuildingArchetype("common_house", "residential", (25, 49), ["shared_sleeping"], ["dining", "storage"], ["middle"]),
-    "large_house": BuildingArchetype("large_house", "residential", (49, 81), ["bedroom", "bedroom", "dining"], ["storage", "office"], ["rich"]),
-    "tavern": BuildingArchetype("tavern", "commercial", (49, 100), ["tavern_floor"], ["storage", "bedroom"], ["middle"]),
-    "city_hall": BuildingArchetype("city_hall", "civic", (49, 81), ["office", "dining"], ["storage"], ["rich"]),
-    "guard_post": BuildingArchetype("guard_post", "civic", (25, 49), ["office"], ["storage"], ["middle"]),
-    "barracks": BuildingArchetype("barracks", "civic", (36, 64), ["shared_sleeping", "storage"], [], ["middle"]),
-    "storage_building": BuildingArchetype("storage_building", "industrial", (25, 49), ["storage"], [], ["poor"]),
-    "lumber_shed": BuildingArchetype("lumber_shed", "industrial", (25, 49), ["workshop"], ["storage"], ["poor"]),
-    "carpenter_shop": BuildingArchetype("carpenter_shop", "industrial", (36, 64), ["workshop"], ["storage"], ["middle"]),
-    "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"])
+    "shack": BuildingArchetype("shack", "residential", (16, 25), ["shared_sleeping"], [], ["poor"], [
+        BlueprintVariant("shack_poor", 4, 4, ["shared_sleeping"], [], 1, [], "poor")
+    ]),
+    "house": BuildingArchetype("house", "residential", (36, 49), ["bedroom", "dining"], ["storage"], ["middle"], [
+        BlueprintVariant("house_poor", 6, 6, ["bedroom", "dining"], [], 2, [], "poor"),
+        BlueprintVariant("house_middle", 7, 7, ["bedroom", "dining"], ["storage"], 3, [], "middle"),
+        BlueprintVariant("house_rich", 8, 8, ["bedroom", "dining"], ["storage"], 4, [], "rich"),
+    ]),
+    "common_house": BuildingArchetype("common_house", "residential", (25, 49), ["shared_sleeping"], ["dining", "storage"], ["middle"], [
+        BlueprintVariant("common_house_base", 6, 6, ["shared_sleeping"], ["dining", "storage"], 2, [], "middle")
+    ]),
+    "large_house": BuildingArchetype("large_house", "residential", (49, 81), ["bedroom", "bedroom", "dining"], ["storage", "office"], ["rich"], [
+        BlueprintVariant("large_house_middle", 8, 8, ["bedroom", "bedroom", "dining"], ["storage"], 4, [], "middle"),
+        BlueprintVariant("large_house_rich", 10, 10, ["bedroom", "bedroom", "dining"], ["storage", "office"], 5, [], "rich")
+    ]),
+    "tavern": BuildingArchetype("tavern", "commercial", (49, 100), ["tavern_floor"], ["storage", "bedroom"], ["middle"], [
+        BlueprintVariant("tavern_poor", 7, 7, ["tavern_floor"], ["storage"], 2, [], "poor"),
+        BlueprintVariant("tavern_middle", 9, 9, ["tavern_floor"], ["storage", "bedroom"], 3, [], "middle"),
+        BlueprintVariant("tavern_rich", 11, 11, ["tavern_floor"], ["storage", "bedroom"], 4, [], "rich")
+    ]),
+    "city_hall": BuildingArchetype("city_hall", "civic", (49, 81), ["office", "dining"], ["storage"], ["rich"], [
+        BlueprintVariant("city_hall_base", 9, 9, ["office", "dining"], ["storage"], 5, [], "rich")
+    ]),
+    "guard_post": BuildingArchetype("guard_post", "civic", (25, 49), ["office"], ["storage"], ["middle"], [
+        BlueprintVariant("guard_post_base", 6, 6, ["office"], ["storage"], 2, [], "middle")
+    ]),
+    "barracks": BuildingArchetype("barracks", "civic", (36, 64), ["shared_sleeping", "storage"], [], ["middle"], [
+        BlueprintVariant("barracks_base", 8, 8, ["shared_sleeping", "storage"], [], 3, [], "middle")
+    ]),
+    "storage_building": BuildingArchetype("storage_building", "industrial", (25, 49), ["storage"], [], ["poor"], [
+        BlueprintVariant("storage_building_base", 6, 6, ["storage"], [], 1, [], "poor")
+    ]),
+    "lumber_shed": BuildingArchetype("lumber_shed", "industrial", (25, 49), ["workshop"], ["storage"], ["poor"], [
+        BlueprintVariant("lumber_shed_base", 6, 6, ["workshop"], ["storage"], 2, ["logs"], "poor")
+    ]),
+    "carpenter_shop": BuildingArchetype("carpenter_shop", "industrial", (36, 64), ["workshop"], ["storage"], ["middle"], [
+        BlueprintVariant("carpenter_shop_base", 7, 7, ["workshop"], ["storage"], 3, ["lumber"], "middle")
+    ]),
+    "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"], [
+        BlueprintVariant("clinic_base", 7, 7, ["clinic_room", "office"], ["storage"], 2, [], "middle")
+    ])
 }
 
 FURNITURE_ANCHORS = {
@@ -128,10 +183,10 @@ def _is_corner(x: int, y: int, rx: int, ry: int, rw: int, rh: int) -> bool:
 
 def _get_wealth_tier(tags: List[str]) -> str:
     if "poor" in tags:
-        return "low"
+        return "poor"
     if "rich" in tags:
-        return "high"
-    return "mid"
+        return "rich"
+    return "middle"
 
 def _get_building_identity_profile(building_type: str, category: str) -> Dict:
     """Returns a lightweight preference profile for visual identity."""
@@ -139,7 +194,7 @@ def _get_building_identity_profile(building_type: str, category: str) -> Dict:
     profile = {
         "room_bias": [],
         "furniture_bias": [],
-        "density_bias": "mid",
+        "density_bias": "middle",
         "clustering": "light"
     }
 
@@ -156,22 +211,22 @@ def _get_building_identity_profile(building_type: str, category: str) -> Dict:
     elif category == "industrial":
         profile["room_bias"] = ["workshop", "storage"]
         profile["furniture_bias"] = ["workbench", "storage"]
-        profile["density_bias"] = "mid"
+        profile["density_bias"] = "middle"
         profile["clustering"] = "functional"
     elif category == "civic":
         profile["room_bias"] = ["office", "dining"]
         profile["furniture_bias"] = ["desk", "chair", "storage"]
-        profile["density_bias"] = "mid"
+        profile["density_bias"] = "middle"
         profile["clustering"] = "functional"
     elif category == "residential":
         profile["room_bias"] = ["bedroom", "dining"]
         profile["furniture_bias"] = ["bed", "table", "chair", "fireplace"]
-        profile["density_bias"] = "mid"
+        profile["density_bias"] = "middle"
         profile["clustering"] = "light"
 
     return profile
 
-def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid", profile: Dict = None) -> List[Tuple[int, int, str]]:
+def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "middle", profile: Dict = None) -> List[Tuple[int, int, str]]:
     placed = []
     archetype = ROOM_ARCHETYPES.get(room.room_type)
     if not archetype:
@@ -180,7 +235,7 @@ def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid", p
     if profile is None:
         profile = {
             "furniture_bias": [],
-            "density_bias": "mid",
+            "density_bias": "middle",
             "clustering": "light"
         }
 
@@ -201,16 +256,16 @@ def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid", p
 
     # Base wealth logic for slicing optional furniture
     slice_idx = len(optional_furniture)
-    if wealth_tier == "low":
+    if wealth_tier == "poor":
         slice_idx = 1 if optional_furniture else 0
-    elif wealth_tier == "mid":
+    elif wealth_tier == "middle":
         slice_idx = len(optional_furniture) // 2 + 1
 
     # Density bias nudge (keep it strictly bounded)
-    density_bias = profile.get("density_bias", "mid")
-    if density_bias == "high" and wealth_tier != "high":
+    density_bias = profile.get("density_bias", "middle")
+    if density_bias == "high" and wealth_tier != "rich":
         slice_idx = min(len(optional_furniture), slice_idx + 1)
-    elif density_bias == "low" and wealth_tier != "low":
+    elif density_bias == "low" and wealth_tier != "poor":
         slice_idx = max(0, slice_idx - 1)
 
     optional_furniture = optional_furniture[:slice_idx]
@@ -256,9 +311,9 @@ def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid", p
                             if dist < min_dist:
                                 min_dist = dist
 
-                    if wealth_tier == "high" and min_dist < 4:
+                    if wealth_tier == "rich" and min_dist < 4:
                         score += 20 - min_dist
-                    elif wealth_tier != "high" and min_dist < 3:
+                    elif wealth_tier != "rich" and min_dist < 3:
                         score += 15 - min_dist
                     else:
                         score += 1 # allow fallback
@@ -295,9 +350,9 @@ def place_furniture(room: Room, occupied_tiles: set, wealth_tier: str = "mid", p
 
                     # Minor coordinate-based deterministic tie-breaker or scatter
                     tie_breaker = ((x * 7 + y * 3) % 5) / 10.0
-                    if wealth_tier == "low":
+                    if wealth_tier == "poor":
                         score -= tie_breaker # slightly looser
-                    elif wealth_tier == "high":
+                    elif wealth_tier == "rich":
                         score += tie_breaker # slightly different tie-breaker behavior
 
                     candidates.append((score, x, y))
@@ -333,9 +388,9 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
     # Sort optional rooms based on profile bias
     optional_rooms.sort(key=lambda r: 0 if r in profile["room_bias"] else 1)
 
-    if wealth_tier == "low":
+    if wealth_tier == "poor":
         optional_rooms = [] # Skip optional rooms
-    elif wealth_tier == "mid":
+    elif wealth_tier == "middle":
         optional_rooms = optional_rooms[:max(1, len(optional_rooms) // 2)]
     # high: try to fit all optional rooms
 
@@ -377,10 +432,10 @@ def generate_building(building_type: str, x: int, y: int, w: int, h: int) -> Gen
 
             # Determine split ratio based on wealth
             split_ratio = 0.5
-            if wealth_tier == "low":
+            if wealth_tier == "poor":
                 # Deterministic uneven split based on coordinates
                 split_ratio = 0.4 if (sx + sy) % 2 == 0 else 0.6
-            elif wealth_tier == "high":
+            elif wealth_tier == "rich":
                 split_ratio = 0.5 # Strictly balanced
 
             if sw >= sh and sw >= 6:

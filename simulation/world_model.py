@@ -194,8 +194,9 @@ class DeliveryTask:
     quantity: int
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     assigned_entity_id: int | None = None
-    status: str = "open" # open, claimed, complete, failed
+    status: str = "open" # open, claimed, going_to_source, carrying, going_to_destination, complete, failed
     created_tick: int = 0
+    updated_tick: int = 0
 
 
 @dataclass
@@ -310,12 +311,17 @@ class TownBoard:
         return next((task for task in self.haul_tasks if task.id == task_id), None)
 
     def post_delivery_task(self, source_building_id: str, destination_building_id: str, item_key: str, quantity: int, created_tick: int) -> DeliveryTask:
+        existing = self.find_active_delivery_task(source_building_id, destination_building_id, item_key)
+        if existing is not None:
+            return existing
+
         task = DeliveryTask(
             source_building_id=source_building_id,
             destination_building_id=destination_building_id,
             item_key=item_key,
             quantity=quantity,
             created_tick=created_tick,
+            updated_tick=created_tick,
         )
         self.delivery_tasks.append(task)
         return task
@@ -327,22 +333,39 @@ class TownBoard:
         return tasks
 
     def get_active_delivery_tasks(self, destination_building_id: str | None = None) -> list[DeliveryTask]:
-        """Returns both open and claimed tasks to prevent deduplication bugs."""
-        tasks = [task for task in self.delivery_tasks if task.status in {"open", "claimed"}]
+        """Return unfinished delivery tasks for dedupe and lifecycle recovery."""
+        active_statuses = {"open", "claimed", "going_to_source", "carrying", "going_to_destination"}
+        tasks = [task for task in self.delivery_tasks if task.status in active_statuses]
         if destination_building_id is not None:
             tasks = [task for task in tasks if task.destination_building_id == destination_building_id]
         return tasks
 
-    def claim_delivery_task(self, task: DeliveryTask, entity_id: int) -> bool:
+    def find_active_delivery_task(self, source_building_id: str, destination_building_id: str, item_key: str) -> DeliveryTask | None:
+        for task in self.get_active_delivery_tasks(destination_building_id):
+            if task.source_building_id == source_building_id and task.item_key == item_key:
+                return task
+        return None
+
+    def claim_delivery_task(self, task: DeliveryTask, entity_id: int, *, current_tick: int | None = None) -> bool:
         if task.status != "open":
             return False
         task.status = "claimed"
         task.assigned_entity_id = entity_id
+        if current_tick is not None:
+            task.updated_tick = current_tick
         return True
+
+    def update_delivery_task_status(self, task_id: str, status: str, *, current_tick: int | None = None) -> None:
+        task = self.get_delivery_task(task_id)
+        if task is None:
+            return
+        task.status = status
+        if current_tick is not None:
+            task.updated_tick = current_tick
 
     def release_delivery_task(self, task_id: str) -> None:
         for task in self.delivery_tasks:
-            if task.id == task_id and task.status == "claimed":
+            if task.id == task_id and task.status in {"claimed", "going_to_source"}:
                 task.status = "open"
                 task.assigned_entity_id = None
                 return

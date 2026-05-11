@@ -202,14 +202,7 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
         self.assertFalse(hasattr(animal, "personality"))
         self.assertFalse(hasattr(animal, "family_ties"))
 
-    def test_render_biome_details_sets_spawned_animal_nested_combat_stats(self):
-        from tile_types import Tile
-        plains_def = engine.TILE_DEFINITIONS["plains"]
-        chunk = engine.Chunk("plains")
-        chunk.tiles = [[Tile(plains_def['char'], plains_def['color'], plains_def['passable'], plains_def['name'], properties={})]]
-        self.world.player.x = 1000
-        self.world.player.y = 1000
-
+    def test_manifested_wildlife_sets_animal_nested_combat_stats(self):
         test_animal_defs = {
             "test_beast": {
                 "name": "Test Beast",
@@ -222,18 +215,14 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
                 "base_attack_damage_dice": "1d4",
                 "combat_behavior": "aggressive",
                 "spawn_biomes": ["plains"],
-                "spawn_chance": 1.0,
+                "spawn_chance": 0.0,
             }
         }
 
-        with patch.object(engine, 'CHUNK_SIZE', 1), \
-             patch.dict(engine.ANIMAL_DEFINITIONS, test_animal_defs, clear=True), \
+        with patch.dict(engine.ANIMAL_DEFINITIONS, test_animal_defs, clear=True), \
              patch('engine.random.choice', return_value='male'):
             self.world.npcs.clear()
-            with patch('engine.random.random', return_value=1.0):
-                self.world._render_biome_details(chunk, 0, 0)
-            with patch('engine.random.random', return_value=0.0):
-                self.world._populate_chunk_wildlife(chunk, 0, 0)
+            self.world._manifest_wildlife_entity("test_beast", 10, 10, "region-test", "region-test:test_beast")
 
         self.assertEqual(len(self.world.npcs), 1)
         spawned = self.world.npcs[0]
@@ -242,6 +231,7 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
         self.assertEqual(spawned.combat.base_attack_name, "bite")
         self.assertEqual(spawned.combat.base_attack_damage_dice, "1d4")
         self.assertEqual(spawned.combat.combat_behavior, "aggressive")
+        self.assertEqual(spawned.wildlife_region_id, "region-test")
 
 
 

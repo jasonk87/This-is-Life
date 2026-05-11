@@ -2,6 +2,8 @@
 
 "This is Life" is a 2D tile-based sandbox RPG where you navigate a procedurally generated world, interacting with NPCs, taking on tasks, and shaping your story. The game leverages a Large Language Model (LLM) to create dynamic NPC personalities, dialogues, and even some world events.
 
+For implementation direction and non-negotiable simulation rules, read [`docs/SIMULATION_DOCTRINE.md`](docs/SIMULATION_DOCTRINE.md).
+
 ## Key Features:
 
 *   **Procedurally Generated World**: Explore a unique world every time you play, with diverse biomes, villages, and points of interest.

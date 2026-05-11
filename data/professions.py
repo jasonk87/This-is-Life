@@ -290,6 +290,25 @@ PROFESSIONS = {
         ],
         "default_sub_task_sequence": ["scout_area", "hunt_animals"] # butchering is dynamic
     },
+    "Butcher": {
+        "display_name": "Butcher",
+        "wage": 24,
+        "description": "Processes hunted meat and stores food for the settlement.",
+        "work_building_categories": ["Butcher Shop", "Tavern"],
+        "sub_tasks": [
+            {
+                "id": "process_meat",
+                "display_name": "Butchering Meat",
+                "duration_ticks": 120,
+                "target_zone_tag": "workbench",
+                "action_verb": "butchering meat",
+                "consumes_item_from_workplace": {"raw_meat": 1},
+                "produces_item_at_workplace": {"processed_meat": 1}
+            }
+        ],
+        "default_sub_task_sequence": ["process_meat"]
+    },
+
     "Cook": {
         "display_name": "Cook",
         "wage": 22,

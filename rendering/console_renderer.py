@@ -469,6 +469,10 @@ def _get_hover_inspect(world, camera_x, camera_y):
     if inspect["object"] is None and _is_feature_tile_name(tile.name):
         inspect["object"] = tile.name
 
+    claim_summary = getattr(world, "get_land_claim_summary", lambda _x, _y: None)(world_x, world_y)
+    if claim_summary:
+        inspect["territory"] = claim_summary
+
     inspect["social"] = social_hover_summary(world, (world_x, world_y))
 
     if getattr(world, "show_autonomy_overlay", False):
@@ -523,6 +527,9 @@ def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, pa
         y += 1
     if inspect["object"]:
         console.print(x=panel_x + 1, y=y, string=f"Object: {inspect['object']}"[:panel_inner], fg=(170, 210, 255))
+        y += 1
+    if inspect.get("territory"):
+        console.print(x=panel_x + 1, y=y, string=f"Land: {inspect['territory']}"[:panel_inner], fg=(190, 210, 130))
         y += 1
     if inspect.get("social"):
         console.print(x=panel_x + 1, y=y, string=f"Social: {inspect['social']}"[:panel_inner], fg=(210, 190, 230))

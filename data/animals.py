@@ -86,6 +86,29 @@ ANIMAL_DEFINITIONS = {
         "diet_type": "herbivore",
         "food_sources": [] # Algae/insects implied
     },
+    "turkey": {
+        "name": "Turkey",
+        "char": "T",
+        "color": (150, 95, 45),
+        "max_hp": 5,
+        "behavior": "Wander-Flee",
+        "hostile": False,
+        "spawn_biomes": ["plains"],
+        "spawn_chance": 0.0,
+        "base_attack_name": "peck",
+        "base_attack_damage_dice": "1d1",
+        "combat_behavior": "cowardly",
+        "loot_drops": {
+            "raw_meat": {
+                "chance": 1.0,
+                "quantity": [1, 2]
+            }
+        },
+        "predators": ["fox", "wolf", "dire_wolf"],
+        "diet_type": "herbivore",
+        "food_sources": ["Tall Grass", "Flower"]
+    },
+
     "wolf": {
         "name": "Wolf",
         "char": ANIMAL_SPRITES["wolf"],

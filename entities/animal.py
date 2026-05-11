@@ -85,6 +85,11 @@ class Animal(NPC):
         self.task_timer = 0
         self.woodcutter_search_radius = 5
         self.den_location = None
+        self.wildlife_region_id = None
+        self.wildlife_population_id = None
+        self.ecology_death_recorded = False
+        self.stress = 0
+        self.fear_state = "calm"
 
     def get_dialogue(self):
         return None

@@ -168,6 +168,7 @@ from simulation.world_model import (
     Chunk,
     ConstructionBlueprint,
     EmploymentTask,
+    LandClaim,
     PoliticalWarrant,
     PoliticsTracker,
     Ruin,
@@ -203,6 +204,20 @@ VILLAGE_BUILDING_PROJECTS = {
         "height": 6,
         "category": "agricultural_workplace",
         "description": "A farm to produce food."
+    },
+    "warehouse": {
+        "cost": {"raw_log": 35, "stone_chunk": 8},
+        "width": 8,
+        "height": 6,
+        "category": "storage_workplace",
+        "description": "Shared storage for growing towns and businesses."
+    },
+    "workshop": {
+        "cost": {"raw_log": 25, "stone_chunk": 6, "wooden_plank": 8},
+        "width": 6,
+        "height": 5,
+        "category": "commercial_workplace",
+        "description": "A small flexible workplace for business expansion."
     }
 }
 
@@ -764,6 +779,8 @@ class World:
         self.items_on_map: dict[tuple[int, int], Inventory] = {} # Key: (x,y), Value: Inventory wrapper preserving item objects
         self.blueprints_by_id: dict[str, ConstructionBlueprint] = {}
         self.blueprint_positions: dict[tuple[int, int], str] = {}
+        self.land_claims_by_id: dict[str, LandClaim] = {}
+        self.show_land_claim_overlay = False
         self.town_board = TownBoard()
 
         # FOV and Light Level state
@@ -3716,7 +3733,6 @@ class World:
         if target_zone_tag == "manager_spot":
             manager_spots = work_building.work_zone_tiles.get("manager_spot", [])
             if manager_spots:
-                import random
                 return random.choice(manager_spots)
             else:
                 return (work_building.global_center_x, work_building.global_center_y)
@@ -4354,20 +4370,19 @@ class World:
                                 price = self.quote_item_reference_price(ItemReference(missing_item), village=village)
                                 # Transfer money and item
                                 if work_building.building_inventory.get("money", 0) >= price or getattr(work_building, "owner_id", None) is None:
-                                    is_active = self._is_building_active(work_building)
+                                    is_active = self._is_building_active(work_building) or self._is_building_active(b)
 
                                     if is_active:
-                                        # Physical logistics mode (local/active)
-                                        existing_tasks = self.town_board.get_active_delivery_tasks(work_building.id)
-                                        task_exists = any(t.item_key == missing_item and t.source_building_id == b.id for t in existing_tasks)
-                                        if not task_exists:
-                                            self.town_board.post_delivery_task(
-                                                source_building_id=b.id,
-                                                destination_building_id=work_building.id,
-                                                item_key=missing_item,
-                                                quantity=1,
-                                                created_tick=self.game_time
-                                            )
+                                        # Physical logistics mode (local/active): post a deduped task only.
+                                        # The source item is not removed until an NPC reaches the source.
+                                        self._recover_invalid_delivery_tasks()
+                                        self.town_board.post_delivery_task(
+                                            source_building_id=b.id,
+                                            destination_building_id=work_building.id,
+                                            item_key=missing_item,
+                                            quantity=1,
+                                            created_tick=self.game_time
+                                        )
                                         # Show we are stalled and waiting for delivery
                                         if hasattr(self, "visual_effects") and self.game_time % 60 == 0:
                                             self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*Awaiting delivery*", color=(200, 200, 150)))
@@ -5312,10 +5327,93 @@ class World:
         npc.schedule.current_destination_coords = None
         npc.task_target_coords = None
         npc.task_target_item_details = None
+        npc.current_sub_task = None
         npc.task_context = None
         npc.task_context_data = None
 
+    def _find_npc_by_id(self, entity_id: int | None) -> NPC | None:
+        if entity_id is None:
+            return None
+        for candidate in getattr(self, "village_npcs", []):
+            if getattr(candidate, "id", None) == entity_id:
+                return candidate
+        if getattr(getattr(self, "player", None), "id", None) == entity_id:
+            return self.player
+        return None
+
+    def _is_available_delivery_laborer(self, candidate: NPC, *, excluding_id: int | None = None) -> bool:
+        if getattr(candidate, "id", None) == excluding_id:
+            return False
+        if getattr(getattr(candidate, "physical", None), "is_dead", False):
+            return False
+        profession = str(getattr(getattr(candidate, "economic", None), "profession", "") or "").strip().lower()
+        if profession not in {"laborer", "helper", "porter"}:
+            return False
+        if getattr(candidate, "task_context", None) in {"delivery", "construction", "hauling"}:
+            return False
+        schedule = getattr(candidate, "schedule", None)
+        current_task = getattr(schedule, "current_task", "") or ""
+        if current_task not in {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, "idle_confused", ""}:
+            return False
+        if getattr(schedule, "current_path", None):
+            return False
+        return True
+
+    def _delivery_laborer_can_service_task(self, candidate: NPC, task, *, excluding_id: int | None = None) -> bool:
+        if not self._is_available_delivery_laborer(candidate, excluding_id=excluding_id):
+            return False
+
+        source_building = self.buildings_by_id.get(getattr(task, "source_building_id", None))
+        dest_building = self.buildings_by_id.get(getattr(task, "destination_building_id", None))
+        if source_building is None or dest_building is None:
+            return False
+
+        task_settlement_ids = {
+            getattr(source_building, "settlement_id", None),
+            getattr(dest_building, "settlement_id", None),
+        }
+        task_settlement_ids.discard(None)
+        if task_settlement_ids:
+            candidate_village = self._get_village_for_npc(candidate, by_coords=True)
+            candidate_settlement_id = getattr(candidate_village, "id", None)
+            candidate_work_building = self.buildings_by_id.get(getattr(getattr(candidate, "schedule", None), "work_building_id", None))
+            candidate_work_settlement_id = getattr(candidate_work_building, "settlement_id", None)
+            if candidate_settlement_id not in task_settlement_ids and candidate_work_settlement_id not in task_settlement_ids:
+                return False
+
+        source_coords = (source_building.global_center_x, source_building.global_center_y)
+        if (candidate.x, candidate.y) == source_coords:
+            return True
+        return bool(self.calculate_path(candidate.x, candidate.y, source_coords[0], source_coords[1]))
+
+    def _has_available_delivery_laborer_for_task(self, task, *, excluding_id: int | None = None) -> bool:
+        return any(
+            self._delivery_laborer_can_service_task(candidate, task, excluding_id=excluding_id)
+            for candidate in getattr(self, "village_npcs", [])
+        )
+
+    def _recover_invalid_delivery_tasks(self) -> None:
+        """Release or fail delivery tasks whose actor/buildings disappeared."""
+        for task in list(self.town_board.get_active_delivery_tasks()):
+            source_building = self.buildings_by_id.get(task.source_building_id)
+            dest_building = self.buildings_by_id.get(task.destination_building_id)
+            if source_building is None or dest_building is None:
+                self.town_board.fail_delivery_task(task.id)
+                actor = self._find_npc_by_id(task.assigned_entity_id)
+                if actor is not None:
+                    self._clear_npc_haul_task(actor, release_claim=False)
+                continue
+            if task.assigned_entity_id is None or task.status == "open":
+                continue
+            actor = self._find_npc_by_id(task.assigned_entity_id)
+            if actor is None or getattr(getattr(actor, "physical", None), "is_dead", False):
+                if task.status in {"claimed", "going_to_source"}:
+                    self.town_board.release_delivery_task(task.id)
+                else:
+                    self.town_board.fail_delivery_task(task.id)
+
     def _assign_delivery_task_to_npc(self, npc: NPC) -> bool:
+        self._recover_invalid_delivery_tasks()
         best_task = None
         best_distance = None
 
@@ -5326,27 +5424,22 @@ class World:
         npc_workplace_id = getattr(getattr(npc, "schedule", None), "work_building_id", None)
         npc_is_owner = npc_workplace_id and npc.id == getattr(self.buildings_by_id.get(npc_workplace_id), "owner_id", None)
 
-        # Fast path if we aren't allowed to take any
         if npc_is_owner and not (is_unemployed or is_laborer):
-            # Owners avoid hauling unless there are no laborers. We check if any laborer exists
-            # We don't want to loop over all NPCs every frame, but we can check active workers.
             workplace = self.buildings_by_id.get(npc_workplace_id)
             if workplace:
                 active_workers = self._count_active_workers_for_building(workplace)
-                # If there are workers besides the owner, owner refuses to haul.
                 if active_workers > 1:
                     return False
 
         for task in self.town_board.get_open_delivery_tasks():
-            # Apply role filters:
-            # 1. Laborers/unemployed can take any task.
-            # 2. Skilled workers and owners ONLY take tasks for their own workplace.
             if not (is_unemployed or is_laborer):
                 if task.destination_building_id != npc_workplace_id:
                     continue
 
             source_building = self.buildings_by_id.get(task.source_building_id)
-            if not source_building:
+            dest_building = self.buildings_by_id.get(task.destination_building_id)
+            if not source_building or not dest_building:
+                self.town_board.fail_delivery_task(task.id)
                 continue
 
             distance = abs(npc.x - source_building.global_center_x) + abs(npc.y - source_building.global_center_y)
@@ -5357,12 +5450,20 @@ class World:
         if best_task is None:
             return False
 
-        if not self.town_board.claim_delivery_task(best_task, npc.id):
+        # Laborers/helpers/porters are preferred, but deferral is scoped to the
+        # selected task. A distant or unreachable idle laborer must not block this
+        # worker/owner from keeping their own workplace supplied.
+        if not is_laborer and self._has_available_delivery_laborer_for_task(best_task, excluding_id=getattr(npc, "id", None)):
             return False
+
+        if not self.town_board.claim_delivery_task(best_task, npc.id, current_tick=getattr(self, "game_time", None)):
+            return False
+        self.town_board.update_delivery_task_status(best_task.id, "going_to_source", current_tick=getattr(self, "game_time", None))
 
         source_building = self.buildings_by_id[best_task.source_building_id]
 
         npc.schedule.current_task = "hauling_to_source"
+        npc.current_sub_task = f"Restocking {best_task.item_key}"
         npc.task_context = "delivery"
         npc.task_context_data = {
             "delivery_task_id": best_task.id,
@@ -5381,6 +5482,10 @@ class World:
         npc.task_target_coords = coords
         npc.schedule.current_destination_coords = coords
         npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
+        if (npc.x, npc.y) != coords and not npc.schedule.current_path:
+            self.town_board.release_delivery_task(best_task.id)
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return False
         return True
 
     def _assign_haul_task_to_npc(self, npc: NPC) -> bool:
@@ -5406,6 +5511,7 @@ class World:
             return False
 
         npc.schedule.current_task = "hauling_to_source"
+        npc.current_sub_task = f"Fetching {task.item_key}"
         npc.task_context = "hauling"
         npc.task_context_data = {
             "haul_task_id": task.id,
@@ -5438,8 +5544,144 @@ class World:
             return False
         return inventory.transfer_item_reference(npc.economic.npc_inventory, item_reference)
 
+    def _is_construction_worker_role(self, npc: NPC) -> bool:
+        profession = str(getattr(getattr(npc, "economic", None), "profession", "") or "").strip().lower()
+        return profession in {"builder", "carpenter", "mason", "laborer", "helper", "porter", "unemployed"}
+
+    def _has_available_construction_worker(self, *, excluding_id: int | None = None) -> bool:
+        for candidate in getattr(self, "village_npcs", []):
+            if getattr(candidate, "id", None) == excluding_id:
+                continue
+            if getattr(getattr(candidate, "physical", None), "is_dead", False):
+                continue
+            if not self._is_construction_worker_role(candidate):
+                continue
+            schedule = getattr(candidate, "schedule", None)
+            current_task = getattr(schedule, "current_task", "") or ""
+            if current_task not in {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, "idle_confused", ""}:
+                continue
+            if getattr(schedule, "current_path", None):
+                continue
+            return True
+        return False
+
+    def _get_buildable_blueprints(self) -> list[ConstructionBlueprint]:
+        buildable = []
+        for blueprint in list(self.blueprints_by_id.values()):
+            blueprint.refresh_status()
+            if blueprint.has_all_materials() and blueprint.status != "complete":
+                buildable.append(blueprint)
+        return buildable
+
+    def _assign_construction_task_to_npc(self, npc: NPC) -> bool:
+        profession = str(getattr(getattr(npc, "economic", None), "profession", "") or "").strip().lower()
+        is_owner_or_manager = profession in {"owner", "manager", "foreman"}
+        if not self._is_construction_worker_role(npc) and not is_owner_or_manager:
+            return False
+        if is_owner_or_manager and self._has_available_construction_worker(excluding_id=getattr(npc, "id", None)):
+            return False
+
+        best_blueprint = None
+        best_distance = None
+        for blueprint in self._get_buildable_blueprints():
+            if getattr(npc, "id", None) in getattr(blueprint, "assigned_workers", []):
+                continue
+            distance = abs(npc.x - blueprint.x) + abs(npc.y - blueprint.y)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_blueprint = blueprint
+
+        if best_blueprint is None:
+            return False
+
+        if npc.id not in best_blueprint.assigned_workers:
+            best_blueprint.assigned_workers.append(npc.id)
+        task_id = f"construct:{best_blueprint.id}:{npc.id}"
+        if task_id not in best_blueprint.active_tasks:
+            best_blueprint.active_tasks.append(task_id)
+        best_blueprint.refresh_status()
+        self._refresh_blueprint_map_marker(best_blueprint)
+
+        npc.schedule.current_task = "constructing_site"
+        npc.current_sub_task = f"Building {best_blueprint.construction_stage}"
+        npc.task_context = "construction"
+        npc.task_context_data = {"blueprint_id": best_blueprint.id, "construction_task_id": task_id}
+        coords = (best_blueprint.x, best_blueprint.y)
+        npc.task_target_coords = coords
+        npc.schedule.current_destination_coords = coords
+        npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
+        if (npc.x, npc.y) != coords and not npc.schedule.current_path:
+            self._clear_npc_construction_task(npc, best_blueprint)
+            return False
+        return True
+
+    def _clear_npc_construction_task(self, npc: NPC, blueprint: ConstructionBlueprint | None = None) -> None:
+        task_data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
+        if blueprint is None:
+            blueprint = self.blueprints_by_id.get(task_data.get("blueprint_id"))
+        if blueprint is not None:
+            if getattr(npc, "id", None) in blueprint.assigned_workers:
+                blueprint.assigned_workers.remove(npc.id)
+            task_id = task_data.get("construction_task_id")
+            if task_id in blueprint.active_tasks:
+                blueprint.active_tasks.remove(task_id)
+            blueprint.refresh_status()
+            self._refresh_blueprint_map_marker(blueprint)
+        self._clear_npc_haul_task(npc, release_claim=False)
+
+    def _handle_npc_construction_task(self, npc: NPC) -> bool:
+        if npc.task_context != "construction":
+            return False
+        task_data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
+        blueprint = self.blueprints_by_id.get(task_data.get("blueprint_id"))
+        if blueprint is None:
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return False
+        if not blueprint.has_all_materials():
+            blueprint.refresh_status()
+            self._clear_npc_construction_task(npc, blueprint)
+            return False
+
+        coords = (blueprint.x, blueprint.y)
+        if (npc.x, npc.y) != coords:
+            if not npc.schedule.current_path:
+                npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
+                npc.schedule.current_destination_coords = coords
+            if not npc.schedule.current_path:
+                blueprint.stalled_reason = "No path to worksite"
+                self._clear_npc_construction_task(npc, blueprint)
+                return False
+            return True
+
+        previous_stage = blueprint.construction_stage
+        completed = blueprint.apply_work(10)
+        npc.current_sub_task = f"Building {blueprint.construction_stage}"
+        if getattr(self, "game_time", 0) % 20 == 0:
+            self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"*{npc.current_sub_task}*", color=(180, 180, 120)))
+        if blueprint.construction_stage != previous_stage:
+            self._refresh_blueprint_map_marker(blueprint)
+        if completed:
+            self._complete_construction_blueprint(blueprint)
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return True
+        self._refresh_blueprint_map_marker(blueprint)
+        return True
+
+    def _fail_delivery_for_npc(self, npc: NPC, task, *, drop_carried_item: bool = False) -> None:
+        item_key = getattr(task, "item_key", None)
+        if drop_carried_item and item_key:
+            npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
+            item_reference = npc_inventory.pop_item_reference(item_key) if npc_inventory is not None else None
+            if item_reference is not None:
+                self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
+        self.town_board.fail_delivery_task(task.id)
+        self._clear_npc_haul_task(npc, release_claim=False)
+
     def _handle_npc_delivery_task(self, npc: NPC) -> bool:
         if npc.task_context != "delivery":
+            return False
+
+        if getattr(getattr(npc, "physical", None), "is_dead", False):
             return False
 
         haul_data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
@@ -5448,66 +5690,85 @@ class World:
         source_building = self.buildings_by_id.get(haul_data.get("source_building_id"))
         item_key = haul_data.get("item_key")
 
-        if task is None or dest_building is None or source_building is None:
-            if task:
-                self.town_board.fail_delivery_task(task.id)
+        if task is None:
             self._clear_npc_haul_task(npc, release_claim=False)
+            return False
+        if dest_building is None or source_building is None or not item_key:
+            self._fail_delivery_for_npc(npc, task, drop_carried_item=npc.schedule.current_task == "hauling_to_delivery_destination")
             return False
 
         if npc.schedule.current_task == "hauling_to_source":
+            self.town_board.update_delivery_task_status(task.id, "going_to_source", current_tick=getattr(self, "game_time", None))
             source_coords = tuple(haul_data.get("source", {}).get("coords", ()))
+            if len(source_coords) != 2:
+                self._fail_delivery_for_npc(npc, task)
+                return False
             if (npc.x, npc.y) != source_coords:
                 if not npc.schedule.current_path:
                     npc.schedule.current_path = self.calculate_path(npc.x, npc.y, source_coords[0], source_coords[1]) or []
                     npc.schedule.current_destination_coords = source_coords
-                return bool(npc.schedule.current_path)
+                if not npc.schedule.current_path:
+                    self.town_board.release_delivery_task(task.id)
+                    self._clear_npc_haul_task(npc, release_claim=False)
+                    return False
+                return True
 
             if not self._pickup_haul_task_material(npc, haul_data):
-                self.town_board.fail_delivery_task(task.id)
-                self._clear_npc_haul_task(npc, release_claim=False)
+                self._fail_delivery_for_npc(npc, task)
                 return False
 
             npc.schedule.current_task = "hauling_to_delivery_destination"
+            npc.current_sub_task = f"Carrying {item_key}"
+            self.town_board.update_delivery_task_status(task.id, "carrying", current_tick=getattr(self, "game_time", None))
             coords = (dest_building.global_center_x, dest_building.global_center_y)
             npc.task_target_coords = coords
             npc.schedule.current_destination_coords = coords
             npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
+            if (npc.x, npc.y) != coords and not npc.schedule.current_path:
+                self._fail_delivery_for_npc(npc, task, drop_carried_item=True)
+                return False
             return True
 
         if npc.schedule.current_task == "hauling_to_delivery_destination":
-            npc.current_sub_task = "delivering" # to use natural hover feedback if available
+            npc.current_sub_task = f"Delivering {item_key}"
+            self.town_board.update_delivery_task_status(task.id, "going_to_destination", current_tick=getattr(self, "game_time", None))
 
             dest_coords = (dest_building.global_center_x, dest_building.global_center_y)
             if (npc.x, npc.y) != dest_coords:
                 if not npc.schedule.current_path:
                     npc.schedule.current_path = self.calculate_path(npc.x, npc.y, dest_coords[0], dest_coords[1]) or []
                     npc.schedule.current_destination_coords = dest_coords
-                return bool(npc.schedule.current_path)
+                if not npc.schedule.current_path:
+                    self._fail_delivery_for_npc(npc, task, drop_carried_item=True)
+                    return False
+                return True
 
-            # Reached destination, deposit item
+            # Reached destination, deposit item. Nothing arrives before this point.
             npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
             if npc_inventory is None or not npc_inventory.has_item(item_key, 1):
-                self.town_board.fail_delivery_task(task.id)
-                self._clear_npc_haul_task(npc, release_claim=False)
+                self._fail_delivery_for_npc(npc, task)
                 return False
 
             item_reference = npc_inventory.pop_item_reference(item_key)
-            if item_reference:
-                # Pay for it if owned by someone else or has money
-                village = self._get_village_for_npc(npc, by_coords=True)
-                price = self.quote_item_reference_price(item_reference, village=village)
-                if dest_building.building_inventory.get("money", 0) >= price or getattr(dest_building, "owner_id", None) is None:
-                    if getattr(dest_building, "owner_id", None) is not None:
-                        dest_building.building_inventory["money"] -= price
-                        source_building.building_inventory["money"] = source_building.building_inventory.get("money", 0) + price
+            if item_reference is None:
+                self._fail_delivery_for_npc(npc, task)
+                return False
 
-                    dest_building.building_inventory.add_item_reference(item_reference)
-                else:
-                    # Return item if not enough money (drop on ground to avoid teleport)
-                    self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
-                    if hasattr(self, "visual_effects"):
-                        self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*Delivery failed: no funds*", color=(255, 100, 100)))
+            village = self._get_village_for_npc(npc, by_coords=True)
+            price = self.quote_item_reference_price(item_reference, village=village)
+            if dest_building.building_inventory.get("money", 0) >= price or getattr(dest_building, "owner_id", None) is None:
+                if getattr(dest_building, "owner_id", None) is not None:
+                    dest_building.building_inventory["money"] -= price
+                    source_building.building_inventory["money"] = source_building.building_inventory.get("money", 0) + price
+                dest_building.building_inventory.add_item_reference(item_reference)
+            else:
+                self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
+                if hasattr(self, "visual_effects"):
+                    self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*Delivery failed: no funds*", color=(255, 100, 100)))
+                self._fail_delivery_for_npc(npc, task)
+                return False
 
+            self.town_board.update_delivery_task_status(task.id, "complete", current_tick=getattr(self, "game_time", None))
             self.town_board.complete_delivery_task(task.id)
             self._clear_npc_haul_task(npc, release_claim=False)
             return True
@@ -5533,6 +5794,7 @@ class World:
                 self._clear_npc_haul_task(npc, release_claim=True)
                 return False
             npc.schedule.current_task = "hauling_to_blueprint"
+            npc.current_sub_task = f"Delivering {haul_data.get('item_key')}"
             npc.task_target_coords = (blueprint.x, blueprint.y)
             npc.schedule.current_destination_coords = (blueprint.x, blueprint.y)
             npc.schedule.current_path = self.calculate_path(npc.x, npc.y, blueprint.x, blueprint.y) or []
@@ -6337,15 +6599,33 @@ class World:
         return self.blueprints_by_id.get(blueprint_id)
 
     def _get_blueprint_tile_def(self, blueprint: ConstructionBlueprint) -> dict:
+        stage_chars = {
+            "planning": blueprint.char,
+            "foundation": "_",
+            "framing": "#",
+            "finishing": "%",
+            "complete": blueprint.char,
+        }
+        stage = getattr(blueprint, "construction_stage", "planning")
         return {
-            "char": blueprint.char,
+            "char": stage_chars.get(stage, blueprint.char),
             "color": blueprint.color,
             "passable": True,
-            "name": blueprint.name,
-            "properties": {"is_construction_site": True, "blueprint_id": blueprint.id},
+            "name": f"{blueprint.name} ({stage.replace('_', ' ').title()})",
+            "properties": {
+                "is_construction_site": True,
+                "blueprint_id": blueprint.id,
+                "construction_stage": stage,
+                "construction_status": getattr(blueprint, "status", "planning"),
+                "stalled_reason": getattr(blueprint, "stalled_reason", None),
+            },
         }
 
-    def place_construction_blueprint(self, recipe_key: str, x: int, y: int) -> ConstructionBlueprint | None:
+    def _refresh_blueprint_map_marker(self, blueprint: ConstructionBlueprint) -> None:
+        if blueprint.id in self.blueprints_by_id:
+            self._change_map_tile((blueprint.x, blueprint.y), self._get_blueprint_tile_def(blueprint))
+
+    def place_construction_blueprint(self, recipe_key: str, x: int, y: int, *, owner_id: int | None = None, requester_id: int | None = None) -> ConstructionBlueprint | None:
         recipe = CONSTRUCTION_RECIPES.get(recipe_key)
         if recipe is None:
             return None
@@ -6356,6 +6636,21 @@ class World:
         village = None
         if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
             village = getattr(self.chunks[chunk_y][chunk_x], "village", None)
+        settlement_id = getattr(village, "id", None)
+        if settlement_id is not None:
+            self.ensure_settlement_territory(village)
+        if not self._can_reserve_land_for_construction(recipe_key, x, y, settlement_id):
+            return None
+        reservation = self.create_land_claim(
+            "construction_reservation",
+            set(),
+            reserved_tiles=self._construction_footprint_tiles(recipe_key, x, y),
+            owner_type="construction",
+            owner_id=None,
+            settlement_id=settlement_id,
+            priority=9,
+            metadata={"target_build": recipe_key, "x": x, "y": y},
+        )
         blueprint = ConstructionBlueprint(
             x=x,
             y=y,
@@ -6366,8 +6661,16 @@ class World:
             width=int(recipe.get("width", 1)),
             height=int(recipe.get("height", 1)),
             category=recipe.get("category", "player_construction"),
-            settlement_id=getattr(village, "id", None),
+            settlement_id=settlement_id,
+            region_id=getattr(village, "region_id", None),
+            owner_id=owner_id,
+            requester_id=requester_id,
+            required_work=int(recipe.get("required_work", 100)),
+            territory_claim_id=getattr(reservation, "id", None),
         )
+        if reservation is not None:
+            reservation.owner_id = blueprint.id
+            reservation.metadata["blueprint_id"] = blueprint.id
         self.blueprints_by_id[blueprint.id] = blueprint
         self.blueprint_positions[(x, y)] = blueprint.id
         self.town_board.post_blueprint(blueprint)
@@ -6428,10 +6731,29 @@ class World:
         for building in getattr(village, "buildings", []):
             self._sync_building_employment_tasks(building)
 
+
+    def _activate_completed_building_owner(self, building: Building | None) -> None:
+        if building is None or "workplace" not in str(getattr(building, "category", "")):
+            return
+        owner = self._find_npc_by_id(getattr(building, "owner_id", None))
+        if owner is None or owner is getattr(self, "player", None) or getattr(getattr(owner, "physical", None), "is_dead", False):
+            return
+        if getattr(getattr(owner, "schedule", None), "work_building_id", None) == building.id:
+            return
+        self._assign_job(
+            owner,
+            building,
+            profession=self._resolve_profession_for_work_building(building, exclude_entity=None),
+            reason="business_owner",
+        )
+
     def _complete_construction_blueprint(self, blueprint: ConstructionBlueprint) -> bool:
         recipe = CONSTRUCTION_RECIPES.get(blueprint.target_build)
         if recipe is None:
             return False
+        blueprint.build_progress = max(blueprint.build_progress, blueprint.required_work)
+        blueprint.refresh_status()
+        completed_building = None
 
         if blueprint.source == "tile":
             target_tile_def = TILE_DEFINITIONS.get(blueprint.tile_def_key)
@@ -6459,6 +6781,13 @@ class World:
                 global_chunk_x_start=chunk_x * CHUNK_SIZE,
                 global_chunk_y_start=chunk_y * CHUNK_SIZE,
             )
+            new_building.owner_id = getattr(blueprint, "owner_id", None)
+            new_building.requester_id = getattr(blueprint, "requester_id", None)
+            new_building.player_owned = bool(new_building.owner_id is not None and new_building.owner_id == getattr(getattr(self, "player", None), "id", None))
+            new_building.settlement_id = getattr(blueprint, "settlement_id", None)
+            new_building.region_id = getattr(blueprint, "region_id", None)
+            new_building.territory_claim_id = getattr(blueprint, "territory_claim_id", None)
+            completed_building = new_building
             self.buildings_by_id[new_building.id] = new_building
             if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
                 chunk = self.chunks[chunk_y][chunk_x]
@@ -6470,11 +6799,14 @@ class World:
                     self.decorate_building_interior(new_building, chunk)
             self._seed_new_building_economy(new_building)
             village = getattr(chunk, "village", None) if chunk is not None else None
+            self._activate_completed_building_owner(new_building)
             self._sync_building_employment_tasks(new_building)
             if village is not None:
                 self._sync_village_employment_tasks(village)
         else:
             return False
+
+        self._finalize_completed_blueprint_claim(blueprint, completed_building)
 
         for task in list(self.town_board.haul_tasks):
             if task.blueprint_id == blueprint.id:
@@ -6483,6 +6815,33 @@ class World:
         self.blueprints_by_id.pop(blueprint.id, None)
         self.blueprint_positions.pop((blueprint.x, blueprint.y), None)
         return True
+
+
+    def _finalize_completed_blueprint_claim(self, blueprint: ConstructionBlueprint, building: Building | None) -> None:
+        claim = self.land_claims_by_id.get(getattr(blueprint, "territory_claim_id", None))
+        if claim is None:
+            return
+        if building is None:
+            claim.active = False
+            return
+        claim.owner_type = "building"
+        claim.owner_id = building.id
+        claim.claimed_tiles |= claim.reserved_tiles
+        claim.reserved_tiles.clear()
+        claim.metadata["building_id"] = building.id
+        building.territory_claim_id = claim.id
+        target_type = self._building_claim_type(building.building_type, building.category)
+        if target_type is not None:
+            claim.claim_type = target_type
+            padding = {"farm": 4, "ranch": 7, "hunting": 12, "logging": 10, "business": 1}.get(target_type, 1)
+            extra_tiles = self._claim_rect_tiles(building.global_origin_x, building.global_origin_y, building.width, building.height, padding=padding)
+            claim.claimed_tiles |= {
+                tile for tile in extra_tiles
+                if not self._claim_tiles_have_conflict({tile}, target_type, building.settlement_id) or tile in claim.claimed_tiles
+            }
+            claim.priority = {"farm": 7, "ranch": 6, "hunting": 5, "logging": 5, "business": 8}.get(target_type, claim.priority)
+        else:
+            claim.claim_type = "business" if "workplace" in building.category else "settlement_core"
 
     def _complete_one_blueprint_task(self, blueprint: ConstructionBlueprint, item_key: str, *, task_id: str | None = None) -> None:
         if task_id:
@@ -6550,8 +6909,8 @@ class World:
             item_name = ITEM_DEFINITIONS.get(item_reference.key, {}).get("name", item_reference.key)
             self.visual_effects.append(FloatingTextEffect(getattr(actor, "x", blueprint.x), getattr(actor, "y", blueprint.y), f"-1 {item_name}", color=(255, 100, 100)))
             self._complete_one_blueprint_task(blueprint, item_reference.key, task_id=resolved_task_id)
-            if blueprint.is_complete():
-                self._complete_construction_blueprint(blueprint)
+            blueprint.refresh_status()
+            self._refresh_blueprint_map_marker(blueprint)
             return True
         return False
 
@@ -12236,57 +12595,354 @@ class World:
         except json.JSONDecodeError:
             pass
 
-    def _find_valid_building_spot(self, village: Village, width: int, height: int) -> tuple[int, int] | None:
-        """Finds a valid spot for a new building near the village center."""
-        # Use town square as anchor, or first building
-        anchor_x, anchor_y = 0, 0
-        if "town_square_center" in village.interaction_points:
-            anchor_x, anchor_y = village.interaction_points["town_square_center"][0]
-        elif village.buildings:
-            anchor_x, anchor_y = village.buildings[0].global_center_x, village.buildings[0].global_center_y
-        else:
-            return None # Dead village
+    def _claim_rect_tiles(self, x: int, y: int, width: int, height: int, *, padding: int = 0) -> set[tuple[int, int]]:
+        return {
+            (tx, ty)
+            for ty in range(max(0, y - padding), min(WORLD_HEIGHT, y + height + padding))
+            for tx in range(max(0, x - padding), min(WORLD_WIDTH, x + width + padding))
+        }
 
-        search_radius_min = 10
-        search_radius_max = 60
+    def _claim_radius_tiles(self, center_x: int, center_y: int, radius: int) -> set[tuple[int, int]]:
+        tiles: set[tuple[int, int]] = set()
+        radius_sq = radius * radius
+        for ty in range(max(0, center_y - radius), min(WORLD_HEIGHT, center_y + radius + 1)):
+            for tx in range(max(0, center_x - radius), min(WORLD_WIDTH, center_x + radius + 1)):
+                if (tx - center_x) ** 2 + (ty - center_y) ** 2 <= radius_sq:
+                    tiles.add((tx, ty))
+        return tiles
 
-        for i in range(50): # Try 50 times
-            # Pick a random spot in the ring
-            angle = random.uniform(0, 2 * math.pi)
-            dist = random.uniform(search_radius_min, search_radius_max)
-            x = int(anchor_x + math.cos(angle) * dist)
-            y = int(anchor_y + math.sin(angle) * dist)
-
-            # Check bounds (with margin)
-            if not (5 <= x < WORLD_WIDTH - width - 5 and 5 <= y < WORLD_HEIGHT - height - 5):
-                continue
-
-            # Check collision with existing buildings
-            collision = False
-            for b in village.buildings:
-                # Simple AABB collision
-                if (x < b.global_origin_x + b.width + 2 and x + width + 2 > b.global_origin_x and
-                    y < b.global_origin_y + b.height + 2 and y + height + 2 > b.global_origin_y):
-                    collision = True
-                    break
-
-            if collision:
-                continue
-
-            # Check terrain (all tiles must be passable and not water)
-            terrain_valid = True
-            for ty in range(y, y + height):
-                for tx in range(x, x + width):
-                    tile = self.get_tile_at(tx, ty)
-                    if not tile or not tile.passable or tile.name in ["Water", "Deep Water"]:
-                        terrain_valid = False
-                        break
-                if not terrain_valid: break
-
-            if terrain_valid:
-                return x, y
-
+    def _get_village_anchor_coords(self, village: Village) -> tuple[int, int] | None:
+        if "town_square_center" in getattr(village, "interaction_points", {}):
+            return village.interaction_points["town_square_center"][0]
+        if getattr(village, "buildings", None):
+            return village.buildings[0].global_center_x, village.buildings[0].global_center_y
         return None
+
+    def _is_claimable_terrain(self, x: int, y: int) -> bool:
+        if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
+            return False
+        tile = self.get_tile_at(x, y)
+        # Territory can reserve woodland/brush for future clearing; only water/off-map is invalid.
+        return bool(tile and getattr(tile, "name", "") not in {"Water", "Deep Water"})
+
+    def create_land_claim(
+        self,
+        claim_type: str,
+        claimed_tiles: set[tuple[int, int]] | None = None,
+        *,
+        reserved_tiles: set[tuple[int, int]] | None = None,
+        owner_type: str = "settlement",
+        owner_id: str | int | None = None,
+        settlement_id: str | None = None,
+        priority: int = 1,
+        expansion_pressure: int = 0,
+        metadata: dict | None = None,
+    ) -> LandClaim | None:
+        claimed_tiles = {tile for tile in (claimed_tiles or set()) if self._is_claimable_terrain(*tile)}
+        reserved_tiles = {tile for tile in (reserved_tiles or set()) if self._is_claimable_terrain(*tile)}
+        if not claimed_tiles and not reserved_tiles:
+            return None
+        claim = LandClaim(
+            claim_type=claim_type,
+            claimed_tiles=claimed_tiles,
+            reserved_tiles=reserved_tiles,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            settlement_id=settlement_id,
+            priority=priority,
+            expansion_pressure=expansion_pressure,
+            metadata=dict(metadata or {}),
+        )
+        self.land_claims_by_id[claim.id] = claim
+        village = self._get_village_by_id(settlement_id)
+        if village is not None and claim.id not in village.territory_claim_ids:
+            village.territory_claim_ids.append(claim.id)
+        return claim
+
+    def _get_village_by_id(self, settlement_id: str | None) -> Village | None:
+        if settlement_id is None:
+            return None
+        for village in getattr(self, "villages", []):
+            if getattr(village, "id", None) == settlement_id:
+                return village
+        atlas = getattr(self, "atlas", None)
+        if atlas and hasattr(atlas, "get_village"):
+            return atlas.get_village(settlement_id)
+        for row in getattr(self, "chunks", []):
+            for chunk in row:
+                village = getattr(chunk, "village", None)
+                if getattr(village, "id", None) == settlement_id:
+                    return village
+        return None
+
+    def get_land_claims_at(self, x: int, y: int, *, include_reserved: bool = True) -> list[LandClaim]:
+        claims = [
+            claim for claim in self.land_claims_by_id.values()
+            if claim.active and claim.contains(x, y, include_reserved=include_reserved)
+        ]
+        claims.sort(key=lambda claim: claim.priority, reverse=True)
+        return claims
+
+    def get_land_claim_summary(self, x: int, y: int) -> str | None:
+        claims = self.get_land_claims_at(x, y)
+        if not claims:
+            return None
+        primary = claims[0]
+        if (x, y) in primary.reserved_tiles and (x, y) not in primary.claimed_tiles:
+            return f"{primary.label()} (reserved)"
+        return primary.label()
+
+    def get_claim_debug_color(self, claim: LandClaim | None) -> tuple[int, int, int] | None:
+        if claim is None:
+            return None
+        colors = {
+            "settlement_core": (120, 160, 255),
+            "rural_expansion": (80, 130, 210),
+            "reserved_expansion": (160, 160, 90),
+            "farm": (80, 180, 80),
+            "ranch": (170, 140, 80),
+            "hunting": (100, 140, 80),
+            "logging": (70, 120, 70),
+            "business": (180, 140, 210),
+            "construction_reservation": (210, 180, 90),
+        }
+        return colors.get(claim.claim_type, (180, 180, 180))
+
+    def _claim_conflicts_for_type(self, existing: LandClaim, new_type: str, settlement_id: str | None) -> bool:
+        if not existing.active:
+            return False
+        broad_settlement = {"settlement_core", "rural_expansion"}
+        if existing.settlement_id is not None and settlement_id is not None and existing.settlement_id != settlement_id:
+            return True
+        if new_type in broad_settlement:
+            return existing.settlement_id not in {None, settlement_id}
+        if existing.claim_type in broad_settlement and existing.settlement_id == settlement_id:
+            return False
+        if existing.claim_type == "reserved_expansion" and existing.settlement_id == settlement_id:
+            return False
+        return existing.claim_type in {
+            "farm", "ranch", "hunting", "logging", "business", "construction_reservation", "reserved_expansion"
+        }
+
+    def _claim_tiles_have_conflict(self, tiles: set[tuple[int, int]], claim_type: str, settlement_id: str | None) -> bool:
+        for tx, ty in tiles:
+            for claim in self.get_land_claims_at(tx, ty):
+                if self._claim_conflicts_for_type(claim, claim_type, settlement_id):
+                    return True
+        return False
+
+    def ensure_settlement_territory(self, village: Village) -> LandClaim | None:
+        existing_core = next(
+            (self.land_claims_by_id.get(claim_id) for claim_id in getattr(village, "territory_claim_ids", [])
+             if self.land_claims_by_id.get(claim_id) and self.land_claims_by_id[claim_id].claim_type == "settlement_core"),
+            None,
+        )
+        anchor = self._get_village_anchor_coords(village)
+        if anchor is None:
+            return existing_core
+        core_tiles = self._claim_radius_tiles(anchor[0], anchor[1], 8)
+        for building in getattr(village, "buildings", []):
+            core_tiles |= self._claim_rect_tiles(building.global_origin_x, building.global_origin_y, building.width, building.height, padding=1)
+        core_tiles = {
+            tile for tile in core_tiles
+            if not self._claim_tiles_have_conflict({tile}, "settlement_core", village.id)
+        }
+        if existing_core is None:
+            existing_core = self.create_land_claim(
+                "settlement_core",
+                core_tiles,
+                owner_type="settlement",
+                owner_id=village.id,
+                settlement_id=village.id,
+                priority=10,
+                metadata={"jurisdiction": True, "anchor": anchor, "radius": 8},
+            )
+        else:
+            existing_core.claimed_tiles |= core_tiles
+            existing_core.metadata.setdefault("jurisdiction", True)
+        for building in getattr(village, "buildings", []):
+            if getattr(building, "territory_claim_id", None) is None and existing_core is not None:
+                building.territory_claim_id = existing_core.id
+        self._ensure_village_rural_claim(village, anchor)
+        self._claim_existing_village_building_territory(village)
+        return existing_core
+
+    def _ensure_village_rural_claim(self, village: Village, anchor: tuple[int, int]) -> LandClaim | None:
+        existing = next(
+            (self.land_claims_by_id.get(claim_id) for claim_id in getattr(village, "territory_claim_ids", [])
+             if self.land_claims_by_id.get(claim_id) and self.land_claims_by_id[claim_id].claim_type == "rural_expansion"),
+            None,
+        )
+        radius = 18
+        tiles = {
+            tile for tile in self._claim_radius_tiles(anchor[0], anchor[1], radius)
+            if not self._claim_tiles_have_conflict({tile}, "rural_expansion", village.id)
+        }
+        if existing is None:
+            return self.create_land_claim(
+                "rural_expansion",
+                tiles,
+                owner_type="settlement",
+                owner_id=village.id,
+                settlement_id=village.id,
+                priority=3,
+                metadata={"jurisdiction": True, "anchor": anchor, "radius": radius},
+            )
+        existing.claimed_tiles |= tiles
+        existing.metadata.setdefault("radius", radius)
+        return existing
+
+    def _claim_existing_village_building_territory(self, village: Village) -> None:
+        for building in getattr(village, "buildings", []):
+            self._ensure_building_land_claim(building, village)
+
+    def _building_claim_type(self, building_type: str, category: str) -> str | None:
+        if building_type in {"ranch", "stable", "pasture"}:
+            return "ranch"
+        if building_type in {"farm", "field"} or "agricultural" in category:
+            return "farm"
+        if building_type in {"hunting_lodge", "hunter_lodge"}:
+            return "hunting"
+        if building_type in {"logging_camp", "lumber_mill"}:
+            return "logging"
+        if "workplace" in category or "commercial" in category:
+            return "business"
+        return None
+
+    def _ensure_building_land_claim(self, building: Building, village: Village | None = None) -> LandClaim | None:
+        existing_id = getattr(building, "territory_claim_id", None)
+        existing = self.land_claims_by_id.get(existing_id)
+        if existing is not None and existing.claim_type != "settlement_core":
+            return existing
+        settlement_id = getattr(building, "settlement_id", None) or getattr(village, "id", None)
+        claim_type = self._building_claim_type(getattr(building, "building_type", ""), getattr(building, "category", ""))
+        if claim_type is None:
+            return existing
+        padding = {"farm": 4, "ranch": 7, "hunting": 12, "logging": 10, "business": 1}.get(claim_type, 1)
+        tiles = self._claim_rect_tiles(building.global_origin_x, building.global_origin_y, building.width, building.height, padding=padding)
+        tiles = {
+            tile for tile in tiles
+            if not self._claim_tiles_have_conflict({tile}, claim_type, settlement_id)
+        }
+        claim = self.create_land_claim(
+            claim_type,
+            tiles,
+            owner_type="building",
+            owner_id=building.id,
+            settlement_id=settlement_id,
+            priority={"farm": 7, "ranch": 6, "hunting": 5, "logging": 5, "business": 8}.get(claim_type, 5),
+            metadata={"building_id": building.id, "resource_use": claim_type},
+        )
+        if claim is not None:
+            building.territory_claim_id = claim.id
+        return claim
+
+    def _expand_settlement_reserved_land(self, village: Village, project_type: str | None = None) -> LandClaim | None:
+        anchor = self._get_village_anchor_coords(village)
+        if anchor is None:
+            return None
+        existing = next(
+            (self.land_claims_by_id.get(claim_id) for claim_id in getattr(village, "territory_claim_ids", [])
+             if self.land_claims_by_id.get(claim_id) and self.land_claims_by_id[claim_id].claim_type == "reserved_expansion"),
+            None,
+        )
+        pressure = self._calculate_settlement_expansion_pressure(village)
+        radius = int((existing.metadata.get("radius", 20) if existing else 20) + max(1, pressure // 40))
+        ring = self._claim_radius_tiles(anchor[0], anchor[1], radius) - self._claim_radius_tiles(anchor[0], anchor[1], max(0, radius - 4))
+        candidates = {
+            tile for tile in ring
+            if not self._claim_tiles_have_conflict({tile}, "reserved_expansion", village.id)
+        }
+        if existing is None:
+            existing = self.create_land_claim(
+                "reserved_expansion",
+                set(),
+                reserved_tiles=candidates,
+                owner_type="settlement",
+                owner_id=village.id,
+                settlement_id=village.id,
+                priority=2,
+                expansion_pressure=pressure,
+                metadata={"project_type": project_type, "radius": radius},
+            )
+        else:
+            existing.reserved_tiles |= candidates
+            existing.expansion_pressure = pressure
+            existing.metadata["radius"] = radius
+            if project_type:
+                existing.metadata["project_type"] = project_type
+        return existing
+
+    def _calculate_settlement_expansion_pressure(self, village: Village) -> int:
+        residents = sum(len(getattr(b, "residents", [])) for b in village.buildings if b.category == "residential")
+        capacity = sum(2 for b in village.buildings if b.category == "residential")
+        pressure = max(0, residents - capacity + 1) * 40 if residents >= capacity else 0
+        if sum(int(qty) for qty in getattr(village, "supply", {}).values()) > 200:
+            pressure += 25
+        if any(getattr(need, "settlement_id", None) == village.id for need in getattr(self.town_board, "economic_needs", [])):
+            pressure += 35
+        return pressure
+
+    def _has_road_near(self, x: int, y: int, radius: int = 6) -> bool:
+        for ty in range(max(0, y - radius), min(WORLD_HEIGHT, y + radius + 1)):
+            for tx in range(max(0, x - radius), min(WORLD_WIDTH, x + radius + 1)):
+                tile = self.get_tile_at(tx, ty)
+                if tile and "road" in getattr(tile, "name", "").lower():
+                    return True
+        return False
+
+    def _construction_footprint_tiles(self, recipe_key: str, x: int, y: int) -> set[tuple[int, int]]:
+        recipe = CONSTRUCTION_RECIPES.get(recipe_key, {})
+        if recipe.get("source") == "building":
+            return self._claim_rect_tiles(x, y, int(recipe.get("width", 1)), int(recipe.get("height", 1)))
+        return {(x, y)}
+
+    def _can_reserve_land_for_construction(self, recipe_key: str, x: int, y: int, settlement_id: str | None) -> bool:
+        footprint = self._construction_footprint_tiles(recipe_key, x, y)
+        if any(not self._is_claimable_terrain(tx, ty) for tx, ty in footprint):
+            return False
+        return not self._claim_tiles_have_conflict(footprint, "construction_reservation", settlement_id)
+
+    def _find_valid_building_spot(self, village: Village, width: int, height: int) -> tuple[int, int] | None:
+        """Find a claim-valid, access-aware spot near a village instead of random unreserved land."""
+        self.ensure_settlement_territory(village)
+        anchor = self._get_village_anchor_coords(village)
+        if anchor is None:
+            return None
+        self._expand_settlement_reserved_land(village)
+
+        search_radius_min = 6
+        search_radius_max = 60
+        candidates: list[tuple[int, int, int]] = []
+        for y in range(max(5, anchor[1] - search_radius_max), min(WORLD_HEIGHT - height - 5, anchor[1] + search_radius_max) + 1, 2):
+            for x in range(max(5, anchor[0] - search_radius_max), min(WORLD_WIDTH - width - 5, anchor[0] + search_radius_max) + 1, 2):
+                dist = abs(x - anchor[0]) + abs(y - anchor[1])
+                if dist < search_radius_min or dist > search_radius_max:
+                    continue
+                footprint = self._claim_rect_tiles(x, y, width, height)
+                if any(not self._is_claimable_terrain(tx, ty) for tx, ty in footprint):
+                    continue
+                if self._claim_tiles_have_conflict(footprint, "construction_reservation", village.id):
+                    continue
+                collision = False
+                for b in village.buildings:
+                    if (x < b.global_origin_x + b.width + 2 and x + width + 2 > b.global_origin_x and
+                        y < b.global_origin_y + b.height + 2 and y + height + 2 > b.global_origin_y):
+                        collision = True
+                        break
+                if collision:
+                    continue
+                road_bonus = 30 if self._has_road_near(x + width // 2, y + height // 2) else 0
+                reserved_bonus = 15 if any(
+                    claim.claim_type == "reserved_expansion" and claim.settlement_id == village.id
+                    for tile in footprint for claim in self.get_land_claims_at(*tile)
+                ) else 0
+                score = road_bonus + reserved_bonus - dist
+                candidates.append((score, x, y))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1], candidates[0][2]
 
     def _update_player_career(self):
         """Updates the player's career status daily using standardized NPC logic."""
@@ -12348,46 +13004,88 @@ class World:
 
         self.player.economic.days_employed += 1
 
+    def _select_village_construction_project(self, village: Village) -> str | None:
+        residents = sum(len(getattr(b, "residents", [])) for b in village.buildings if b.category == "residential")
+        capacity = sum(2 for b in village.buildings if b.category == "residential")
+        if residents >= capacity:
+            return "house"
+
+        total_stored = sum(int(qty) for qty in getattr(village, "supply", {}).values())
+        has_warehouse = any(getattr(b, "building_type", "") == "warehouse" for b in village.buildings)
+        if total_stored > 200 and not has_warehouse:
+            return "warehouse"
+
+        economic_needs = getattr(getattr(self, "town_board", None), "economic_needs", [])
+        has_workshop = any(getattr(b, "building_type", "") == "workshop" for b in village.buildings)
+        if not has_workshop and any(getattr(need, "settlement_id", None) == village.id and getattr(need, "type", "") == "service" for need in economic_needs):
+            return "workshop"
+        return None
+
     def _plan_village_expansion(self, village: Village):
-        """Decides if the village should build something."""
+        """Creates a construction site when housing, storage, or service pressure exists."""
         if self._get_village_blueprints(village):
             return # Finish current project first
 
-        # Check population vs housing
-        residents = sum(len(b.residents) for b in village.buildings if b.category == "residential")
-        capacity = sum(2 for b in village.buildings if b.category == "residential") # Assuming 2 per house
+        project_type = self._select_village_construction_project(village)
+        if project_type is None:
+            return
 
-        # 1. Housing Need
-        if residents >= capacity:
-            project_type = "house"
-            cost = VILLAGE_BUILDING_PROJECTS[project_type]["cost"]
+        project = VILLAGE_BUILDING_PROJECTS.get(project_type)
+        recipe = CONSTRUCTION_RECIPES.get(project_type, {})
+        width = int(project.get("width", recipe.get("width", 1))) if project else int(recipe.get("width", 1))
+        height = int(project.get("height", recipe.get("height", 1))) if project else int(recipe.get("height", 1))
+        spot = self._find_valid_building_spot(village, width, height)
+        if not spot:
+            return
 
-            can_afford = True
-            for res, amt in cost.items():
-                if village.supply.get(res, 0) < amt:
-                    can_afford = False
-                    break
+        blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1])
+        if blueprint is not None:
+            blueprint.settlement_id = village.id
+            blueprint.refresh_status()
+            self._refresh_blueprint_map_marker(blueprint)
+            self.log_event("construction_started", f"The village started building a new {project_type}.", -1, location=spot)
 
-            if can_afford:
-                spot = self._find_valid_building_spot(village, VILLAGE_BUILDING_PROJECTS[project_type]["width"], VILLAGE_BUILDING_PROJECTS[project_type]["height"])
-                if spot:
-                    blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1])
-                    if blueprint is not None:
-                        blueprint.settlement_id = village.id
-                        self.log_event("construction_started", f"The village started building a new {project_type}.", -1, location=spot)
+    def _npc_maybe_start_construction_project(self, npc: NPC, village: Village | None = None) -> ConstructionBlueprint | None:
+        """Allow an autonomous NPC owner/foreman to request a pressure-driven project."""
+        village = village or self._get_village_for_npc(npc, by_coords=True)
+        if village is None or self._get_village_blueprints(village):
+            return None
+        project_type = self._select_village_construction_project(village)
+        if project_type is None:
+            return None
+        recipe = CONSTRUCTION_RECIPES.get(project_type, {})
+        spot = self._find_valid_building_spot(village, int(recipe.get("width", 1)), int(recipe.get("height", 1)))
+        if spot is None:
+            return None
+        blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1], owner_id=getattr(npc, "id", None), requester_id=getattr(npc, "id", None))
+        if blueprint is not None:
+            blueprint.settlement_id = village.id
+            blueprint.refresh_status()
+            self._refresh_blueprint_map_marker(blueprint)
+        return blueprint
+
+    def _is_blueprint_active(self, blueprint: ConstructionBlueprint | None) -> bool:
+        if blueprint is None:
+            return False
+        return self._is_chunk_active(self.get_chunk_coords(blueprint.x, blueprint.y))
 
     def _advance_village_construction(self, village: Village):
-        """Progresses active construction projects."""
+        """Progresses offscreen construction projects through material-limited abstraction."""
         village_blueprints = self._get_village_blueprints(village)
         if not village_blueprints:
             return
 
         blueprint = village_blueprints[0]
+        if self._is_blueprint_active(blueprint):
+            blueprint.refresh_status()
+            self._refresh_blueprint_map_marker(blueprint)
+            return
+
         total_required = max(1, sum(int(quantity) for quantity in blueprint.required_materials.values()))
         materials_per_day = max(1, math.ceil(total_required / 5))
         moved_materials = 0
 
-        for item_key, remaining_qty in blueprint.remaining_materials().items():
+        for item_key, remaining_qty in list(blueprint.remaining_materials().items()):
             while remaining_qty > 0 and village.supply.get(item_key, 0) > 0 and moved_materials < materials_per_day:
                 village.supply[item_key] -= 1
                 if village.supply[item_key] <= 0:
@@ -12399,16 +13097,22 @@ class World:
                 self._complete_one_blueprint_task(blueprint, item_key)
                 moved_materials += 1
                 remaining_qty -= 1
-                if blueprint.is_complete():
-                    completed = self._complete_construction_blueprint(blueprint)
-                    if completed:
-                        self.log_event(
-                            "construction_complete",
-                            f"The village completed a new {blueprint.target_build}.",
-                            -1,
-                            location=(blueprint.x, blueprint.y),
-                        )
-                    return
+
+        if blueprint.has_all_materials():
+            completed = blueprint.apply_work(max(10, math.ceil(blueprint.required_work / 4)))
+            self._refresh_blueprint_map_marker(blueprint)
+            if completed:
+                completed_build = self._complete_construction_blueprint(blueprint)
+                if completed_build:
+                    self.log_event(
+                        "construction_complete",
+                        f"The village completed a new {blueprint.target_build}.",
+                        -1,
+                        location=(blueprint.x, blueprint.y),
+                    )
+        else:
+            blueprint.refresh_status()
+            self._refresh_blueprint_map_marker(blueprint)
 
     def _is_sleeping_work_hour(self) -> bool:
         current_time_in_day = self.game_time % max(1, DAY_LENGTH_TICKS)
@@ -13560,12 +14264,20 @@ class World:
                 self.add_message_to_chat_log("A different construction project is already here.")
                 return
             if self.deposit_actor_material_into_blueprint(self.player, existing_blueprint):
-                if existing_blueprint.id not in self.blueprints_by_id:
-                    self.add_message_to_chat_log(f"You finish building the {recipe['name']}.")
+                if existing_blueprint.has_all_materials():
+                    self.add_message_to_chat_log(f"All materials are delivered for the {recipe['name']}; construction work can begin.")
                 else:
                     self.add_message_to_chat_log(f"You add materials to the {recipe['name']} construction site.")
+            elif existing_blueprint.has_all_materials():
+                completed = existing_blueprint.apply_work(25)
+                self._refresh_blueprint_map_marker(existing_blueprint)
+                if completed:
+                    self._complete_construction_blueprint(existing_blueprint)
+                    self.add_message_to_chat_log(f"You finish building the {recipe['name']}.")
+                else:
+                    self.add_message_to_chat_log(f"You work on the {recipe['name']} ({existing_blueprint.construction_stage}).")
             else:
-                self.add_message_to_chat_log("You do not have any of the required materials to deposit.")
+                self.add_message_to_chat_log(existing_blueprint.stalled_reason or "You do not have any of the required materials to deposit.")
             return
 
         # Validate location

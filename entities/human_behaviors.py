@@ -103,6 +103,12 @@ class HaulingBehavior(JobBehavior):
                     return True
             return False
 
+        if current_task == "constructing_site":
+            if hasattr(world, "_handle_npc_construction_task"):
+                if world._handle_npc_construction_task(entity):
+                    return True
+            return False
+
         profession = str(getattr(getattr(entity, "economic", None), "profession", "") or "").strip().lower()
         is_unemployed = profession == "unemployed"
         is_laborer = profession in {"laborer", "helper", "porter"}
@@ -126,6 +132,10 @@ class HaulingBehavior(JobBehavior):
 
         if hasattr(world, "_assign_haul_task_to_npc"):
             if world._assign_haul_task_to_npc(entity):
+                return True
+
+        if hasattr(world, "_assign_construction_task_to_npc"):
+            if world._assign_construction_task_to_npc(entity):
                 return True
 
         return False

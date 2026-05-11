@@ -20,6 +20,7 @@ CONSTRUCTION_RECIPES = {
         "tile_def_key": "wood_wall",
         "source": "building",
         "materials": {"raw_log": 50},
+        "required_work": 100,
         "width": 7,
         "height": 7,
         "category": "residential",
@@ -30,10 +31,33 @@ CONSTRUCTION_RECIPES = {
         "tile_def_key": "wood_wall",
         "source": "building",
         "materials": {"raw_log": 30, "stone_chunk": 10},
+        "required_work": 120,
         "width": 8,
         "height": 6,
         "category": "agricultural_workplace",
         "description": "A farm to produce food."
+    },
+    "warehouse": {
+        "name": "Warehouse",
+        "tile_def_key": "wood_wall",
+        "source": "building",
+        "materials": {"raw_log": 35, "stone_chunk": 8},
+        "required_work": 110,
+        "width": 8,
+        "height": 6,
+        "category": "storage_workplace",
+        "description": "Shared storage for growing towns and businesses."
+    },
+    "workshop": {
+        "name": "Workshop",
+        "tile_def_key": "wood_wall",
+        "source": "building",
+        "materials": {"raw_log": 25, "stone_chunk": 6, "wooden_plank": 8},
+        "required_work": 100,
+        "width": 6,
+        "height": 5,
+        "category": "commercial_workplace",
+        "description": "A small flexible workplace for business expansion."
     },
     "wood_wall": {
         "name": "Wooden Wall",

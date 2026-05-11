@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 import uuid
 
 from data.decorations import DECORATION_ITEM_DEFINITIONS
@@ -142,8 +142,19 @@ class ConstructionBlueprint:
     height: int = 1
     category: str = "player_construction"
     settlement_id: str | None = None
+    owner_id: int | None = None
+    requester_id: int | None = None
+    build_progress: int = 0
+    required_work: int = 100
+    status: str = "planning"
+    construction_stage: str = "planning"
+    stalled_reason: str | None = None
+    assigned_workers: list[int] = field(default_factory=list)
+    active_tasks: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deposited_inventory: Inventory = field(default_factory=Inventory)
+
+    STAGES: ClassVar[tuple[str, ...]] = ("planning", "foundation", "framing", "finishing", "complete")
 
     def __post_init__(self):
         if not isinstance(self.deposited_inventory, Inventory):
@@ -154,6 +165,11 @@ class ConstructionBlueprint:
         self.char = primary_material_def.get("char", fallback["char"])
         self.color = primary_material_def.get("color", fallback["color"])
         self.name = f"{self.target_build.replace('_', ' ').title()} Construction Site"
+        self.refresh_status()
+
+    @property
+    def delivered_materials(self) -> Inventory:
+        return self.deposited_inventory
 
     def remaining_materials(self) -> dict[str, int]:
         return {
@@ -165,14 +181,53 @@ class ConstructionBlueprint:
     def needs_material(self, item_key: str) -> bool:
         return self.deposited_inventory.get(item_key, 0) < int(self.required_materials.get(item_key, 0))
 
+    def has_all_materials(self) -> bool:
+        return not self.remaining_materials()
+
+    def refresh_status(self) -> None:
+        if self.build_progress >= self.required_work:
+            self.status = "complete"
+            self.construction_stage = "complete"
+            self.stalled_reason = None
+            return
+        missing = self.remaining_materials()
+        if missing:
+            first_item = next(iter(missing))
+            self.status = "stalled" if self.build_progress > 0 else "awaiting_materials"
+            self.construction_stage = "planning" if self.build_progress <= 0 else self.construction_stage
+            self.stalled_reason = f"Awaiting {first_item}"
+            return
+        self.status = "building"
+        self.stalled_reason = None
+        self._update_stage_from_progress()
+
+    def _update_stage_from_progress(self) -> None:
+        if self.build_progress >= self.required_work:
+            self.construction_stage = "complete"
+        elif self.build_progress >= int(self.required_work * 0.66):
+            self.construction_stage = "finishing"
+        elif self.build_progress >= int(self.required_work * 0.33):
+            self.construction_stage = "framing"
+        else:
+            self.construction_stage = "foundation"
+
     def deposit_item_reference(self, item_reference) -> bool:
         if item_reference is None or not self.needs_material(item_reference.key):
             return False
         self.deposited_inventory.add_item_reference(item_reference)
+        self.refresh_status()
         return True
 
+    def apply_work(self, amount: int) -> bool:
+        if not self.has_all_materials() or self.status == "complete":
+            self.refresh_status()
+            return False
+        self.build_progress = min(self.required_work, self.build_progress + max(0, int(amount)))
+        self.refresh_status()
+        return self.status == "complete"
+
     def is_complete(self) -> bool:
-        return not self.remaining_materials()
+        return self.status == "complete"
 
 
 @dataclass
@@ -194,8 +249,9 @@ class DeliveryTask:
     quantity: int
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     assigned_entity_id: int | None = None
-    status: str = "open" # open, claimed, complete, failed
+    status: str = "open" # open, claimed, going_to_source, carrying, going_to_destination, complete, failed
     created_tick: int = 0
+    updated_tick: int = 0
 
 
 @dataclass
@@ -310,12 +366,17 @@ class TownBoard:
         return next((task for task in self.haul_tasks if task.id == task_id), None)
 
     def post_delivery_task(self, source_building_id: str, destination_building_id: str, item_key: str, quantity: int, created_tick: int) -> DeliveryTask:
+        existing = self.find_active_delivery_task(source_building_id, destination_building_id, item_key)
+        if existing is not None:
+            return existing
+
         task = DeliveryTask(
             source_building_id=source_building_id,
             destination_building_id=destination_building_id,
             item_key=item_key,
             quantity=quantity,
             created_tick=created_tick,
+            updated_tick=created_tick,
         )
         self.delivery_tasks.append(task)
         return task
@@ -327,22 +388,39 @@ class TownBoard:
         return tasks
 
     def get_active_delivery_tasks(self, destination_building_id: str | None = None) -> list[DeliveryTask]:
-        """Returns both open and claimed tasks to prevent deduplication bugs."""
-        tasks = [task for task in self.delivery_tasks if task.status in {"open", "claimed"}]
+        """Return unfinished delivery tasks for dedupe and lifecycle recovery."""
+        active_statuses = {"open", "claimed", "going_to_source", "carrying", "going_to_destination"}
+        tasks = [task for task in self.delivery_tasks if task.status in active_statuses]
         if destination_building_id is not None:
             tasks = [task for task in tasks if task.destination_building_id == destination_building_id]
         return tasks
 
-    def claim_delivery_task(self, task: DeliveryTask, entity_id: int) -> bool:
+    def find_active_delivery_task(self, source_building_id: str, destination_building_id: str, item_key: str) -> DeliveryTask | None:
+        for task in self.get_active_delivery_tasks(destination_building_id):
+            if task.source_building_id == source_building_id and task.item_key == item_key:
+                return task
+        return None
+
+    def claim_delivery_task(self, task: DeliveryTask, entity_id: int, *, current_tick: int | None = None) -> bool:
         if task.status != "open":
             return False
         task.status = "claimed"
         task.assigned_entity_id = entity_id
+        if current_tick is not None:
+            task.updated_tick = current_tick
         return True
+
+    def update_delivery_task_status(self, task_id: str, status: str, *, current_tick: int | None = None) -> None:
+        task = self.get_delivery_task(task_id)
+        if task is None:
+            return
+        task.status = status
+        if current_tick is not None:
+            task.updated_tick = current_tick
 
     def release_delivery_task(self, task_id: str) -> None:
         for task in self.delivery_tasks:
-            if task.id == task_id and task.status == "claimed":
+            if task.id == task_id and task.status in {"claimed", "going_to_source"}:
                 task.status = "open"
                 task.assigned_entity_id = None
                 return

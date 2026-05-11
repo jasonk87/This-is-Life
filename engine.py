@@ -3716,7 +3716,6 @@ class World:
         if target_zone_tag == "manager_spot":
             manager_spots = work_building.work_zone_tiles.get("manager_spot", [])
             if manager_spots:
-                import random
                 return random.choice(manager_spots)
             else:
                 return (work_building.global_center_x, work_building.global_center_y)
@@ -4354,20 +4353,19 @@ class World:
                                 price = self.quote_item_reference_price(ItemReference(missing_item), village=village)
                                 # Transfer money and item
                                 if work_building.building_inventory.get("money", 0) >= price or getattr(work_building, "owner_id", None) is None:
-                                    is_active = self._is_building_active(work_building)
+                                    is_active = self._is_building_active(work_building) or self._is_building_active(b)
 
                                     if is_active:
-                                        # Physical logistics mode (local/active)
-                                        existing_tasks = self.town_board.get_active_delivery_tasks(work_building.id)
-                                        task_exists = any(t.item_key == missing_item and t.source_building_id == b.id for t in existing_tasks)
-                                        if not task_exists:
-                                            self.town_board.post_delivery_task(
-                                                source_building_id=b.id,
-                                                destination_building_id=work_building.id,
-                                                item_key=missing_item,
-                                                quantity=1,
-                                                created_tick=self.game_time
-                                            )
+                                        # Physical logistics mode (local/active): post a deduped task only.
+                                        # The source item is not removed until an NPC reaches the source.
+                                        self._recover_invalid_delivery_tasks()
+                                        self.town_board.post_delivery_task(
+                                            source_building_id=b.id,
+                                            destination_building_id=work_building.id,
+                                            item_key=missing_item,
+                                            quantity=1,
+                                            created_tick=self.game_time
+                                        )
                                         # Show we are stalled and waiting for delivery
                                         if hasattr(self, "visual_effects") and self.game_time % 60 == 0:
                                             self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*Awaiting delivery*", color=(200, 200, 150)))
@@ -5312,10 +5310,64 @@ class World:
         npc.schedule.current_destination_coords = None
         npc.task_target_coords = None
         npc.task_target_item_details = None
+        npc.current_sub_task = None
         npc.task_context = None
         npc.task_context_data = None
 
+    def _find_npc_by_id(self, entity_id: int | None) -> NPC | None:
+        if entity_id is None:
+            return None
+        for candidate in getattr(self, "village_npcs", []):
+            if getattr(candidate, "id", None) == entity_id:
+                return candidate
+        if getattr(getattr(self, "player", None), "id", None) == entity_id:
+            return self.player
+        return None
+
+    def _is_available_delivery_laborer(self, candidate: NPC, *, excluding_id: int | None = None) -> bool:
+        if getattr(candidate, "id", None) == excluding_id:
+            return False
+        if getattr(getattr(candidate, "physical", None), "is_dead", False):
+            return False
+        profession = str(getattr(getattr(candidate, "economic", None), "profession", "") or "").strip().lower()
+        if profession not in {"laborer", "helper", "porter"}:
+            return False
+        schedule = getattr(candidate, "schedule", None)
+        current_task = getattr(schedule, "current_task", "") or ""
+        if current_task not in {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, "idle_confused", ""}:
+            return False
+        if getattr(schedule, "current_path", None):
+            return False
+        return True
+
+    def _has_available_delivery_laborer(self, *, excluding_id: int | None = None) -> bool:
+        return any(
+            self._is_available_delivery_laborer(candidate, excluding_id=excluding_id)
+            for candidate in getattr(self, "village_npcs", [])
+        )
+
+    def _recover_invalid_delivery_tasks(self) -> None:
+        """Release or fail delivery tasks whose actor/buildings disappeared."""
+        for task in list(self.town_board.get_active_delivery_tasks()):
+            source_building = self.buildings_by_id.get(task.source_building_id)
+            dest_building = self.buildings_by_id.get(task.destination_building_id)
+            if source_building is None or dest_building is None:
+                self.town_board.fail_delivery_task(task.id)
+                actor = self._find_npc_by_id(task.assigned_entity_id)
+                if actor is not None:
+                    self._clear_npc_haul_task(actor, release_claim=False)
+                continue
+            if task.assigned_entity_id is None or task.status == "open":
+                continue
+            actor = self._find_npc_by_id(task.assigned_entity_id)
+            if actor is None or getattr(getattr(actor, "physical", None), "is_dead", False):
+                if task.status in {"claimed", "going_to_source"}:
+                    self.town_board.release_delivery_task(task.id)
+                else:
+                    self.town_board.fail_delivery_task(task.id)
+
     def _assign_delivery_task_to_npc(self, npc: NPC) -> bool:
+        self._recover_invalid_delivery_tasks()
         best_task = None
         best_distance = None
 
@@ -5326,27 +5378,27 @@ class World:
         npc_workplace_id = getattr(getattr(npc, "schedule", None), "work_building_id", None)
         npc_is_owner = npc_workplace_id and npc.id == getattr(self.buildings_by_id.get(npc_workplace_id), "owner_id", None)
 
-        # Fast path if we aren't allowed to take any
+        # Laborers/helpers/porters are the preferred delivery actors. Skilled workers and
+        # owners only step in when no idle hauling worker is available.
+        if not is_laborer and self._has_available_delivery_laborer(excluding_id=getattr(npc, "id", None)):
+            return False
+
         if npc_is_owner and not (is_unemployed or is_laborer):
-            # Owners avoid hauling unless there are no laborers. We check if any laborer exists
-            # We don't want to loop over all NPCs every frame, but we can check active workers.
             workplace = self.buildings_by_id.get(npc_workplace_id)
             if workplace:
                 active_workers = self._count_active_workers_for_building(workplace)
-                # If there are workers besides the owner, owner refuses to haul.
                 if active_workers > 1:
                     return False
 
         for task in self.town_board.get_open_delivery_tasks():
-            # Apply role filters:
-            # 1. Laborers/unemployed can take any task.
-            # 2. Skilled workers and owners ONLY take tasks for their own workplace.
             if not (is_unemployed or is_laborer):
                 if task.destination_building_id != npc_workplace_id:
                     continue
 
             source_building = self.buildings_by_id.get(task.source_building_id)
-            if not source_building:
+            dest_building = self.buildings_by_id.get(task.destination_building_id)
+            if not source_building or not dest_building:
+                self.town_board.fail_delivery_task(task.id)
                 continue
 
             distance = abs(npc.x - source_building.global_center_x) + abs(npc.y - source_building.global_center_y)
@@ -5357,12 +5409,14 @@ class World:
         if best_task is None:
             return False
 
-        if not self.town_board.claim_delivery_task(best_task, npc.id):
+        if not self.town_board.claim_delivery_task(best_task, npc.id, current_tick=getattr(self, "game_time", None)):
             return False
+        self.town_board.update_delivery_task_status(best_task.id, "going_to_source", current_tick=getattr(self, "game_time", None))
 
         source_building = self.buildings_by_id[best_task.source_building_id]
 
         npc.schedule.current_task = "hauling_to_source"
+        npc.current_sub_task = f"Restocking {best_task.item_key}"
         npc.task_context = "delivery"
         npc.task_context_data = {
             "delivery_task_id": best_task.id,
@@ -5381,6 +5435,10 @@ class World:
         npc.task_target_coords = coords
         npc.schedule.current_destination_coords = coords
         npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
+        if (npc.x, npc.y) != coords and not npc.schedule.current_path:
+            self.town_board.release_delivery_task(best_task.id)
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return False
         return True
 
     def _assign_haul_task_to_npc(self, npc: NPC) -> bool:
@@ -5438,8 +5496,21 @@ class World:
             return False
         return inventory.transfer_item_reference(npc.economic.npc_inventory, item_reference)
 
+    def _fail_delivery_for_npc(self, npc: NPC, task, *, drop_carried_item: bool = False) -> None:
+        item_key = getattr(task, "item_key", None)
+        if drop_carried_item and item_key:
+            npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
+            item_reference = npc_inventory.pop_item_reference(item_key) if npc_inventory is not None else None
+            if item_reference is not None:
+                self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
+        self.town_board.fail_delivery_task(task.id)
+        self._clear_npc_haul_task(npc, release_claim=False)
+
     def _handle_npc_delivery_task(self, npc: NPC) -> bool:
         if npc.task_context != "delivery":
+            return False
+
+        if getattr(getattr(npc, "physical", None), "is_dead", False):
             return False
 
         haul_data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
@@ -5448,66 +5519,85 @@ class World:
         source_building = self.buildings_by_id.get(haul_data.get("source_building_id"))
         item_key = haul_data.get("item_key")
 
-        if task is None or dest_building is None or source_building is None:
-            if task:
-                self.town_board.fail_delivery_task(task.id)
+        if task is None:
             self._clear_npc_haul_task(npc, release_claim=False)
+            return False
+        if dest_building is None or source_building is None or not item_key:
+            self._fail_delivery_for_npc(npc, task, drop_carried_item=npc.schedule.current_task == "hauling_to_delivery_destination")
             return False
 
         if npc.schedule.current_task == "hauling_to_source":
+            self.town_board.update_delivery_task_status(task.id, "going_to_source", current_tick=getattr(self, "game_time", None))
             source_coords = tuple(haul_data.get("source", {}).get("coords", ()))
+            if len(source_coords) != 2:
+                self._fail_delivery_for_npc(npc, task)
+                return False
             if (npc.x, npc.y) != source_coords:
                 if not npc.schedule.current_path:
                     npc.schedule.current_path = self.calculate_path(npc.x, npc.y, source_coords[0], source_coords[1]) or []
                     npc.schedule.current_destination_coords = source_coords
-                return bool(npc.schedule.current_path)
+                if not npc.schedule.current_path:
+                    self.town_board.release_delivery_task(task.id)
+                    self._clear_npc_haul_task(npc, release_claim=False)
+                    return False
+                return True
 
             if not self._pickup_haul_task_material(npc, haul_data):
-                self.town_board.fail_delivery_task(task.id)
-                self._clear_npc_haul_task(npc, release_claim=False)
+                self._fail_delivery_for_npc(npc, task)
                 return False
 
             npc.schedule.current_task = "hauling_to_delivery_destination"
+            npc.current_sub_task = f"Carrying {item_key}"
+            self.town_board.update_delivery_task_status(task.id, "carrying", current_tick=getattr(self, "game_time", None))
             coords = (dest_building.global_center_x, dest_building.global_center_y)
             npc.task_target_coords = coords
             npc.schedule.current_destination_coords = coords
             npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
+            if (npc.x, npc.y) != coords and not npc.schedule.current_path:
+                self._fail_delivery_for_npc(npc, task, drop_carried_item=True)
+                return False
             return True
 
         if npc.schedule.current_task == "hauling_to_delivery_destination":
-            npc.current_sub_task = "delivering" # to use natural hover feedback if available
+            npc.current_sub_task = f"Delivering {item_key}"
+            self.town_board.update_delivery_task_status(task.id, "going_to_destination", current_tick=getattr(self, "game_time", None))
 
             dest_coords = (dest_building.global_center_x, dest_building.global_center_y)
             if (npc.x, npc.y) != dest_coords:
                 if not npc.schedule.current_path:
                     npc.schedule.current_path = self.calculate_path(npc.x, npc.y, dest_coords[0], dest_coords[1]) or []
                     npc.schedule.current_destination_coords = dest_coords
-                return bool(npc.schedule.current_path)
+                if not npc.schedule.current_path:
+                    self._fail_delivery_for_npc(npc, task, drop_carried_item=True)
+                    return False
+                return True
 
-            # Reached destination, deposit item
+            # Reached destination, deposit item. Nothing arrives before this point.
             npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
             if npc_inventory is None or not npc_inventory.has_item(item_key, 1):
-                self.town_board.fail_delivery_task(task.id)
-                self._clear_npc_haul_task(npc, release_claim=False)
+                self._fail_delivery_for_npc(npc, task)
                 return False
 
             item_reference = npc_inventory.pop_item_reference(item_key)
-            if item_reference:
-                # Pay for it if owned by someone else or has money
-                village = self._get_village_for_npc(npc, by_coords=True)
-                price = self.quote_item_reference_price(item_reference, village=village)
-                if dest_building.building_inventory.get("money", 0) >= price or getattr(dest_building, "owner_id", None) is None:
-                    if getattr(dest_building, "owner_id", None) is not None:
-                        dest_building.building_inventory["money"] -= price
-                        source_building.building_inventory["money"] = source_building.building_inventory.get("money", 0) + price
+            if item_reference is None:
+                self._fail_delivery_for_npc(npc, task)
+                return False
 
-                    dest_building.building_inventory.add_item_reference(item_reference)
-                else:
-                    # Return item if not enough money (drop on ground to avoid teleport)
-                    self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
-                    if hasattr(self, "visual_effects"):
-                        self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*Delivery failed: no funds*", color=(255, 100, 100)))
+            village = self._get_village_for_npc(npc, by_coords=True)
+            price = self.quote_item_reference_price(item_reference, village=village)
+            if dest_building.building_inventory.get("money", 0) >= price or getattr(dest_building, "owner_id", None) is None:
+                if getattr(dest_building, "owner_id", None) is not None:
+                    dest_building.building_inventory["money"] -= price
+                    source_building.building_inventory["money"] = source_building.building_inventory.get("money", 0) + price
+                dest_building.building_inventory.add_item_reference(item_reference)
+            else:
+                self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
+                if hasattr(self, "visual_effects"):
+                    self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*Delivery failed: no funds*", color=(255, 100, 100)))
+                self._fail_delivery_for_npc(npc, task)
+                return False
 
+            self.town_board.update_delivery_task_status(task.id, "complete", current_tick=getattr(self, "game_time", None))
             self.town_board.complete_delivery_task(task.id)
             self._clear_npc_haul_task(npc, release_claim=False)
             return True

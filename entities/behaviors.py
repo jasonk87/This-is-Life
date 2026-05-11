@@ -250,6 +250,9 @@ class WanderFleeBehavior:
                 threat_name = world.get_entity_display_name(threat) if hasattr(threat, "name") else "player"
                 world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} spots {threat_name} and bolts!")
                 entity.schedule.current_task = "fleeing"
+                entity.current_sub_task = "Fleeing"
+                entity.fear_state = "startled"
+                entity.stress = min(100, int(getattr(entity, "stress", 0)) + 25)
 
             dx = entity.x - threat.x
             dy = entity.y - threat.y
@@ -267,6 +270,9 @@ class WanderFleeBehavior:
 
         if entity.schedule.current_task == "fleeing":
             entity.schedule.current_task = TaskType.IDLE
+            entity.current_sub_task = "Roaming"
+            entity.fear_state = "calm"
+            entity.stress = max(0, int(getattr(entity, "stress", 0)) - 5)
         return False
 
 

@@ -606,6 +606,24 @@ ITEM_DEFINITIONS = {
             "rots_into": "rotten_food"
         },
     },
+    "processed_meat": {
+        "name": "Processed Meat",
+        "description": "Trimmed meat prepared by a butcher for cooking or simple meals.",
+        "char": ITEM_SPRITES["raw_meat"],
+        "color": COLORS["crimson"],
+        "value": 9,
+        "weight": 1,
+        "stackable": True,
+        "item_type_tags": ["consumable", "food", "butchered_food"],
+        "properties": {
+            "spoilage_chance": 0.1,
+            "rots_into": "rotten_food"
+        },
+        "on_use": {
+            "reduces_hunger": 35
+        },
+    },
+
     "cooked_meat": {
         "name": "Cooked Meat",
         "description": "Meat cooked over a fire. Savory and filling.",

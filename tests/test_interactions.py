@@ -353,7 +353,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertEqual(blueprint.settlement_id, village.id)
         self.assertEqual(len(self.world.town_board.get_open_tasks(blueprint.id)), 50)
 
-        for _ in range(5):
+        for _ in range(8):
             self.world._advance_village_construction(village)
 
         self.assertIsNone(self.world.get_blueprint_at(8, 8))
@@ -1968,6 +1968,13 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertIsInstance(blueprint.deposited_inventory, Inventory)
 
         self.world.player_attempt_build("wooden_chair", 9, 9)
+        blueprint = self.world.get_blueprint_at(9, 9)
+        self.assertIsNotNone(blueprint)
+        self.assertTrue(blueprint.has_all_materials())
+
+        for _ in range(4):
+            self.world.player_attempt_build("wooden_chair", 9, 9)
+
         self.assertIsNone(self.world.get_blueprint_at(9, 9))
         self.assertEqual(self.world.get_tile_at(9, 9).name, DECORATION_ITEM_DEFINITIONS["wooden_chair"]["name"])
 

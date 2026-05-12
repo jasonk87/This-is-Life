@@ -41,6 +41,20 @@ For implementation direction and non-negotiable simulation rules, read [`docs/SI
     python main.py
     ```
 
+
+## Developer Headless Simulation Sandbox
+
+For developer and agent validation of actual simulation behavior, use the headless sandbox. It runs deterministic scenarios without graphics or LLM/Ollama calls and emits readable summaries plus optional JSON reports.
+
+```bash
+python tools/run_simulation_sandbox.py --scenario construction_basic --ticks 500 --seed 123
+python tools/run_simulation_sandbox.py --scenario delivery_basic --ticks 500 --seed 123 --report out/sim_reports/delivery_basic.json --log out/sim_reports/delivery_basic.log
+python tools/run_simulation_sandbox.py --scenario construction_basic --ticks 500 --seed 123 --snapshot out/sim_reports/construction_basic.png --overlay claims,paths,buildings,npcs,blueprints,chunks,interactions
+python tools/asset_workbench.py --preview-character --gender female --profession Blacksmith
+```
+
+Available scenarios include `construction_basic`, `delivery_basic`, `hunting_food_chain`, and `settlement_growth`. See [`docs/SIMULATION_SANDBOX.md`](docs/SIMULATION_SANDBOX.md) for report format, usage guidance for Codex/Jules, and instructions for adding scenarios.
+
 ## Basic Controls (Partial List - see `main.py` for more):
 
 *   **Arrow Keys**: Move

@@ -5848,7 +5848,10 @@ class World:
         for candidate in getattr(self, "village_npcs", []):
             if getattr(candidate, "id", None) == excluding_id:
                 continue
-            if getattr(getattr(candidate, "physical", None), "is_dead", False):
+            physical = getattr(candidate, "physical", None)
+            if physical and getattr(physical, "is_dead", False):
+                continue
+            if not getattr(candidate, "is_alive", True):
                 continue
             if not self._is_construction_worker_role(candidate):
                 continue
@@ -6943,7 +6946,7 @@ class World:
         if settlement_id is None:
             settlement_id = getattr(village, "id", None)
         if settlement_id is not None:
-            self.ensure_settlement_territory(village)
+            self.ensure_settlement_territory(self._get_village_by_id(settlement_id) or village)
         blueprint_width = int(recipe.get("width", 1))
         blueprint_height = int(recipe.get("height", 1))
         variant_id = None

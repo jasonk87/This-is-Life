@@ -84,17 +84,26 @@ class TestBlueprintVariants(unittest.TestCase):
         self.assertEqual(variant_empty.height, 4)
 
     def test_wealth_variant_selection_uses_economic_money(self):
-        # Create a rich NPC
+        # Create a rich NPC with poor inventory money
         rich_npc = NPC(x=10, y=10, name="Rich Guy")
         rich_npc.economic.money = 600
+        rich_npc.economic.npc_inventory.add_item("money", 10)  # Inventory money should be ignored
         self.world.village_npcs.append(rich_npc)
         self.assertEqual(self.world._get_owner_wealth_tier(rich_npc.id), "rich")
+        blueprint_rich = self.world.place_construction_blueprint("house", 5, 5, owner_id=rich_npc.id)
+        # Variant id depends on wealth
+        rich_variant = BUILDING_ARCHETYPES["house"].get_variant("rich")
+        self.assertEqual(blueprint_rich.variant_id, rich_variant.id)
 
-        # Create a poor NPC
+        # Create a poor NPC with rich inventory money
         poor_npc = NPC(x=12, y=12, name="Poor Guy")
         poor_npc.economic.money = 10
+        poor_npc.economic.npc_inventory.add_item("money", 1000)  # Inventory money should be ignored
         self.world.village_npcs.append(poor_npc)
         self.assertEqual(self.world._get_owner_wealth_tier(poor_npc.id), "poor")
+        blueprint_poor = self.world.place_construction_blueprint("house", 25, 25, owner_id=poor_npc.id)
+        poor_variant = BUILDING_ARCHETYPES["house"].get_variant("poor")
+        self.assertEqual(blueprint_poor.variant_id, poor_variant.id)
 
 if __name__ == "__main__":
     unittest.main()

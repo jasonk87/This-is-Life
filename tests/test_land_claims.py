@@ -166,11 +166,19 @@ class TestTerritorialLandClaims(unittest.TestCase):
         self.assertEqual(self.world.get_land_claim_summary(12, 12), "Pasture claim")
 
     def test_autonomous_rural_expansion_outside_village_chunk_preserves_settlement_ownership(self):
-        # Start an expansion far from the village chunk
-        far_x, far_y = 60, 60 # Assuming chunk width is large enough, but 60,60 is definitely far
+        from engine import Chunk
+        # Setup a realistic 3x3 chunk grid
         self.world.chunk_width = 3
         self.world.chunk_height = 3
-        self.world.chunks.extend([[SimpleNamespace(village=None) for _ in range(3)] for _ in range(3)]) # Ensure chunks exist
+        self.world.chunks = [[Chunk(x, y) for x in range(3)] for y in range(3)]
+        for row in self.world.chunks:
+            for c in row:
+                c.biome = "plains"
+        # Place village in chunk 0,0
+        self.world.chunks[0][0].village = self.village
+
+        from config import CHUNK_SIZE
+        far_x, far_y = CHUNK_SIZE * 2 + 5, CHUNK_SIZE * 2 + 5 # Chunk 2,2
 
         blueprint = self.world.place_construction_blueprint("farm", far_x, far_y, settlement_id=self.village.id)
         self.assertIsNotNone(blueprint)

@@ -379,7 +379,7 @@ def run_construction_basic(seed: int, ticks: int, snapshot_config: SnapshotConfi
         if active_blueprint.build_progress > before_progress and active_blueprint.build_progress != last_progress:
             work_applied = True
             last_progress = active_blueprint.build_progress
-            trace.event(tick, "construction_work_applied", actor=worker, location=(active_blueprint.x, active_blueprint.y), target=active_blueprint.id, metadata={"build_progress": active_blueprint.build_progress, "stage": active_blueprint.construction_stage})
+            trace.event(tick, "construction_work_applied", actor=worker, location=(active_blueprint.x, active_blueprint.y), target=active_blueprint.id, metadata={"build_progress": active_blueprint.build_progress, "stage": active_blueprint.construction_stage, "animation_cue": "build"})
 
     if completed_building is None and blueprint is not None:
         completed_building = next((b for b in world.buildings_by_id.values() if getattr(b, "requester_id", None) == owner.id and b.building_type == "workshop"), None)
@@ -492,7 +492,7 @@ def run_delivery_basic(seed: int, ticks: int, snapshot_config: SnapshotConfig | 
         if after_source < before_source and after_carried > before_carried:
             picked_up = True
             carrying = True
-            trace.event(tick, "delivery_pickup", actor=laborer, location=(laborer.x, laborer.y), target=task.id, metadata={"source_inventory": after_source, "carrying": after_carried})
+            trace.event(tick, "delivery_pickup", actor=laborer, location=(laborer.x, laborer.y), target=task.id, metadata={"source_inventory": after_source, "carrying": after_carried, "animation_cue": "haul_carry"})
         if after_dest > before_dest:
             deposited = True
             trace.event(tick, "delivery_deposit", actor=laborer, location=(laborer.x, laborer.y), target=task.id, metadata={"destination_inventory": after_dest})
@@ -575,17 +575,17 @@ def run_hunting_food_chain(seed: int, ticks: int, snapshot_config: SnapshotConfi
         after_processed = butcher.building_inventory.get("processed_meat", 0)
         if deer is not None and deer.physical.is_dead and not prey_killed:
             prey_killed = True
-            trace.event(tick, "prey_killed", actor=hunter, location=(deer.x, deer.y), target=deer.id, metadata={"population_before": before_population, "population_after": population.population_count})
+            trace.event(tick, "prey_killed", actor=hunter, location=(deer.x, deer.y), target=deer.id, metadata={"population_before": before_population, "population_after": population.population_count, "animation_cue": "attack_lunge"})
         if population.population_count == before_population - 1:
             ecology_reduced_once = True
         if after_meat > before_meat:
             meat_carried = True
-            trace.event(tick, "delivery_pickup", actor=hunter, location=(hunter.x, hunter.y), target=getattr(deer, "id", None), metadata={"item_key": "raw_venison"})
+            trace.event(tick, "delivery_pickup", actor=hunter, location=(hunter.x, hunter.y), target=getattr(deer, "id", None), metadata={"item_key": "raw_venison", "animation_cue": "haul_carry"})
         if after_processed > before_processed:
             meat_deposited = True
             butcher_processed = True
             trace.event(tick, "meat_deposited", actor=hunter, location=(butcher.global_center_x, butcher.global_center_y), target=butcher.id)
-            trace.event(tick, "butcher_processed", location=(butcher.global_center_x, butcher.global_center_y), target=butcher.id, metadata={"processed_meat": after_processed})
+            trace.event(tick, "butcher_processed", location=(butcher.global_center_x, butcher.global_center_y), target=butcher.id, metadata={"processed_meat": after_processed, "animation_cue": "butcher_work"})
             break
 
     trace.assert_check(ticks, "wildlife_manifested", deer is not None, "visible deer should manifest from regional population")

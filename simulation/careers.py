@@ -140,17 +140,24 @@ def infer_career_level(role: str | None) -> int:
     return 0
 
 
+def _is_generic_merchant_building(normalized_building: str) -> bool:
+    building_tokens = normalized_building.split("_")
+    return (
+        normalized_building == "general_store"
+        or "shop" in building_tokens
+        or "market" in building_tokens
+    )
+
+
 def resolve_profession_for_building(building_type: str, coworker_roles: list[str] | tuple[str, ...] = ()) -> str:
     normalized_building = str(building_type or "").strip().lower()
 
     rule = BUILDING_ROLE_RULES.get(normalized_building)
-    if rule is None and (normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building):
+    if rule is None and _is_generic_merchant_building(normalized_building):
         return "Merchant"
 
-    lead_role, worker_role = rule if rule else (
-        normalized_building,
-        (normalized_building.replace("_", " ").title(), normalized_building.replace("_", " ").title()),
-    )
+    fallback_role = normalized_building.replace("_", " ").title()
+    lead_role, worker_role = rule if rule else (fallback_role, fallback_role)
     if lead_role == worker_role:
         return lead_role
     if lead_role in coworker_roles:
@@ -162,13 +169,11 @@ def get_roles_for_building(building_type: str) -> list[str]:
     normalized_building = str(building_type or "").strip().lower()
 
     rule = BUILDING_ROLE_RULES.get(normalized_building)
-    if rule is None and (normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building):
+    if rule is None and _is_generic_merchant_building(normalized_building):
         return ["Merchant"]
 
-    lead_role, worker_role = rule if rule else (
-        normalized_building,
-        (normalized_building.replace("_", " ").title(), normalized_building.replace("_", " ").title()),
-    )
+    fallback_role = normalized_building.replace("_", " ").title()
+    lead_role, worker_role = rule if rule else (fallback_role, fallback_role)
     roles: list[str] = []
     for role in (lead_role, worker_role):
         if role not in roles:

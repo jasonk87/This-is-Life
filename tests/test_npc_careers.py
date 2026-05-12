@@ -169,6 +169,19 @@ class TestNPCProfessionDynamics(unittest.TestCase):
             "Woodcutter",
         )
 
+    def test_unknown_building_fallback_roles_are_title_case_strings(self):
+        self.assertEqual(resolve_profession_for_building("warehouse"), "Warehouse")
+        self.assertEqual(get_roles_for_building("warehouse"), ["Warehouse"])
+        self.assertEqual(resolve_profession_for_building("workshop"), "Workshop")
+        self.assertEqual(get_roles_for_building("workshop"), ["Workshop"])
+
+    def test_unknown_building_role_options_are_flat_strings(self):
+        roles = get_roles_for_building("unknown_building")
+
+        self.assertEqual(roles, ["Unknown Building"])
+        self.assertTrue(all(isinstance(role, str) for role in roles))
+        self.assertTrue(all(not isinstance(role, (tuple, list)) for role in roles))
+
     def test_profession_capabilities_are_queryable(self):
         set_entity_profession(self.npc, "Merchant")
         self.assertTrue(entity_has_capability(self.npc, "trade"))
@@ -179,6 +192,12 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         self.assertEqual(resolve_profession_for_building("butcher_shop", []), "Butcher")
         self.assertEqual(resolve_profession_for_building("butcher_shop", ["Butcher"]), "Hunter")
         self.assertEqual(get_roles_for_building("butcher_shop"), ["Butcher", "Hunter"])
+
+    def test_generic_shop_and_market_fallback_to_merchant(self):
+        self.assertEqual(resolve_profession_for_building("tailor_shop"), "Merchant")
+        self.assertEqual(get_roles_for_building("tailor_shop"), ["Merchant"])
+        self.assertEqual(resolve_profession_for_building("farmers_market"), "Merchant")
+        self.assertEqual(get_roles_for_building("farmers_market"), ["Merchant"])
 
 if __name__ == '__main__':
     unittest.main()

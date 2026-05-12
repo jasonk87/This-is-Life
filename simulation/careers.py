@@ -142,10 +142,12 @@ def infer_career_level(role: str | None) -> int:
 
 def resolve_profession_for_building(building_type: str, coworker_roles: list[str] | tuple[str, ...] = ()) -> str:
     normalized_building = str(building_type or "").strip().lower()
-    if normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building:
+
+    rule = BUILDING_ROLE_RULES.get(normalized_building)
+    if rule is None and (normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building):
         return "Merchant"
 
-    lead_role, worker_role = BUILDING_ROLE_RULES.get(
+    lead_role, worker_role = rule if rule else (
         normalized_building,
         (normalized_building.replace("_", " ").title(), normalized_building.replace("_", " ").title()),
     )
@@ -158,10 +160,12 @@ def resolve_profession_for_building(building_type: str, coworker_roles: list[str
 
 def get_roles_for_building(building_type: str) -> list[str]:
     normalized_building = str(building_type or "").strip().lower()
-    if normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building:
+
+    rule = BUILDING_ROLE_RULES.get(normalized_building)
+    if rule is None and (normalized_building == "general_store" or "shop" in normalized_building or "market" in normalized_building):
         return ["Merchant"]
 
-    lead_role, worker_role = BUILDING_ROLE_RULES.get(
+    lead_role, worker_role = rule if rule else (
         normalized_building,
         (normalized_building.replace("_", " ").title(), normalized_building.replace("_", " ").title()),
     )

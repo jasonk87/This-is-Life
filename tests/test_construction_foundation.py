@@ -205,6 +205,74 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(self.world._assign_construction_task_to_npc(manager))
         self.assertEqual(blueprint.assigned_workers, [manager.id])
 
+    def test_construction_deferral_ignores_unreachable_workers(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 21, 21)
+        self._fully_supply_blueprint(blueprint)
+        manager = NPC(1, 1, name="Manager")
+        manager.economic.profession = "Manager"
+        self.world.village_npcs.append(manager)
+
+        laborer = NPC(25, 25, name="Laborer")
+        laborer.economic.profession = "Laborer"
+        self.world.village_npcs.append(laborer)
+
+        # Force same settlement association
+        with patch.object(self.world, '_get_village_for_npc') as mock_village:
+            mock_village.return_value = SimpleNamespace(id=blueprint.settlement_id)
+
+        # Block the path so laborer cannot reach the blueprint
+        with patch.object(self.world, 'calculate_path') as mock_path:
+            # For the laborer's reachability check, return empty path (unreachable)
+            # For the manager, return a valid path
+            def path_side_effect(start_x, start_y, end_x, end_y):
+                if start_x == laborer.x and start_y == laborer.y:
+                    return []
+                return [(start_x, start_y), (end_x, end_y)]
+            mock_path.side_effect = path_side_effect
+
+            self.assertTrue(self.world._assign_construction_task_to_npc(manager))
+            self.assertEqual(blueprint.assigned_workers, [manager.id])
+            # The settlement check may not have been executed if the path logic shortcuts, but we want to ensure we set it up anyway
+
+    def test_reachable_local_laborer_receives_priority(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 21, 21)
+        self._fully_supply_blueprint(blueprint)
+        manager = NPC(1, 1, name="Manager")
+        manager.economic.profession = "Manager"
+        self.world.village_npcs.append(manager)
+
+        laborer = NPC(22, 22, name="Laborer")
+        laborer.economic.profession = "Laborer"
+        self.world.village_npcs.append(laborer)
+
+        # Force same settlement association
+        with patch.object(self.world, '_get_village_for_npc') as mock_village:
+            mock_village.return_value = SimpleNamespace(id=blueprint.settlement_id)
+
+        with patch.object(self.world, 'calculate_path', return_value=[(22,22), (21,21)]):
+            # Manager should defer to reachable laborer
+            self.assertFalse(self.world._assign_construction_task_to_npc(manager))
+            self.assertTrue(self.world._assign_construction_task_to_npc(laborer))
+            self.assertEqual(blueprint.assigned_workers, [laborer.id])
+
+    def test_building_placement_rejects_chunk_crossing(self):
+        from config import CHUNK_SIZE
+
+        # 1. Attempt to place a building right on the chunk border
+        border_x = CHUNK_SIZE - 2
+        border_y = CHUNK_SIZE - 2
+
+        blueprint = self.world.place_construction_blueprint("workshop", border_x, border_y)
+        self.assertIsNone(blueprint, "Building footprint crossing chunk border should be rejected.")
+        self.assertFalse(any(b.building_type == "workshop" for b in self.village.buildings), "No partial building should be created.")
+
+        # 2. Attempt to place a valid building inside the chunk
+        valid_x = 5
+        valid_y = 5
+
+        blueprint2 = self.world.place_construction_blueprint("workshop", valid_x, valid_y)
+        self.assertIsNotNone(blueprint2, "Valid in-chunk placement should succeed.")
+
     def test_completed_npc_owned_construction_preserves_ownership_and_claim(self):
         self.village.region_id = "region-test"
         owner = NPC(8, 8, name="Workshop Owner")

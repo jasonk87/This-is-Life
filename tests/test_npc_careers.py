@@ -10,6 +10,7 @@ from simulation.careers import (
     entity_has_profession,
     resolve_profession_for_building,
     set_entity_profession,
+    get_roles_for_building,
 )
 
 # Create a dummy World class that bypasses heavy initialization
@@ -173,6 +174,11 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         self.assertTrue(entity_has_capability(self.npc, "trade"))
         self.assertTrue(entity_has_profession(self.npc, "Merchant"))
         self.assertTrue(entity_has_any_profession(self.npc, ["Merchant", "Scribe"]))
+
+    def test_butcher_shop_role_resolution_overrides_generic_shop(self):
+        self.assertEqual(resolve_profession_for_building("butcher_shop", []), "Butcher")
+        self.assertEqual(resolve_profession_for_building("butcher_shop", ["Butcher"]), "Hunter")
+        self.assertEqual(get_roles_for_building("butcher_shop"), ["Butcher", "Hunter"])
 
 if __name__ == '__main__':
     unittest.main()

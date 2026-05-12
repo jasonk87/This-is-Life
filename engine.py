@@ -5844,11 +5844,14 @@ class World:
         profession = str(getattr(getattr(npc, "economic", None), "profession", "") or "").strip().lower()
         return profession in {"builder", "carpenter", "mason", "laborer", "helper", "porter", "unemployed"}
 
-    def _has_available_construction_worker(self, *, excluding_id: int | None = None) -> bool:
+    def _has_available_construction_worker(self, blueprint, *, excluding_id: int | None = None) -> bool:
         for candidate in getattr(self, "village_npcs", []):
             if getattr(candidate, "id", None) == excluding_id:
                 continue
-            if getattr(getattr(candidate, "physical", None), "is_dead", False):
+            physical = getattr(candidate, "physical", None)
+            if physical and getattr(physical, "is_dead", False):
+                continue
+            if not getattr(candidate, "is_alive", True):
                 continue
             if not self._is_construction_worker_role(candidate):
                 continue
@@ -5857,6 +5860,14 @@ class World:
             if current_task not in {TaskType.IDLE, TaskType.WANDERING, TaskType.AT_HOME, "idle_confused", ""}:
                 continue
             if getattr(schedule, "current_path", None):
+                continue
+
+            # Must be in the same settlement or reachable
+            village = self._get_village_for_npc(candidate, by_coords=True)
+            if village and blueprint.settlement_id != village.id:
+                continue
+            # Must be reachable
+            if not self.calculate_path(candidate.x, candidate.y, blueprint.x, blueprint.y):
                 continue
             return True
         return False
@@ -5874,12 +5885,12 @@ class World:
         is_owner_or_manager = profession in {"owner", "manager", "foreman"}
         if not self._is_construction_worker_role(npc) and not is_owner_or_manager:
             return False
-        if is_owner_or_manager and self._has_available_construction_worker(excluding_id=getattr(npc, "id", None)):
-            return False
 
         best_blueprint = None
         best_distance = None
         for blueprint in self._get_buildable_blueprints():
+            if is_owner_or_manager and self._has_available_construction_worker(blueprint, excluding_id=getattr(npc, "id", None)):
+                continue
             if getattr(npc, "id", None) in getattr(blueprint, "assigned_workers", []):
                 continue
             distance = abs(npc.x - blueprint.x) + abs(npc.y - blueprint.y)
@@ -6921,7 +6932,7 @@ class World:
         if blueprint.id in self.blueprints_by_id:
             self._change_map_tile((blueprint.x, blueprint.y), self._get_blueprint_tile_def(blueprint))
 
-    def place_construction_blueprint(self, recipe_key: str, x: int, y: int, *, owner_id: int | None = None, requester_id: int | None = None) -> ConstructionBlueprint | None:
+    def place_construction_blueprint(self, recipe_key: str, x: int, y: int, *, owner_id: int | None = None, requester_id: int | None = None, settlement_id: str | None = None) -> ConstructionBlueprint | None:
         recipe = CONSTRUCTION_RECIPES.get(recipe_key)
         if recipe is None:
             return None
@@ -6932,9 +6943,10 @@ class World:
         village = None
         if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
             village = getattr(self.chunks[chunk_y][chunk_x], "village", None)
-        settlement_id = getattr(village, "id", None)
+        if settlement_id is None:
+            settlement_id = getattr(village, "id", None)
         if settlement_id is not None:
-            self.ensure_settlement_territory(village)
+            self.ensure_settlement_territory(self._get_village_by_id(settlement_id) or village)
         blueprint_width = int(recipe.get("width", 1))
         blueprint_height = int(recipe.get("height", 1))
         variant_id = None
@@ -13289,7 +13301,7 @@ class World:
         if not owner:
             return "middle"
         # Player is assumed middle/rich based on wealth if we implement that, for now let's just use money
-        money = getattr(owner.inventory, "money", 0) if hasattr(owner, "inventory") else 0
+        money = getattr(owner.economic, "money", 0) if hasattr(owner, "economic") else 0
         if money > 500: return "rich"
         if money < 50: return "poor"
         return "middle"
@@ -13326,6 +13338,11 @@ class World:
     def _can_reserve_land_for_construction(self, recipe_key: str, x: int, y: int, settlement_id: str | None, variant_id: str | None = None) -> bool:
         footprint = self._construction_footprint_tiles(recipe_key, x, y, variant_id)
         if any(not self._is_claimable_terrain(tx, ty) for tx, ty in footprint):
+            return False
+        # Building MUST fit entirely within a single chunk to prevent drawing errors during rendering
+        chunk_x = x // CHUNK_SIZE
+        chunk_y = y // CHUNK_SIZE
+        if any(tx // CHUNK_SIZE != chunk_x or ty // CHUNK_SIZE != chunk_y for tx, ty in footprint):
             return False
         return not self._claim_tiles_have_conflict(footprint, "construction_reservation", settlement_id)
 
@@ -13464,7 +13481,7 @@ class World:
         if not spot:
             return
 
-        blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1])
+        blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1], settlement_id=village.id)
         if blueprint is not None:
             blueprint.settlement_id = village.id
             blueprint.refresh_status()
@@ -13483,7 +13500,7 @@ class World:
         spot = self._find_valid_building_spot(village, int(recipe.get("width", 1)), int(recipe.get("height", 1)))
         if spot is None:
             return None
-        blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1], owner_id=getattr(npc, "id", None), requester_id=getattr(npc, "id", None))
+        blueprint = self.place_construction_blueprint(project_type, spot[0], spot[1], owner_id=getattr(npc, "id", None), requester_id=getattr(npc, "id", None), settlement_id=village.id)
         if blueprint is not None:
             blueprint.settlement_id = village.id
             blueprint.refresh_status()

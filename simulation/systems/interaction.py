@@ -6,6 +6,8 @@ import dataclasses
 import uuid
 from typing import Any
 
+from config import CHUNK_SIZE
+
 
 @dataclasses.dataclass
 class ActionIntent:
@@ -121,37 +123,41 @@ class ChopTreeInteraction(ActiveInteraction):
 
         # Replace tree with stump using world's existing replace_tile logic if available
         # or manual tile replacement (which depends on specific world implementation)
-        from data.decorations import DECORATION_ITEM_DEFINITIONS
+        from data.tiles import TILE_DEFINITIONS
         from tile_types import Tile
 
-        stump_def = DECORATION_ITEM_DEFINITIONS.get("tree_stump")
+        stump_def = TILE_DEFINITIONS.get("stump_generic")
 
         if stump_def:
-            chunk_x, chunk_y = target_x // world.CHUNK_SIZE, target_y // world.CHUNK_SIZE
-            local_x, local_y = target_x % world.CHUNK_SIZE, target_y % world.CHUNK_SIZE
+            if hasattr(world, "_change_map_tile"):
+                # Use engine.py API directly if available
+                world._change_map_tile((target_x, target_y), stump_def)
+            else:
+                chunk_x, chunk_y = target_x // CHUNK_SIZE, target_y // CHUNK_SIZE
+                local_x, local_y = target_x % CHUNK_SIZE, target_y % CHUNK_SIZE
 
-            chunk = world.chunks.get(chunk_y, {}).get(chunk_x)
-            if chunk:
-                chunk.tiles[local_y][local_x] = Tile(
-                    char=stump_def["char"],
-                    color=stump_def["color"],
-                    passable=stump_def["passable"],
-                    name=stump_def["name"],
-                    properties=stump_def["properties"]
-                )
-                world.transparency_map[target_y, target_x] = not chunk.tiles[local_y][local_x].blocks_fov
+                chunk = world.chunks.get(chunk_y, {}).get(chunk_x)
+                if chunk:
+                    chunk.tiles[local_y][local_x] = Tile(
+                        char=stump_def["char"],
+                        color=stump_def["color"],
+                        passable=stump_def["passable"],
+                        name=stump_def["name"],
+                        properties=stump_def.get("properties", {})
+                    )
+                    world.transparency_map[target_y, target_x] = not chunk.tiles[local_y][local_x].blocks_fov
 
-                # Spawn logs
-                from data.items import ITEM_DEFINITIONS
-                from engine import ItemReference
+            # Spawn logs
+            from data.items import ITEM_DEFINITIONS
+            from engine import ItemReference
 
-                log_def = ITEM_DEFINITIONS.get("wood_log")
-                if log_def:
-                    world.items_on_map[(target_x, target_y)] = world.items_on_map.get((target_x, target_y)) or getattr(world, "Inventory", dict)()
-                    inventory = world.items_on_map[(target_x, target_y)]
+            log_def = ITEM_DEFINITIONS.get("raw_log")
+            if log_def:
+                world.items_on_map[(target_x, target_y)] = world.items_on_map.get((target_x, target_y)) or getattr(world, "Inventory", dict)()
+                inventory = world.items_on_map[(target_x, target_y)]
 
-                    if hasattr(inventory, "add_item_reference"):
-                        inventory.add_item_reference(ItemReference("wood_log"))
+                if hasattr(inventory, "add_item_reference"):
+                    inventory.add_item_reference(ItemReference("raw_log"))
 
         return ActionResult(
             success=True,
@@ -213,27 +219,29 @@ class InteractionResolver:
         if new_state_key and new_state_key in DECORATION_ITEM_DEFINITIONS:
             new_door_def = DECORATION_ITEM_DEFINITIONS[new_state_key]
 
-            chunk_size = getattr(world, "CHUNK_SIZE", 32)
-            chunk_x, chunk_y = target_x // chunk_size, target_y // chunk_size
-            local_x, local_y = target_x % chunk_size, target_y % chunk_size
-
-            if isinstance(world.chunks, dict):
-                chunk = world.chunks.get(chunk_y, {}).get(chunk_x)
+            if hasattr(world, "_change_map_tile"):
+                world._change_map_tile((target_x, target_y), new_door_def)
             else:
-                try:
-                    chunk = world.chunks[chunk_y][chunk_x]
-                except IndexError:
-                    chunk = None
+                chunk_x, chunk_y = target_x // CHUNK_SIZE, target_y // CHUNK_SIZE
+                local_x, local_y = target_x % CHUNK_SIZE, target_y % CHUNK_SIZE
 
-            if chunk:
-                chunk.tiles[local_y][local_x] = Tile(
-                    char=new_door_def["char"],
-                    color=new_door_def["color"],
-                    passable=new_door_def["passable"],
-                    name=new_door_def["name"],
-                    properties=new_door_def["properties"]
-                )
-                world.transparency_map[target_y, target_x] = not chunk.tiles[local_y][local_x].blocks_fov
+                if isinstance(world.chunks, dict):
+                    chunk = world.chunks.get(chunk_y, {}).get(chunk_x)
+                else:
+                    try:
+                        chunk = world.chunks[chunk_y][chunk_x]
+                    except IndexError:
+                        chunk = None
+
+                if chunk:
+                    chunk.tiles[local_y][local_x] = Tile(
+                        char=new_door_def["char"],
+                        color=new_door_def["color"],
+                        passable=new_door_def["passable"],
+                        name=new_door_def["name"],
+                        properties=new_door_def["properties"]
+                    )
+                    world.transparency_map[target_y, target_x] = not chunk.tiles[local_y][local_x].blocks_fov
 
             return ActionResult(
                 success=True,
@@ -303,15 +311,14 @@ class InteractionResolver:
             actor.sitting_on_object_at = (target_x, target_y)
             actor.leisure_timer = intent.payload.get("duration", 40)
 
-            # Create a simple Activity equivalent
-            class SimpleActivity:
-                def __init__(self, t, d):
-                    self.activity_type = t
-                    self.duration_ticks = d
-                    self.progress_ticks = 0
-                    self.associated_interaction_point = (target_x, target_y)
-
-            actor.current_activity = SimpleActivity("sitting", actor.leisure_timer)
+            start_activity(
+                actor,
+                "sitting",
+                actor.leisure_timer,
+                location=(actor.x, actor.y),
+                anchor_coords=(target_x, target_y),
+                world=world
+            )
 
             return ActionResult(
                 success=True,

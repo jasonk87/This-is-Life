@@ -33,12 +33,16 @@ class MockWorld:
         self.chunks = {0: {0: MockChunk()}}
         self.transparency_map = {}
         self.items_on_map = {}
+        self.changed_tiles = []
 
     def get_entity_by_id(self, entity_id):
         return self.actors.get(entity_id)
 
     def get_tile_at(self, x, y):
         return self.tiles.get((x, y))
+
+    def _change_map_tile(self, coords, new_tile_def):
+        self.changed_tiles.append((coords, new_tile_def))
 
 class TestInteraction(unittest.TestCase):
     def setUp(self):
@@ -50,19 +54,23 @@ class TestInteraction(unittest.TestCase):
         self.world.actors["npc"] = self.npc
 
         import data.decorations
+        import data.tiles
         data.decorations.DECORATION_ITEM_DEFINITIONS = {
             "open_door_def": {
                 "char": "'", "color": (100, 100, 100), "passable": True, "name": "open door", "properties": {"is_door": True, "is_open": True}
-            },
-            "tree_stump": {
+            }
+        }
+
+        data.tiles.TILE_DEFINITIONS = {
+            "stump_generic": {
                 "char": "s", "color": (100, 50, 0), "passable": True, "name": "tree stump", "properties": {}
             }
         }
 
         import data.items
         data.items.ITEM_DEFINITIONS = {
-            "wood_log": {
-                "name": "Wood Log"
+            "raw_log": {
+                "name": "Raw Log"
             }
         }
 
@@ -126,6 +134,15 @@ class TestInteraction(unittest.TestCase):
         self.assertIn("chop_tree", comp_res.cues_to_fire)
         self.assertTrue(any(t[0] == "tree_chopped" for t in comp_res.traces_to_log))
         self.assertNotIn(iid, self.resolver.active_interactions)
+
+        # Verify _change_map_tile was called
+        self.assertEqual(len(self.world.changed_tiles), 1)
+        self.assertEqual(self.world.changed_tiles[0][0], (11, 10))
+        self.assertEqual(self.world.changed_tiles[0][1]["name"], "tree stump")
+
+        # Verify raw_log was spawned
+        inv = self.world.items_on_map.get((11, 10))
+        self.assertIsNotNone(inv)
 
     def test_chop_tree_cancellation(self):
         self.world.tiles[(11, 10)] = MockTile(is_tree=True)

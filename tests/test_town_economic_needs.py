@@ -67,9 +67,14 @@ class TestTownEconomicNeeds(unittest.TestCase):
     def test_npc_evaluates_opportunity(self):
         from simulation.world_model import TownEconomicNeed
         from config import CHUNK_SIZE
+        from entities.base import NPC
 
-        npc = self.world.village_npcs[0]
-        village = self.world._get_village_for_npc(npc)
+        npc = NPC(0, 0, name="Test NPC")
+        self.world.village_npcs.append(npc)
+        village = self.village
+        self.world.chunks[0][0].village = village
+        npc.x = 0
+        npc.y = 0
 
         # Important: the `handle_npc_job_seeking` uses `npc.x, npc.y` to compare with the noticeboard coords.
         # But noticeboard coords might be non-integers if something is weird, though they shouldn't be.
@@ -82,6 +87,20 @@ class TestTownEconomicNeeds(unittest.TestCase):
         need = TownEconomicNeed(type="service", target_key="Blacksmith", settlement_id=village.id)
         self.world.town_board.economic_needs = [need]
         self.world.town_board.employment_tasks = []
+
+        # Need to ensure the village is properly associated with the chunks where the noticeboard is
+        cx, cy = npc.x // CHUNK_SIZE, npc.y // CHUNK_SIZE
+        if cx >= len(self.world.chunks):
+            self.world.chunk_width = cx + 1
+            for r in self.world.chunks:
+                while len(r) <= cx:
+                    r.append(self.world.chunks[0][0])
+        if cy >= len(self.world.chunks):
+            self.world.chunk_height = cy + 1
+            while len(self.world.chunks) <= cy:
+                self.world.chunks.append([self.world.chunks[0][0]] * self.world.chunk_width)
+        self.world.chunks[cy][cx].village = village
+        village.interaction_points["noticeboard"] = [(npc.x, npc.y)]
 
         res = self.world.handle_npc_job_seeking(npc)
         self.assertTrue(res, "NPC should have picked up a job")

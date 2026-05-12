@@ -1,6 +1,8 @@
 import unittest
-from engine import World
+from engine import World, NPC
 from simulation.systems.architecture import BUILDING_ARCHETYPES, generate_building
+from simulation.systems.architecture import BuildingArchetype, BlueprintVariant
+
 
 class TestBlueprintVariants(unittest.TestCase):
     def setUp(self):
@@ -64,7 +66,6 @@ class TestBlueprintVariants(unittest.TestCase):
         self.assertEqual(loaded_building.variant_id, blueprint.variant_id)
 
     def test_get_variant_fallback_behavior(self):
-        from simulation.systems.architecture import BuildingArchetype, BlueprintVariant
         # Create an archetype with some variants
         arch = BuildingArchetype("test", "test", (10, 10), [], [], [], [
             BlueprintVariant("test_rich", 10, 10, [], [], 0, [], "rich"),
@@ -81,3 +82,19 @@ class TestBlueprintVariants(unittest.TestCase):
         self.assertEqual(variant_empty.id, "default")
         self.assertEqual(variant_empty.width, 4)
         self.assertEqual(variant_empty.height, 4)
+
+    def test_wealth_variant_selection_uses_economic_money(self):
+        # Create a rich NPC
+        rich_npc = NPC(x=10, y=10, name="Rich Guy")
+        rich_npc.economic.money = 600
+        self.world.village_npcs.append(rich_npc)
+        self.assertEqual(self.world._get_owner_wealth_tier(rich_npc.id), "rich")
+
+        # Create a poor NPC
+        poor_npc = NPC(x=12, y=12, name="Poor Guy")
+        poor_npc.economic.money = 10
+        self.world.village_npcs.append(poor_npc)
+        self.assertEqual(self.world._get_owner_wealth_tier(poor_npc.id), "poor")
+
+if __name__ == "__main__":
+    unittest.main()

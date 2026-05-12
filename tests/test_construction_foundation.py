@@ -205,6 +205,56 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(self.world._assign_construction_task_to_npc(manager))
         self.assertEqual(blueprint.assigned_workers, [manager.id])
 
+    def test_construction_deferral_ignores_unreachable_workers(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 21, 21)
+        self._fully_supply_blueprint(blueprint)
+        manager = NPC(1, 1, name="Manager")
+        manager.economic.profession = "Manager"
+        self.world.village_npcs.append(manager)
+
+        laborer = NPC(25, 25, name="Laborer")
+        laborer.economic.profession = "Laborer"
+        self.world.village_npcs.append(laborer)
+
+        # Block the path so laborer cannot reach the blueprint
+        with patch.object(self.world, 'calculate_path') as mock_path:
+            # For the laborer's reachability check, return empty path (unreachable)
+            # For the manager, return a valid path
+            def path_side_effect(start_x, start_y, end_x, end_y):
+                if start_x == laborer.x and start_y == laborer.y:
+                    return []
+                return [(start_x, start_y), (end_x, end_y)]
+            mock_path.side_effect = path_side_effect
+
+            self.assertTrue(self.world._assign_construction_task_to_npc(manager))
+            self.assertEqual(blueprint.assigned_workers, [manager.id])
+
+    def test_reachable_local_laborer_receives_priority(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 21, 21)
+        self._fully_supply_blueprint(blueprint)
+        manager = NPC(1, 1, name="Manager")
+        manager.economic.profession = "Manager"
+        self.world.village_npcs.append(manager)
+
+        laborer = NPC(22, 22, name="Laborer")
+        laborer.economic.profession = "Laborer"
+        self.world.village_npcs.append(laborer)
+
+        with patch.object(self.world, 'calculate_path', return_value=[(22,22), (21,21)]):
+            # Manager should defer to reachable laborer
+            self.assertFalse(self.world._assign_construction_task_to_npc(manager))
+            self.assertTrue(self.world._assign_construction_task_to_npc(laborer))
+            self.assertEqual(blueprint.assigned_workers, [laborer.id])
+
+    def test_building_placement_rejects_chunk_crossing(self):
+        from config import CHUNK_SIZE
+        # Attempt to place a building right on the chunk border
+        border_x = CHUNK_SIZE - 2
+        border_y = CHUNK_SIZE - 2
+
+        blueprint = self.world.place_construction_blueprint("workshop", border_x, border_y)
+        self.assertIsNone(blueprint, "Building footprint crossing chunk border should be rejected.")
+
     def test_completed_npc_owned_construction_preserves_ownership_and_claim(self):
         self.village.region_id = "region-test"
         owner = NPC(8, 8, name="Workshop Owner")

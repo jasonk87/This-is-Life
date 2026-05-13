@@ -20,6 +20,7 @@ class TestSimulationSandbox(unittest.TestCase):
                 "starving_worker_interrupts_build",
                 "threat_overrides_task",
                 "target_disappears_cancels_task",
+                "extended_player_npc_parity",
             },
         )
 

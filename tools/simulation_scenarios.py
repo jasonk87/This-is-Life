@@ -771,11 +771,9 @@ def run_starving_worker_interrupts_build(seed: int, ticks: int, snapshot_config:
 
     for tick in range(1, ticks + 1):
         world.game_time = tick
-        # Emulate the brain loop deciding survival is more important
-        if npc.physical.hunger >= 90:
-            interaction = world.interaction_resolver.active_interactions.pop(iid, None)
-            if interaction:
-                interaction.cancel(world, "survival_override")
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(world)
+        if iid not in world.interaction_resolver.active_interactions:
             break
 
     trace.assert_check(tick, "work_interrupted", iid not in world.interaction_resolver.active_interactions, "Work should be interrupted by survival needs")
@@ -784,9 +782,15 @@ def run_starving_worker_interrupts_build(seed: int, ticks: int, snapshot_config:
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 
+from tools.simulation_scenarios import SimulationTrace, ScenarioResult, _create_headless_world, finalize_snapshot_artifacts, SnapshotConfig
+
+from tools.simulation_scenarios import SimulationTrace, ScenarioResult, _create_headless_world, finalize_snapshot_artifacts, SnapshotConfig
+
 def run_threat_overrides_task(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
-    from engine import NPC
+    from engine import NPC, Animal
     from simulation.systems.interaction import ActionIntent, InteractionResolver
+    import random
+    from config import CHUNK_SIZE
 
     scenario = "threat_overrides_task"
     trace = SimulationTrace()
@@ -798,10 +802,19 @@ def run_threat_overrides_task(seed: int, ticks: int, snapshot_config: SnapshotCo
 
     npc = NPC(10, 10, name="Sandbox NPC")
     world.npcs.append(npc)
+    world.village_npcs.append(npc)
 
-    threat = NPC(10, 12, name="Wolf")
-    threat.faction = "wildlife"
+    # 2 threats are required to trigger fear unless they are a Hunter.
+    threat = Animal(10, 12, animal_type="wolf")
+    threat.combat.is_hostile_to_player = True
     world.npcs.append(threat)
+    world.village_npcs.append(threat)
+
+    threat2 = Animal(11, 12, animal_type="wolf")
+    threat2.combat.is_hostile_to_player = True
+    world.npcs.append(threat2)
+    world.village_npcs.append(threat2)
+
 
     # Start a work interaction
     intent = ActionIntent(actor_id=npc.id, action_type="chop_tree", target_pos=(10, 11), source="npc")
@@ -813,18 +826,18 @@ def run_threat_overrides_task(seed: int, ticks: int, snapshot_config: SnapshotCo
 
     for tick in range(1, ticks + 1):
         world.game_time = tick
-        # Emulate threat evaluation
-        threat_nearby = True # Emulate
-        if threat_nearby:
-            interaction = world.interaction_resolver.active_interactions.pop(iid, None)
-            if interaction:
-                interaction.cancel(world, "threat_flee")
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(world)
+        if iid not in world.interaction_resolver.active_interactions:
             break
 
     trace.assert_check(tick, "work_canceled_by_threat", iid not in world.interaction_resolver.active_interactions, "Work should be canceled due to threat")
 
     trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 
 def run_target_disappears_cancels_task(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
@@ -875,6 +888,7 @@ SCENARIOS: dict[str, ScenarioCallable] = {
     "starving_worker_interrupts_build": run_starving_worker_interrupts_build,
     "threat_overrides_task": run_threat_overrides_task,
     "target_disappears_cancels_task": run_target_disappears_cancels_task,
+    "extended_player_npc_parity": run_interaction_parity_basic,
 }
 
 

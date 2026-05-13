@@ -118,7 +118,6 @@ class ChopTreeInteraction(ActiveInteraction):
         )
 
     def complete(self, world: Any) -> ActionResult:
-        actor = world.get_entity_by_id(self.actor_id)
         target_x, target_y = self.target_pos
 
         # Replace tree with stump using world's existing replace_tile logic if available
@@ -149,11 +148,11 @@ class ChopTreeInteraction(ActiveInteraction):
 
             # Spawn logs
             from data.items import ITEM_DEFINITIONS
-            from engine import ItemReference
+            from entities.items import Inventory, ItemReference
 
             log_def = ITEM_DEFINITIONS.get("raw_log")
             if log_def:
-                world.items_on_map[(target_x, target_y)] = world.items_on_map.get((target_x, target_y)) or getattr(world, "Inventory", dict)()
+                world.items_on_map[(target_x, target_y)] = world.items_on_map.get((target_x, target_y)) or Inventory()
                 inventory = world.items_on_map[(target_x, target_y)]
 
                 if hasattr(inventory, "add_item_reference"):

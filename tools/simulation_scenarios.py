@@ -679,13 +679,14 @@ def run_interaction_parity_basic(seed: int, ticks: int, snapshot_config: Snapsho
 
     # Test 1: open_door parity
     from data.decorations import DECORATION_ITEM_DEFINITIONS
-    door_def = DECORATION_ITEM_DEFINITIONS.get("wooden_door_closed", {})
-    if not door_def:
-        door_def = {"char": "+", "color": (100,100,100), "passable": False, "name": "door", "properties": {"is_door": True, "opens_to": "wooden_door_open"}}
+    door_def = DECORATION_ITEM_DEFINITIONS["wooden_door_closed"]
 
     chunk.tiles[10][11] = Tile(
-        char=door_def["char"], color=door_def["color"], passable=door_def.get("passable", False),
-        name=door_def.get("name", "door"), properties=door_def.get("properties", {"is_door": True, "opens_to": "wooden_door_open"})
+        char=door_def["char"],
+        color=door_def["color"],
+        passable=door_def["passable"],
+        name=door_def["name"],
+        properties=dict(door_def["properties"]),
     )
 
     # Player opens door
@@ -695,8 +696,11 @@ def run_interaction_parity_basic(seed: int, ticks: int, snapshot_config: Snapsho
 
     # Reset door
     chunk.tiles[10][11] = Tile(
-        char=door_def["char"], color=door_def["color"], passable=door_def.get("passable", False),
-        name=door_def.get("name", "door"), properties=door_def.get("properties", {"is_door": True, "opens_to": "wooden_door_open"})
+        char=door_def["char"],
+        color=door_def["color"],
+        passable=door_def["passable"],
+        name=door_def["name"],
+        properties=dict(door_def["properties"]),
     )
 
     # NPC opens door
@@ -704,7 +708,8 @@ def run_interaction_parity_basic(seed: int, ticks: int, snapshot_config: Snapsho
     n_res = world.interaction_resolver.resolve(n_intent, world)
     trace.assert_check(2, "npc_open_door", n_res.success, "NPC should be able to open door")
 
-    # Check traces/cues are identical
+    # Check outcomes/traces/cues are identical
+    trace.assert_check(2, "open_door_parity_outcomes", p_res.success == n_res.success, "Player and NPC should have identical outcomes")
     trace.assert_check(2, "open_door_parity_cues", p_res.cues_to_fire == n_res.cues_to_fire, "Player and NPC should emit identical cues")
 
     p_trace_types = [t[0] for t in p_res.traces_to_log]
@@ -712,13 +717,12 @@ def run_interaction_parity_basic(seed: int, ticks: int, snapshot_config: Snapsho
     trace.assert_check(2, "open_door_parity_traces", p_trace_types == n_trace_types, "Player and NPC should emit identical traces")
 
     # Test 2: chop_tree lifecycle and cancellation
-    tree_def = DECORATION_ITEM_DEFINITIONS.get("tree", {})
-    if not tree_def:
-        tree_def = {"char": "T", "color": (0,255,0), "passable": False, "name": "tree", "properties": {"is_tree": True}}
-
     chunk.tiles[11][10] = Tile(
-        char=tree_def["char"], color=tree_def["color"], passable=tree_def.get("passable", False),
-        name=tree_def.get("name", "tree"), properties=tree_def.get("properties", {"is_tree": True})
+        char="T",
+        color=(34, 139, 34),
+        passable=False,
+        name="Choppable Tree",
+        properties={"is_tree": True},
     )
 
     chop_intent = ActionIntent(actor_id=player.id, action_type="chop_tree", target_pos=(10, 11), source="player")

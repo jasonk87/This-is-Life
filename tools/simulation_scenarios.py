@@ -782,9 +782,7 @@ def run_starving_worker_interrupts_build(seed: int, ticks: int, snapshot_config:
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 
-from tools.simulation_scenarios import SimulationTrace, ScenarioResult, _create_headless_world, finalize_snapshot_artifacts, SnapshotConfig
 
-from tools.simulation_scenarios import SimulationTrace, ScenarioResult, _create_headless_world, finalize_snapshot_artifacts, SnapshotConfig
 
 def run_threat_overrides_task(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
     from engine import NPC, Animal
@@ -879,6 +877,61 @@ def run_target_disappears_cancels_task(seed: int, ticks: int, snapshot_config: S
     trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+def run_extended_player_npc_parity(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent, InteractionResolver
+    from tile_types import Tile
+
+    scenario = "extended_player_npc_parity"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    world.interaction_resolver = InteractionResolver()
+
+    player = NPC(10, 10, name="Sandbox Player")
+    world.player = player
+    world.npcs.append(player)
+
+    npc = NPC(10, 10, name="Sandbox NPC")
+    world.npcs.append(npc)
+
+    from data.decorations import DECORATION_ITEM_DEFINITIONS
+
+    # pickup_item parity
+    from entities.items import Inventory, ItemReference
+    player_inv = Inventory()
+    player_inv.add_item_reference(ItemReference("apple"))
+    world.items_on_map[(11, 10)] = player_inv
+    p_pickup = world.interaction_resolver.resolve(ActionIntent(actor_id=player.id, action_type="pickup_item", target_pos=(11, 10), source="player", payload={"item_key": "apple"}), world)
+
+    npc_inv = Inventory()
+    npc_inv.add_item_reference(ItemReference("apple"))
+    world.items_on_map[(11, 10)] = npc_inv
+    n_pickup = world.interaction_resolver.resolve(ActionIntent(actor_id=npc.id, action_type="pickup_item", target_pos=(11, 10), source="npc", payload={"item_key": "apple"}), world)
+
+    trace.assert_check(2, "pickup_item_parity_outcomes", p_pickup.success == n_pickup.success, "Player and NPC should have identical outcomes for pickup")
+
+    # sit_on_chair parity
+    door_def = DECORATION_ITEM_DEFINITIONS["wooden_chair"]
+    chunk.tiles[10][11] = Tile(char=door_def["char"], color=door_def["color"], passable=door_def["passable"], name=door_def["name"], properties=dict(door_def["properties"]))
+    p_sit = world.interaction_resolver.resolve(ActionIntent(actor_id=player.id, action_type="sit_on_chair", target_pos=(11, 10), source="player"), world)
+    n_sit = world.interaction_resolver.resolve(ActionIntent(actor_id=npc.id, action_type="sit_on_chair", target_pos=(11, 10), source="npc"), world)
+    trace.assert_check(2, "sit_on_chair_parity_outcomes", p_sit.success == n_sit.success, "Player and NPC should have identical outcomes for sit_on_chair")
+    trace.assert_check(2, "sit_on_chair_parity_traces", [t[0] for t in p_sit.traces_to_log] == [t[0] for t in n_sit.traces_to_log], "Player and NPC should emit identical traces for sit_on_chair")
+
+    # sleep_in_bed parity
+    door_def = DECORATION_ITEM_DEFINITIONS["wooden_bed"]
+    chunk.tiles[10][11] = Tile(char=door_def["char"], color=door_def["color"], passable=door_def["passable"], name=door_def["name"], properties=dict(door_def["properties"]))
+    p_sleep = world.interaction_resolver.resolve(ActionIntent(actor_id=player.id, action_type="sleep_in_bed", target_pos=(11, 10), source="player"), world)
+    n_sleep = world.interaction_resolver.resolve(ActionIntent(actor_id=npc.id, action_type="sleep_in_bed", target_pos=(11, 10), source="npc"), world)
+    trace.assert_check(2, "sleep_in_bed_parity_outcomes", p_sleep.success == n_sleep.success, "Player and NPC should have identical outcomes for sleep_in_bed")
+
+    trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
 SCENARIOS: dict[str, ScenarioCallable] = {
     "construction_basic": run_construction_basic,
     "delivery_basic": run_delivery_basic,
@@ -888,7 +941,7 @@ SCENARIOS: dict[str, ScenarioCallable] = {
     "starving_worker_interrupts_build": run_starving_worker_interrupts_build,
     "threat_overrides_task": run_threat_overrides_task,
     "target_disappears_cancels_task": run_target_disappears_cancels_task,
-    "extended_player_npc_parity": run_interaction_parity_basic,
+    "extended_player_npc_parity": run_extended_player_npc_parity,
 }
 
 

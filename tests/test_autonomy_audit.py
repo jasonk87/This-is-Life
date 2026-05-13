@@ -18,7 +18,7 @@ class TestAutonomyAudit(unittest.TestCase):
         world.village_npcs = []
 
         # We need to mock player_fov_map since it's checked by update
-        import numpy as np
+        from runtime_compat import np
         from config import WORLD_HEIGHT, WORLD_WIDTH
         world.player_fov_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), False)
 

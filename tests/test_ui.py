@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import json
 import math
 import uuid
-import numpy as np
+from runtime_compat import np
 
 import engine
 from engine import World

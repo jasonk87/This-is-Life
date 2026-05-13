@@ -61,8 +61,13 @@ def _build_numpy_fallback():
     def _build(shape, fill_value):
         if len(shape) == 1:
             return FallbackNdarray([fill_value for _ in range(shape[0])])
-        rows, cols = shape
-        return FallbackNdarray([[fill_value for _ in range(cols)] for _ in range(rows)])
+        if len(shape) == 2:
+            rows, cols = shape
+            return FallbackNdarray([[fill_value for _ in range(cols)] for _ in range(rows)])
+        if len(shape) == 3:
+            depth, rows, cols = shape
+            return FallbackNdarray([[[fill_value for _ in range(cols)] for _ in range(rows)] for _ in range(depth)])
+        return FallbackNdarray([])
 
     def _where(arr):
         ys, xs = [], []
@@ -75,6 +80,7 @@ def _build_numpy_fallback():
 
     return SimpleNamespace(
         float32=float,
+        uint8=int,
         ndarray=FallbackNdarray,
         random=_FallbackRandom(),
         zeros=lambda shape, dtype=None: _build(shape, 0 if dtype is not bool else False),

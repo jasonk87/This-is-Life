@@ -12,7 +12,15 @@ class TestSimulationSandbox(unittest.TestCase):
     def test_registry_contains_required_scenarios(self):
         self.assertGreaterEqual(
             set(SCENARIOS),
-            {"construction_basic", "delivery_basic", "hunting_food_chain", "settlement_growth"},
+            {
+                "construction_basic",
+                "delivery_basic",
+                "hunting_food_chain",
+                "settlement_growth",
+                "starving_worker_interrupts_build",
+                "threat_overrides_task",
+                "target_disappears_cancels_task",
+            },
         )
 
     def test_construction_basic_runs_headlessly_and_reports_structure(self):

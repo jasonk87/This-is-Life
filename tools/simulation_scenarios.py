@@ -657,11 +657,95 @@ def run_settlement_growth(seed: int, ticks: int, snapshot_config: SnapshotConfig
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 
 
+def run_interaction_parity_basic(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent, InteractionResolver
+    from tile_types import Tile
+
+    scenario = "interaction_parity_basic"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    world.interaction_resolver = InteractionResolver()
+
+    player = NPC(10, 10, name="Sandbox Player")
+    world.player = player
+    world.npcs.append(player)
+
+    npc = NPC(10, 10, name="Sandbox NPC")
+    world.npcs.append(npc)
+
+    # Test 1: open_door parity
+    from data.decorations import DECORATION_ITEM_DEFINITIONS
+    door_def = DECORATION_ITEM_DEFINITIONS.get("wooden_door_closed", {})
+    if not door_def:
+        door_def = {"char": "+", "color": (100,100,100), "passable": False, "name": "door", "properties": {"is_door": True, "opens_to": "wooden_door_open"}}
+
+    chunk.tiles[10][11] = Tile(
+        char=door_def["char"], color=door_def["color"], passable=door_def.get("passable", False),
+        name=door_def.get("name", "door"), properties=door_def.get("properties", {"is_door": True, "opens_to": "wooden_door_open"})
+    )
+
+    # Player opens door
+    p_intent = ActionIntent(actor_id=player.id, action_type="open_door", target_pos=(11, 10), source="player")
+    p_res = world.interaction_resolver.resolve(p_intent, world)
+    trace.assert_check(1, "player_open_door", p_res.success, "Player should be able to open door")
+
+    # Reset door
+    chunk.tiles[10][11] = Tile(
+        char=door_def["char"], color=door_def["color"], passable=door_def.get("passable", False),
+        name=door_def.get("name", "door"), properties=door_def.get("properties", {"is_door": True, "opens_to": "wooden_door_open"})
+    )
+
+    # NPC opens door
+    n_intent = ActionIntent(actor_id=npc.id, action_type="open_door", target_pos=(11, 10), source="npc")
+    n_res = world.interaction_resolver.resolve(n_intent, world)
+    trace.assert_check(2, "npc_open_door", n_res.success, "NPC should be able to open door")
+
+    # Check traces/cues are identical
+    trace.assert_check(2, "open_door_parity_cues", p_res.cues_to_fire == n_res.cues_to_fire, "Player and NPC should emit identical cues")
+
+    p_trace_types = [t[0] for t in p_res.traces_to_log]
+    n_trace_types = [t[0] for t in n_res.traces_to_log]
+    trace.assert_check(2, "open_door_parity_traces", p_trace_types == n_trace_types, "Player and NPC should emit identical traces")
+
+    # Test 2: chop_tree lifecycle and cancellation
+    tree_def = DECORATION_ITEM_DEFINITIONS.get("tree", {})
+    if not tree_def:
+        tree_def = {"char": "T", "color": (0,255,0), "passable": False, "name": "tree", "properties": {"is_tree": True}}
+
+    chunk.tiles[11][10] = Tile(
+        char=tree_def["char"], color=tree_def["color"], passable=tree_def.get("passable", False),
+        name=tree_def.get("name", "tree"), properties=tree_def.get("properties", {"is_tree": True})
+    )
+
+    chop_intent = ActionIntent(actor_id=player.id, action_type="chop_tree", target_pos=(10, 11), source="player")
+    chop_res = world.interaction_resolver.resolve(chop_intent, world)
+    trace.assert_check(3, "start_chop_tree", chop_res.success, "Should start chopping tree")
+
+    if chop_res.success and chop_res.started_interaction_id:
+        iid = chop_res.started_interaction_id
+        adv_res = world.interaction_resolver.advance_active_interaction(iid, world)
+        trace.assert_check(4, "advance_chop_tree", adv_res and adv_res.success, "Should advance tree chopping")
+
+        # Remove tree
+        chunk.tiles[11][10] = Tile(char=".", color=(0,0,0), passable=True, name="ground", properties={})
+
+        cancel_res = world.interaction_resolver.advance_active_interaction(iid, world)
+        trace.assert_check(5, "cancel_chop_tree", not cancel_res.success and cancel_res.reason == "cannot_continue", "Should cleanly cancel when tree is gone")
+
+    trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
 SCENARIOS: dict[str, ScenarioCallable] = {
     "construction_basic": run_construction_basic,
     "delivery_basic": run_delivery_basic,
     "hunting_food_chain": run_hunting_food_chain,
     "settlement_growth": run_settlement_growth,
+    "interaction_parity_basic": run_interaction_parity_basic,
 }
 
 

@@ -537,7 +537,6 @@ def run_piece_construction_interrupted(seed: int, ticks: int, snapshot_config: S
     blueprint = world.place_construction_blueprint("wooden_chair", 12, 12, settlement_id=village.id)
     if blueprint is not None:
         blueprint.required_work = 20
-        # Need to fix the component required_work too
         for comp in blueprint.components:
             comp.required_work = 20
 
@@ -548,22 +547,8 @@ def run_piece_construction_interrupted(seed: int, ticks: int, snapshot_config: S
 
     for tick in range(1, ticks + 1):
         world.game_time = tick
-
-        active_blueprint = world.blueprints_by_id.get(blueprint.id)
-        if active_blueprint:
-            if active_blueprint.has_all_materials():
-                if getattr(worker, "task_context", None) != "construction":
-                    world._assign_construction_task_to_npc(worker)
-                _move_actor_to_destination(worker, trace, tick)
-                world._handle_npc_construction_task(worker)
-            else:
-                if getattr(worker, "task_context", None) != "hauling":
-                    world._assign_haul_task_to_npc(worker)
-                _move_actor_to_destination(worker, trace, tick)
-                world._handle_npc_hauling_task(worker)
-
-        if hasattr(world, "advance_active_interactions"):
-            world.advance_active_interactions()
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(world)
 
         # Interrupt when the worker is in active interaction
         if getattr(worker.schedule, "active_interaction_id", None) is not None:

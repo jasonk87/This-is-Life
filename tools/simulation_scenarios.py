@@ -361,32 +361,13 @@ def run_construction_basic(seed: int, ticks: int, snapshot_config: SnapshotConfi
                     trace.event(tick, "path_failed", actor=worker, location=(worker.x, worker.y), target=active_blueprint.id, success=False, reason="could not assign construction task")
             _move_actor_to_destination(worker, trace, tick)
 
-            safety_counter = 0
-            while active_blueprint and safety_counter < 3000:
-                safety_counter += 1
-                interaction = world.interaction_resolver.active_interactions.get(getattr(worker.schedule, "active_interaction_id", None))
-                if not interaction:
-                    world._handle_npc_construction_task(worker)
-                    if getattr(worker.schedule, "current_destination_coords", None):
-                        worker.x, worker.y = worker.schedule.current_destination_coords
-                        worker.schedule.current_destination_coords = None
-                        worker.schedule.current_path = []
-                        world._handle_npc_construction_task(worker)
-                    interaction = world.interaction_resolver.active_interactions.get(getattr(worker.schedule, "active_interaction_id", None))
-                    if not interaction:
-                        if world.get_blueprint_at(12, 12) is None:
-                            break
-                        break
-                if interaction:
-                    interaction.advance_tick(world)
-                    work_applied = True
-                    if getattr(interaction, "remaining_work", 0) <= 0:
-                        interaction.complete(world)
-                        active_id = getattr(worker.schedule, "active_interaction_id", None)
-                        if active_id in world.interaction_resolver.active_interactions:
-                            del world.interaction_resolver.active_interactions[active_id]
-                        worker.schedule.active_interaction_id = None
-                        world._handle_npc_construction_task(worker)
+            world._handle_npc_construction_task(worker)
+            if getattr(worker, "task_context", None) == "construction" and getattr(worker.schedule, "active_interaction_id", None):
+                work_applied = True
+
+            # Since this scenario manually steps the worker instead of using run_world_tick, we must manually advance interactions.
+            if hasattr(world, "advance_active_interactions"):
+                world.advance_active_interactions()
         else:
             if getattr(worker, "task_context", None) != "hauling":
                 if not world._assign_haul_task_to_npc(worker):
@@ -565,10 +546,24 @@ def run_piece_construction_interrupted(seed: int, ticks: int, snapshot_config: S
     for item_key, count in blueprint.required_materials.items():
         world.items_on_map[(2, 2)].add_item(item_key, count)
 
-    for tick in range(ticks):
+    for tick in range(1, ticks + 1):
         world.game_time = tick
-        from simulation.systems.tick import run_world_tick
-        run_world_tick(world)
+
+        active_blueprint = world.blueprints_by_id.get(blueprint.id)
+        if active_blueprint:
+            if active_blueprint.has_all_materials():
+                if getattr(worker, "task_context", None) != "construction":
+                    world._assign_construction_task_to_npc(worker)
+                _move_actor_to_destination(worker, trace, tick)
+                world._handle_npc_construction_task(worker)
+            else:
+                if getattr(worker, "task_context", None) != "hauling":
+                    world._assign_haul_task_to_npc(worker)
+                _move_actor_to_destination(worker, trace, tick)
+                world._handle_npc_hauling_task(worker)
+
+        if hasattr(world, "advance_active_interactions"):
+            world.advance_active_interactions()
 
         # Interrupt when the worker is in active interaction
         if getattr(worker.schedule, "active_interaction_id", None) is not None:
@@ -580,6 +575,8 @@ def run_piece_construction_interrupted(seed: int, ticks: int, snapshot_config: S
             comp = blueprint.components[0]
             trace.assert_check(comp.build_progress > 0, "progress_saved", f"Component progress should be saved, got {comp.build_progress}")
             trace.assert_check(comp.status != "complete", "not_completed_early", "Component should not complete early")
+            # Verify deposited materials are intact
+            trace.assert_check(not comp.needs_material("wooden_plank"), "materials_kept", "Materials should still be inside the component inventory")
             break
 
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)

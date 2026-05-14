@@ -10210,6 +10210,42 @@ class World:
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
 
+    def advance_active_interactions(self) -> None:
+        if not hasattr(self, "interaction_resolver"):
+            return
+
+        to_remove = []
+        for interaction_id, interaction in list(self.interaction_resolver.active_interactions.items()):
+            if not interaction.can_continue(self):
+                # Optional: cancel or just remove
+                to_remove.append(interaction_id)
+                continue
+
+            result = interaction.advance_tick(self)
+
+            # Apply cues and traces from result
+            if result.cues_to_fire and hasattr(self, "visual_effects"):
+                for cue in result.cues_to_fire:
+                    if cue == "build":
+                        self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
+
+            # Since sandbox trace isn't accessible here, standard engine logs traces via `self.log_event` or ignores them unless explicitly handled by the scenario.
+
+            if getattr(interaction, "remaining_work", 1) <= 0:
+                interaction.complete(self)
+                to_remove.append(interaction_id)
+
+                # Cleanup the NPC's active interaction id if they own it
+                actor = self.get_entity_by_id(interaction.actor_id)
+                if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
+                    actor.schedule.active_interaction_id = None
+                    actor.schedule.current_path = []
+                    actor.schedule.current_destination_coords = None
+
+        for i_id in to_remove:
+            if i_id in self.interaction_resolver.active_interactions:
+                del self.interaction_resolver.active_interactions[i_id]
+
     def _handle_npc_speech(self):
         current_time = time.time()
         player_rep = self.player.social.reputation  # Get player rep once

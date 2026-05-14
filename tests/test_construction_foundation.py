@@ -152,13 +152,18 @@ class TestConstructionFoundation(unittest.TestCase):
         self.world.village_npcs.append(builder)
         self.assertTrue(self.world._assign_construction_task_to_npc(builder))
 
-        # Complete all work manually to bypass pathing logic in tests
-        for comp in blueprint.components:
-            comp.build_progress = comp.required_work
-            comp.status = "complete"
-        blueprint.refresh_status()
+        safety_counter = 0
+        while self.world.get_blueprint_at(8, 8) is not None and safety_counter < 3000:
+            safety_counter += 1
+            self.world._handle_npc_construction_task(builder)
+            if builder.schedule.current_destination_coords:
+                builder.x, builder.y = builder.schedule.current_destination_coords
+                builder.schedule.current_destination_coords = None
+                builder.schedule.current_path = []
+                self.world._handle_npc_construction_task(builder)
 
-        self.assertTrue(self.world._handle_npc_construction_task(builder))
+            self.world.advance_active_interactions()
+
         self.assertIsNone(self.world.get_blueprint_at(8, 8))
         self.assertTrue(any(b.building_type == "workshop" for b in self.village.buildings))
 

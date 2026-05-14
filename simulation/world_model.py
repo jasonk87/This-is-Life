@@ -134,8 +134,6 @@ class Building:
 
 
 @dataclass
-
-@dataclass
 class ConstructionComponent:
     id: str
     type: str

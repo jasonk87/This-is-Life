@@ -744,12 +744,204 @@ def run_interaction_parity_basic(seed: int, ticks: int, snapshot_config: Snapsho
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 
 
+def run_starving_worker_interrupts_build(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent, InteractionResolver
+
+    scenario = "starving_worker_interrupts_build"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    world.interaction_resolver = InteractionResolver()
+
+    npc = NPC(10, 10, name="Sandbox NPC")
+    npc.economic.profession = "Laborer"
+    npc.physical.hunger = 100 # Starving
+    world.npcs.append(npc)
+
+    # Start a work interaction directly to bypass normal pathing logic and force it
+    intent = ActionIntent(actor_id=npc.id, action_type="chop_tree", target_pos=(10, 11), source="npc")
+    from tile_types import Tile
+    chunk.tiles[11][10] = Tile(char="T", color=(34, 139, 34), passable=False, name="Choppable Tree", properties={"is_tree": True})
+    res = world.interaction_resolver.resolve(intent, world)
+    iid = res.started_interaction_id
+    trace.assert_check(1, "start_work", res.success, "Should start working")
+
+    for tick in range(1, ticks + 1):
+        world.game_time = tick
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(world)
+        if iid not in world.interaction_resolver.active_interactions:
+            break
+
+    trace.assert_check(tick, "work_interrupted", iid not in world.interaction_resolver.active_interactions, "Work should be interrupted by survival needs")
+
+    trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+
+def run_threat_overrides_task(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC, Animal
+    from simulation.systems.interaction import ActionIntent, InteractionResolver
+    import random
+    from config import CHUNK_SIZE
+
+    scenario = "threat_overrides_task"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    world.interaction_resolver = InteractionResolver()
+
+    npc = NPC(10, 10, name="Sandbox NPC")
+    world.npcs.append(npc)
+    world.village_npcs.append(npc)
+
+    # 2 threats are required to trigger fear unless they are a Hunter.
+    threat = Animal(10, 12, animal_type="wolf")
+    threat.combat.is_hostile_to_player = True
+    world.npcs.append(threat)
+    world.village_npcs.append(threat)
+
+    threat2 = Animal(11, 12, animal_type="wolf")
+    threat2.combat.is_hostile_to_player = True
+    world.npcs.append(threat2)
+    world.village_npcs.append(threat2)
+
+
+    # Start a work interaction
+    intent = ActionIntent(actor_id=npc.id, action_type="chop_tree", target_pos=(10, 11), source="npc")
+    from tile_types import Tile
+    chunk.tiles[11][10] = Tile(char="T", color=(34, 139, 34), passable=False, name="Choppable Tree", properties={"is_tree": True})
+    res = world.interaction_resolver.resolve(intent, world)
+    iid = res.started_interaction_id
+    trace.assert_check(1, "start_work", res.success, "Should start working")
+
+    for tick in range(1, ticks + 1):
+        world.game_time = tick
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(world)
+        if iid not in world.interaction_resolver.active_interactions:
+            break
+
+    trace.assert_check(tick, "work_canceled_by_threat", iid not in world.interaction_resolver.active_interactions, "Work should be canceled due to threat")
+
+    trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+def run_target_disappears_cancels_task(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent, InteractionResolver
+    from tile_types import Tile
+
+    scenario = "target_disappears_cancels_task"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    world.interaction_resolver = InteractionResolver()
+
+    npc = NPC(10, 10, name="Sandbox NPC")
+    world.npcs.append(npc)
+
+    chunk.tiles[11][10] = Tile(
+        char="T",
+        color=(34, 139, 34),
+        passable=False,
+        name="Choppable Tree",
+        properties={"is_tree": True},
+    )
+
+    intent = ActionIntent(actor_id=npc.id, action_type="chop_tree", target_pos=(10, 11), source="npc")
+    res = world.interaction_resolver.resolve(intent, world)
+    trace.assert_check(1, "start_work", res.success, "Should start working")
+    iid = res.started_interaction_id
+
+    # Remove tree
+    chunk.tiles[11][10] = Tile(char=".", color=(0,0,0), passable=True, name="ground", properties={})
+
+    cancel_res = world.interaction_resolver.advance_active_interaction(iid, world)
+    trace.assert_check(2, "cancel_work", not cancel_res.success and cancel_res.reason == "cannot_continue", "Should cleanly cancel when target is removed")
+    trace.assert_check(2, "interaction_removed", iid not in world.interaction_resolver.active_interactions, "Interaction should be removed from resolver")
+
+    trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+def run_extended_player_npc_parity(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent, InteractionResolver
+    from tile_types import Tile
+
+    scenario = "extended_player_npc_parity"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    world.interaction_resolver = InteractionResolver()
+
+    player = NPC(10, 10, name="Sandbox Player")
+    world.player = player
+    world.npcs.append(player)
+
+    npc = NPC(10, 10, name="Sandbox NPC")
+    world.npcs.append(npc)
+
+    from data.decorations import DECORATION_ITEM_DEFINITIONS
+
+    # pickup_item parity
+    from entities.items import Inventory, ItemReference
+    player_inv = Inventory()
+    player_inv.add_item_reference(ItemReference("apple"))
+    world.items_on_map[(11, 10)] = player_inv
+    p_pickup = world.interaction_resolver.resolve(ActionIntent(actor_id=player.id, action_type="pickup_item", target_pos=(11, 10), source="player", payload={"item_key": "apple"}), world)
+
+    npc_inv = Inventory()
+    npc_inv.add_item_reference(ItemReference("apple"))
+    world.items_on_map[(11, 10)] = npc_inv
+    n_pickup = world.interaction_resolver.resolve(ActionIntent(actor_id=npc.id, action_type="pickup_item", target_pos=(11, 10), source="npc", payload={"item_key": "apple"}), world)
+
+    trace.assert_check(2, "pickup_item_parity_outcomes", p_pickup.success == n_pickup.success, "Player and NPC should have identical outcomes for pickup")
+
+    # sit_on_chair parity
+    door_def = DECORATION_ITEM_DEFINITIONS["wooden_chair"]
+    chunk.tiles[10][11] = Tile(char=door_def["char"], color=door_def["color"], passable=door_def["passable"], name=door_def["name"], properties=dict(door_def["properties"]))
+    p_sit = world.interaction_resolver.resolve(ActionIntent(actor_id=player.id, action_type="sit_on_chair", target_pos=(11, 10), source="player"), world)
+    n_sit = world.interaction_resolver.resolve(ActionIntent(actor_id=npc.id, action_type="sit_on_chair", target_pos=(11, 10), source="npc"), world)
+    trace.assert_check(2, "sit_on_chair_parity_outcomes", p_sit.success == n_sit.success, "Player and NPC should have identical outcomes for sit_on_chair")
+    trace.assert_check(2, "sit_on_chair_parity_traces", [t[0] for t in p_sit.traces_to_log] == [t[0] for t in n_sit.traces_to_log], "Player and NPC should emit identical traces for sit_on_chair")
+
+    # sleep_in_bed parity
+    door_def = DECORATION_ITEM_DEFINITIONS["wooden_bed"]
+    chunk.tiles[10][11] = Tile(char=door_def["char"], color=door_def["color"], passable=door_def["passable"], name=door_def["name"], properties=dict(door_def["properties"]))
+    p_sleep = world.interaction_resolver.resolve(ActionIntent(actor_id=player.id, action_type="sleep_in_bed", target_pos=(11, 10), source="player"), world)
+    n_sleep = world.interaction_resolver.resolve(ActionIntent(actor_id=npc.id, action_type="sleep_in_bed", target_pos=(11, 10), source="npc"), world)
+    trace.assert_check(2, "sleep_in_bed_parity_outcomes", p_sleep.success == n_sleep.success, "Player and NPC should have identical outcomes for sleep_in_bed")
+
+    trace.event(ticks, "scenario_completed", success=all(assertion.passed for assertion in trace.assertions))
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
 SCENARIOS: dict[str, ScenarioCallable] = {
     "construction_basic": run_construction_basic,
     "delivery_basic": run_delivery_basic,
     "hunting_food_chain": run_hunting_food_chain,
     "settlement_growth": run_settlement_growth,
     "interaction_parity_basic": run_interaction_parity_basic,
+    "starving_worker_interrupts_build": run_starving_worker_interrupts_build,
+    "threat_overrides_task": run_threat_overrides_task,
+    "target_disappears_cancels_task": run_target_disappears_cancels_task,
+    "extended_player_npc_parity": run_extended_player_npc_parity,
 }
 
 

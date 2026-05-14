@@ -349,6 +349,22 @@ class InteractionResolver:
             traces_to_log=[("started_chop_tree", {"target_pos": intent.target_pos})]
         )
 
+    def cancel_active_interaction(self, interaction_id: str, world: Any, reason: str) -> ActionResult | None:
+        interaction = self.active_interactions.pop(interaction_id, None)
+        if not interaction:
+            return None
+        return interaction.cancel(world, reason=reason)
+
+    def cancel_actor_interaction(self, actor_id: str | int, world: Any, reason: str) -> ActionResult | None:
+        found_id = None
+        for iid, interaction in self.active_interactions.items():
+            if interaction.intent.actor_id == actor_id:
+                found_id = iid
+                break
+        if found_id:
+            return self.cancel_active_interaction(found_id, world, reason)
+        return None
+
     def advance_active_interaction(self, interaction_id: str, world: Any) -> ActionResult | None:
         interaction = self.active_interactions.get(interaction_id)
         if not interaction:

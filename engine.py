@@ -3510,6 +3510,8 @@ class World:
                         npc.schedule.current_path = []
 
             if npc.is_frightened:
+                if getattr(self, "interaction_resolver", None):
+                    self.interaction_resolver.cancel_actor_interaction(npc.id, self, reason="threat_flee")
                 threats_still_visible = False
                 if npc.id in self.npc_fov_maps:
                     fov_map = self.npc_fov_maps[npc.id]
@@ -6162,6 +6164,8 @@ class World:
         )
 
     def _handle_npc_survival_need(self, npc: NPC, *, need_type: str, urgent_threshold: int, desperate_threshold: int) -> bool:
+        if getattr(self, "interaction_resolver", None):
+            self.interaction_resolver.cancel_actor_interaction(npc.id, self, reason="survival_override")
         current_value = getattr(npc.physical, need_type, 0)
         seeking_task = "seeking_water" if need_type == "thirst" else "seeking_food"
         current_activity = getattr(npc, "current_activity", None)

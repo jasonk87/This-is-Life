@@ -763,7 +763,7 @@ def load_custom_tileset():
     # Load combined DawnLike tiles
     try:
         from PIL import Image
-        import numpy as np
+        from runtime_compat import np
         img = Image.open(TILESET_PATH).convert("RGBA")
         arr = np.array(img)
 

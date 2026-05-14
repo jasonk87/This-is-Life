@@ -10214,37 +10214,30 @@ class World:
         if not hasattr(self, "interaction_resolver"):
             return
 
-        to_remove = []
-        for interaction_id, interaction in list(self.interaction_resolver.active_interactions.items()):
-            if not interaction.can_continue(self):
-                # Optional: cancel or just remove
-                to_remove.append(interaction_id)
+        # Iterate a copy of keys so we can safely remove from the dict during advance
+        for interaction_id in list(self.interaction_resolver.active_interactions.keys()):
+            interaction = self.interaction_resolver.active_interactions.get(interaction_id)
+            if not interaction:
                 continue
 
-            result = interaction.advance_tick(self)
+            result = self.interaction_resolver.advance_active_interaction(interaction_id, self)
+            if result:
+                # Apply cues and traces from result
+                if result.cues_to_fire and hasattr(self, "visual_effects"):
+                    for cue in result.cues_to_fire:
+                        if cue == "build":
+                            self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
 
-            # Apply cues and traces from result
-            if result.cues_to_fire and hasattr(self, "visual_effects"):
-                for cue in result.cues_to_fire:
-                    if cue == "build":
-                        self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
-
-            # Since sandbox trace isn't accessible here, standard engine logs traces via `self.log_event` or ignores them unless explicitly handled by the scenario.
-
-            if getattr(interaction, "remaining_work", 1) <= 0:
-                interaction.complete(self)
-                to_remove.append(interaction_id)
-
-                # Cleanup the NPC's active interaction id if they own it
-                actor = self.get_entity_by_id(interaction.actor_id)
-                if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
-                    actor.schedule.active_interaction_id = None
-                    actor.schedule.current_path = []
-                    actor.schedule.current_destination_coords = None
-
-        for i_id in to_remove:
-            if i_id in self.interaction_resolver.active_interactions:
-                del self.interaction_resolver.active_interactions[i_id]
+                # Check if it was completed or cancelled
+                if interaction_id not in self.interaction_resolver.active_interactions:
+                    # It was removed! Let's clean up the NPC's schedule
+                    actor = self.get_entity_by_id(interaction.actor_id)
+                    if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
+                        actor.schedule.active_interaction_id = None
+                        actor.schedule.current_path = []
+                        actor.schedule.current_destination_coords = None
+                        # Allow them to re-evaluate what to do next
+                        self._handle_npc_construction_task(actor)
 
     def _handle_npc_speech(self):
         current_time = time.time()

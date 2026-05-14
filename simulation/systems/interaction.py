@@ -238,8 +238,13 @@ class BuildInteraction(ActiveInteraction):
             payload={"blueprint_id": self.blueprint_id, "component_id": self.component_id}
         )
 
-    def cancel(self, world: Any, reason: str) -> None:
-        pass
+    def cancel(self, world: Any, reason: str) -> ActionResult:
+        return ActionResult(
+            success=False,
+            intent=self._original_intent(),
+            reason=reason,
+            traces_to_log=[("build_cancelled", {"blueprint_id": self.blueprint_id, "component_id": self.component_id, "reason": reason})]
+        )
 
     def complete(self, world: Any) -> ActionResult:
         return ActionResult(

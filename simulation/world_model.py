@@ -134,7 +134,55 @@ class Building:
 
 
 @dataclass
+
+@dataclass
+class ConstructionComponent:
+    id: str
+    type: str
+    x: int
+    y: int
+    required_materials: dict[str, int]
+    deposited_inventory: Inventory = field(default_factory=Inventory)
+    required_work: int = 100
+    build_progress: int = 0
+    status: str = "pending"  # pending, building, complete
+
+    def __post_init__(self):
+        if not isinstance(self.deposited_inventory, Inventory):
+            self.deposited_inventory = Inventory(self.deposited_inventory or {})
+
+    def remaining_materials(self) -> dict[str, int]:
+        return {
+            item_key: max(0, int(required_qty) - self.deposited_inventory.get(item_key, 0))
+            for item_key, required_qty in self.required_materials.items()
+            if max(0, int(required_qty) - self.deposited_inventory.get(item_key, 0)) > 0
+        }
+
+    def needs_material(self, item_key: str) -> bool:
+        return self.remaining_materials().get(item_key, 0) > 0
+
+    def has_all_materials(self) -> bool:
+        return sum(self.remaining_materials().values()) == 0
+
+    def deposit_item_reference(self, item_reference) -> bool:
+        if item_reference is None or not self.needs_material(item_reference.key):
+            return False
+        self.deposited_inventory.add_item_reference(item_reference)
+        return True
+
+    def apply_work(self, amount: int) -> bool:
+        if not self.has_all_materials() or self.status == "complete":
+            return False
+        self.status = "building"
+        self.build_progress = min(self.required_work, self.build_progress + max(0, int(amount)))
+        if self.build_progress >= self.required_work:
+            self.status = "complete"
+        return self.status == "complete"
+
+
+@dataclass
 class ConstructionBlueprint:
+
     x: int
     y: int
     target_build: str
@@ -159,6 +207,8 @@ class ConstructionBlueprint:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deposited_inventory: Inventory = field(default_factory=Inventory)
     variant_id: str | None = None
+    components: list[ConstructionComponent] = field(default_factory=list)
+
 
     STAGES: ClassVar[tuple[str, ...]] = ("planning", "foundation", "framing", "finishing", "complete")
 
@@ -171,18 +221,53 @@ class ConstructionBlueprint:
         self.char = primary_material_def.get("char", fallback["char"])
         self.color = primary_material_def.get("color", fallback["color"])
         self.name = f"{self.target_build.replace('_', ' ').title()} Construction Site"
+
+        if not self.components:
+            # Distribute materials over the components evenly
+            total_components = self.width * self.height
+            mat_per_comp = {}
+            mat_rem = {}
+            for k, v in self.required_materials.items():
+                mat_per_comp[k] = v // total_components
+                mat_rem[k] = v % total_components
+
+            for cy in range(self.height):
+                for cx in range(self.width):
+                    comp_mats = mat_per_comp.copy()
+                    for k in list(mat_rem.keys()):
+                        if mat_rem[k] > 0:
+                            comp_mats[k] = comp_mats.get(k, 0) + 1
+                            mat_rem[k] -= 1
+
+                    # Remove empty requirements
+                    comp_mats = {k: v for k, v in comp_mats.items() if v > 0}
+
+                    comp = ConstructionComponent(
+                        id=str(uuid.uuid4()),
+                        type="foundation",
+                        x=self.x + cx,
+                        y=self.y + cy,
+                        required_materials=comp_mats,
+                        required_work=max(10, self.required_work // total_components)
+                    )
+                    self.components.append(comp)
+
         self.refresh_status()
 
     @property
     def delivered_materials(self) -> Inventory:
-        return self.deposited_inventory
+        items = {}
+        for comp in self.components:
+            for item_key, qty in comp.deposited_inventory.items():
+                items[item_key] = items.get(item_key, 0) + qty
+        return Inventory(items)
 
     def remaining_materials(self) -> dict[str, int]:
-        return {
-            item_key: max(0, int(required_qty) - self.deposited_inventory.get(item_key, 0))
-            for item_key, required_qty in self.required_materials.items()
-            if max(0, int(required_qty) - self.deposited_inventory.get(item_key, 0)) > 0
-        }
+        remaining = {}
+        for comp in self.components:
+            for k, v in comp.remaining_materials().items():
+                remaining[k] = remaining.get(k, 0) + v
+        return remaining
 
     def needs_material(self, item_key: str) -> bool:
         return self.deposited_inventory.get(item_key, 0) < int(self.required_materials.get(item_key, 0))
@@ -217,14 +302,33 @@ class ConstructionBlueprint:
         else:
             self.construction_stage = "foundation"
 
-    def deposit_item_reference(self, item_reference) -> bool:
-        if item_reference is None or not self.needs_material(item_reference.key):
+    def deposit_item_reference(self, item_reference, component_id: str | None = None) -> bool:
+        if item_reference is None:
             return False
-        self.deposited_inventory.add_item_reference(item_reference)
-        self.refresh_status()
-        return True
+        if component_id:
+            for comp in self.components:
+                if comp.id == component_id:
+                    if comp.deposit_item_reference(item_reference):
+                        self.deposited_inventory.add_item_reference(item_reference)
+                        self.refresh_status()
+                        return True
+            return False
+        # Fallback to the first component that needs it
+        for comp in self.components:
+            if comp.deposit_item_reference(item_reference):
+                self.deposited_inventory.add_item_reference(item_reference)
+                self.refresh_status()
+                return True
+        return False
 
-    def apply_work(self, amount: int) -> bool:
+    def apply_work(self, amount: int, component_id: str | None = None) -> bool:
+        if component_id:
+            for comp in self.components:
+                if comp.id == component_id:
+                    if comp.apply_work(amount):
+                        self.refresh_status()
+                    return True
+        # Original fallback apply to overall if component_id not given
         if not self.has_all_materials() or self.status == "complete":
             self.refresh_status()
             return False
@@ -281,6 +385,7 @@ class HaulTask:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     assigned_entity_id: int | None = None
     status: str = "open"
+    component_id: str | None = None
 
 
 @dataclass
@@ -361,16 +466,18 @@ class TownBoard:
         self.delivery_tasks: list[DeliveryTask] = []
 
     def post_blueprint(self, blueprint: ConstructionBlueprint) -> None:
-        for item_key, remaining_qty in blueprint.remaining_materials().items():
-            for _ in range(max(0, int(remaining_qty))):
-                self.haul_tasks.append(
-                    HaulTask(
-                        blueprint_id=blueprint.id,
-                        item_key=item_key,
-                        destination_x=blueprint.x,
-                        destination_y=blueprint.y,
+        for comp in blueprint.components:
+            for item_key, remaining_qty in comp.remaining_materials().items():
+                for _ in range(max(0, int(remaining_qty))):
+                    self.haul_tasks.append(
+                        HaulTask(
+                            blueprint_id=blueprint.id,
+                            item_key=item_key,
+                            destination_x=comp.x,
+                            destination_y=comp.y,
+                            component_id=comp.id
+                        )
                     )
-                )
 
     def get_open_tasks(self, blueprint_id: str | None = None) -> list[HaulTask]:
         tasks = [task for task in self.haul_tasks if task.status == "open"]

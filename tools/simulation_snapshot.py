@@ -271,14 +271,24 @@ def _draw_blueprints(canvas: SnapshotCanvas, world: Any) -> None:
         width = int(getattr(blueprint, "width", 1))
         height = int(getattr(blueprint, "height", 1))
         color = _asset_color(ITEM_SPRITES.get(next(iter(getattr(blueprint, "required_materials", {}) or {}), "raw_log")))
-        canvas.rect(x, y, width, height, "C", color)
-        # Make the footprint edges clear for layout inspection.
-        for tx in range(x, x + width):
-            canvas.set(tx, y, "C", (245, 220, 75))
-            canvas.set(tx, y + height - 1, "C", (245, 220, 75))
-        for ty in range(y, y + height):
-            canvas.set(x, ty, "C", (245, 220, 75))
-            canvas.set(x + width - 1, ty, "C", (245, 220, 75))
+
+        components = getattr(blueprint, "components", [])
+        if components:
+            for comp in components:
+                cx, cy = getattr(comp, "x", x), getattr(comp, "y", y)
+                status = getattr(comp, "status", "pending")
+                comp_char = "#" if status == "complete" else ("c" if status == "building" else "C")
+                comp_color = (150, 150, 150) if status == "complete" else color
+                canvas.set(cx, cy, comp_char, comp_color)
+        else:
+            canvas.rect(x, y, width, height, "C", color)
+            # Make the footprint edges clear for layout inspection.
+            for tx in range(x, x + width):
+                canvas.set(tx, y, "C", (245, 220, 75))
+                canvas.set(tx, y + height - 1, "C", (245, 220, 75))
+            for ty in range(y, y + height):
+                canvas.set(x, ty, "C", (245, 220, 75))
+                canvas.set(x + width - 1, ty, "C", (245, 220, 75))
 
 
 def _draw_actors(canvas: SnapshotCanvas, world: Any, overlays: set[str]) -> None:

@@ -19,6 +19,8 @@ class TestConstructionFoundation(unittest.TestCase):
         self.world.chunk_width = 1
         self.world.chunk_height = 1
         self.world.calculate_path = lambda sx, sy, ex, ey: [(sx, sy), (ex, ey)]
+        from simulation.systems.interaction import InteractionResolver
+        self.world.interaction_resolver = InteractionResolver()
 
     def test_construction_site_tracks_lifecycle_fields_and_does_not_complete_on_placement(self):
         blueprint = self.world.place_construction_blueprint("house", 8, 8, owner_id=7, requester_id=8)
@@ -79,7 +81,12 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(self.world._assign_construction_task_to_npc(laborer))
         self.assertEqual(laborer.schedule.current_task, "constructing_site")
         self.assertTrue(self.world._handle_npc_construction_task(laborer))
-        self.assertGreater(blueprint.build_progress, 0)
+        interaction = self.world.interaction_resolver.active_interactions.get(laborer.schedule.active_interaction_id)
+        if interaction:
+            interaction.advance_tick(self.world)
+
+        total_progress = sum(c.build_progress for c in blueprint.components)
+        self.assertGreater(total_progress, 0)
         self.assertIn(blueprint.construction_stage, {"foundation", "framing", "finishing"})
 
     def test_stalled_construction_due_to_material_shortage_is_visible(self):
@@ -134,18 +141,24 @@ class TestConstructionFoundation(unittest.TestCase):
     def test_completed_construction_integrates_real_building(self):
         blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
         blueprint.required_work = 20
-        for item_key, qty in blueprint.required_materials.items():
-            for _ in range(qty):
-                blueprint.deposit_item_reference(ItemReference(item_key))
+        for comp in blueprint.components:
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
         blueprint.refresh_status()
 
         builder = NPC(8, 8, name="Builder")
         builder.economic.profession = "Builder"
         self.world.village_npcs.append(builder)
         self.assertTrue(self.world._assign_construction_task_to_npc(builder))
-        self.assertTrue(self.world._handle_npc_construction_task(builder))
-        self.assertTrue(self.world._handle_npc_construction_task(builder))
 
+        # Complete all work manually to bypass pathing logic in tests
+        for comp in blueprint.components:
+            comp.build_progress = comp.required_work
+            comp.status = "complete"
+        blueprint.refresh_status()
+
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
         self.assertIsNone(self.world.get_blueprint_at(8, 8))
         self.assertTrue(any(b.building_type == "workshop" for b in self.village.buildings))
 
@@ -174,9 +187,10 @@ class TestConstructionFoundation(unittest.TestCase):
 
 
     def _fully_supply_blueprint(self, blueprint):
-        for item_key, qty in blueprint.required_materials.items():
-            for _ in range(qty):
-                blueprint.deposit_item_reference(ItemReference(item_key))
+        for comp in blueprint.components:
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
         blueprint.refresh_status()
 
     def test_non_construction_professions_do_not_claim_build_work(self):

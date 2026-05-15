@@ -81,9 +81,8 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(self.world._assign_construction_task_to_npc(laborer))
         self.assertEqual(laborer.schedule.current_task, "constructing_site")
         self.assertTrue(self.world._handle_npc_construction_task(laborer))
-        interaction = self.world.interaction_resolver.active_interactions.get(laborer.schedule.active_interaction_id)
-        if interaction:
-            interaction.advance_tick(self.world)
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(self.world)
 
         total_progress = sum(c.build_progress for c in blueprint.components)
         self.assertGreater(total_progress, 0)
@@ -152,17 +151,25 @@ class TestConstructionFoundation(unittest.TestCase):
         self.world.village_npcs.append(builder)
         self.assertTrue(self.world._assign_construction_task_to_npc(builder))
 
+        from simulation.systems.tick import run_world_tick
+
         safety_counter = 0
         while self.world.get_blueprint_at(8, 8) is not None and safety_counter < 3000:
             safety_counter += 1
+
+            # The test normally calls `_handle_npc_construction_task` directly because it mocks the schedule.
+            # But the reviewer requested we use `run_world_tick`.
+            # We can still manually call the specific task logic since that's what `process_macro_daily_tick` would do.
             self.world._handle_npc_construction_task(builder)
+
             if builder.schedule.current_destination_coords:
                 builder.x, builder.y = builder.schedule.current_destination_coords
                 builder.schedule.current_destination_coords = None
                 builder.schedule.current_path = []
                 self.world._handle_npc_construction_task(builder)
 
-            self.world.advance_active_interactions()
+            # This is the vital part: The tick loop naturally advances the interaction!
+            run_world_tick(self.world)
 
         self.assertIsNone(self.world.get_blueprint_at(8, 8))
         self.assertTrue(any(b.building_type == "workshop" for b in self.village.buildings))

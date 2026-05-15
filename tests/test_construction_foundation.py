@@ -137,6 +137,35 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertEqual(blueprint.requester_id, foreman.id)
         self.assertEqual(blueprint.settlement_id, self.village.id)
 
+    def test_construction_advances_through_run_world_tick(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        blueprint.required_work = 20
+        for comp in blueprint.components:
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+
+        # Call it once to initiate the interaction
+        self.world._handle_npc_construction_task(builder)
+        self.assertIsNotNone(builder.schedule.active_interaction_id)
+
+        # Now use purely run_world_tick to advance it
+        from simulation.systems.tick import run_world_tick
+
+        # Before tick
+        comp = blueprint.components[0]
+        initial_progress = comp.build_progress
+
+        run_world_tick(self.world)
+
+        self.assertGreater(comp.build_progress, initial_progress)
+
     def test_completed_construction_integrates_real_building(self):
         blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
         blueprint.required_work = 20

@@ -5993,16 +5993,15 @@ class World:
             target_pos=coords,
             payload={"blueprint_id": blueprint.id, "component_id": target_comp.id}
         )
+
         result = self.interaction_resolver.resolve(intent, self)
+
 
         if result.success and result.started_interaction_id:
             npc.schedule.active_interaction_id = result.started_interaction_id
             npc.schedule.current_task = "active_interaction"
             npc.current_sub_task = f"Building {blueprint.construction_stage}"
             return True
-        else:
-            print("RESOLVE FAILED:", result)
-
         return False
 
     def _fail_delivery_for_npc(self, npc: NPC, task, *, drop_carried_item: bool = False) -> None:
@@ -10236,8 +10235,9 @@ class World:
                         actor.schedule.active_interaction_id = None
                         actor.schedule.current_path = []
                         actor.schedule.current_destination_coords = None
-                        # Allow them to re-evaluate what to do next
-                        self._handle_npc_construction_task(actor)
+                        # Allow them to re-evaluate what to do next if they were constructing
+                        if getattr(actor, "task_context", None) == "construction":
+                            self._handle_npc_construction_task(actor)
 
     def _handle_npc_speech(self):
         current_time = time.time()

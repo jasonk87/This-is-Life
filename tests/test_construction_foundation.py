@@ -151,19 +151,35 @@ class TestConstructionFoundation(unittest.TestCase):
         self.world.village_npcs.append(builder)
         self.assertTrue(self.world._assign_construction_task_to_npc(builder))
 
-        # Call it once to initiate the interaction
-        self.world._handle_npc_construction_task(builder)
-        self.assertIsNotNone(builder.schedule.active_interaction_id)
-
-        # Now use purely run_world_tick to advance it
         from simulation.systems.tick import run_world_tick
 
-        # Before tick
         comp = blueprint.components[0]
         initial_progress = comp.build_progress
+        self.assertEqual(initial_progress, 0)
 
-        run_world_tick(self.world)
+        found_active_interaction = False
+        completed = False
 
+        for _ in range(100):
+            if getattr(builder.schedule, "active_interaction_id", None) is None:
+                self.world._handle_npc_construction_task(builder)
+                if getattr(builder.schedule, "current_destination_coords", None):
+                    builder.x, builder.y = builder.schedule.current_destination_coords
+                    builder.schedule.current_destination_coords = None
+                    builder.schedule.current_path = []
+                self.world._handle_npc_construction_task(builder)
+
+            run_world_tick(self.world)
+
+            if getattr(builder.schedule, "active_interaction_id", None):
+                found_active_interaction = True
+
+            if comp.status == "complete":
+                completed = True
+                break
+
+        self.assertTrue(found_active_interaction, "Builder did not start an interaction")
+        self.assertTrue(completed, "Component did not complete naturally via ticks")
         self.assertGreater(comp.build_progress, initial_progress)
 
     def test_completed_construction_integrates_real_building(self):

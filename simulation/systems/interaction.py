@@ -174,14 +174,12 @@ class ChopTreeInteraction(ActiveInteraction):
         )
 
 
-
 class BuildInteraction(ActiveInteraction):
     def __init__(self, intent: ActionIntent):
         super().__init__(intent)
         self.blueprint_id = intent.payload.get("blueprint_id")
         self.component_id = intent.payload.get("component_id")
         self.animation_cue = "build"
-        # We start with some required work, but we will sync it with the component in can_start.
         self.remaining_work = 0
 
     def can_start(self, world: Any) -> bool:
@@ -252,7 +250,6 @@ class BuildInteraction(ActiveInteraction):
             intent=self._original_intent(),
             traces_to_log=[("component_completed", {"blueprint_id": self.blueprint_id, "component_id": self.component_id})]
         )
-
 
 class InteractionResolver:
     def __init__(self):

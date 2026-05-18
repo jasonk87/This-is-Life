@@ -203,6 +203,13 @@ class BuildInteraction(ActiveInteraction):
         if dx > 1 or dy > 1:
             return False
 
+        claim_available = getattr(world, "_construction_component_available_for_actor", None)
+        claim_component = getattr(world, "_claim_construction_component", None)
+        if callable(claim_available) and not claim_available(blueprint, comp, actor):
+            return False
+        if callable(claim_component) and not claim_component(blueprint, comp, actor, reason="build_interaction"):
+            return False
+
         self.remaining_work = max(1, comp.required_work - comp.build_progress)
 
         return True
@@ -237,6 +244,11 @@ class BuildInteraction(ActiveInteraction):
         )
 
     def cancel(self, world: Any, reason: str) -> ActionResult:
+        if reason in {"cannot_continue", "blueprint_not_found", "component_unavailable"}:
+            blueprint = world.blueprints_by_id.get(self.blueprint_id)
+            releaser = getattr(world, "_release_construction_component_claim", None)
+            if callable(releaser):
+                releaser(blueprint, self.component_id, self.actor_id, reason=f"build_cancelled:{reason}")
         return ActionResult(
             success=False,
             intent=self._original_intent(),
@@ -245,6 +257,11 @@ class BuildInteraction(ActiveInteraction):
         )
 
     def complete(self, world: Any) -> ActionResult:
+        blueprint = world.blueprints_by_id.get(self.blueprint_id)
+        component = next((c for c in getattr(blueprint, "components", []) if c.id == self.component_id), None) if blueprint else None
+        recorder = getattr(world, "_record_component_claim_trace", None)
+        if callable(recorder) and component is not None:
+            recorder("component_claim_released", blueprint, component, self.actor_id, reason="component_completed")
         return ActionResult(
             success=True,
             intent=self._original_intent(),
@@ -429,6 +446,16 @@ class InteractionResolver:
         )
 
     def _resolve_build(self, intent: ActionIntent, world: Any, actor: Any) -> ActionResult:
+        blueprint_id = intent.payload.get("blueprint_id")
+        component_id = intent.payload.get("component_id")
+        for active in self.active_interactions.values():
+            if (
+                getattr(active, "action_type", None) == "build"
+                and getattr(active, "blueprint_id", None) == blueprint_id
+                and getattr(active, "component_id", None) == component_id
+            ):
+                return ActionResult(success=False, intent=intent, reason="component_already_building")
+
         interaction = BuildInteraction(intent)
         if not interaction.can_start(world):
             return ActionResult(success=False, intent=intent, reason="cannot_start")

@@ -4020,11 +4020,48 @@ class World:
         return output
 
 
+    def _warn_simulation_validation(self, warning_type: str, key, message: str, *, actor=None, metadata: dict | None = None, cooldown_ticks: int = 120) -> bool:
+        from simulation.validation import emit_validation_warning
+
+        return emit_validation_warning(
+            self,
+            warning_type,
+            key,
+            message,
+            cooldown_ticks=cooldown_ticks,
+            actor=actor,
+            metadata=metadata,
+        )
+
+    def _abandon_invalid_work_sub_task(self, npc: NPC, *, reason: str, sub_task_data: dict | None = None, metadata: dict | None = None) -> None:
+        details = dict(metadata or {})
+        if sub_task_data:
+            details.setdefault("sub_task_id", sub_task_data.get("id"))
+            details.setdefault("target_zone_tag", sub_task_data.get("target_zone_tag"))
+        self._warn_simulation_validation(
+            "task_abandoned",
+            (getattr(npc, "id", None), reason, details.get("sub_task_id")),
+            f"{getattr(npc, 'name', 'NPC')} abandoned invalid work task: {reason}",
+            actor=npc,
+            metadata=details,
+        )
+        npc.clear_work_sub_task_state()
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None
+        npc.task_target_coords = None
+        npc._work_validation_retry_after_tick = getattr(self, "game_time", 0) + 120
+
     def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
         """Determines the global target coordinates for a given sub-task."""
         target_zone_tag = sub_task_data.get("target_zone_tag")
         if not target_zone_tag:
-            # self.add_message_to_chat_log(f"Error: Sub-task {sub_task_data.get('id')} for {npc.name} has no target_zone_tag.")
+            self._warn_simulation_validation(
+                "invalid_subtask",
+                (getattr(work_building, "id", None), sub_task_data.get("id"), "missing_target_zone_tag"),
+                "Work sub-task is missing target_zone_tag.",
+                actor=npc,
+                metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id")},
+            )
             return None
 
         if target_zone_tag == "corpse":
@@ -4091,12 +4128,24 @@ class World:
         elif npc.economic.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
-                # self.add_message_to_chat_log(f"Warning: Farm {work_building.id} has no field_patch zone defined.")
+                self._warn_simulation_validation(
+                    "missing_zone",
+                    (getattr(work_building, "id", None), "field_patch"),
+                    "Farm work task requires a field_patch zone, but none is defined.",
+                    actor=npc,
+                    metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "zone": "field_patch"},
+                )
                 return None
 
             target_tile_type_key = sub_task_data.get("target_tile_type_key") # e.g., "plains", "tilled_soil"
             if not target_tile_type_key:
-                # self.add_message_to_chat_log(f"Error: Farmer sub-task {sub_task_data['id']} missing 'target_tile_type_key'.")
+                self._warn_simulation_validation(
+                    "invalid_subtask",
+                    (getattr(work_building, "id", None), sub_task_data.get("id"), "missing_target_tile_type_key"),
+                    "Farmer work sub-task is missing target_tile_type_key.",
+                    actor=npc,
+                    metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "zone": "field_patch"},
+                )
                 return None
 
             # Specific check for "plant_seeds": ensure seeds are available BEFORE finding a tile
@@ -4104,7 +4153,13 @@ class World:
                 seeds_to_consume = sub_task_data.get("consumes_item_from_workplace", {})
                 seed_item_key = next(iter(seeds_to_consume), None) # Get the first seed type key
                 if not seed_item_key or work_building.building_inventory.get(seed_item_key, 0) < seeds_to_consume[seed_item_key]:
-                    # self.add_message_to_chat_log(f"Debug: {npc.name} wants to plant seeds, but farm has no {seed_item_key}.")
+                    self._warn_simulation_validation(
+                        "missing_resource",
+                        (getattr(work_building, "id", None), sub_task_data.get("id"), seed_item_key),
+                        "Farm work task requires seeds that are not available.",
+                        actor=npc,
+                        metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "item_key": seed_item_key},
+                    )
                     return None # Cannot plant if no seeds
 
             # Shuffle to vary the choice of tile a bit if multiple are suitable
@@ -4128,7 +4183,13 @@ class World:
 
                     if not is_already_targeted:
                         return (tx, ty)
-            # self.add_message_to_chat_log(f"Debug: {npc.name} could not find suitable '{expected_tile_name}' tile in field_patch for {sub_task_data['id']}.")
+            self._warn_simulation_validation(
+                "missing_tile",
+                (getattr(work_building, "id", None), sub_task_data.get("id"), target_tile_type_key),
+                "Work task could not find a suitable tile in its zone.",
+                actor=npc,
+                metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "target_tile_type_key": target_tile_type_key, "expected_tile_name": expected_tile_name},
+            )
             return None
         else:
             # Check for anchor usage for these indoor work tags first
@@ -5642,6 +5703,71 @@ class World:
             return self.player
         return None
 
+    def _record_component_claim_trace(self, trace_type: str, blueprint: ConstructionBlueprint, component, actor_id=None, *, reason: str | None = None) -> None:
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if trace_log is None:
+            trace_log = []
+            setattr(self, "interaction_trace_log", trace_log)
+        metadata = {
+            "blueprint_id": getattr(blueprint, "id", None),
+            "component_id": getattr(component, "id", None),
+            "actor_id": actor_id,
+            "reason": reason,
+        }
+        trace_log.append({
+            "tick": getattr(self, "game_time", None),
+            "interaction_id": None,
+            "actor_id": actor_id,
+            "action_type": "construction_claim",
+            "trace_type": trace_type,
+            "metadata": metadata,
+        })
+
+    def _get_blueprint_component(self, blueprint: ConstructionBlueprint | None, component_id: str | None):
+        if blueprint is None or component_id is None:
+            return None
+        return next((comp for comp in getattr(blueprint, "components", []) if comp.id == component_id), None)
+
+    def _expire_component_claim_if_needed(self, blueprint: ConstructionBlueprint, component) -> bool:
+        actor_id = getattr(component, "claimed_by_actor_id", None)
+        if actor_id is None:
+            return False
+        actor = self._find_npc_by_id(actor_id)
+        actor_unavailable = actor is None or getattr(getattr(actor, "physical", None), "is_dead", False) or not getattr(actor, "is_alive", True)
+        expired = component.expire_claim_if_needed(getattr(self, "game_time", None))
+        if not expired and actor_unavailable:
+            expired = component.release_claim(actor_id)
+        if expired:
+            self._record_component_claim_trace("component_claim_expired", blueprint, component, actor_id, reason="actor_unavailable" if actor_unavailable else "expired")
+        return expired
+
+    def _claim_construction_component(self, blueprint: ConstructionBlueprint, component, actor, *, reason: str) -> bool:
+        actor_id = getattr(actor, "id", None)
+        if actor_id is None or component is None:
+            return False
+        self._expire_component_claim_if_needed(blueprint, component)
+        previous_actor_id = getattr(component, "claimed_by_actor_id", None)
+        if not component.claim_for_actor(actor_id, getattr(self, "game_time", None)):
+            return False
+        if previous_actor_id != actor_id:
+            self._record_component_claim_trace("component_claimed", blueprint, component, actor_id, reason=reason)
+        return True
+
+    def _release_construction_component_claim(self, blueprint: ConstructionBlueprint | None, component_id: str | None, actor_id=None, *, reason: str) -> None:
+        component = self._get_blueprint_component(blueprint, component_id)
+        if component is None:
+            return
+        released_actor_id = getattr(component, "claimed_by_actor_id", None)
+        if component.release_claim(actor_id):
+            self._record_component_claim_trace("component_claim_released", blueprint, component, released_actor_id, reason=reason)
+
+    def _construction_component_available_for_actor(self, blueprint: ConstructionBlueprint, component, actor) -> bool:
+        if component is None or component.status == "complete" or not component.has_remaining_work():
+            return False
+        self._expire_component_claim_if_needed(blueprint, component)
+        actor_id = getattr(actor, "id", None)
+        return not component.claim_is_active(getattr(self, "game_time", None)) or component.claimed_by_actor_id == actor_id
+
     def _is_available_delivery_laborer(self, candidate: NPC, *, excluding_id: int | None = None) -> bool:
         if getattr(candidate, "id", None) == excluding_id:
             return False
@@ -5796,6 +5922,9 @@ class World:
             blueprint = self.blueprints_by_id.get(task.blueprint_id)
             if blueprint is None or not blueprint.needs_material(task.item_key):
                 continue
+            component = self._get_blueprint_component(blueprint, getattr(task, "component_id", None))
+            if component is not None and not self._construction_component_available_for_actor(blueprint, component, npc):
+                continue
             source = self._find_nearest_haul_source(npc, task.item_key)
             if source is None:
                 continue
@@ -5808,7 +5937,13 @@ class World:
             return False
 
         task, source = best_choice
+        blueprint = self.blueprints_by_id.get(task.blueprint_id)
+        component = self._get_blueprint_component(blueprint, getattr(task, "component_id", None))
+        if blueprint is not None and component is not None and not self._claim_construction_component(blueprint, component, npc, reason="hauling"):
+            return False
         if not self.town_board.claim_task(task, npc.id):
+            if blueprint is not None and component is not None:
+                self._release_construction_component_claim(blueprint, component.id, getattr(npc, "id", None), reason="haul_task_claim_failed")
             return False
 
         npc.schedule.current_task = "hauling_to_source"
@@ -5817,6 +5952,7 @@ class World:
         npc.task_context_data = {
             "haul_task_id": task.id,
             "blueprint_id": task.blueprint_id,
+            "component_id": getattr(task, "component_id", None),
             "item_key": task.item_key,
             "source": source,
         }
@@ -5824,6 +5960,12 @@ class World:
         npc.task_target_coords = source["coords"]
         npc.schedule.current_destination_coords = source["coords"]
         npc.schedule.current_path = self.calculate_path(npc.x, npc.y, source["coords"][0], source["coords"][1]) or []
+        if (npc.x, npc.y) != source["coords"] and not npc.schedule.current_path:
+            self.town_board.release_task(task.id)
+            if blueprint is not None and component is not None:
+                self._release_construction_component_claim(blueprint, component.id, getattr(npc, "id", None), reason="haul_path_failed")
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return False
         return True
 
     def _pickup_haul_task_material(self, npc: NPC, haul_data: dict) -> bool:
@@ -5932,6 +6074,7 @@ class World:
         if blueprint is None:
             blueprint = self.blueprints_by_id.get(task_data.get("blueprint_id"))
         if blueprint is not None:
+            self._release_construction_component_claim(blueprint, task_data.get("component_id"), getattr(npc, "id", None), reason="construction_task_cleared")
             if getattr(npc, "id", None) in blueprint.assigned_workers:
                 blueprint.assigned_workers.remove(npc.id)
             task_id = task_data.get("construction_task_id")
@@ -5958,12 +6101,35 @@ class World:
                 # Still building, let interaction system handle it
                 return True
 
-        # Find a component to build
+        # Find or retain a claimed component to build. Claims keep multiple
+        # workers from racing for the same piece while still expiring naturally.
         target_comp = None
-        for comp in blueprint.components:
-            if comp.status != "complete" and comp.has_all_materials():
-                target_comp = comp
-                break
+        existing_component_id = task_data.get("component_id")
+        existing_comp = self._get_blueprint_component(blueprint, existing_component_id)
+        if (
+            existing_comp is not None
+            and existing_comp.status != "complete"
+            and existing_comp.has_all_materials()
+            and self._construction_component_available_for_actor(blueprint, existing_comp, npc)
+        ):
+            target_comp = existing_comp
+
+        if target_comp is None:
+            for comp in blueprint.components:
+                if (
+                    comp.status != "complete"
+                    and comp.has_all_materials()
+                    and self._construction_component_available_for_actor(blueprint, comp, npc)
+                ):
+                    target_comp = comp
+                    break
+
+        if target_comp is not None and not self._claim_construction_component(blueprint, target_comp, npc, reason="building"):
+            target_comp = None
+
+        if target_comp is not None:
+            task_data["component_id"] = target_comp.id
+            npc.task_context_data = task_data
 
         if not target_comp:
             # If no component is ready, maybe the whole thing is complete or stalled
@@ -6117,8 +6283,25 @@ class World:
         task = self.town_board.get_task(haul_data.get("haul_task_id"))
         blueprint = self.blueprints_by_id.get(haul_data.get("blueprint_id"))
         if task is None or blueprint is None or not blueprint.needs_material(haul_data.get("item_key", "")):
+            if blueprint is not None:
+                self._release_construction_component_claim(blueprint, haul_data.get("component_id"), getattr(npc, "id", None), reason="hauling_invalid")
             self._clear_npc_haul_task(npc, release_claim=task is not None and task.status != "complete")
             return False
+
+        valid_haul_tasks = {"hauling_to_source", "hauling_to_blueprint"}
+        if npc.schedule.current_task not in valid_haul_tasks:
+            npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
+            if npc_inventory is not None and npc_inventory.has_item(haul_data.get("item_key"), 1):
+                npc.schedule.current_task = "hauling_to_blueprint"
+            else:
+                npc.schedule.current_task = "hauling_to_source"
+            self._warn_simulation_validation(
+                "task_recovered",
+                (getattr(npc, "id", None), haul_data.get("haul_task_id"), "hauling_schedule"),
+                "Recovered stale hauling schedule from task context.",
+                actor=npc,
+                metadata={"haul_task_id": haul_data.get("haul_task_id"), "restored_task": npc.schedule.current_task},
+            )
 
         if npc.schedule.current_task == "hauling_to_source":
             source_coords = tuple(haul_data.get("source", {}).get("coords", ()))
@@ -6128,6 +6311,7 @@ class World:
                     npc.schedule.current_destination_coords = source_coords
                 return bool(npc.schedule.current_path)
             if not self._pickup_haul_task_material(npc, haul_data):
+                self._release_construction_component_claim(blueprint, haul_data.get("component_id"), getattr(npc, "id", None), reason="haul_pickup_failed")
                 self._clear_npc_haul_task(npc, release_claim=True)
                 return False
             npc.schedule.current_task = "hauling_to_blueprint"
@@ -6161,6 +6345,7 @@ class World:
                     npc.schedule.current_destination_coords = (dest_x, dest_y)
                 return bool(npc.schedule.current_path)
             deposited = self.deposit_actor_material_into_blueprint(npc, blueprint, haul_data.get("item_key"), task_id=task.id)
+            self._release_construction_component_claim(blueprint, haul_data.get("component_id"), getattr(npc, "id", None), reason="hauling_delivered" if deposited else "haul_deposit_failed")
             self._clear_npc_haul_task(npc, release_claim=not deposited)
             return deposited
 
@@ -10209,35 +10394,20 @@ class World:
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
 
+    def apply_animation_cue(self, cue: str, *, interaction=None, result=None) -> None:
+        if cue == "build" and hasattr(self, "visual_effects") and interaction is not None:
+            target_pos = getattr(interaction, "target_pos", None)
+            if target_pos is not None:
+                self.visual_effects.append(FloatingTextEffect(target_pos[0], target_pos[1], "*building*", color=(180, 180, 120)))
+
     def advance_active_interactions(self) -> None:
-        if not hasattr(self, "interaction_resolver"):
-            return
+        from simulation.systems.tick import advance_active_interactions
 
-        # Iterate a copy of keys so we can safely remove from the dict during advance
-        for interaction_id in list(self.interaction_resolver.active_interactions.keys()):
-            interaction = self.interaction_resolver.active_interactions.get(interaction_id)
-            if not interaction:
-                continue
+        advance_active_interactions(self)
 
-            result = self.interaction_resolver.advance_active_interaction(interaction_id, self)
-            if result:
-                # Apply cues and traces from result
-                if result.cues_to_fire and hasattr(self, "visual_effects"):
-                    for cue in result.cues_to_fire:
-                        if cue == "build":
-                            self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
-
-                # Check if it was completed or cancelled
-                if interaction_id not in self.interaction_resolver.active_interactions:
-                    # It was removed! Let's clean up the NPC's schedule
-                    actor = self.get_entity_by_id(interaction.actor_id)
-                    if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
-                        actor.schedule.active_interaction_id = None
-                        actor.schedule.current_path = []
-                        actor.schedule.current_destination_coords = None
-                        # Allow them to re-evaluate what to do next if they were constructing
-                        if getattr(actor, "task_context", None) == "construction":
-                            self._handle_npc_construction_task(actor)
+    def on_active_interaction_finished(self, *, actor=None, interaction=None, result=None) -> None:
+        if actor is not None and getattr(actor, "task_context", None) == "construction":
+            self._handle_npc_construction_task(actor)
 
     def _handle_npc_speech(self):
         current_time = time.time()

@@ -10209,35 +10209,20 @@ class World:
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
 
+    def apply_animation_cue(self, cue: str, *, interaction=None, result=None) -> None:
+        if cue == "build" and hasattr(self, "visual_effects") and interaction is not None:
+            target_pos = getattr(interaction, "target_pos", None)
+            if target_pos is not None:
+                self.visual_effects.append(FloatingTextEffect(target_pos[0], target_pos[1], "*building*", color=(180, 180, 120)))
+
     def advance_active_interactions(self) -> None:
-        if not hasattr(self, "interaction_resolver"):
-            return
+        from simulation.systems.tick import advance_active_interactions
 
-        # Iterate a copy of keys so we can safely remove from the dict during advance
-        for interaction_id in list(self.interaction_resolver.active_interactions.keys()):
-            interaction = self.interaction_resolver.active_interactions.get(interaction_id)
-            if not interaction:
-                continue
+        advance_active_interactions(self)
 
-            result = self.interaction_resolver.advance_active_interaction(interaction_id, self)
-            if result:
-                # Apply cues and traces from result
-                if result.cues_to_fire and hasattr(self, "visual_effects"):
-                    for cue in result.cues_to_fire:
-                        if cue == "build":
-                            self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
-
-                # Check if it was completed or cancelled
-                if interaction_id not in self.interaction_resolver.active_interactions:
-                    # It was removed! Let's clean up the NPC's schedule
-                    actor = self.get_entity_by_id(interaction.actor_id)
-                    if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
-                        actor.schedule.active_interaction_id = None
-                        actor.schedule.current_path = []
-                        actor.schedule.current_destination_coords = None
-                        # Allow them to re-evaluate what to do next if they were constructing
-                        if getattr(actor, "task_context", None) == "construction":
-                            self._handle_npc_construction_task(actor)
+    def on_active_interaction_finished(self, *, actor=None, interaction=None, result=None) -> None:
+        if actor is not None and getattr(actor, "task_context", None) == "construction":
+            self._handle_npc_construction_task(actor)
 
     def _handle_npc_speech(self):
         current_time = time.time()

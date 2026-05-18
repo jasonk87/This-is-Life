@@ -365,9 +365,10 @@ def run_construction_basic(seed: int, ticks: int, snapshot_config: SnapshotConfi
             if getattr(worker, "task_context", None) == "construction" and getattr(worker.schedule, "active_interaction_id", None):
                 work_applied = True
 
-            # Since this scenario manually steps the worker instead of using run_world_tick, we must manually advance interactions.
-            if hasattr(world, "advance_active_interactions"):
-                world.advance_active_interactions()
+            # This legacy scenario manually steps movement/hauling, so invoke the same
+            # production helper that run_world_tick uses rather than a sandbox-only path.
+            from simulation.systems.tick import advance_active_interactions
+            advance_active_interactions(world)
         else:
             if getattr(worker, "task_context", None) != "hauling":
                 if not world._assign_haul_task_to_npc(worker):

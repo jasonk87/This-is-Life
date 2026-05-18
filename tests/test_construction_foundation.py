@@ -182,6 +182,76 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(completed, "Component did not complete naturally via ticks")
         self.assertGreater(comp.build_progress, initial_progress)
 
+    def test_runtime_tick_advances_active_build_interaction_without_world_method(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        for comp in blueprint.components:
+            comp.required_work = 20
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Runtime Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        interaction_id = getattr(builder.schedule, "active_interaction_id", None)
+        self.assertIsNotNone(interaction_id)
+        self.assertIn(interaction_id, self.world.interaction_resolver.active_interactions)
+
+        component = blueprint.components[0]
+        initial_remaining_work = component.required_work - component.build_progress
+
+        from simulation.systems.tick import run_world_tick
+
+        with patch.object(self.world, "advance_active_interactions", side_effect=AssertionError("sandbox helper should not drive runtime advancement")):
+            run_world_tick(self.world)
+
+        self.assertLess(component.required_work - component.build_progress, initial_remaining_work)
+        self.assertGreater(component.build_progress, 0)
+        self.assertIn("build_progress", [entry["trace_type"] for entry in self.world.interaction_trace_log])
+        self.assertIn("build", [entry["cue"] for entry in self.world.animation_cue_log])
+
+        for _ in range(10):
+            if component.status == "complete":
+                break
+            run_world_tick(self.world)
+
+        self.assertEqual(component.status, "complete")
+
+    def test_runtime_interruption_preserves_partial_build_state(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        for comp in blueprint.components:
+            comp.required_work = 30
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Interruptible Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        from simulation.systems.tick import run_world_tick
+
+        run_world_tick(self.world)
+        component = blueprint.components[0]
+        progress_after_tick = component.build_progress
+        delivered_after_tick = dict(component.deposited_inventory)
+
+        cancel_result = self.world.interaction_resolver.cancel_actor_interaction(builder.id, self.world, "unit_test_interrupt")
+
+        self.assertIsNotNone(cancel_result)
+        self.assertGreater(progress_after_tick, 0)
+        self.assertLess(progress_after_tick, component.required_work)
+        self.assertEqual(component.build_progress, progress_after_tick)
+        self.assertEqual(dict(component.deposited_inventory), delivered_after_tick)
+        self.assertFalse(component.needs_material("wooden_plank"))
+
     def test_completed_construction_integrates_real_building(self):
         blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
         blueprint.required_work = 20

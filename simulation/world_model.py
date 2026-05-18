@@ -144,6 +144,8 @@ class ConstructionComponent:
     required_work: int = 100
     build_progress: int = 0
     status: str = "pending"  # pending, building, complete
+    claimed_by_actor_id: int | str | None = None
+    claim_expiration_tick: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.deposited_inventory, Inventory):
@@ -162,6 +164,49 @@ class ConstructionComponent:
     def has_all_materials(self) -> bool:
         return sum(self.remaining_materials().values()) == 0
 
+    def remaining_work(self) -> int:
+        return max(0, self.required_work - self.build_progress)
+
+    def has_remaining_work(self) -> bool:
+        return self.remaining_work() > 0 and self.status != "complete"
+
+    def claim_is_active(self, current_tick: int | None = None) -> bool:
+        if self.claimed_by_actor_id is None:
+            return False
+        if self.status == "complete" or not self.has_remaining_work():
+            return False
+        if self.claim_expiration_tick is None or current_tick is None:
+            return True
+        return current_tick <= self.claim_expiration_tick
+
+    def is_claimed_by(self, actor_id: int | str | None, current_tick: int | None = None) -> bool:
+        return actor_id is not None and self.claimed_by_actor_id == actor_id and self.claim_is_active(current_tick)
+
+    def claim_for_actor(self, actor_id: int | str, current_tick: int | None = None, *, duration: int = 120) -> bool:
+        if actor_id is None or self.status == "complete" or not self.has_remaining_work():
+            return False
+        if self.claim_is_active(current_tick) and self.claimed_by_actor_id != actor_id:
+            return False
+        self.claimed_by_actor_id = actor_id
+        self.claim_expiration_tick = (current_tick + duration) if current_tick is not None else None
+        return True
+
+    def release_claim(self, actor_id: int | str | None = None) -> bool:
+        if self.claimed_by_actor_id is None:
+            return False
+        if actor_id is not None and self.claimed_by_actor_id != actor_id:
+            return False
+        self.claimed_by_actor_id = None
+        self.claim_expiration_tick = None
+        return True
+
+    def expire_claim_if_needed(self, current_tick: int | None = None) -> bool:
+        if self.claimed_by_actor_id is None or self.claim_expiration_tick is None or current_tick is None:
+            return False
+        if current_tick <= self.claim_expiration_tick:
+            return False
+        return self.release_claim()
+
     def deposit_item_reference(self, item_reference) -> bool:
         if item_reference is None or not self.needs_material(item_reference.key):
             return False
@@ -175,6 +220,7 @@ class ConstructionComponent:
         self.build_progress = min(self.required_work, self.build_progress + max(0, int(amount)))
         if self.build_progress >= self.required_work:
             self.status = "complete"
+            self.release_claim()
         return self.status == "complete"
 
 

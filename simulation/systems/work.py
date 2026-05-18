@@ -7,13 +7,41 @@ from simulation.systems.task_types import TaskType
 from data.professions import get_profession_data, get_sub_task_data
 
 
+def _warn(world, warning_type: str, key, message: str, *, actor=None, metadata: dict | None = None) -> None:
+    reporter = getattr(world, "_warn_simulation_validation", None)
+    if callable(reporter):
+        reporter(warning_type, key, message, actor=actor, metadata=metadata)
+
+
+def _abandon_invalid_task(world, npc, *, reason: str, sub_task_data: dict | None = None, metadata: dict | None = None) -> None:
+    abandoner = getattr(world, "_abandon_invalid_work_sub_task", None)
+    if callable(abandoner):
+        abandoner(npc, reason=reason, sub_task_data=sub_task_data, metadata=metadata)
+        return
+    npc.clear_work_sub_task_state()
+    npc.schedule.current_path = []
+    npc.schedule.current_destination_coords = None
+
+
 def update_npc_work_sub_tasks(world, npc) -> bool:
     """Advance one NPC through profession work sub-task transitions."""
     if not npc.schedule.work_building_id or not npc.economic.profession:
         return False
 
+    retry_after = getattr(npc, "_work_validation_retry_after_tick", 0)
+    if retry_after and getattr(world, "game_time", 0) < retry_after:
+        return True
+
     work_building = world.buildings_by_id.get(npc.schedule.work_building_id)
     if not work_building:
+        _warn(
+            world,
+            "missing_workplace",
+            (getattr(npc, "id", None), npc.schedule.work_building_id),
+            "NPC work schedule references a missing workplace.",
+            actor=npc,
+            metadata={"work_building_id": npc.schedule.work_building_id, "profession": npc.economic.profession},
+        )
         npc.schedule.current_task = "idle_confused"
         return True
 
@@ -87,6 +115,14 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                 if not current_sub_task_data:
                     current_sub_task_data = get_sub_task_data(npc.economic.profession, next_sub_task_id)
                 if not current_sub_task_data:
+                    _warn(
+                        world,
+                        "invalid_subtask",
+                        (npc.economic.profession, next_sub_task_id, "undefined"),
+                        "Profession sub-task sequence references an undefined sub-task.",
+                        actor=npc,
+                        metadata={"profession": npc.economic.profession, "sub_task_id": next_sub_task_id, "building_id": getattr(work_building, "id", None)},
+                    )
                     continue
 
                 target_coords = world._find_target_coords_for_sub_task(npc, work_building, current_sub_task_data)
@@ -103,6 +139,12 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                 break
 
             if not found_viable_task:
+                _abandon_invalid_task(
+                    world,
+                    npc,
+                    reason="no_viable_work_subtask",
+                    metadata={"profession": npc.economic.profession, "building_id": getattr(work_building, "id", None), "sequence": list(sub_task_sequence)},
+                )
                 npc.schedule.current_task = TaskType.AT_WORK
                 return True
 
@@ -115,9 +157,13 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                     npc.schedule.current_destination_coords = npc.sub_task_target_coords
                     npc.schedule.current_task = TaskType.AT_WORK
                 else:
-                    npc.clear_work_sub_task_state()
-                    npc.schedule.current_path = []
-                    npc.schedule.current_destination_coords = None
+                    _abandon_invalid_task(
+                        world,
+                        npc,
+                        reason="path_unreachable",
+                        sub_task_data=get_sub_task_data(npc.economic.profession, npc.current_sub_task) or {"id": npc.current_sub_task},
+                        metadata={"target_coords": npc.sub_task_target_coords, "building_id": getattr(work_building, "id", None)},
+                    )
                     npc.schedule.current_task = TaskType.AT_WORK
             else:
                 npc.schedule.current_task = TaskType.AT_WORK

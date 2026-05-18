@@ -34,6 +34,99 @@ def advance_player_auto_movement(world) -> None:
         world.game_time += action_cost - 1
 
 
+
+def _record_interaction_traces(world, interaction, interaction_id: str, result) -> None:
+    if not getattr(result, "traces_to_log", None):
+        return
+
+    trace_log = getattr(world, "interaction_trace_log", None)
+    if trace_log is None:
+        trace_log = []
+        setattr(world, "interaction_trace_log", trace_log)
+
+    for trace_type, metadata in result.traces_to_log:
+        entry = {
+            "tick": getattr(world, "game_time", None),
+            "interaction_id": interaction_id,
+            "actor_id": getattr(interaction, "actor_id", None),
+            "action_type": getattr(interaction, "action_type", None),
+            "trace_type": trace_type,
+            "metadata": dict(metadata or {}),
+        }
+        trace_log.append(entry)
+        recorder = getattr(world, "record_interaction_trace", None)
+        if callable(recorder):
+            recorder(entry)
+
+
+def _apply_interaction_cues(world, interaction, interaction_id: str, result) -> None:
+    if not getattr(result, "cues_to_fire", None):
+        return
+
+    cue_log = getattr(world, "animation_cue_log", None)
+    if cue_log is None:
+        cue_log = []
+        setattr(world, "animation_cue_log", cue_log)
+
+    for cue in result.cues_to_fire:
+        entry = {
+            "tick": getattr(world, "game_time", None),
+            "interaction_id": interaction_id,
+            "actor_id": getattr(interaction, "actor_id", None),
+            "action_type": getattr(interaction, "action_type", None),
+            "cue": cue,
+            "target_pos": getattr(interaction, "target_pos", None),
+        }
+        cue_log.append(entry)
+        applier = getattr(world, "apply_animation_cue", None)
+        if callable(applier):
+            applier(cue, interaction=interaction, result=result)
+
+
+def _clear_actor_active_interaction(world, interaction, interaction_id: str):
+    get_entity = getattr(world, "get_entity_by_id", None)
+    if not callable(get_entity):
+        return None
+
+    actor = get_entity(getattr(interaction, "actor_id", None))
+    schedule = getattr(actor, "schedule", None)
+    if schedule is None or getattr(schedule, "active_interaction_id", None) != interaction_id:
+        return actor
+
+    schedule.active_interaction_id = None
+    schedule.current_path = []
+    schedule.current_destination_coords = None
+    if getattr(schedule, "current_task", None) == "active_interaction":
+        schedule.current_task = "idle"
+    return actor
+
+
+def advance_active_interactions(world) -> None:
+    """Advance all resolver-owned active interactions once for this world tick."""
+    resolver = getattr(world, "interaction_resolver", None)
+    if resolver is None:
+        return
+
+    active_interactions = getattr(resolver, "active_interactions", None)
+    if not active_interactions:
+        return
+
+    for interaction_id in sorted(list(active_interactions.keys())):
+        interaction = active_interactions.get(interaction_id)
+        if interaction is None:
+            continue
+
+        result = resolver.advance_active_interaction(interaction_id, world)
+        if result is not None:
+            _record_interaction_traces(world, interaction, interaction_id, result)
+            _apply_interaction_cues(world, interaction, interaction_id, result)
+
+        if interaction_id not in active_interactions:
+            actor = _clear_actor_active_interaction(world, interaction, interaction_id)
+            handler = getattr(world, "on_active_interaction_finished", None)
+            if callable(handler):
+                handler(actor=actor, interaction=interaction, result=result)
+
 def run_world_tick(world) -> None:
     """Run one simulation tick; engine.World only orchestrates through this entry point."""
     world._update_spatial_partitioning()
@@ -80,8 +173,7 @@ def run_world_tick(world) -> None:
     world._trigger_event_driven_conversation()
     world._handle_npc_speech()
     world._handle_npc_conversations()
-    if hasattr(world, 'advance_active_interactions'):
-        world.advance_active_interactions()
+    advance_active_interactions(world)
     if hasattr(world, "_handle_ambient_activity_interactions"):
         world._handle_ambient_activity_interactions()
     world._update_entity_titles()

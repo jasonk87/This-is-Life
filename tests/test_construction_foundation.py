@@ -19,6 +19,8 @@ class TestConstructionFoundation(unittest.TestCase):
         self.world.chunk_width = 1
         self.world.chunk_height = 1
         self.world.calculate_path = lambda sx, sy, ex, ey: [(sx, sy), (ex, ey)]
+        from simulation.systems.interaction import InteractionResolver
+        self.world.interaction_resolver = InteractionResolver()
 
     def test_construction_site_tracks_lifecycle_fields_and_does_not_complete_on_placement(self):
         blueprint = self.world.place_construction_blueprint("house", 8, 8, owner_id=7, requester_id=8)
@@ -79,7 +81,11 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(self.world._assign_construction_task_to_npc(laborer))
         self.assertEqual(laborer.schedule.current_task, "constructing_site")
         self.assertTrue(self.world._handle_npc_construction_task(laborer))
-        self.assertGreater(blueprint.build_progress, 0)
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(self.world)
+
+        total_progress = sum(c.build_progress for c in blueprint.components)
+        self.assertGreater(total_progress, 0)
         self.assertIn(blueprint.construction_stage, {"foundation", "framing", "finishing"})
 
     def test_stalled_construction_due_to_material_shortage_is_visible(self):
@@ -131,20 +137,84 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertEqual(blueprint.requester_id, foreman.id)
         self.assertEqual(blueprint.settlement_id, self.village.id)
 
-    def test_completed_construction_integrates_real_building(self):
-        blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
+    def test_construction_advances_through_run_world_tick(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
         blueprint.required_work = 20
-        for item_key, qty in blueprint.required_materials.items():
-            for _ in range(qty):
-                blueprint.deposit_item_reference(ItemReference(item_key))
+        for comp in blueprint.components:
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
         blueprint.refresh_status()
 
         builder = NPC(8, 8, name="Builder")
         builder.economic.profession = "Builder"
         self.world.village_npcs.append(builder)
         self.assertTrue(self.world._assign_construction_task_to_npc(builder))
-        self.assertTrue(self.world._handle_npc_construction_task(builder))
-        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        from simulation.systems.tick import run_world_tick
+
+        comp = blueprint.components[0]
+        initial_progress = comp.build_progress
+        self.assertEqual(initial_progress, 0)
+
+        found_active_interaction = False
+        completed = False
+
+        for _ in range(100):
+            if getattr(builder.schedule, "active_interaction_id", None) is None:
+                self.world._handle_npc_construction_task(builder)
+                if getattr(builder.schedule, "current_destination_coords", None):
+                    builder.x, builder.y = builder.schedule.current_destination_coords
+                    builder.schedule.current_destination_coords = None
+                    builder.schedule.current_path = []
+                self.world._handle_npc_construction_task(builder)
+
+            run_world_tick(self.world)
+
+            if getattr(builder.schedule, "active_interaction_id", None):
+                found_active_interaction = True
+
+            if comp.status == "complete":
+                completed = True
+                break
+
+        self.assertTrue(found_active_interaction, "Builder did not start an interaction")
+        self.assertTrue(completed, "Component did not complete naturally via ticks")
+        self.assertGreater(comp.build_progress, initial_progress)
+
+    def test_completed_construction_integrates_real_building(self):
+        blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
+        blueprint.required_work = 20
+        for comp in blueprint.components:
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+
+        from simulation.systems.tick import run_world_tick
+
+        safety_counter = 0
+        while self.world.get_blueprint_at(8, 8) is not None and safety_counter < 3000:
+            safety_counter += 1
+
+            # The test normally calls `_handle_npc_construction_task` directly because it mocks the schedule.
+            # But the reviewer requested we use `run_world_tick`.
+            # We can still manually call the specific task logic since that's what `process_macro_daily_tick` would do.
+            self.world._handle_npc_construction_task(builder)
+
+            if builder.schedule.current_destination_coords:
+                builder.x, builder.y = builder.schedule.current_destination_coords
+                builder.schedule.current_destination_coords = None
+                builder.schedule.current_path = []
+                self.world._handle_npc_construction_task(builder)
+
+            # This is the vital part: The tick loop naturally advances the interaction!
+            run_world_tick(self.world)
 
         self.assertIsNone(self.world.get_blueprint_at(8, 8))
         self.assertTrue(any(b.building_type == "workshop" for b in self.village.buildings))
@@ -174,9 +244,10 @@ class TestConstructionFoundation(unittest.TestCase):
 
 
     def _fully_supply_blueprint(self, blueprint):
-        for item_key, qty in blueprint.required_materials.items():
-            for _ in range(qty):
-                blueprint.deposit_item_reference(ItemReference(item_key))
+        for comp in blueprint.components:
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
         blueprint.refresh_status()
 
     def test_non_construction_professions_do_not_claim_build_work(self):

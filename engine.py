@@ -1,3 +1,4 @@
+from simulation.systems.interaction import ActionIntent, InteractionResolver
 from simulation.systems.task_types import TaskType
 # engine.py
 import math
@@ -623,6 +624,8 @@ class World:
         self.chat_log = [] # Stores chat messages
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
+
+        self.interaction_resolver = InteractionResolver()
         self.player = Player(WORLD_WIDTH // 2, WORLD_HEIGHT // 2)
         if player_first_name:
             chosen_name = player_first_name.strip()
@@ -5946,12 +5949,33 @@ class World:
         if blueprint is None:
             self._clear_npc_haul_task(npc, release_claim=False)
             return False
-        if not blueprint.has_all_materials():
+
+        # Check if already in active build interaction
+        active_interaction_id = getattr(npc.schedule, "active_interaction_id", None)
+        if active_interaction_id and active_interaction_id in self.interaction_resolver.active_interactions:
+            active_interaction = self.interaction_resolver.active_interactions[active_interaction_id]
+            if getattr(active_interaction, "action_type", None) == "build" and active_interaction.blueprint_id == blueprint.id:
+                # Still building, let interaction system handle it
+                return True
+
+        # Find a component to build
+        target_comp = None
+        for comp in blueprint.components:
+            if comp.status != "complete" and comp.has_all_materials():
+                target_comp = comp
+                break
+
+        if not target_comp:
+            # If no component is ready, maybe the whole thing is complete or stalled
+            if blueprint.status == "complete" or all(c.status == "complete" for c in blueprint.components):
+                self._complete_construction_blueprint(blueprint)
+                self._clear_npc_haul_task(npc, release_claim=False)
+                return True
             blueprint.refresh_status()
             self._clear_npc_construction_task(npc, blueprint)
             return False
 
-        coords = (blueprint.x, blueprint.y)
+        coords = (target_comp.x, target_comp.y)
         if (npc.x, npc.y) != coords:
             if not npc.schedule.current_path:
                 npc.schedule.current_path = self.calculate_path(npc.x, npc.y, coords[0], coords[1]) or []
@@ -5962,19 +5986,23 @@ class World:
                 return False
             return True
 
-        previous_stage = blueprint.construction_stage
-        completed = blueprint.apply_work(10)
-        npc.current_sub_task = f"Building {blueprint.construction_stage}"
-        if getattr(self, "game_time", 0) % 20 == 0:
-            self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, f"*{npc.current_sub_task}*", color=(180, 180, 120)))
-        if blueprint.construction_stage != previous_stage:
-            self._refresh_blueprint_map_marker(blueprint)
-        if completed:
-            self._complete_construction_blueprint(blueprint)
-            self._clear_npc_haul_task(npc, release_claim=False)
+        # At coordinates, push intent
+        intent = ActionIntent(
+            actor_id=npc.id,
+            action_type="build",
+            target_pos=coords,
+            payload={"blueprint_id": blueprint.id, "component_id": target_comp.id}
+        )
+
+        result = self.interaction_resolver.resolve(intent, self)
+
+
+        if result.success and result.started_interaction_id:
+            npc.schedule.active_interaction_id = result.started_interaction_id
+            npc.schedule.current_task = "active_interaction"
+            npc.current_sub_task = f"Building {blueprint.construction_stage}"
             return True
-        self._refresh_blueprint_map_marker(blueprint)
-        return True
+        return False
 
     def _fail_delivery_for_npc(self, npc: NPC, task, *, drop_carried_item: bool = False) -> None:
         item_key = getattr(task, "item_key", None)
@@ -6104,18 +6132,33 @@ class World:
                 return False
             npc.schedule.current_task = "hauling_to_blueprint"
             npc.current_sub_task = f"Delivering {haul_data.get('item_key')}"
-            npc.task_target_coords = (blueprint.x, blueprint.y)
-            npc.schedule.current_destination_coords = (blueprint.x, blueprint.y)
-            npc.schedule.current_path = self.calculate_path(npc.x, npc.y, blueprint.x, blueprint.y) or []
+            dest_x, dest_y = blueprint.x, blueprint.y
+            component_id = getattr(task, "component_id", None)
+            if component_id:
+                for comp in blueprint.components:
+                    if comp.id == component_id:
+                        dest_x, dest_y = comp.x, comp.y
+                        break
+            npc.task_target_coords = (dest_x, dest_y)
+            npc.schedule.current_destination_coords = (dest_x, dest_y)
+            npc.schedule.current_path = self.calculate_path(npc.x, npc.y, dest_x, dest_y) or []
             return True
 
         if npc.schedule.current_task == "hauling_to_blueprint":
+            dest_x, dest_y = blueprint.x, blueprint.y
+            component_id = getattr(task, "component_id", None)
+            if component_id:
+                for comp in blueprint.components:
+                    if comp.id == component_id:
+                        dest_x, dest_y = comp.x, comp.y
+                        break
+
             if getattr(self, "game_time", 0) % 40 == 0:
                 self.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "*hauling*", color=(200, 200, 150)))
-            if (npc.x, npc.y) != (blueprint.x, blueprint.y):
+            if (npc.x, npc.y) != (dest_x, dest_y):
                 if not npc.schedule.current_path:
-                    npc.schedule.current_path = self.calculate_path(npc.x, npc.y, blueprint.x, blueprint.y) or []
-                    npc.schedule.current_destination_coords = (blueprint.x, blueprint.y)
+                    npc.schedule.current_path = self.calculate_path(npc.x, npc.y, dest_x, dest_y) or []
+                    npc.schedule.current_destination_coords = (dest_x, dest_y)
                 return bool(npc.schedule.current_path)
             deposited = self.deposit_actor_material_into_blueprint(npc, blueprint, haul_data.get("item_key"), task_id=task.id)
             self._clear_npc_haul_task(npc, release_claim=not deposited)
@@ -7219,24 +7262,41 @@ class World:
             return False
         remaining = blueprint.remaining_materials()
         candidate_keys = [item_key] if item_key else list(remaining.keys())
+
+        # Determine component_id from task
+        component_id = None
+        resolved_task_id = task_id
+        if resolved_task_id is None and actor is self.player:
+            for claimed_task_id in list(getattr(self.player.knowledge, "claimed_tasks", [])):
+                claimed_task = self.town_board.get_task(claimed_task_id)
+                if claimed_task and claimed_task.blueprint_id == blueprint.id and claimed_task.item_key in candidate_keys:
+                    resolved_task_id = claimed_task.id
+                    break
+
+        if resolved_task_id:
+            task = self.town_board.get_task(resolved_task_id)
+            if task:
+                component_id = getattr(task, "component_id", None)
+
         for candidate_key in candidate_keys:
             if not candidate_key or not blueprint.needs_material(candidate_key):
                 continue
-            resolved_task_id = task_id
-            if resolved_task_id is None and actor is self.player:
-                for claimed_task_id in list(getattr(self.player.knowledge, "claimed_tasks", [])):
-                    claimed_task = self.town_board.get_task(claimed_task_id)
-                    if claimed_task and claimed_task.blueprint_id == blueprint.id and claimed_task.item_key == candidate_key:
-                        resolved_task_id = claimed_task.id
-                        break
             item_reference = self._extract_actor_item_reference(actor, candidate_key)
             if item_reference is None:
                 continue
-            if not blueprint.deposit_item_reference(item_reference):
+            if not blueprint.deposit_item_reference(item_reference, component_id=component_id):
                 self.drop_item_reference_on_map(item_reference, getattr(actor, "x", blueprint.x), getattr(actor, "y", blueprint.y))
                 continue
             item_name = ITEM_DEFINITIONS.get(item_reference.key, {}).get("name", item_reference.key)
-            self.visual_effects.append(FloatingTextEffect(getattr(actor, "x", blueprint.x), getattr(actor, "y", blueprint.y), f"-1 {item_name}", color=(255, 100, 100)))
+
+            target_x, target_y = blueprint.x, blueprint.y
+            if component_id:
+                for comp in blueprint.components:
+                    if comp.id == component_id:
+                        target_x, target_y = comp.x, comp.y
+                        break
+
+            self.visual_effects.append(FloatingTextEffect(target_x, target_y, f"-1 {item_name}", color=(255, 100, 100)))
             self._complete_one_blueprint_task(blueprint, item_reference.key, task_id=resolved_task_id)
             blueprint.refresh_status()
             self._refresh_blueprint_map_marker(blueprint)
@@ -10148,6 +10208,36 @@ class World:
             except IndexError: # Ran out of homes or workplaces
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
+
+    def advance_active_interactions(self) -> None:
+        if not hasattr(self, "interaction_resolver"):
+            return
+
+        # Iterate a copy of keys so we can safely remove from the dict during advance
+        for interaction_id in list(self.interaction_resolver.active_interactions.keys()):
+            interaction = self.interaction_resolver.active_interactions.get(interaction_id)
+            if not interaction:
+                continue
+
+            result = self.interaction_resolver.advance_active_interaction(interaction_id, self)
+            if result:
+                # Apply cues and traces from result
+                if result.cues_to_fire and hasattr(self, "visual_effects"):
+                    for cue in result.cues_to_fire:
+                        if cue == "build":
+                            self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
+
+                # Check if it was completed or cancelled
+                if interaction_id not in self.interaction_resolver.active_interactions:
+                    # It was removed! Let's clean up the NPC's schedule
+                    actor = self.get_entity_by_id(interaction.actor_id)
+                    if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
+                        actor.schedule.active_interaction_id = None
+                        actor.schedule.current_path = []
+                        actor.schedule.current_destination_coords = None
+                        # Allow them to re-evaluate what to do next if they were constructing
+                        if getattr(actor, "task_context", None) == "construction":
+                            self._handle_npc_construction_task(actor)
 
     def _handle_npc_speech(self):
         current_time = time.time()

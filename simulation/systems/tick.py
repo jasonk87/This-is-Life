@@ -80,6 +80,8 @@ def run_world_tick(world) -> None:
     world._trigger_event_driven_conversation()
     world._handle_npc_speech()
     world._handle_npc_conversations()
+    if hasattr(world, 'advance_active_interactions'):
+        world.advance_active_interactions()
     if hasattr(world, "_handle_ambient_activity_interactions"):
         world._handle_ambient_activity_interactions()
     world._update_entity_titles()

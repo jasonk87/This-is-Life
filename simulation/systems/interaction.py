@@ -174,6 +174,83 @@ class ChopTreeInteraction(ActiveInteraction):
         )
 
 
+class BuildInteraction(ActiveInteraction):
+    def __init__(self, intent: ActionIntent):
+        super().__init__(intent)
+        self.blueprint_id = intent.payload.get("blueprint_id")
+        self.component_id = intent.payload.get("component_id")
+        self.animation_cue = "build"
+        self.remaining_work = 0
+
+    def can_start(self, world: Any) -> bool:
+        blueprint = world.blueprints_by_id.get(self.blueprint_id)
+        if not blueprint:
+            return False
+
+        comp = next((c for c in blueprint.components if c.id == self.component_id), None)
+        if not comp:
+            return False
+
+        if not comp.has_all_materials() or comp.status == "complete":
+            return False
+
+        actor = world.get_entity_by_id(self.actor_id)
+        if not actor:
+            return False
+
+        dx = abs(actor.x - comp.x)
+        dy = abs(actor.y - comp.y)
+        if dx > 1 or dy > 1:
+            return False
+
+        self.remaining_work = max(1, comp.required_work - comp.build_progress)
+
+        return True
+
+    def can_continue(self, world: Any) -> bool:
+        return self.can_start(world)
+
+    def advance_tick(self, world: Any) -> ActionResult:
+        blueprint = world.blueprints_by_id.get(self.blueprint_id)
+        if not blueprint:
+            return ActionResult(success=False, intent=self._original_intent(), reason="blueprint_not_found")
+
+        amount = 10
+        self.remaining_work = max(0, self.remaining_work - amount)
+
+        blueprint.apply_work(amount, self.component_id)
+
+        return ActionResult(
+            success=True,
+            intent=self._original_intent(),
+            cues_to_fire=[self.animation_cue],
+            traces_to_log=[("build_progress", {"blueprint_id": self.blueprint_id, "component_id": self.component_id, "remaining": self.remaining_work})],
+            consumed_time=amount
+        )
+
+    def _original_intent(self) -> ActionIntent:
+        return ActionIntent(
+            actor_id=self.actor_id,
+            action_type="build",
+            target_pos=self.target_pos,
+            payload={"blueprint_id": self.blueprint_id, "component_id": self.component_id}
+        )
+
+    def cancel(self, world: Any, reason: str) -> ActionResult:
+        return ActionResult(
+            success=False,
+            intent=self._original_intent(),
+            reason=reason,
+            traces_to_log=[("build_cancelled", {"blueprint_id": self.blueprint_id, "component_id": self.component_id, "reason": reason})]
+        )
+
+    def complete(self, world: Any) -> ActionResult:
+        return ActionResult(
+            success=True,
+            intent=self._original_intent(),
+            traces_to_log=[("component_completed", {"blueprint_id": self.blueprint_id, "component_id": self.component_id})]
+        )
+
 class InteractionResolver:
     def __init__(self):
         self.active_interactions: dict[str, ActiveInteraction] = {}
@@ -191,6 +268,8 @@ class InteractionResolver:
             return self._resolve_sit_or_sleep(intent, world, actor)
         elif intent.action_type == "chop_tree":
             return self._resolve_chop_tree(intent, world, actor)
+        elif intent.action_type == "build":
+            return self._resolve_build(intent, world, actor)
 
         return ActionResult(success=False, intent=intent, reason=f"unknown_action_type:{intent.action_type}")
 
@@ -348,6 +427,14 @@ class InteractionResolver:
             started_interaction_id=interaction.interaction_id,
             traces_to_log=[("started_chop_tree", {"target_pos": intent.target_pos})]
         )
+
+    def _resolve_build(self, intent: ActionIntent, world: Any, actor: Any) -> ActionResult:
+        interaction = BuildInteraction(intent)
+        if not interaction.can_start(world):
+            return ActionResult(success=False, intent=intent, reason="cannot_start")
+
+        self.active_interactions[interaction.interaction_id] = interaction
+        return ActionResult(success=True, intent=intent, started_interaction_id=interaction.interaction_id, traces_to_log=[("build_started", {"blueprint_id": interaction.blueprint_id})])
 
     def cancel_active_interaction(self, interaction_id: str, world: Any, reason: str) -> ActionResult | None:
         interaction = self.active_interactions.pop(interaction_id, None)

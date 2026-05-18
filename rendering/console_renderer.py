@@ -873,6 +873,24 @@ def _draw_social_indicators(console, world, camera_x, camera_y, max_markers=8):
 
 def _draw_world_markers(console, world, camera_x, camera_y):
     _draw_social_indicators(console, world, camera_x, camera_y)
+
+    # Render construction components
+    for blueprint in getattr(world, "blueprints_by_id", {}).values():
+        if not getattr(blueprint, "components", []):
+            screen_point = _screen_point_for_world(world, camera_x, camera_y, blueprint.x, blueprint.y)
+            if screen_point is not None:
+                screen_x, screen_y = screen_point
+                console.print(x=screen_x, y=screen_y, string="C", fg=(245, 220, 75))
+            continue
+        for comp in blueprint.components:
+            screen_point = _screen_point_for_world(world, camera_x, camera_y, comp.x, comp.y)
+            if screen_point is not None and is_visible(world, comp.x, comp.y):
+                screen_x, screen_y = screen_point
+                status = getattr(comp, "status", "pending")
+                comp_char = "#" if status == "complete" else ("c" if status == "building" else "C")
+                comp_color = (150, 150, 150) if status == "complete" else (245, 220, 75)
+                console.print(x=screen_x, y=screen_y, string=comp_char, fg=comp_color)
+
     marked = 0
     max_markers = 18
 

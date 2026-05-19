@@ -286,6 +286,27 @@ class NPC:
             self._initialize_relationships(attitude_to_player, self.player_id)
 
         self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=NPCTaskState())
+        self.work_tags: set[str] = {"woodcutting", "hauling", "construction", "crafting"}
+        self.skill_levels: dict[str, int] = {"woodcutting": 1, "hauling": 1, "construction": 1, "crafting": 1}
+        self.preferred_work_types: list[str] = []
+        self.fatigue_modifier: float = 0.0
+        self.recent_task_history: list[str] = []
+        self.current_work_focus: str | None = None
+        self.work_efficiency_modifiers: dict[str, float] = {"woodcutting": 1.0, "hauling": 1.0, "construction": 1.0, "crafting": 1.0}
+        self.skill_experience_by_tag: dict[str, float] = {"woodcutting": 0.0, "hauling": 0.0, "construction": 0.0, "crafting": 0.0}
+        self.last_skill_gain_tick: int = 0
+        self.specialization_pressure: dict[str, float] = {"woodcutting": 0.0, "hauling": 0.0, "construction": 0.0, "crafting": 0.0}
+        self.recent_skill_usage: list[str] = []
+        self.actor_work_profile: dict[str, object] = {
+            "dominant_work_tag": "hauling",
+            "recent_work_summary": "No strong labor trend yet.",
+            "specialization_summary": "General labor profile.",
+            "fatigue_state": "rested",
+            "work_identity_label": "General Laborer",
+            "work_history_snapshot": [],
+            "preferred_task_bias": [],
+            "lifetime_work_totals": {"woodcutting": 0, "hauling": 0, "construction": 0, "crafting": 0},
+        }
         self.den_location: tuple[int, int] | None = None
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []

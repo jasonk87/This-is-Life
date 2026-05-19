@@ -157,12 +157,18 @@ class ChopTreeInteraction(ActiveInteraction):
 
                 if hasattr(inventory, "add_item_reference"):
                     inventory.add_item_reference(ItemReference("raw_log"))
+                handler = getattr(world, "on_tree_resource_created", None)
+                if callable(handler):
+                    handler(item_key="raw_log", coords=(target_x, target_y), actor_id=self.actor_id)
 
         return ActionResult(
             success=True,
             intent=self.intent,
             cues_to_fire=["chop_tree"],
-            traces_to_log=[("tree_chopped", {"target_pos": self.target_pos})]
+            traces_to_log=[
+                ("tree_chopped", {"target_pos": self.target_pos}),
+                ("raw_log_created", {"target_pos": self.target_pos, "item_key": "raw_log"}),
+            ]
         )
 
     def cancel(self, world: Any, reason: str) -> ActionResult:
@@ -203,6 +209,13 @@ class BuildInteraction(ActiveInteraction):
         if dx > 1 or dy > 1:
             return False
 
+        claim_available = getattr(world, "_construction_component_available_for_actor", None)
+        claim_component = getattr(world, "_claim_construction_component", None)
+        if callable(claim_available) and not claim_available(blueprint, comp, actor):
+            return False
+        if callable(claim_component) and not claim_component(blueprint, comp, actor, reason="build_interaction"):
+            return False
+
         self.remaining_work = max(1, comp.required_work - comp.build_progress)
 
         return True
@@ -237,6 +250,11 @@ class BuildInteraction(ActiveInteraction):
         )
 
     def cancel(self, world: Any, reason: str) -> ActionResult:
+        if reason in {"cannot_continue", "blueprint_not_found", "component_unavailable"}:
+            blueprint = world.blueprints_by_id.get(self.blueprint_id)
+            releaser = getattr(world, "_release_construction_component_claim", None)
+            if callable(releaser):
+                releaser(blueprint, self.component_id, self.actor_id, reason=f"build_cancelled:{reason}")
         return ActionResult(
             success=False,
             intent=self._original_intent(),
@@ -245,11 +263,68 @@ class BuildInteraction(ActiveInteraction):
         )
 
     def complete(self, world: Any) -> ActionResult:
+        blueprint = world.blueprints_by_id.get(self.blueprint_id)
+        component = next((c for c in getattr(blueprint, "components", []) if c.id == self.component_id), None) if blueprint else None
+        recorder = getattr(world, "_record_component_claim_trace", None)
+        if callable(recorder) and component is not None:
+            recorder("component_claim_released", blueprint, component, self.actor_id, reason="component_completed")
         return ActionResult(
             success=True,
             intent=self._original_intent(),
             traces_to_log=[("component_completed", {"blueprint_id": self.blueprint_id, "component_id": self.component_id})]
         )
+
+
+
+class WorkshopInteraction(ActiveInteraction):
+    def __init__(self, intent: ActionIntent):
+        super().__init__(intent)
+        self.workshop_id = intent.payload.get("workshop_id")
+        self.recipe = intent.payload.get("recipe", "raw_log_to_plank")
+        self.remaining_work = 8
+        self.animation_cue = "build"
+
+    def can_start(self, world: Any) -> bool:
+        workshop = getattr(world, "workshops_by_id", {}).get(self.workshop_id)
+        actor = world.get_entity_by_id(self.actor_id)
+        if workshop is None or actor is None or not workshop.operational:
+            return False
+        if workshop.occupied_by_actor_id not in {None, self.actor_id}:
+            return False
+        if workshop.input_buffer.get("raw_log", 0) <= 0:
+            return False
+        return True
+
+    def can_continue(self, world: Any) -> bool:
+        workshop = getattr(world, "workshops_by_id", {}).get(self.workshop_id)
+        return workshop is not None and workshop.operational and workshop.input_buffer.get("raw_log", 0) > 0
+
+    def advance_tick(self, world: Any) -> ActionResult:
+        self.remaining_work = max(0, self.remaining_work - 1)
+        return ActionResult(success=True, intent=self.intent, cues_to_fire=[self.animation_cue], traces_to_log=[("workshop_progress", {"workshop_id": self.workshop_id, "recipe": self.recipe, "remaining_work": self.remaining_work})])
+
+    def complete(self, world: Any) -> ActionResult:
+        workshop = getattr(world, "workshops_by_id", {}).get(self.workshop_id)
+        if workshop is None:
+            return ActionResult(success=False, intent=self.intent, reason="workshop_missing")
+        consumed = workshop.input_buffer.pop_item_reference("raw_log")
+        if consumed is None:
+            return ActionResult(success=False, intent=self.intent, reason="missing_inputs")
+        from entities.items import ItemReference
+        plank = ItemReference("wooden_plank")
+        workshop.output_buffer.add_item_reference(plank)
+        workshop.last_used_tick = int(getattr(world, "game_time", 0) or 0)
+        releaser = getattr(world, "_release_workshop_lock", None)
+        if callable(releaser):
+            releaser(workshop, self.actor_id)
+        return ActionResult(success=True, intent=self.intent, traces_to_log=[("workshop_output_created", {"workshop_id": self.workshop_id, "recipe": self.recipe, "output_item_key": "wooden_plank"}), ("workshop_interaction_completed", {"workshop_id": self.workshop_id, "recipe": self.recipe})])
+
+    def cancel(self, world: Any, reason: str) -> ActionResult:
+        workshop = getattr(world, "workshops_by_id", {}).get(self.workshop_id)
+        releaser = getattr(world, "_release_workshop_lock", None)
+        if workshop is not None and callable(releaser):
+            releaser(workshop, self.actor_id)
+        return ActionResult(success=False, intent=self.intent, reason=reason, traces_to_log=[("workshop_interaction_cancelled", {"workshop_id": self.workshop_id, "reason": reason})])
 
 class InteractionResolver:
     def __init__(self):
@@ -270,6 +345,8 @@ class InteractionResolver:
             return self._resolve_chop_tree(intent, world, actor)
         elif intent.action_type == "build":
             return self._resolve_build(intent, world, actor)
+        elif intent.action_type == "workshop_transform":
+            return self._resolve_workshop_transform(intent, world, actor)
 
         return ActionResult(success=False, intent=intent, reason=f"unknown_action_type:{intent.action_type}")
 
@@ -428,7 +505,25 @@ class InteractionResolver:
             traces_to_log=[("started_chop_tree", {"target_pos": intent.target_pos})]
         )
 
+
+    def _resolve_workshop_transform(self, intent: ActionIntent, world: Any, actor: Any) -> ActionResult:
+        interaction = WorkshopInteraction(intent)
+        if not interaction.can_start(world):
+            return ActionResult(success=False, intent=intent, reason="cannot_start_workshop_transform")
+        self.active_interactions[interaction.interaction_id] = interaction
+        return ActionResult(success=True, intent=intent, started_interaction_id=interaction.interaction_id, traces_to_log=[("workshop_interaction_started", {"workshop_id": interaction.workshop_id, "recipe": interaction.recipe})])
+
     def _resolve_build(self, intent: ActionIntent, world: Any, actor: Any) -> ActionResult:
+        blueprint_id = intent.payload.get("blueprint_id")
+        component_id = intent.payload.get("component_id")
+        for active in self.active_interactions.values():
+            if (
+                getattr(active, "action_type", None) == "build"
+                and getattr(active, "blueprint_id", None) == blueprint_id
+                and getattr(active, "component_id", None) == component_id
+            ):
+                return ActionResult(success=False, intent=intent, reason="component_already_building")
+
         interaction = BuildInteraction(intent)
         if not interaction.can_start(world):
             return ActionResult(success=False, intent=intent, reason="cannot_start")

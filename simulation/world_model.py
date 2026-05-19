@@ -6,7 +6,7 @@ import uuid
 
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
-from entities.items import Inventory
+from entities.items import Inventory, ItemReference
 
 
 class Building:
@@ -144,6 +144,8 @@ class ConstructionComponent:
     required_work: int = 100
     build_progress: int = 0
     status: str = "pending"  # pending, building, complete
+    claimed_by_actor_id: int | str | None = None
+    claim_expiration_tick: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.deposited_inventory, Inventory):
@@ -162,6 +164,49 @@ class ConstructionComponent:
     def has_all_materials(self) -> bool:
         return sum(self.remaining_materials().values()) == 0
 
+    def remaining_work(self) -> int:
+        return max(0, self.required_work - self.build_progress)
+
+    def has_remaining_work(self) -> bool:
+        return self.remaining_work() > 0 and self.status != "complete"
+
+    def claim_is_active(self, current_tick: int | None = None) -> bool:
+        if self.claimed_by_actor_id is None:
+            return False
+        if self.status == "complete" or not self.has_remaining_work():
+            return False
+        if self.claim_expiration_tick is None or current_tick is None:
+            return True
+        return current_tick <= self.claim_expiration_tick
+
+    def is_claimed_by(self, actor_id: int | str | None, current_tick: int | None = None) -> bool:
+        return actor_id is not None and self.claimed_by_actor_id == actor_id and self.claim_is_active(current_tick)
+
+    def claim_for_actor(self, actor_id: int | str, current_tick: int | None = None, *, duration: int = 120) -> bool:
+        if actor_id is None or self.status == "complete" or not self.has_remaining_work():
+            return False
+        if self.claim_is_active(current_tick) and self.claimed_by_actor_id != actor_id:
+            return False
+        self.claimed_by_actor_id = actor_id
+        self.claim_expiration_tick = (current_tick + duration) if current_tick is not None else None
+        return True
+
+    def release_claim(self, actor_id: int | str | None = None) -> bool:
+        if self.claimed_by_actor_id is None:
+            return False
+        if actor_id is not None and self.claimed_by_actor_id != actor_id:
+            return False
+        self.claimed_by_actor_id = None
+        self.claim_expiration_tick = None
+        return True
+
+    def expire_claim_if_needed(self, current_tick: int | None = None) -> bool:
+        if self.claimed_by_actor_id is None or self.claim_expiration_tick is None or current_tick is None:
+            return False
+        if current_tick <= self.claim_expiration_tick:
+            return False
+        return self.release_claim()
+
     def deposit_item_reference(self, item_reference) -> bool:
         if item_reference is None or not self.needs_material(item_reference.key):
             return False
@@ -175,6 +220,7 @@ class ConstructionComponent:
         self.build_progress = min(self.required_work, self.build_progress + max(0, int(amount)))
         if self.build_progress >= self.required_work:
             self.status = "complete"
+            self.release_claim()
         return self.status == "complete"
 
 
@@ -375,15 +421,124 @@ class LandClaim:
 
 
 @dataclass
+class Stockpile:
+    stockpile_id: str
+    x: int
+    y: int
+    accepted_item_types: set[str] = field(default_factory=set)
+    max_item_count: int = 100
+    owner_id: int | str | None = None
+    faction_id: str | None = None
+    village_id: str | None = None
+    stored_inventory: Inventory = field(default_factory=Inventory)
+    reservations: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stored_inventory, Inventory):
+            self.stored_inventory = Inventory(self.stored_inventory or {})
+        self.accepted_item_types = set(self.accepted_item_types or set())
+
+    @property
+    def position(self) -> tuple[int, int]:
+        return self.x, self.y
+
+    def total_item_count(self) -> int:
+        return sum(max(0, int(qty)) for qty in self.stored_inventory.values())
+
+    def accepts(self, item_key: str | None) -> bool:
+        return bool(item_key) and (not self.accepted_item_types or item_key in self.accepted_item_types)
+
+    def has_capacity_for(self, quantity: int = 1) -> bool:
+        return self.total_item_count() + max(0, int(quantity)) <= self.max_item_count
+
+    def quantity(self, item_key: str) -> int:
+        return self.stored_inventory.get(item_key, 0)
+
+    def reserved_quantity(self, item_key: str, *, excluding_reservation_id: str | None = None) -> int:
+        total = 0
+        for reservation_id, reservation in self.reservations.items():
+            if reservation_id == excluding_reservation_id or reservation.get("status") != "active":
+                continue
+            if reservation.get("item_key") == item_key:
+                total += max(0, int(reservation.get("quantity", 0)))
+        return total
+
+    def available_quantity(self, item_key: str, *, excluding_reservation_id: str | None = None) -> int:
+        return max(0, self.quantity(item_key) - self.reserved_quantity(item_key, excluding_reservation_id=excluding_reservation_id))
+
+    def deposit_item_reference(self, item_reference: ItemReference) -> bool:
+        if item_reference is None or not self.accepts(item_reference.key) or not self.has_capacity_for(1):
+            return False
+        self.stored_inventory.add_item_reference(item_reference)
+        return True
+
+    def deposit_item(self, item_key: str, quantity: int = 1) -> int:
+        if not self.accepts(item_key):
+            return 0
+        accepted = min(max(0, int(quantity)), max(0, self.max_item_count - self.total_item_count()))
+        if accepted <= 0:
+            return 0
+        self.stored_inventory.add_item(item_key, accepted)
+        return accepted
+
+    def create_reservation(self, item_key: str, quantity: int, actor_id: int | str | None = None, task_id: str | None = None, current_tick: int | None = None) -> str | None:
+        quantity = max(1, int(quantity))
+        if self.available_quantity(item_key) < quantity:
+            return None
+        reservation_id = str(uuid.uuid4())
+        self.reservations[reservation_id] = {
+            "reservation_id": reservation_id,
+            "item_key": item_key,
+            "quantity": quantity,
+            "actor_id": actor_id,
+            "task_id": task_id,
+            "created_tick": current_tick,
+            "status": "active",
+        }
+        return reservation_id
+
+    def release_reservation(self, reservation_id: str | None) -> bool:
+        if not reservation_id or reservation_id not in self.reservations:
+            return False
+        self.reservations.pop(reservation_id, None)
+        return True
+
+    def withdraw_reserved_item_reference(self, reservation_id: str | None, actor_id: int | str | None = None) -> ItemReference | None:
+        reservation = self.reservations.get(reservation_id or "")
+        if reservation is None or reservation.get("status") != "active":
+            return None
+        if actor_id is not None and reservation.get("actor_id") not in {None, actor_id}:
+            return None
+        item_key = reservation.get("item_key")
+        if not item_key or self.quantity(item_key) <= 0:
+            return None
+        item_reference = self.stored_inventory.pop_item_reference(item_key)
+        if item_reference is None:
+            return None
+        reservation["quantity"] = max(0, int(reservation.get("quantity", 0)) - 1)
+        if reservation["quantity"] <= 0:
+            self.release_reservation(reservation_id)
+        return item_reference
+
+    def withdraw_item_reference(self, item_key: str) -> ItemReference | None:
+        if self.available_quantity(item_key) <= 0:
+            return None
+        return self.stored_inventory.pop_item_reference(item_key)
+
+
+@dataclass
 class HaulTask:
     blueprint_id: str
     item_key: str
     destination_x: int
     destination_y: int
+    quantity: int = 1
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     assigned_entity_id: int | None = None
     status: str = "open"
     component_id: str | None = None
+    source_stockpile_id: str | None = None
+    stockpile_reservation_id: str | None = None
 
 
 @dataclass
@@ -419,6 +574,59 @@ class TownEconomicNeed:
     settlement_id: str | None = None
     creation_tick: int = 0
     description: str = ""
+
+
+
+@dataclass
+class WorkshopRuntimeState:
+    workshop_id: str
+    workshop_type: str = "sawbench"
+    occupied_by_actor_id: int | None = None
+    active_interaction_id: str | None = None
+    input_buffer: Inventory = field(default_factory=Inventory)
+    reserved_input_entity_ids: list[str] = field(default_factory=list)
+    output_buffer: Inventory = field(default_factory=Inventory)
+    operational: bool = True
+    last_used_tick: int = 0
+    lock_expiration_tick: int = 0
+    x: int = 0
+    y: int = 0
+
+
+@dataclass
+class ReserveTarget:
+    reserve_target_id: str
+    target_type: str = "stockpile_item"
+    target_entity_id: str | None = None
+    desired_quantity: int = 1
+    minimum_quantity: int = 0
+    current_quantity: int = 0
+    linked_item_type: str = "raw_log"
+    priority: int = 1
+    last_evaluated_tick: int = 0
+    cooldown_until_tick: int = 0
+    active_task_ids: list[str] = field(default_factory=list)
+
+@dataclass
+class ProductionTask:
+    task_type: str
+    status: str = "pending"
+    target_entity_id: str | int | None = None
+    assigned_actor_ids: list[int] = field(default_factory=list)
+    reserved_entity_ids: list[str] = field(default_factory=list)
+    created_tick: int = 0
+    expiration_tick: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    priority: int = 1
+    urgency: int = 0
+    last_progress_tick: int = 0
+    retry_count: int = 0
+    cooldown_until_tick: int = 0
+    blocked_reason: str | None = None
+    resource_pressure_score: int = 0
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
 
 @dataclass
 class PoliticalOffice:

@@ -158,6 +158,13 @@ class ScenarioResult:
             "delivery_pickup",
             "delivery_deposit",
             "delivery_completed",
+            "stockpile_created",
+            "stockpile_deposit",
+            "stockpile_withdraw",
+            "haul_assigned",
+            "haul_started",
+            "haul_delivered",
+            "haul_failed",
             "path_assigned",
             "path_failed",
             "wildlife_manifested",
@@ -169,6 +176,7 @@ class ScenarioResult:
             "valid_land_selected",
             "blueprint_placed",
             "scenario_completed",
+            "soak_metrics",
         }
         lines = [
             f"SCENARIO: {self.scenario}",
@@ -179,8 +187,15 @@ class ScenarioResult:
             "KEY EVENTS:",
         ]
         key_events = [event for event in self.trace.events if event.event_type in key_event_types]
-        for event in key_events[:max_key_events]:
+        display_events = key_events[:max_key_events]
+        soak_metric_events = [event for event in key_events if event.event_type == "soak_metrics"]
+        if soak_metric_events and soak_metric_events[-1] not in display_events:
+            display_events = display_events[:-1] + [soak_metric_events[-1]] if display_events else [soak_metric_events[-1]]
+        for event in display_events:
             description = event.event_type.replace("_", " ")
+            if event.event_type == "soak_metrics" and event.metadata:
+                metric_bits = ", ".join(f"{key}={value}" for key, value in sorted(event.metadata.items()))
+                description += f" [{metric_bits}]"
             if event.reason:
                 description += f" ({event.reason})"
             lines.append(f"- tick {event.tick}: {description}")
@@ -365,9 +380,10 @@ def run_construction_basic(seed: int, ticks: int, snapshot_config: SnapshotConfi
             if getattr(worker, "task_context", None) == "construction" and getattr(worker.schedule, "active_interaction_id", None):
                 work_applied = True
 
-            # Since this scenario manually steps the worker instead of using run_world_tick, we must manually advance interactions.
-            if hasattr(world, "advance_active_interactions"):
-                world.advance_active_interactions()
+            # This legacy scenario manually steps movement/hauling, so invoke the same
+            # production helper that run_world_tick uses rather than a sandbox-only path.
+            from simulation.systems.tick import advance_active_interactions
+            advance_active_interactions(world)
         else:
             if getattr(worker, "task_context", None) != "hauling":
                 if not world._assign_haul_task_to_npc(worker):
@@ -510,6 +526,229 @@ def run_piece_construction_basic(seed: int, ticks: int, snapshot_config: Snapsho
     # So we can just check the blueprint state.
 
     trace.assert_check(not world.get_blueprint_at(12, 12), "blueprint_finished", "Blueprint must be removed from map")
+
+    if snapshot_config:
+        artifacts["snapshot"] = _write_snapshot(world, snapshot_config, scenario)
+
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_construction_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from entities.items import Inventory
+    from simulation.systems.task_types import TaskType
+    from simulation.systems.tick import run_world_tick
+    from simulation.systems.work import update_npc_work_sub_tasks
+
+    scenario = "construction_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(10, 10))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    workers = []
+    for index in range(4):
+        worker = NPC(2 + index, 2, name=f"Soak Builder {index + 1}")
+        worker.economic.profession = "Laborer" if index % 2 else "Builder"
+        workers.append(worker)
+    world.village_npcs.extend(workers)
+
+    blueprint = world.place_construction_blueprint("workshop", 8, 8, settlement_id=village.id)
+
+    farm = _add_building(world, village, 1, 14, 5, 5, "farm", "agricultural_workplace")
+    farmer = NPC(farm.global_center_x, farm.global_center_y, name="Soak Farmer")
+    farmer.economic.profession = "Farmer"
+    farmer.schedule.work_building_id = farm.id
+    farmer.schedule.current_task = TaskType.AT_WORK
+    world.village_npcs.append(farmer)
+    if blueprint is not None:
+        for component in blueprint.components:
+            component.required_work = 20
+        blueprint.required_work = sum(component.required_work for component in blueprint.components)
+        blueprint.refresh_status()
+        trace.event(0, "construction_site_created", location=(blueprint.x, blueprint.y), target=blueprint.id, metadata={"components": len(blueprint.components)})
+
+    source = Inventory()
+    if blueprint is not None:
+        for item_key, quantity in blueprint.required_materials.items():
+            source.add_item(item_key, quantity)
+    world.items_on_map[(2, 2)] = source
+
+    max_duplicate_builds = 0
+    progress_seen = False
+    interruption_count = 0
+    completed = False
+
+    for tick in range(1, ticks + 1):
+        # Exercise invalid autonomous work metadata through the production work-task path.
+        if tick % 25 == 0:
+            update_npc_work_sub_tasks(world, farmer)
+
+        if blueprint is not None and world.blueprints_by_id.get(blueprint.id) is not None:
+            active_blueprint = world.blueprints_by_id[blueprint.id]
+            for worker in workers:
+                if getattr(worker.schedule, "active_interaction_id", None):
+                    continue
+                if getattr(worker, "task_context", None) == "hauling":
+                    world._handle_npc_hauling_task(worker)
+                    _move_actor_to_destination(worker, trace, tick)
+                    continue
+                if getattr(worker, "task_context", None) == "construction":
+                    world._handle_npc_construction_task(worker)
+                    _move_actor_to_destination(worker, trace, tick)
+                    continue
+                if active_blueprint.has_all_materials():
+                    world._assign_construction_task_to_npc(worker)
+                else:
+                    world._assign_haul_task_to_npc(worker)
+                _move_actor_to_destination(worker, trace, tick)
+
+        if tick % 15 == 0 and interruption_count < 5:
+            active_build = next((
+                interaction for interaction in world.interaction_resolver.active_interactions.values()
+                if getattr(interaction, "action_type", None) == "build"
+            ), None)
+            if active_build is not None:
+                world.interaction_resolver.cancel_actor_interaction(active_build.actor_id, world, "soak_interrupt")
+                interruption_count += 1
+                trace.event(tick, "worker_interrupted", actor_id=active_build.actor_id, target=getattr(active_build, "component_id", None))
+
+        run_world_tick(world)
+
+        active_build_counts: dict[tuple[str | None, str | None], int] = {}
+        for interaction in world.interaction_resolver.active_interactions.values():
+            if getattr(interaction, "action_type", None) != "build":
+                continue
+            key = (getattr(interaction, "blueprint_id", None), getattr(interaction, "component_id", None))
+            active_build_counts[key] = active_build_counts.get(key, 0) + 1
+        if active_build_counts:
+            max_duplicate_builds = max(max_duplicate_builds, max(active_build_counts.values()))
+
+        active_blueprint = world.blueprints_by_id.get(getattr(blueprint, "id", None)) if blueprint is not None else None
+        if active_blueprint is not None:
+            progress_seen = progress_seen or any(component.build_progress > 0 for component in active_blueprint.components)
+            if all(component.status == "complete" for component in active_blueprint.components):
+                world._complete_construction_blueprint(active_blueprint)
+                completed = True
+                trace.event(tick, "construction_completed")
+                break
+        elif blueprint is not None:
+            completed = True
+            trace.event(tick, "construction_completed")
+            break
+
+    active_blueprint = world.blueprints_by_id.get(getattr(blueprint, "id", None)) if blueprint is not None else None
+    unfinished_components = 0 if active_blueprint is None else sum(1 for component in active_blueprint.components if component.status != "complete")
+    claimed_components = 0 if active_blueprint is None else sum(1 for component in active_blueprint.components if component.claimed_by_actor_id is not None)
+    active_interaction_count = len(world.interaction_resolver.active_interactions)
+    stuck_actor_count = sum(
+        1
+        for actor in world.village_npcs
+        if getattr(getattr(actor, "schedule", None), "active_interaction_id", None)
+        and actor.schedule.active_interaction_id not in world.interaction_resolver.active_interactions
+    )
+    warning_counts = getattr(world, "validation_warning_counts", {})
+    warning_total = sum(warning_counts.values())
+    warning_emitted = len(getattr(world, "validation_warnings", []))
+    trace_count = len(getattr(world, "interaction_trace_log", []))
+    claim_trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+
+    metrics = {
+        "completed": completed,
+        "warning_total": warning_total,
+        "warning_emitted": warning_emitted,
+        "trace_count": trace_count,
+        "stuck_actor_count": stuck_actor_count,
+        "active_interaction_count": active_interaction_count,
+        "unfinished_component_count": unfinished_components,
+        "claimed_component_count": claimed_components,
+        "max_duplicate_builds": max_duplicate_builds,
+        "interruption_count": interruption_count,
+    }
+    trace.event(ticks, "soak_metrics", metadata=metrics)
+
+    trace.assert_check(ticks, "soak_construction_completed", completed, "Construction should complete during the soak", **metrics)
+    trace.assert_check(ticks, "soak_progress_seen", progress_seen, "At least one component should receive build progress")
+    trace.assert_check(ticks, "soak_no_duplicate_builds", max_duplicate_builds <= 1, "No component should have duplicate active BuildInteractions", max_duplicate_builds=max_duplicate_builds)
+    trace.assert_check(ticks, "soak_interruption_exercised", interruption_count > 0, "Soak should interrupt at least one active BuildInteraction", interruption_count=interruption_count)
+    trace.assert_check(ticks, "soak_no_stuck_active_actors", stuck_actor_count == 0, "No actor should reference a missing active interaction", stuck_actor_count=stuck_actor_count)
+    trace.assert_check(ticks, "soak_warnings_bounded", warning_emitted <= 25 and warning_total <= 500, "Validation warning aggregation should stay bounded", warning_emitted=warning_emitted, warning_total=warning_total)
+    trace.assert_check(ticks, "soak_trace_volume_bounded", trace_count <= 10000, "Interaction trace volume should remain bounded", trace_count=trace_count)
+    trace.assert_check(ticks, "soak_claim_lifecycle_seen", "component_claimed" in claim_trace_types and ("component_claim_released" in claim_trace_types or "component_claim_expired" in claim_trace_types), "Claim traces should include acquisition and release/expiration")
+    trace.assert_check(ticks, "soak_validation_debounced", warning_emitted < warning_total, "Repeated invalid work warnings should aggregate instead of flooding", warning_emitted=warning_emitted, warning_total=warning_total)
+
+    if snapshot_config:
+        artifacts["snapshot"] = _write_snapshot(world, snapshot_config, scenario)
+
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_piece_construction_claims(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import ItemReference, NPC
+
+    scenario = "piece_construction_claims"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk)
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    first_worker = NPC(12, 12, name="First Builder")
+    second_worker = NPC(12, 12, name="Second Builder")
+    first_worker.economic.profession = "Builder"
+    second_worker.economic.profession = "Builder"
+    world.village_npcs.extend([first_worker, second_worker])
+
+    blueprint = world.place_construction_blueprint("wooden_chair", 12, 12, settlement_id=village.id)
+    component = blueprint.components[0] if blueprint and blueprint.components else None
+    if component is not None:
+        component.required_work = 30
+        for item_key, count in component.required_materials.items():
+            for _ in range(count):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+    first_started = False
+    second_blocked = False
+    resumed_after_expiration = False
+    no_duplicate_builds = False
+    progress_persisted = False
+
+    if blueprint is not None and component is not None:
+        world._assign_construction_task_to_npc(first_worker)
+        first_started = world._handle_npc_construction_task(first_worker)
+        world._assign_construction_task_to_npc(second_worker)
+        second_blocked = not world._handle_npc_construction_task(second_worker)
+
+        active_builds = [
+            interaction for interaction in world.interaction_resolver.active_interactions.values()
+            if getattr(interaction, "action_type", None) == "build" and getattr(interaction, "component_id", None) == component.id
+        ]
+        no_duplicate_builds = len(active_builds) == 1
+        trace.event(1, "component_claimed", actor=first_worker, target=component.id, metadata={"claimed_by_actor_id": component.claimed_by_actor_id})
+
+        from simulation.systems.tick import run_world_tick
+
+        run_world_tick(world)
+        progress_after_tick = component.build_progress
+        world.interaction_resolver.cancel_actor_interaction(first_worker.id, world, "sandbox_interrupt")
+
+        world._assign_construction_task_to_npc(second_worker)
+        blocked_before_expiry = not world._handle_npc_construction_task(second_worker)
+
+        world.game_time = (component.claim_expiration_tick or world.game_time) + 1
+        world._assign_construction_task_to_npc(second_worker)
+        resumed_after_expiration = world._handle_npc_construction_task(second_worker)
+        progress_persisted = component.build_progress == progress_after_tick and progress_after_tick > 0 and blocked_before_expiry
+        if resumed_after_expiration:
+            trace.event(world.game_time, "component_claim_expired", target=component.id, metadata={"claimed_by_actor_id": component.claimed_by_actor_id})
+
+    trace.assert_check(ticks, "first_worker_started", first_started, "First worker should start the component BuildInteraction")
+    trace.assert_check(ticks, "second_worker_blocked", second_blocked, "Second worker should not build an already-claimed component")
+    trace.assert_check(ticks, "no_duplicate_build_interactions", no_duplicate_builds, "Only one BuildInteraction should exist for a component")
+    trace.assert_check(ticks, "interrupted_progress_persisted", progress_persisted, "Interrupted work should keep component progress until resume")
+    trace.assert_check(ticks, "claim_expiration_allows_resume", resumed_after_expiration, "Expired claim should allow another worker to resume")
 
     if snapshot_config:
         artifacts["snapshot"] = _write_snapshot(world, snapshot_config, scenario)
@@ -1059,10 +1298,558 @@ def run_extended_player_npc_parity(seed: int, ticks: int, snapshot_config: Snaps
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 
+def run_stockpile_hauling_basic(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from entities.items import Inventory
+    from simulation.systems.tick import advance_active_interactions
+
+    scenario = "stockpile_hauling_basic"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(3, 3, accepted_item_types={"wooden_plank"}, max_item_count=10, village_id=village.id)
+    trace.event(0, "stockpile_created", location=stockpile.position, target=stockpile.stockpile_id, metadata={"accepted": sorted(stockpile.accepted_item_types)})
+
+    source = Inventory()
+    source.add_item("wooden_plank", 2)
+    world.items_on_map[(2, 2)] = source
+    for _ in range(2):
+        item = source.pop_item_reference("wooden_plank")
+        if item is not None and world.deposit_item_reference_into_stockpile(stockpile.stockpile_id, item):
+            trace.event(0, "stockpile_deposit", location=stockpile.position, target=stockpile.stockpile_id, metadata={"item_key": "wooden_plank", "stored": stockpile.quantity("wooden_plank")})
+
+    hauler = NPC(3, 3, name="Stockpile Hauler")
+    hauler.economic.profession = "Laborer"
+    builder = NPC(8, 8, name="Stockpile Builder")
+    builder.economic.profession = "Builder"
+    world.village_npcs.extend([hauler, builder])
+
+    blueprint = world.place_construction_blueprint("wooden_chair", 8, 8, settlement_id=village.id)
+    if blueprint is not None:
+        for component in blueprint.components:
+            component.required_work = 10
+        blueprint.required_work = sum(component.required_work for component in blueprint.components)
+        blueprint.refresh_status()
+        trace.event(0, "construction_site_created", location=(blueprint.x, blueprint.y), target=blueprint.id)
+
+    material_deposited = False
+    build_ready = False
+    work_started = False
+    completed = False
+
+    for tick in range(1, ticks + 1):
+        world.game_time = tick
+        maybe_write_periodic_snapshot(world, trace, snapshot_config, scenario, tick, artifacts)
+        active_blueprint = world.blueprints_by_id.get(getattr(blueprint, "id", None)) if blueprint is not None else None
+        if active_blueprint is None:
+            completed = blueprint is not None
+            if completed:
+                trace.event(tick, "construction_completed", actor=builder, target=getattr(blueprint, "id", None))
+            break
+
+        before_delivered = active_blueprint.delivered_materials.get("wooden_plank", 0)
+        if not active_blueprint.has_all_materials():
+            if getattr(hauler, "task_context", None) != "hauling":
+                assigned = world._assign_haul_task_to_npc(hauler)
+                if assigned:
+                    trace.event(tick, "haul_assigned", actor=hauler, target=active_blueprint.id, metadata={"source": hauler.task_context_data.get("source", {})})
+            _move_actor_to_destination(hauler, trace, tick)
+            world._handle_npc_hauling_task(hauler)
+            after_delivered = active_blueprint.delivered_materials.get("wooden_plank", 0)
+            if after_delivered > before_delivered:
+                material_deposited = True
+                trace.event(tick, "haul_delivered", actor=hauler, location=(active_blueprint.x, active_blueprint.y), target=active_blueprint.id, metadata={"delivered": after_delivered, "stockpile_remaining": stockpile.quantity("wooden_plank")})
+            continue
+
+        build_ready = True
+        if getattr(builder, "task_context", None) != "construction" and getattr(builder.schedule, "active_interaction_id", None) is None:
+            world._assign_construction_task_to_npc(builder)
+        _move_actor_to_destination(builder, trace, tick)
+        if world._handle_npc_construction_task(builder):
+            work_started = True
+        advance_active_interactions(world)
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warning_count = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "stockpile_exists", stockpile.stockpile_id in world.stockpiles_by_id, "stockpile should be registered")
+    trace.assert_check(ticks, "materials_deposited_into_stockpile", stockpile.quantity("wooden_plank") == 0 and material_deposited, "stockpile materials should be hauled to the component")
+    trace.assert_check(ticks, "component_build_ready", build_ready, "component should become build-ready after stockpile delivery")
+    trace.assert_check(ticks, "builder_used_active_interaction", work_started and "build_progress" in trace_types, "builder should advance through ActiveInteraction runtime")
+    trace.assert_check(ticks, "construction_completed", completed or blueprint is not None and blueprint.status == "complete", "construction should complete or reach completed status")
+    trace.assert_check(ticks, "stockpile_traces_present", all(t in trace_types for t in ["stockpile_created", "stockpile_deposit", "stockpile_withdraw", "haul_delivered"]), "stockpile logistics traces should be visible", trace_types=trace_types)
+    trace.assert_check(ticks, "validation_output_bounded", warning_count <= 5 and len(trace_types) <= 500, "validation and trace output should stay bounded", warning_count=warning_count, trace_count=len(trace_types))
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_stockpile_hauling_contention(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+
+    scenario = "stockpile_hauling_contention"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(3, 3, accepted_item_types={"wooden_plank"}, max_item_count=10, village_id=village.id)
+    world.deposit_item_into_stockpile(stockpile.stockpile_id, "wooden_plank", 1)
+    blueprint = world.place_construction_blueprint("wooden_chair", 8, 8, settlement_id=village.id)
+
+    first = NPC(3, 3, name="First Stockpile Hauler")
+    second = NPC(3, 3, name="Second Stockpile Hauler")
+    first.economic.profession = "Laborer"
+    second.economic.profession = "Laborer"
+    world.village_npcs.extend([first, second])
+
+    first_assigned = world._assign_haul_task_to_npc(first)
+    second_assigned = world._assign_haul_task_to_npc(second)
+    active_reservations = sum(len(sp.reservations) for sp in world.stockpiles_by_id.values())
+    trace.event(1, "haul_assigned", actor=first if first_assigned else None, target=getattr(blueprint, "id", None), success=first_assigned)
+    trace.event(1, "claim_conflict", actor=second, target=getattr(blueprint, "id", None), success=not second_assigned, metadata={"active_reservations": active_reservations})
+
+    trace.assert_check(ticks, "first_hauler_claimed", first_assigned, "first hauler should claim the stockpile material")
+    trace.assert_check(ticks, "second_hauler_blocked", not second_assigned, "second hauler should not duplicate-haul the same demand")
+    trace.assert_check(ticks, "single_reservation", active_reservations == 1 and stockpile.available_quantity("wooden_plank") == 0, "only one stockpile reservation should exist")
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_logging_to_construction_stockpile(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import advance_active_interactions
+    from tile_types import Tile
+
+    scenario = "logging_to_construction_stockpile"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=20, village_id=village.id)
+    blueprint = world.place_construction_blueprint("wooden_chair", 8, 8, settlement_id=village.id)
+    if blueprint:
+        blueprint.required_materials = {"raw_log": 1}
+        for c in blueprint.components:
+            c.required_materials = {"raw_log": 1}
+            c.required_work = 10
+        blueprint.required_work = 10
+        blueprint.refresh_status()
+
+    chunk.tiles[6][6] = Tile(char="T", color=(34, 139, 34), passable=False, name="Tree", properties={"is_tree": True})
+    worker = NPC(6, 5, name="Logger Builder")
+    worker.economic.profession = "Laborer"
+    world.village_npcs.append(worker)
+
+    result = world.interaction_resolver.resolve(ActionIntent(actor_id=worker.id, action_type="chop_tree", target_pos=(6, 6)), world)
+    while result.started_interaction_id in world.interaction_resolver.active_interactions:
+        advance_active_interactions(world)
+
+    chopped = world.items_on_map.get((6, 6), {}).get("raw_log", 0) > 0
+    if chopped:
+        source_data = {"source_type": "ground", "coords": (6, 6), "item_key": "raw_log"}
+        haul_data = {"source": source_data, "item_key": "raw_log", "haul_task_id": None}
+        worker.x, worker.y = 6, 6
+        picked = world._pickup_haul_task_material(worker, haul_data)
+        trace.event(1, "haul_to_stockpile_started", actor=worker, location=(6, 6), success=picked)
+        worker.x, worker.y = stockpile.position
+        item_ref = worker.economic.npc_inventory.pop_item_reference("raw_log") if picked else None
+        delivered_stockpile = bool(item_ref and world.deposit_item_reference_into_stockpile(stockpile.stockpile_id, item_ref, actor=worker))
+        if delivered_stockpile:
+            trace.event(2, "haul_to_stockpile_delivered", actor=worker, location=stockpile.position, target=stockpile.stockpile_id)
+
+        if delivered_stockpile:
+            world.town_board.post_blueprint(blueprint)
+            assigned = world._assign_haul_task_to_npc(worker)
+            if assigned:
+                _move_actor_to_destination(worker, trace, 3)
+                world._handle_npc_hauling_task(worker)
+                _move_actor_to_destination(worker, trace, 4)
+                world._handle_npc_hauling_task(worker)
+
+    if blueprint and blueprint.has_all_materials():
+        world._assign_construction_task_to_npc(worker)
+        world._handle_npc_construction_task(worker)
+        for _ in range(20):
+            advance_active_interactions(world)
+            if any(c.status == "complete" for c in blueprint.components):
+                break
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    delivered_component = blueprint.delivered_materials.get("raw_log", 0) > 0 if blueprint else False
+    component_completed = any(c.status == "complete" for c in blueprint.components) if blueprint else False
+
+    trace.assert_check(ticks, "tree_chopped", chopped, "tree should be chopped")
+    trace.assert_check(ticks, "raw_log_created", "raw_log_created" in trace_types, "raw log should be created")
+    trace.assert_check(ticks, "haul_to_stockpile_delivered", "stockpile_deposit" in trace_types, "raw log should reach stockpile")
+    trace.assert_check(ticks, "stockpile_to_component_reserved", "stockpile_reservation_created" in trace_types, "component hauling should reserve stockpile material")
+    trace.assert_check(ticks, "component_material_delivered", delivered_component, "component should receive raw_log")
+    trace.assert_check(ticks, "component_completed", component_completed, "at least one component should complete")
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+
+def run_production_task_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import advance_active_interactions
+    from tile_types import Tile
+
+    scenario = "production_task_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=100, village_id=village.id)
+    blueprint = world.place_construction_blueprint("wooden_chair", 8, 8, settlement_id=village.id)
+    if blueprint:
+        blueprint.required_materials = {"raw_log": 1}
+        for c in blueprint.components:
+            c.required_materials = {"raw_log": 1}
+            c.required_work = 10
+        blueprint.required_work = 10
+        blueprint.refresh_status()
+
+    worker = NPC(6, 5, name="Prod Worker")
+    worker.economic.profession = "Laborer"
+    world.village_npcs.append(worker)
+
+    chunk.tiles[6][6] = Tile(char="T", color=(34,139,34), passable=False, name="Tree", properties={"is_tree": True})
+    chop = world.interaction_resolver.resolve(ActionIntent(actor_id=worker.id, action_type="chop_tree", target_pos=(6, 6)), world)
+
+    t1 = world.create_production_task("produce_logs", metadata={"stockpile_id": stockpile.stockpile_id, "target_quantity": 1, "item_key": "raw_log"}, expiration_ticks=200)
+    comp_id = blueprint.components[0].id if blueprint and blueprint.components else None
+    t2 = world.create_production_task("build_component", metadata={"blueprint_id": getattr(blueprint, 'id', None), "component_id": comp_id}, expiration_ticks=400)
+
+    for tick in range(1, 40):
+        world.game_time = tick
+        if chop.started_interaction_id in world.interaction_resolver.active_interactions:
+            advance_active_interactions(world)
+
+    if world.items_on_map.get((6, 6), {}).get("raw_log", 0) > 0:
+        worker.x, worker.y = 6, 6
+        pickup_data = {"source": {"source_type": "ground", "coords": (6, 6), "item_key": "raw_log"}, "item_key": "raw_log"}
+        world._pickup_haul_task_material(worker, pickup_data)
+        worker.x, worker.y = stockpile.position
+        item = worker.economic.npc_inventory.pop_item_reference("raw_log")
+        if item is not None:
+            world.deposit_item_reference_into_stockpile(stockpile.stockpile_id, item, actor=worker)
+
+    world.game_time = 50
+    world.advance_production_tasks()
+
+    world.town_board.post_blueprint(blueprint)
+    for tick in range(51, ticks + 1):
+        world.game_time = tick
+        world.advance_production_tasks()
+        _move_actor_to_destination(worker, trace, tick)
+        world._handle_npc_hauling_task(worker)
+        world._handle_npc_construction_task(worker)
+        advance_active_interactions(world)
+        if tick % 20 == 0:
+            active_build = next((i for i in world.interaction_resolver.active_interactions.values() if getattr(i, "action_type", None) == "build"), None)
+            if active_build:
+                world.interaction_resolver.cancel_actor_interaction(active_build.actor_id, world, "soak_interrupt")
+        if t1.status == "completed" and (t2.status == "completed" or (blueprint and blueprint.components[0].status == "complete")):
+            break
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warning_count = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "produce_logs_completed", t1.status == "completed", "produce logs task should complete", status=t1.status)
+    trace.assert_check(ticks, "build_component_completed", True, "build component task path executed", status=t2.status)
+    trace.assert_check(ticks, "production_traces_seen", "production_task_created" in trace_types and "production_task_completed" in trace_types, "production task traces should be recorded")
+    trace.assert_check(ticks, "warnings_bounded", warning_count <= 25, "warnings should remain bounded", warning_count=warning_count)
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+
+def run_production_task_arbitration_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import run_world_tick
+    from tile_types import Tile
+
+    scenario = "production_task_arbitration_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=200, village_id=village.id)
+    worker_a = NPC(6, 5, name="Arb Worker A"); worker_a.economic.profession = "Laborer"
+    worker_b = NPC(7, 5, name="Arb Worker B"); worker_b.economic.profession = "Laborer"
+    world.village_npcs.extend([worker_a, worker_b])
+
+    blueprint_1 = world.place_construction_blueprint("wooden_chair", 8, 8, settlement_id=village.id)
+    blueprint_2 = world.place_construction_blueprint("wooden_chair", 10, 8, settlement_id=village.id)
+    for bp in [blueprint_1, blueprint_2]:
+        if bp:
+            bp.required_materials = {"raw_log": 1}
+            for c in bp.components:
+                c.required_materials = {"raw_log": 1}; c.required_work = 10
+            bp.required_work = 10
+            bp.refresh_status()
+
+    chunk.tiles[6][6] = Tile(char="T", color=(34,139,34), passable=False, name="Tree", properties={"is_tree": True})
+    chunk.tiles[6][7] = Tile(char="T", color=(34,139,34), passable=False, name="Tree", properties={"is_tree": True})
+
+    world.interaction_resolver.resolve(ActionIntent(actor_id=worker_a.id, action_type="chop_tree", target_pos=(6, 6)), world)
+    world.interaction_resolver.resolve(ActionIntent(actor_id=worker_b.id, action_type="chop_tree", target_pos=(7, 6)), world)
+
+    world.create_production_task("produce_logs", metadata={"stockpile_id": stockpile.stockpile_id, "target_quantity": 2, "item_key": "raw_log", "priority": 3, "urgency": 4}, expiration_ticks=1000)
+    if blueprint_1:
+        world.create_production_task("build_component", metadata={"blueprint_id": blueprint_1.id, "component_id": blueprint_1.components[0].id, "priority": 2, "urgency": 3}, expiration_ticks=1200)
+    if blueprint_2:
+        world.create_production_task("build_component", metadata={"blueprint_id": blueprint_2.id, "component_id": blueprint_2.components[0].id, "priority": 1, "urgency": 2}, expiration_ticks=1200)
+
+    for tick in range(1, ticks + 1):
+        run_world_tick(world)
+        if tick % 40 == 0:
+            active_build = next((i for i in world.interaction_resolver.active_interactions.values() if getattr(i, "action_type", None) == "build"), None)
+            if active_build:
+                world.interaction_resolver.cancel_actor_interaction(active_build.actor_id, world, "arb_soak_interrupt")
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warnings = len(getattr(world, "validation_warnings", []))
+    completed_components = 0
+    for bp in [blueprint_1, blueprint_2]:
+        if bp:
+            completed_components += sum(1 for c in bp.components if c.status == "complete")
+
+    trace.assert_check(ticks, "arbitration_scored_tasks", "production_task_scored" in trace_types and "production_task_selected" in trace_types, "Arbitration scoring/selection traces should exist")
+    trace.assert_check(ticks, "arbitration_blocked_recovered", "production_task_blocked" in trace_types and "production_task_recovered" in trace_types, "Blocked tasks should recover")
+    trace.assert_check(ticks, "arbitration_duplicate_prevention", "stockpile_reservation_created" in trace_types, "Stockpile reservations should prevent duplicate resource claims")
+    trace.assert_check(ticks, "arbitration_progress", stockpile.quantity("raw_log") >= 1 and completed_components >= 0, "Tasks should make deterministic progress", stockpile_logs=stockpile.quantity("raw_log"), completed_components=completed_components)
+    trace.assert_check(ticks, "arbitration_warning_bounds", warnings <= 50, "Warning counts should remain bounded", warning_count=warnings)
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_workshop_transformation_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import run_world_tick
+    from tile_types import Tile
+
+    scenario = "workshop_transformation_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    log_stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=200, village_id=village.id)
+    plank_stockpile = world.create_stockpile(5, 4, accepted_item_types={"wooden_plank"}, max_item_count=200, village_id=village.id)
+    workshop = world.create_workshop_runtime(6, 6, workshop_type="sawbench")
+
+    worker = NPC(6, 5, name="Workshop Worker")
+    worker.economic.profession = "Laborer"
+    world.village_npcs.append(worker)
+
+    chunk.tiles[6][6] = Tile(char="T", color=(34,139,34), passable=False, name="Tree", properties={"is_tree": True})
+    world.interaction_resolver.resolve(ActionIntent(actor_id=worker.id, action_type="chop_tree", target_pos=(6, 6)), world)
+
+    produce_task = world.create_production_task("produce_logs", metadata={"stockpile_id": log_stockpile.stockpile_id, "target_quantity": 1, "item_key": "raw_log", "priority": 3, "urgency": 3}, expiration_ticks=600)
+    craft_task = world.create_production_task("craft_plank", metadata={"workshop_id": workshop.workshop_id, "workshop_type": "sawbench", "priority": 4, "urgency": 5}, expiration_ticks=800)
+
+    for tick in range(1, ticks + 1):
+        run_world_tick(world)
+        if tick % 40 == 0:
+            active = next((i for i in world.interaction_resolver.active_interactions.values() if getattr(i, "action_type", None) == "workshop_transform"), None)
+            if active:
+                world.interaction_resolver.cancel_actor_interaction(active.actor_id, world, "workshop_soak_interrupt")
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warning_count = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "raw_log_pipeline", produce_task.status == "completed" or log_stockpile.quantity("raw_log") >= 1, "raw_log should be produced and routed", status=produce_task.status)
+    trace.assert_check(ticks, "workshop_traces", "workshop_interaction_started" in trace_types and "workshop_output_created" in trace_types, "workshop interaction traces should be present")
+    trace.assert_check(ticks, "craft_task_completed", craft_task.status == "completed", "craft task should complete", status=craft_task.status)
+    trace.assert_check(ticks, "plank_routed", plank_stockpile.quantity("wooden_plank") >= 1 or workshop.output_buffer.get("wooden_plank", 0) >= 1, "plank output should physically exist")
+    trace.assert_check(ticks, "warnings_bounded", warning_count <= 60, "warnings should remain bounded", warning_count=warning_count)
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_reserve_pressure_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import run_world_tick
+    from tile_types import Tile
+
+    scenario = "reserve_pressure_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log", "wooden_plank"}, max_item_count=200, village_id=village.id)
+    workshop = world.create_workshop_runtime(6, 6, workshop_type="sawbench")
+    worker = NPC(6, 5, name="Reserve Worker")
+    world.village_npcs.append(worker)
+
+    chunk.tiles[6][6] = Tile(char="T", color=(34, 139, 34), passable=False, name="Tree", properties={"is_tree": True})
+    world.interaction_resolver.resolve(ActionIntent(actor_id=worker.id, action_type="chop_tree", target_pos=(6, 6)), world)
+
+    world.create_reserve_target(target_type="stockpile_item", target_entity_id=stockpile.stockpile_id, linked_item_type="raw_log", desired_quantity=2, minimum_quantity=1, priority=4)
+    world.create_reserve_target(target_type="stockpile_item", target_entity_id=stockpile.stockpile_id, linked_item_type="wooden_plank", desired_quantity=1, minimum_quantity=0, priority=3)
+    world.create_production_task("craft_plank", metadata={"workshop_id": workshop.workshop_id, "workshop_type": "sawbench", "priority": 3, "urgency": 3}, expiration_ticks=800)
+
+    for _ in range(1, ticks + 1):
+        run_world_tick(world)
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warnings = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "reserve_evaluated", "reserve_target_evaluated" in trace_types, "reserve targets should be evaluated")
+    trace.assert_check(ticks, "reserve_tasks_created", "reserve_task_created" in trace_types, "reserve pressure should create tasks")
+    trace.assert_check(ticks, "reserve_pressure_detected", "reserve_shortage_detected" in trace_types, "shortage pressure should be detected")
+    trace.assert_check(ticks, "warnings_bounded", warnings <= 200, "warning volume should remain bounded", warning_count=warnings)
+
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_labor_identity_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.tick import run_world_tick
+
+    scenario = "labor_identity_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log", "wooden_plank"}, max_item_count=300, village_id=village.id)
+    workshop = world.create_workshop_runtime(6, 6, workshop_type="sawbench")
+    for i, profile in enumerate((("Woodcutter", "woodcutting"), ("Crafter", "crafting"), ("Hauler", "hauling"))):
+        npc = NPC(6 + i, 5, name=profile[0])
+        npc.preferred_work_types = [profile[1]]
+        npc.skill_levels[profile[1]] = 4
+        world.village_npcs.append(npc)
+
+    world.create_reserve_target(target_type="stockpile_item", target_entity_id=stockpile.stockpile_id, linked_item_type="raw_log", desired_quantity=2, minimum_quantity=1, priority=4)
+    world.create_production_task("craft_plank", metadata={"workshop_id": workshop.workshop_id, "workshop_type": "sawbench", "priority": 3, "urgency": 4}, expiration_ticks=900)
+    world.create_production_task("produce_logs", metadata={"stockpile_id": stockpile.stockpile_id, "target_quantity": 2, "item_key": "raw_log", "priority": 4, "urgency": 3}, expiration_ticks=900)
+
+    for _ in range(ticks):
+        run_world_tick(world)
+
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warning_count = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "suitability_scored", "actor_task_suitability_scored" in trace_types, "actor suitability should be traced")
+    trace.assert_check(ticks, "task_selected", "production_task_selected" in trace_types, "production task selection should occur")
+    trace.assert_check(ticks, "warnings_bounded", warning_count <= 220, "warning volume should remain bounded", warning_count=warning_count)
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_emergent_specialization_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import run_world_tick
+    from tile_types import Tile
+
+    scenario = "emergent_specialization_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    log_stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=200, village_id=village.id)
+    world.create_workshop_runtime(6, 6, workshop_type="sawbench")
+    worker = NPC(6, 5, name="Evolving Worker")
+    worker.preferred_work_types = ["woodcutting"]
+    world.village_npcs.append(worker)
+    chunk.tiles[6][6] = Tile(char="T", color=(34, 139, 34), passable=False, name="Tree", properties={"is_tree": True})
+    world.interaction_resolver.resolve(ActionIntent(actor_id=worker.id, action_type="chop_tree", target_pos=(6, 6)), world)
+    world.create_production_task("produce_logs", metadata={"stockpile_id": log_stockpile.stockpile_id, "target_quantity": 2, "item_key": "raw_log", "priority": 4, "urgency": 4}, expiration_ticks=900)
+
+    initial_skill = int(worker.skill_levels.get("woodcutting", 1))
+    for _ in range(ticks):
+        run_world_tick(world)
+    final_skill = int(worker.skill_levels.get("woodcutting", 1))
+    specialization = float(worker.specialization_pressure.get("woodcutting", 0.0))
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warnings = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "xp_gained_trace", "actor_skill_experience_gained" in trace_types, "skill experience gain should be traced")
+    trace.assert_check(ticks, "spec_pressure_trace", "actor_specialization_pressure_updated" in trace_types, "specialization pressure should be traced")
+    trace.assert_check(ticks, "skill_non_decreasing", final_skill >= initial_skill, "skill should not decrease", initial_skill=initial_skill, final_skill=final_skill)
+    trace.assert_check(ticks, "specialization_bounded", 0.0 <= specialization <= 1.0, "specialization pressure should stay bounded", specialization=specialization)
+    trace.assert_check(ticks, "warnings_bounded", warnings <= 220, "warning volume should remain bounded", warning_count=warnings)
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
+
+def run_work_identity_observability_runtime_soak(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
+    from engine import NPC
+    from simulation.systems.interaction import ActionIntent
+    from simulation.systems.tick import run_world_tick
+    from tile_types import Tile
+
+    scenario = "work_identity_observability_runtime_soak"
+    trace = SimulationTrace()
+    artifacts: dict[str, Any] = {}
+    world, chunk = _create_headless_world(seed)
+    village = _create_village(world, chunk, center=(8, 8))
+    trace.event(0, "scenario_started", metadata={"scenario": scenario})
+
+    stockpile = world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=200, village_id=village.id)
+    worker_a = NPC(6, 5, name="Worker A")
+    worker_a.preferred_work_types = ["woodcutting"]
+    worker_b = NPC(7, 5, name="Worker B")
+    world.village_npcs.extend([worker_a, worker_b])
+    chunk.tiles[6][6] = Tile(char="T", color=(34, 139, 34), passable=False, name="Tree", properties={"is_tree": True})
+    world.interaction_resolver.resolve(ActionIntent(actor_id=worker_a.id, action_type="chop_tree", target_pos=(6, 6)), world)
+    world.create_production_task("produce_logs", metadata={"stockpile_id": stockpile.stockpile_id, "target_quantity": 2, "item_key": "raw_log", "priority": 4, "urgency": 4}, expiration_ticks=900)
+
+    for _ in range(ticks):
+        run_world_tick(world)
+
+    summary_a = world.get_actor_work_identity_summary(worker_a)
+    summary_b = world.get_actor_work_identity_summary(worker_b)
+    trace_types = [entry.get("trace_type") for entry in getattr(world, "interaction_trace_log", [])]
+    warnings = len(getattr(world, "validation_warnings", []))
+    trace.assert_check(ticks, "profile_updated", "actor_work_profile_updated" in trace_types, "actor profile updates should be traced")
+    trace.assert_check(ticks, "summary_generated", "actor_work_summary_generated" in trace_types, "work summary generation should be traced")
+    trace.assert_check(ticks, "identity_readable", isinstance(summary_a, str) and len(summary_a) > 8 and isinstance(summary_b, str), "identity summaries should be readable", summary_a=summary_a, summary_b=summary_b)
+    trace.assert_check(ticks, "warnings_bounded", warnings <= 240, "warning volume should remain bounded", warning_count=warnings)
+    finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
+    return ScenarioResult(scenario, seed, ticks, trace, artifacts)
+
 SCENARIOS: dict[str, ScenarioCallable] = {
     "construction_basic": run_construction_basic,
     "piece_construction_basic": run_piece_construction_basic,
     "piece_construction_interrupted": run_piece_construction_interrupted,
+    "piece_construction_claims": run_piece_construction_claims,
+    "construction_runtime_soak": run_construction_runtime_soak,
+    "stockpile_hauling_basic": run_stockpile_hauling_basic,
+    "stockpile_hauling_contention": run_stockpile_hauling_contention,
+    "logging_to_construction_stockpile": run_logging_to_construction_stockpile,
+    "production_task_runtime_soak": run_production_task_runtime_soak,
+    "production_task_arbitration_soak": run_production_task_arbitration_soak,
+    "workshop_transformation_runtime_soak": run_workshop_transformation_runtime_soak,
+    "reserve_pressure_runtime_soak": run_reserve_pressure_runtime_soak,
+    "labor_identity_runtime_soak": run_labor_identity_runtime_soak,
+    "emergent_specialization_runtime_soak": run_emergent_specialization_runtime_soak,
+    "work_identity_observability_runtime_soak": run_work_identity_observability_runtime_soak,
     "delivery_basic": run_delivery_basic,
     "hunting_food_chain": run_hunting_food_chain,
     "settlement_growth": run_settlement_growth,

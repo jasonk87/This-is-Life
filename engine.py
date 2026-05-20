@@ -13,6 +13,7 @@ from tcod_compat import tcod, libtcodpy
 import time
 import pickle
 import os
+import uuid
 from typing import Any
 from simulation.activity import (
     ensure_activity_state,
@@ -172,6 +173,13 @@ from simulation.world_model import (
     LandClaim,
     PoliticalWarrant,
     PoliticsTracker,
+    Stockpile,
+    ReserveTarget,
+    ProductionTask,
+    DecisionExplanation,
+    WorldDebugSnapshot,
+    CampfireRuntimeState,
+    WorkshopRuntimeState,
     Ruin,
     TownBoard,
     Village,
@@ -667,6 +675,15 @@ class World:
         self.current_season_index: int = 0
         self.current_day: int = 0
         self.ambient_temperature: float = 20.0 # Default starting temp
+        self.cold_threshold: float = 8.0
+        self.severe_cold_threshold: float = 0.0
+        self.warmth_decay_radius: int = 6
+        self.last_temperature_tick: int = 0
+        self.shelter_zones_by_id: dict[str, dict] = {}
+        self.cold_threshold: float = 8.0
+        self.severe_cold_threshold: float = 0.0
+        self.warmth_decay_radius: int = 6
+        self.last_temperature_tick: int = 0
         self.weather = "clear"
         self.weather_change_timer: int = 0
 
@@ -785,6 +802,22 @@ class World:
         self.land_claims_by_id: dict[str, LandClaim] = {}
         self.show_land_claim_overlay = False
         self.town_board = TownBoard()
+        self.stockpiles_by_id: dict[str, Stockpile] = {}
+        self.reserve_targets_by_id: dict[str, ReserveTarget] = {}
+        self.production_tasks_by_id: dict[str, ProductionTask] = {}
+        self.decision_explanations: list[DecisionExplanation] = []
+        self.workshops_by_id: dict[str, WorkshopRuntimeState] = {}
+        self.campfires_by_id: dict[str, CampfireRuntimeState] = {}
+        self.next_reserve_eval_tick: int = 0
+        self.next_production_eval_tick: int = 0
+        self.next_dependency_eval_tick: int = 0
+        self.actor_suitability_cache_until_tick: int = 0
+        self.scheduling_cadence_config: dict[str, int] = {"reserve_eval_interval": 5, "production_eval_interval": 2, "dependency_eval_interval": 4, "suitability_cache_interval": 2}
+        self._actor_suitability_cache: dict[tuple[str, int, str], int] = {}
+        self._production_score_cache: dict[str, tuple[int, int]] = {}
+        self.cold_override_threshold: float = 0.7
+        self.cold_recovery_threshold: float = 0.35
+        self.cold_override_cooldown_ticks: int = 40
 
         # FOV and Light Level state
         self.current_light_level_name = "DAY" # Default
@@ -859,6 +892,27 @@ class World:
         self.chunk_manager = ChunkManager(CHUNK_SIZE, self.chunk_width, self.chunk_height)
         self.last_abstract_simulation_hour = getattr(self, "last_abstract_simulation_hour", -1)
         self.last_macro_daily_day = getattr(self, "last_macro_daily_day", -1)
+        self.stockpiles_by_id = getattr(self, "stockpiles_by_id", {})
+        self.reserve_targets_by_id = getattr(self, "reserve_targets_by_id", {})
+        self.production_tasks_by_id = getattr(self, "production_tasks_by_id", {})
+        self.decision_explanations = getattr(self, "decision_explanations", [])
+        self.workshops_by_id = getattr(self, "workshops_by_id", {})
+        self.campfires_by_id = getattr(self, "campfires_by_id", {})
+        self.next_reserve_eval_tick = getattr(self, "next_reserve_eval_tick", 0)
+        self.next_production_eval_tick = getattr(self, "next_production_eval_tick", 0)
+        self.next_dependency_eval_tick = getattr(self, "next_dependency_eval_tick", 0)
+        self.actor_suitability_cache_until_tick = getattr(self, "actor_suitability_cache_until_tick", 0)
+        self.scheduling_cadence_config = getattr(self, "scheduling_cadence_config", {"reserve_eval_interval": 5, "production_eval_interval": 2, "dependency_eval_interval": 4, "suitability_cache_interval": 2})
+        self._actor_suitability_cache = getattr(self, "_actor_suitability_cache", {})
+        self._production_score_cache = getattr(self, "_production_score_cache", {})
+        self.cold_threshold = getattr(self, "cold_threshold", 8.0)
+        self.severe_cold_threshold = getattr(self, "severe_cold_threshold", 0.0)
+        self.warmth_decay_radius = getattr(self, "warmth_decay_radius", 6)
+        self.last_temperature_tick = getattr(self, "last_temperature_tick", 0)
+        self.shelter_zones_by_id = getattr(self, "shelter_zones_by_id", {})
+        self.cold_override_threshold = float(getattr(self, "cold_override_threshold", 0.7))
+        self.cold_recovery_threshold = float(getattr(self, "cold_recovery_threshold", 0.35))
+        self.cold_override_cooldown_ticks = int(getattr(self, "cold_override_cooldown_ticks", 40) or 40)
         if getattr(self, "player", None) is not None:
             self.player.world_ref = self
             self._refresh_chunk_activity(force=True)
@@ -4020,11 +4074,48 @@ class World:
         return output
 
 
+    def _warn_simulation_validation(self, warning_type: str, key, message: str, *, actor=None, metadata: dict | None = None, cooldown_ticks: int = 120) -> bool:
+        from simulation.validation import emit_validation_warning
+
+        return emit_validation_warning(
+            self,
+            warning_type,
+            key,
+            message,
+            cooldown_ticks=cooldown_ticks,
+            actor=actor,
+            metadata=metadata,
+        )
+
+    def _abandon_invalid_work_sub_task(self, npc: NPC, *, reason: str, sub_task_data: dict | None = None, metadata: dict | None = None) -> None:
+        details = dict(metadata or {})
+        if sub_task_data:
+            details.setdefault("sub_task_id", sub_task_data.get("id"))
+            details.setdefault("target_zone_tag", sub_task_data.get("target_zone_tag"))
+        self._warn_simulation_validation(
+            "task_abandoned",
+            (getattr(npc, "id", None), reason, details.get("sub_task_id")),
+            f"{getattr(npc, 'name', 'NPC')} abandoned invalid work task: {reason}",
+            actor=npc,
+            metadata=details,
+        )
+        npc.clear_work_sub_task_state()
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None
+        npc.task_target_coords = None
+        npc._work_validation_retry_after_tick = getattr(self, "game_time", 0) + 120
+
     def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
         """Determines the global target coordinates for a given sub-task."""
         target_zone_tag = sub_task_data.get("target_zone_tag")
         if not target_zone_tag:
-            # self.add_message_to_chat_log(f"Error: Sub-task {sub_task_data.get('id')} for {npc.name} has no target_zone_tag.")
+            self._warn_simulation_validation(
+                "invalid_subtask",
+                (getattr(work_building, "id", None), sub_task_data.get("id"), "missing_target_zone_tag"),
+                "Work sub-task is missing target_zone_tag.",
+                actor=npc,
+                metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id")},
+            )
             return None
 
         if target_zone_tag == "corpse":
@@ -4091,12 +4182,24 @@ class World:
         elif npc.economic.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
-                # self.add_message_to_chat_log(f"Warning: Farm {work_building.id} has no field_patch zone defined.")
+                self._warn_simulation_validation(
+                    "missing_zone",
+                    (getattr(work_building, "id", None), "field_patch"),
+                    "Farm work task requires a field_patch zone, but none is defined.",
+                    actor=npc,
+                    metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "zone": "field_patch"},
+                )
                 return None
 
             target_tile_type_key = sub_task_data.get("target_tile_type_key") # e.g., "plains", "tilled_soil"
             if not target_tile_type_key:
-                # self.add_message_to_chat_log(f"Error: Farmer sub-task {sub_task_data['id']} missing 'target_tile_type_key'.")
+                self._warn_simulation_validation(
+                    "invalid_subtask",
+                    (getattr(work_building, "id", None), sub_task_data.get("id"), "missing_target_tile_type_key"),
+                    "Farmer work sub-task is missing target_tile_type_key.",
+                    actor=npc,
+                    metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "zone": "field_patch"},
+                )
                 return None
 
             # Specific check for "plant_seeds": ensure seeds are available BEFORE finding a tile
@@ -4104,7 +4207,13 @@ class World:
                 seeds_to_consume = sub_task_data.get("consumes_item_from_workplace", {})
                 seed_item_key = next(iter(seeds_to_consume), None) # Get the first seed type key
                 if not seed_item_key or work_building.building_inventory.get(seed_item_key, 0) < seeds_to_consume[seed_item_key]:
-                    # self.add_message_to_chat_log(f"Debug: {npc.name} wants to plant seeds, but farm has no {seed_item_key}.")
+                    self._warn_simulation_validation(
+                        "missing_resource",
+                        (getattr(work_building, "id", None), sub_task_data.get("id"), seed_item_key),
+                        "Farm work task requires seeds that are not available.",
+                        actor=npc,
+                        metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "item_key": seed_item_key},
+                    )
                     return None # Cannot plant if no seeds
 
             # Shuffle to vary the choice of tile a bit if multiple are suitable
@@ -4128,7 +4237,13 @@ class World:
 
                     if not is_already_targeted:
                         return (tx, ty)
-            # self.add_message_to_chat_log(f"Debug: {npc.name} could not find suitable '{expected_tile_name}' tile in field_patch for {sub_task_data['id']}.")
+            self._warn_simulation_validation(
+                "missing_tile",
+                (getattr(work_building, "id", None), sub_task_data.get("id"), target_tile_type_key),
+                "Work task could not find a suitable tile in its zone.",
+                actor=npc,
+                metadata={"building_id": getattr(work_building, "id", None), "sub_task_id": sub_task_data.get("id"), "target_tile_type_key": target_tile_type_key, "expected_tile_name": expected_tile_name},
+            )
             return None
         else:
             # Check for anchor usage for these indoor work tags first
@@ -5591,11 +5706,128 @@ class World:
         npc.schedule.current_destination_coords = destination
         return True
 
+    def _record_stockpile_trace(self, trace_type: str, stockpile: Stockpile | None = None, *, actor=None, metadata: dict | None = None) -> None:
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if trace_log is None:
+            trace_log = []
+            setattr(self, "interaction_trace_log", trace_log)
+        payload = dict(metadata or {})
+        if stockpile is not None:
+            payload.setdefault("stockpile_id", stockpile.stockpile_id)
+            payload.setdefault("position", stockpile.position)
+        trace_log.append({
+            "tick": getattr(self, "game_time", None),
+            "interaction_id": None,
+            "actor_id": getattr(actor, "id", None),
+            "action_type": "stockpile_logistics",
+            "trace_type": trace_type,
+            "metadata": payload,
+        })
+
+    def create_stockpile(self, x: int, y: int, *, accepted_item_types: set[str] | list[str] | tuple[str, ...] | None = None, max_item_count: int = 100, owner_id=None, faction_id: str | None = None, village_id: str | None = None, stockpile_id: str | None = None) -> Stockpile:
+        stockpile = Stockpile(
+            stockpile_id=stockpile_id or str(uuid.uuid4()),
+            x=int(x),
+            y=int(y),
+            accepted_item_types=set(accepted_item_types or set()),
+            max_item_count=max(1, int(max_item_count)),
+            owner_id=owner_id,
+            faction_id=faction_id,
+            village_id=village_id,
+        )
+        self.stockpiles_by_id[stockpile.stockpile_id] = stockpile
+        self._record_stockpile_trace("stockpile_created", stockpile, metadata={"accepted_item_types": sorted(stockpile.accepted_item_types), "max_item_count": stockpile.max_item_count})
+        return stockpile
+
+    def find_stockpile_for_item(self, item_key: str, *, require_available: bool = False, require_capacity: bool = False, near: tuple[int, int] | None = None) -> Stockpile | None:
+        candidates: list[tuple[int, str, Stockpile]] = []
+        for stockpile in getattr(self, "stockpiles_by_id", {}).values():
+            if not stockpile.accepts(item_key):
+                continue
+            if require_available and stockpile.available_quantity(item_key) <= 0:
+                continue
+            if require_capacity and not stockpile.has_capacity_for(1):
+                continue
+            origin = near or stockpile.position
+            distance = abs(origin[0] - stockpile.x) + abs(origin[1] - stockpile.y)
+            candidates.append((distance, stockpile.stockpile_id, stockpile))
+        if not candidates:
+            self._warn_simulation_validation(
+                "no_available_stockpile",
+                (item_key, require_available, require_capacity),
+                "No valid stockpile is available for the requested item.",
+                metadata={"item_key": item_key, "require_available": require_available, "require_capacity": require_capacity},
+            )
+            return None
+        candidates.sort(key=lambda entry: (entry[0], entry[1]))
+        return candidates[0][2]
+
+    def deposit_item_reference_into_stockpile(self, stockpile_id: str, item_reference: ItemReference, *, actor=None) -> bool:
+        stockpile = getattr(self, "stockpiles_by_id", {}).get(stockpile_id)
+        if stockpile is None:
+            self._warn_simulation_validation("invalid_stockpile", (stockpile_id, "deposit"), "Cannot deposit into a missing stockpile.", actor=actor, metadata={"stockpile_id": stockpile_id})
+            return False
+        if item_reference is None:
+            self._warn_simulation_validation("missing_source_item", (stockpile_id, None), "Cannot deposit a missing item into a stockpile.", actor=actor, metadata={"stockpile_id": stockpile_id})
+            return False
+        if not stockpile.accepts(item_reference.key):
+            self._warn_simulation_validation("unsupported_stockpile_item", (stockpile_id, item_reference.key), "Stockpile does not accept this item type.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_reference.key})
+            return False
+        if not stockpile.has_capacity_for(1):
+            self._warn_simulation_validation("full_stockpile", (stockpile_id, item_reference.key), "Stockpile has no capacity for this item.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_reference.key})
+            return False
+        deposited = stockpile.deposit_item_reference(item_reference)
+        if deposited:
+            self._record_stockpile_trace("stockpile_deposit", stockpile, actor=actor, metadata={"item_key": item_reference.key, "quantity": 1, "stored_quantity": stockpile.quantity(item_reference.key)})
+        return deposited
+
+    def deposit_item_into_stockpile(self, stockpile_id: str, item_key: str, quantity: int = 1, *, actor=None) -> int:
+        stockpile = getattr(self, "stockpiles_by_id", {}).get(stockpile_id)
+        if stockpile is None:
+            self._warn_simulation_validation("invalid_stockpile", (stockpile_id, "deposit"), "Cannot deposit into a missing stockpile.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_key})
+            return 0
+        if not stockpile.accepts(item_key):
+            self._warn_simulation_validation("unsupported_stockpile_item", (stockpile_id, item_key), "Stockpile does not accept this item type.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_key})
+            return 0
+        deposited = stockpile.deposit_item(item_key, quantity)
+        if deposited <= 0:
+            self._warn_simulation_validation("full_stockpile", (stockpile_id, item_key), "Stockpile has no capacity for this item.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_key, "quantity": quantity})
+            return 0
+        self._record_stockpile_trace("stockpile_deposit", stockpile, actor=actor, metadata={"item_key": item_key, "quantity": deposited, "stored_quantity": stockpile.quantity(item_key)})
+        return deposited
+
+    def _reserve_stockpile_item_for_task(self, stockpile_id: str | None, item_key: str, actor, task_id: str | None) -> str | None:
+        stockpile = getattr(self, "stockpiles_by_id", {}).get(stockpile_id or "")
+        if stockpile is None:
+            self._warn_simulation_validation("invalid_stockpile", (stockpile_id, "reserve"), "Cannot reserve from a missing stockpile.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_key, "task_id": task_id})
+            return None
+        reservation_id = stockpile.create_reservation(item_key, 1, actor_id=getattr(actor, "id", None), task_id=task_id, current_tick=getattr(self, "game_time", None))
+        if reservation_id is None:
+            self._warn_simulation_validation("missing_source_item", (stockpile_id, item_key), "Stockpile lacks unreserved source material for hauling.", actor=actor, metadata={"stockpile_id": stockpile_id, "item_key": item_key, "task_id": task_id})
+            return None
+        self._record_stockpile_trace("stockpile_reservation_created", stockpile, actor=actor, metadata={"item_key": item_key, "reservation_id": reservation_id, "task_id": task_id})
+        return reservation_id
+
+    def _release_stockpile_reservation(self, stockpile_id: str | None, reservation_id: str | None, *, actor=None, reason: str | None = None) -> None:
+        stockpile = getattr(self, "stockpiles_by_id", {}).get(stockpile_id or "")
+        if stockpile is None or not reservation_id:
+            return
+        if stockpile.release_reservation(reservation_id):
+            self._record_stockpile_trace("stockpile_reservation_released", stockpile, actor=actor, metadata={"reservation_id": reservation_id, "reason": reason})
+
     def _find_nearest_haul_source(self, npc: NPC, item_key: str) -> dict | None:
-        candidates: list[tuple[int, dict]] = []
+        candidates: list[tuple[int, int, dict]] = []
+        for stockpile in getattr(self, "stockpiles_by_id", {}).values():
+            if stockpile.available_quantity(item_key) > 0:
+                candidates.append((
+                    0,
+                    abs(npc.x - stockpile.x) + abs(npc.y - stockpile.y),
+                    {"source_type": "stockpile", "coords": stockpile.position, "stockpile_id": stockpile.stockpile_id, "item_key": item_key},
+                ))
         for (item_x, item_y), inventory in self.items_on_map.items():
             if inventory.get(item_key, 0) > 0:
                 candidates.append((
+                    1,
                     abs(npc.x - item_x) + abs(npc.y - item_y),
                     {"source_type": "ground", "coords": (item_x, item_y), "item_key": item_key},
                 ))
@@ -5603,6 +5835,7 @@ class World:
             inventory = getattr(building, "building_inventory", None)
             if inventory and inventory.get(item_key, 0) > 0:
                 candidates.append((
+                    2,
                     abs(npc.x - building.global_center_x) + abs(npc.y - building.global_center_y),
                     {
                         "source_type": "building",
@@ -5613,8 +5846,8 @@ class World:
                 ))
         if not candidates:
             return None
-        candidates.sort(key=lambda entry: entry[0])
-        return candidates[0][1]
+        candidates.sort(key=lambda entry: (entry[0], entry[1]))
+        return candidates[0][2]
 
     def _clear_npc_haul_task(self, npc: NPC, *, release_claim: bool = False) -> None:
         task_data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
@@ -5622,6 +5855,13 @@ class World:
             self.town_board.release_task(task_data["haul_task_id"])
         if release_claim and task_data.get("delivery_task_id"):
             self.town_board.release_delivery_task(task_data["delivery_task_id"])
+        if task_data.get("stockpile_reservation_id"):
+            self._release_stockpile_reservation(
+                task_data.get("source", {}).get("stockpile_id"),
+                task_data.get("stockpile_reservation_id"),
+                actor=npc,
+                reason="clear_haul_task",
+            )
 
         npc.schedule.current_task = TaskType.IDLE
         npc.schedule.current_path = []
@@ -5641,6 +5881,71 @@ class World:
         if getattr(getattr(self, "player", None), "id", None) == entity_id:
             return self.player
         return None
+
+    def _record_component_claim_trace(self, trace_type: str, blueprint: ConstructionBlueprint, component, actor_id=None, *, reason: str | None = None) -> None:
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if trace_log is None:
+            trace_log = []
+            setattr(self, "interaction_trace_log", trace_log)
+        metadata = {
+            "blueprint_id": getattr(blueprint, "id", None),
+            "component_id": getattr(component, "id", None),
+            "actor_id": actor_id,
+            "reason": reason,
+        }
+        trace_log.append({
+            "tick": getattr(self, "game_time", None),
+            "interaction_id": None,
+            "actor_id": actor_id,
+            "action_type": "construction_claim",
+            "trace_type": trace_type,
+            "metadata": metadata,
+        })
+
+    def _get_blueprint_component(self, blueprint: ConstructionBlueprint | None, component_id: str | None):
+        if blueprint is None or component_id is None:
+            return None
+        return next((comp for comp in getattr(blueprint, "components", []) if comp.id == component_id), None)
+
+    def _expire_component_claim_if_needed(self, blueprint: ConstructionBlueprint, component) -> bool:
+        actor_id = getattr(component, "claimed_by_actor_id", None)
+        if actor_id is None:
+            return False
+        actor = self._find_npc_by_id(actor_id)
+        actor_unavailable = actor is None or getattr(getattr(actor, "physical", None), "is_dead", False) or not getattr(actor, "is_alive", True)
+        expired = component.expire_claim_if_needed(getattr(self, "game_time", None))
+        if not expired and actor_unavailable:
+            expired = component.release_claim(actor_id)
+        if expired:
+            self._record_component_claim_trace("component_claim_expired", blueprint, component, actor_id, reason="actor_unavailable" if actor_unavailable else "expired")
+        return expired
+
+    def _claim_construction_component(self, blueprint: ConstructionBlueprint, component, actor, *, reason: str) -> bool:
+        actor_id = getattr(actor, "id", None)
+        if actor_id is None or component is None:
+            return False
+        self._expire_component_claim_if_needed(blueprint, component)
+        previous_actor_id = getattr(component, "claimed_by_actor_id", None)
+        if not component.claim_for_actor(actor_id, getattr(self, "game_time", None)):
+            return False
+        if previous_actor_id != actor_id:
+            self._record_component_claim_trace("component_claimed", blueprint, component, actor_id, reason=reason)
+        return True
+
+    def _release_construction_component_claim(self, blueprint: ConstructionBlueprint | None, component_id: str | None, actor_id=None, *, reason: str) -> None:
+        component = self._get_blueprint_component(blueprint, component_id)
+        if component is None:
+            return
+        released_actor_id = getattr(component, "claimed_by_actor_id", None)
+        if component.release_claim(actor_id):
+            self._record_component_claim_trace("component_claim_released", blueprint, component, released_actor_id, reason=reason)
+
+    def _construction_component_available_for_actor(self, blueprint: ConstructionBlueprint, component, actor) -> bool:
+        if component is None or component.status == "complete" or not component.has_remaining_work():
+            return False
+        self._expire_component_claim_if_needed(blueprint, component)
+        actor_id = getattr(actor, "id", None)
+        return not component.claim_is_active(getattr(self, "game_time", None)) or component.claimed_by_actor_id == actor_id
 
     def _is_available_delivery_laborer(self, candidate: NPC, *, excluding_id: int | None = None) -> bool:
         if getattr(candidate, "id", None) == excluding_id:
@@ -5796,6 +6101,9 @@ class World:
             blueprint = self.blueprints_by_id.get(task.blueprint_id)
             if blueprint is None or not blueprint.needs_material(task.item_key):
                 continue
+            component = self._get_blueprint_component(blueprint, getattr(task, "component_id", None))
+            if component is not None and not self._construction_component_available_for_actor(blueprint, component, npc):
+                continue
             source = self._find_nearest_haul_source(npc, task.item_key)
             if source is None:
                 continue
@@ -5808,8 +6116,28 @@ class World:
             return False
 
         task, source = best_choice
-        if not self.town_board.claim_task(task, npc.id):
+        blueprint = self.blueprints_by_id.get(task.blueprint_id)
+        component = self._get_blueprint_component(blueprint, getattr(task, "component_id", None))
+        if blueprint is not None and component is not None and not self._claim_construction_component(blueprint, component, npc, reason="hauling"):
             return False
+        if not self.town_board.claim_task(task, npc.id):
+            if blueprint is not None and component is not None:
+                self._release_construction_component_claim(blueprint, component.id, getattr(npc, "id", None), reason="haul_task_claim_failed")
+            return False
+
+        stockpile_reservation_id = None
+        if source.get("source_type") == "stockpile":
+            stockpile_reservation_id = self._reserve_stockpile_item_for_task(source.get("stockpile_id"), task.item_key, npc, task.id)
+            if stockpile_reservation_id is None:
+                self.town_board.release_task(task.id)
+                if blueprint is not None and component is not None:
+                    self._release_construction_component_claim(blueprint, component.id, getattr(npc, "id", None), reason="stockpile_reservation_failed")
+                self._record_stockpile_trace("haul_failed", None, actor=npc, metadata={"haul_task_id": task.id, "item_key": task.item_key, "reason": "stockpile_reservation_failed"})
+                return False
+            task.source_stockpile_id = source.get("stockpile_id")
+            task.stockpile_reservation_id = stockpile_reservation_id
+
+        self._record_stockpile_trace("haul_assigned", getattr(self, "stockpiles_by_id", {}).get(source.get("stockpile_id")), actor=npc, metadata={"haul_task_id": task.id, "blueprint_id": task.blueprint_id, "component_id": getattr(task, "component_id", None), "item_key": task.item_key, "source_type": source.get("source_type")})
 
         npc.schedule.current_task = "hauling_to_source"
         npc.current_sub_task = f"Fetching {task.item_key}"
@@ -5817,13 +6145,23 @@ class World:
         npc.task_context_data = {
             "haul_task_id": task.id,
             "blueprint_id": task.blueprint_id,
+            "component_id": getattr(task, "component_id", None),
             "item_key": task.item_key,
             "source": source,
+            "stockpile_reservation_id": stockpile_reservation_id,
         }
         npc.task_target_item_details = {"item_key": task.item_key}
         npc.task_target_coords = source["coords"]
         npc.schedule.current_destination_coords = source["coords"]
         npc.schedule.current_path = self.calculate_path(npc.x, npc.y, source["coords"][0], source["coords"][1]) or []
+        if (npc.x, npc.y) != source["coords"] and not npc.schedule.current_path:
+            self.town_board.release_task(task.id)
+            self._release_stockpile_reservation(source.get("stockpile_id"), stockpile_reservation_id, actor=npc, reason="haul_path_failed")
+            if blueprint is not None and component is not None:
+                self._release_construction_component_claim(blueprint, component.id, getattr(npc, "id", None), reason="haul_path_failed")
+            self._record_stockpile_trace("haul_failed", getattr(self, "stockpiles_by_id", {}).get(source.get("stockpile_id")), actor=npc, metadata={"haul_task_id": task.id, "item_key": task.item_key, "reason": "path_failed"})
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return False
         return True
 
     def _pickup_haul_task_material(self, npc: NPC, haul_data: dict) -> bool:
@@ -5837,13 +6175,33 @@ class World:
             inventory = self.items_on_map.get(tuple(source.get("coords", ())))
         elif source.get("source_type") == "building":
             inventory = getattr(self.buildings_by_id.get(source.get("building_id")), "building_inventory", None)
+        elif source.get("source_type") == "stockpile":
+            stockpile = getattr(self, "stockpiles_by_id", {}).get(source.get("stockpile_id"))
+            if stockpile is None:
+                self._warn_simulation_validation("invalid_stockpile", (source.get("stockpile_id"), "pickup"), "Cannot withdraw from a missing stockpile.", actor=npc, metadata={"stockpile_id": source.get("stockpile_id"), "item_key": item_key})
+                return False
+            item_reference = stockpile.withdraw_reserved_item_reference(haul_data.get("stockpile_reservation_id"), actor_id=getattr(npc, "id", None))
+            if item_reference is None:
+                self._warn_simulation_validation("missing_source_item", (source.get("stockpile_id"), item_key, haul_data.get("stockpile_reservation_id")), "Reserved stockpile item was unavailable at pickup.", actor=npc, metadata={"stockpile_id": source.get("stockpile_id"), "item_key": item_key})
+                return False
+            npc.economic.npc_inventory.add_item_reference(item_reference)
+            haul_data["stockpile_reservation_id"] = None
+            task = self.town_board.get_task(haul_data.get("haul_task_id"))
+            if task is not None:
+                task.stockpile_reservation_id = None
+            self._record_stockpile_trace("stockpile_withdraw", stockpile, actor=npc, metadata={"item_key": item_key, "quantity": 1, "haul_task_id": haul_data.get("haul_task_id"), "stored_quantity": stockpile.quantity(item_key)})
+            self._record_stockpile_trace("haul_started", stockpile, actor=npc, metadata={"item_key": item_key, "haul_task_id": haul_data.get("haul_task_id")})
+            return True
 
         if inventory is None or not hasattr(inventory, "get_item_reference"):
             return False
         item_reference = inventory.get_item_reference(item_key)
         if item_reference is None:
             return False
-        return inventory.transfer_item_reference(npc.economic.npc_inventory, item_reference)
+        transferred = inventory.transfer_item_reference(npc.economic.npc_inventory, item_reference)
+        if transferred:
+            self._record_stockpile_trace("haul_started", None, actor=npc, metadata={"item_key": item_key, "haul_task_id": haul_data.get("haul_task_id"), "source_type": source.get("source_type")})
+        return transferred
 
     def _is_construction_worker_role(self, npc: NPC) -> bool:
         profession = str(getattr(getattr(npc, "economic", None), "profession", "") or "").strip().lower()
@@ -5932,6 +6290,7 @@ class World:
         if blueprint is None:
             blueprint = self.blueprints_by_id.get(task_data.get("blueprint_id"))
         if blueprint is not None:
+            self._release_construction_component_claim(blueprint, task_data.get("component_id"), getattr(npc, "id", None), reason="construction_task_cleared")
             if getattr(npc, "id", None) in blueprint.assigned_workers:
                 blueprint.assigned_workers.remove(npc.id)
             task_id = task_data.get("construction_task_id")
@@ -5958,12 +6317,35 @@ class World:
                 # Still building, let interaction system handle it
                 return True
 
-        # Find a component to build
+        # Find or retain a claimed component to build. Claims keep multiple
+        # workers from racing for the same piece while still expiring naturally.
         target_comp = None
-        for comp in blueprint.components:
-            if comp.status != "complete" and comp.has_all_materials():
-                target_comp = comp
-                break
+        existing_component_id = task_data.get("component_id")
+        existing_comp = self._get_blueprint_component(blueprint, existing_component_id)
+        if (
+            existing_comp is not None
+            and existing_comp.status != "complete"
+            and existing_comp.has_all_materials()
+            and self._construction_component_available_for_actor(blueprint, existing_comp, npc)
+        ):
+            target_comp = existing_comp
+
+        if target_comp is None:
+            for comp in blueprint.components:
+                if (
+                    comp.status != "complete"
+                    and comp.has_all_materials()
+                    and self._construction_component_available_for_actor(blueprint, comp, npc)
+                ):
+                    target_comp = comp
+                    break
+
+        if target_comp is not None and not self._claim_construction_component(blueprint, target_comp, npc, reason="building"):
+            target_comp = None
+
+        if target_comp is not None:
+            task_data["component_id"] = target_comp.id
+            npc.task_context_data = task_data
 
         if not target_comp:
             # If no component is ready, maybe the whole thing is complete or stalled
@@ -6117,8 +6499,25 @@ class World:
         task = self.town_board.get_task(haul_data.get("haul_task_id"))
         blueprint = self.blueprints_by_id.get(haul_data.get("blueprint_id"))
         if task is None or blueprint is None or not blueprint.needs_material(haul_data.get("item_key", "")):
+            if blueprint is not None:
+                self._release_construction_component_claim(blueprint, haul_data.get("component_id"), getattr(npc, "id", None), reason="hauling_invalid")
             self._clear_npc_haul_task(npc, release_claim=task is not None and task.status != "complete")
             return False
+
+        valid_haul_tasks = {"hauling_to_source", "hauling_to_blueprint"}
+        if npc.schedule.current_task not in valid_haul_tasks:
+            npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
+            if npc_inventory is not None and npc_inventory.has_item(haul_data.get("item_key"), 1):
+                npc.schedule.current_task = "hauling_to_blueprint"
+            else:
+                npc.schedule.current_task = "hauling_to_source"
+            self._warn_simulation_validation(
+                "task_recovered",
+                (getattr(npc, "id", None), haul_data.get("haul_task_id"), "hauling_schedule"),
+                "Recovered stale hauling schedule from task context.",
+                actor=npc,
+                metadata={"haul_task_id": haul_data.get("haul_task_id"), "restored_task": npc.schedule.current_task},
+            )
 
         if npc.schedule.current_task == "hauling_to_source":
             source_coords = tuple(haul_data.get("source", {}).get("coords", ()))
@@ -6128,6 +6527,7 @@ class World:
                     npc.schedule.current_destination_coords = source_coords
                 return bool(npc.schedule.current_path)
             if not self._pickup_haul_task_material(npc, haul_data):
+                self._release_construction_component_claim(blueprint, haul_data.get("component_id"), getattr(npc, "id", None), reason="haul_pickup_failed")
                 self._clear_npc_haul_task(npc, release_claim=True)
                 return False
             npc.schedule.current_task = "hauling_to_blueprint"
@@ -6161,6 +6561,8 @@ class World:
                     npc.schedule.current_destination_coords = (dest_x, dest_y)
                 return bool(npc.schedule.current_path)
             deposited = self.deposit_actor_material_into_blueprint(npc, blueprint, haul_data.get("item_key"), task_id=task.id)
+            self._record_stockpile_trace("haul_delivered" if deposited else "haul_failed", getattr(self, "stockpiles_by_id", {}).get(haul_data.get("source", {}).get("stockpile_id")), actor=npc, metadata={"haul_task_id": task.id, "blueprint_id": blueprint.id, "component_id": haul_data.get("component_id"), "item_key": haul_data.get("item_key"), "reason": None if deposited else "deposit_failed"})
+            self._release_construction_component_claim(blueprint, haul_data.get("component_id"), getattr(npc, "id", None), reason="hauling_delivered" if deposited else "haul_deposit_failed")
             self._clear_npc_haul_task(npc, release_claim=not deposited)
             return deposited
 
@@ -10209,35 +10611,1081 @@ class World:
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
 
+    def apply_animation_cue(self, cue: str, *, interaction=None, result=None) -> None:
+        if cue == "build" and hasattr(self, "visual_effects") and interaction is not None:
+            target_pos = getattr(interaction, "target_pos", None)
+            if target_pos is not None:
+                self.visual_effects.append(FloatingTextEffect(target_pos[0], target_pos[1], "*building*", color=(180, 180, 120)))
+
     def advance_active_interactions(self) -> None:
-        if not hasattr(self, "interaction_resolver"):
+        from simulation.systems.tick import advance_active_interactions
+
+        advance_active_interactions(self)
+
+    def on_active_interaction_finished(self, *, actor=None, interaction=None, result=None) -> None:
+        if actor is not None and getattr(actor, "task_context", None) == "construction":
+            self._handle_npc_construction_task(actor)
+        if getattr(interaction, "action_type", None) == "workshop_transform":
+            workshop_id = getattr(interaction, "workshop_id", None)
+            workshop = self.workshops_by_id.get(workshop_id)
+            if workshop is not None and workshop.output_buffer.get("wooden_plank", 0) > 0:
+                stockpile = self.find_stockpile_for_item("wooden_plank", require_capacity=True, near=(workshop.x, workshop.y))
+                while stockpile is not None and workshop.output_buffer.get("wooden_plank", 0) > 0:
+                    item = workshop.output_buffer.pop_item_reference("wooden_plank")
+                    if item is None or not self.deposit_item_reference_into_stockpile(stockpile.stockpile_id, item, actor=actor):
+                        if item is not None:
+                            workshop.output_buffer.add_item_reference(item)
+                        break
+            matched_task_id = getattr(interaction, "production_task_id", None)
+            if matched_task_id and matched_task_id in self.production_tasks_by_id:
+                task = self.production_tasks_by_id[matched_task_id]
+                if task.task_type == "craft_plank" and task.status not in {"completed", "failed", "cancelled"}:
+                    task.status = "completed"
+                    self._record_production_task_trace("craft_task_completion_matched", task, actor=actor, metadata={"workshop_id": workshop_id, "interaction_id": getattr(interaction, "interaction_id", None)})
+                    self._mark_production_task_progress(task, int(getattr(self, "game_time", 0) or 0), actor=actor, trace_type="craft_task_completed", metadata={"workshop_id": workshop_id})
+            else:
+                self._warn_simulation_validation("craft_task_completion_mismatch", (workshop_id, getattr(interaction, "interaction_id", None)), "Workshop interaction completed without a matching craft task link.", actor=actor, cooldown_ticks=180)
+
+
+    def on_tree_resource_created(self, *, item_key: str, coords: tuple[int, int], actor_id=None) -> None:
+        if item_key != "raw_log":
             return
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if trace_log is None:
+            trace_log = []
+            setattr(self, "interaction_trace_log", trace_log)
+        trace_log.append({
+            "tick": getattr(self, "game_time", None),
+            "interaction_id": None,
+            "actor_id": actor_id,
+            "action_type": "resource_pipeline",
+            "trace_type": "raw_log_created",
+            "metadata": {"item_key": item_key, "coords": coords},
+        })
 
-        # Iterate a copy of keys so we can safely remove from the dict during advance
-        for interaction_id in list(self.interaction_resolver.active_interactions.keys()):
-            interaction = self.interaction_resolver.active_interactions.get(interaction_id)
-            if not interaction:
+    def _assign_source_to_stockpile_haul_task(self, npc: NPC, *, item_key: str = "raw_log") -> bool:
+        if getattr(npc, "task_context", None) in {"hauling", "delivery", "construction"}:
+            return False
+        source = self._find_nearest_haul_source(npc, item_key)
+        if source is None:
+            return False
+        if source.get("source_type") == "stockpile":
+            self._warn_simulation_validation("produce_logs_invalid_source_selection", (getattr(npc, "id", None), item_key), "Source->stockpile flow skipped incompatible stockpile source.", actor=npc, metadata={"item_key": item_key}, cooldown_ticks=180)
+            self._record_production_task_trace("produce_logs_source_candidate_skipped", ProductionTask(task_type="produce_logs", id=str(getattr(npc, "id", 0))), actor=npc, metadata={"item_key": item_key, "reason": "stockpile_source_incompatible"})
+            self._record_decision_explanation(explanation_type="source_candidate_skipped", decision="source_skipped", primary_reason="incompatible_stockpile_source_for_source_to_stockpile_flow", actor=npc, contributing_factors={"item_key": item_key})
+            # fallback to nearest non-stockpile ground source
+            ground_candidates: list[tuple[int, dict]] = []
+            for coords, inv in getattr(self, "items_on_map", {}).items():
+                if inv is None or getattr(inv, "get", lambda *_: 0)(item_key, 0) <= 0:
+                    continue
+                dist = abs(npc.x - coords[0]) + abs(npc.y - coords[1])
+                ground_candidates.append((dist, {"source_type": "ground", "coords": coords, "item_key": item_key}))
+            if not ground_candidates:
+                return False
+            ground_candidates.sort(key=lambda e: (e[0], e[1]["coords"]))
+            source = ground_candidates[0][1]
+            self._record_production_task_trace("produce_logs_source_fallback_selected", ProductionTask(task_type="produce_logs", id=str(getattr(npc, "id", 0))), actor=npc, metadata={"item_key": item_key, "coords": source.get("coords")})
+            self._record_decision_explanation(explanation_type="source_fallback_selected", decision="source_selected", primary_reason="ground_source_selected_after_incompatible_stockpile_source", actor=npc, contributing_factors={"item_key": item_key, "coords": source.get("coords")})
+        stockpile = self.find_stockpile_for_item(item_key, require_capacity=True, near=source.get("coords"))
+        if stockpile is None:
+            return False
+        reservation_id = f"stockpile-dest:{getattr(npc, 'id', None)}:{item_key}:{source.get('coords')}"
+        npc.schedule.current_task = "hauling_to_source"
+        npc.current_sub_task = f"Stockpiling {item_key}"
+        npc.task_context = "stockpile_hauling"
+        npc.task_context_data = {
+            "item_key": item_key,
+            "source": source,
+            "destination_stockpile_id": stockpile.stockpile_id,
+            "stockpile_reservation_id": reservation_id,
+        }
+        npc.schedule.current_destination_coords = source.get("coords")
+        npc.schedule.current_path = self.calculate_path(npc.x, npc.y, source["coords"][0], source["coords"][1]) or []
+        self._record_stockpile_trace("haul_to_stockpile_assigned", stockpile, actor=npc, metadata={"item_key": item_key, "source": source})
+        return True
+
+    def _is_actor_adjacent_to_position(self, actor, position: tuple[int, int]) -> bool:
+        return actor is not None and abs(actor.x - position[0]) <= 1 and abs(actor.y - position[1]) <= 1
+
+    def _route_actor_toward_position(self, actor, position: tuple[int, int], *, reason: str, task_id: str | None = None) -> bool:
+        if actor is None:
+            return False
+        path = self.calculate_path(actor.x, actor.y, position[0], position[1]) or []
+        actor.schedule.current_destination_coords = position
+        actor.schedule.current_path = path
+        self._record_decision_explanation(explanation_type="actor_routed_to_workshop" if "workshop" in reason else "actor_routed_to_campfire", decision="routed", primary_reason=reason, actor=actor, contributing_factors={"task_id": task_id, "target": position})
+        return bool(path) or self._is_actor_adjacent_to_position(actor, position)
+
+    def _handle_npc_stockpile_haul_task(self, npc: NPC) -> bool:
+        if getattr(npc, "task_context", None) != "stockpile_hauling":
+            return False
+        data = npc.task_context_data if isinstance(npc.task_context_data, dict) else {}
+        source = data.get("source", {})
+        stockpile_id = data.get("destination_stockpile_id")
+        stockpile = self.stockpiles_by_id.get(stockpile_id)
+        if stockpile is None:
+            self._warn_simulation_validation("invalid_stockpile", (stockpile_id, "stockpile_haul"), "Stockpile haul destination is missing.", actor=npc)
+            self._clear_npc_haul_task(npc, release_claim=True)
+            return False
+        if npc.schedule.current_task == "hauling_to_source":
+            if (npc.x, npc.y) != tuple(source.get("coords", ())):
+                if not npc.schedule.current_path:
+                    npc.schedule.current_path = self.calculate_path(npc.x, npc.y, source["coords"][0], source["coords"][1]) or []
+                return bool(npc.schedule.current_path)
+            if not self._pickup_haul_task_material(npc, data):
+                self._record_stockpile_trace("haul_to_stockpile_failed", stockpile, actor=npc, metadata={"item_key": data.get("item_key"), "reason": "missing_source_item"})
+                self._clear_npc_haul_task(npc, release_claim=True)
+                return False
+            npc.schedule.current_task = "hauling_to_stockpile"
+            npc.schedule.current_destination_coords = stockpile.position
+            npc.schedule.current_path = self.calculate_path(npc.x, npc.y, stockpile.x, stockpile.y) or []
+            self._record_stockpile_trace("haul_to_stockpile_started", stockpile, actor=npc, metadata={"item_key": data.get("item_key")})
+            return True
+        if npc.schedule.current_task == "hauling_to_stockpile":
+            if (npc.x, npc.y) != stockpile.position:
+                if not npc.schedule.current_path:
+                    npc.schedule.current_path = self.calculate_path(npc.x, npc.y, stockpile.x, stockpile.y) or []
+                return bool(npc.schedule.current_path)
+            item_ref = npc.economic.npc_inventory.pop_item_reference(data.get("item_key"))
+            if item_ref is None or not self.deposit_item_reference_into_stockpile(stockpile.stockpile_id, item_ref, actor=npc):
+                if item_ref is not None:
+                    npc.economic.npc_inventory.add_item_reference(item_ref)
+                self._record_stockpile_trace("haul_to_stockpile_failed", stockpile, actor=npc, metadata={"item_key": data.get("item_key"), "reason": "deposit_failed"})
+                self._clear_npc_haul_task(npc, release_claim=True)
+                return False
+            self._record_stockpile_trace("haul_to_stockpile_delivered", stockpile, actor=npc, metadata={"item_key": data.get("item_key")})
+            self._clear_npc_haul_task(npc, release_claim=False)
+            return True
+        return False
+
+    def create_workshop_runtime(self, x: int, y: int, *, workshop_type: str = "sawbench", workshop_id: str | None = None) -> WorkshopRuntimeState:
+        wid = workshop_id or str(uuid.uuid4())
+        workshop = WorkshopRuntimeState(workshop_id=wid, workshop_type=workshop_type, x=int(x), y=int(y))
+        self.workshops_by_id[wid] = workshop
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if trace_log is None:
+            trace_log = []
+            setattr(self, "interaction_trace_log", trace_log)
+        trace_log.append({"tick": getattr(self, "game_time", None), "interaction_id": None, "actor_id": None, "action_type": "workshop", "trace_type": "workshop_reserved", "metadata": {"workshop_id": wid, "workshop_type": workshop_type, "coords": (x, y)}})
+        return workshop
+
+    def _find_operational_workshop(self, workshop_type: str = "sawbench") -> WorkshopRuntimeState | None:
+        candidates = [w for w in self.workshops_by_id.values() if w.workshop_type == workshop_type and w.operational]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda w: (w.last_used_tick, w.workshop_id))
+        return candidates[0]
+
+    def _reserve_workshop_for_actor(self, workshop: WorkshopRuntimeState, actor_id: int | None) -> bool:
+        now = int(getattr(self, "game_time", 0) or 0)
+        if actor_id is None:
+            self._warn_simulation_validation("workshop_reservation_missing_actor", (workshop.workshop_id, "none"), "Workshop reservation requires a valid actor id.", metadata={"workshop_id": workshop.workshop_id}, cooldown_ticks=180)
+            self._record_decision_explanation(explanation_type="actor_skipped", decision="reservation_rejected", primary_reason="missing_actor_id_for_workshop_reservation", source_entity_id=workshop.workshop_id)
+            trace_log = getattr(self, "interaction_trace_log", None)
+            if isinstance(trace_log, list):
+                trace_log.append({"tick": now, "interaction_id": None, "actor_id": None, "action_type": "workshop", "trace_type": "workshop_reservation_rejected", "metadata": {"workshop_id": workshop.workshop_id}})
+            return False
+        if workshop.occupied_by_actor_id is not None and workshop.occupied_by_actor_id != actor_id and now <= workshop.lock_expiration_tick:
+            self._warn_simulation_validation("workshop_assignment_conflict", (workshop.workshop_id, actor_id), "Workshop already occupied by another actor.", metadata={"workshop_id": workshop.workshop_id, "occupied_by": workshop.occupied_by_actor_id})
+            return False
+        workshop.occupied_by_actor_id = actor_id
+        workshop.lock_expiration_tick = now + 120
+        workshop.last_used_tick = now
+        return True
+
+    def _release_workshop_lock(self, workshop: WorkshopRuntimeState, actor_id: int | None = None) -> None:
+        if actor_id is not None and workshop.occupied_by_actor_id not in {None, actor_id}:
+            return
+        workshop.occupied_by_actor_id = None
+        workshop.active_interaction_id = None
+        workshop.lock_expiration_tick = 0
+        workshop.reserved_input_entity_ids = []
+
+    def _record_production_task_trace(self, trace_type: str, task: ProductionTask, *, actor=None, metadata: dict | None = None) -> None:
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if trace_log is None:
+            trace_log = []
+            setattr(self, "interaction_trace_log", trace_log)
+        trace_log.append({
+            "tick": getattr(self, "game_time", None),
+            "interaction_id": None,
+            "actor_id": getattr(actor, "id", None),
+            "action_type": "production_task",
+            "trace_type": trace_type,
+            "metadata": {"production_task_id": task.id, "task_type": task.task_type, **dict(metadata or {})},
+        })
+
+    def _record_decision_explanation(self, *, explanation_type: str, decision: str, primary_reason: str, task: ProductionTask | None = None, actor=None, source_entity_id=None, target_entity_id=None, contributing_factors: dict | None = None, score_snapshot: dict | None = None, created_from: str = "runtime") -> str:
+        tick = int(getattr(self, "game_time", 0) or 0)
+        explanation_id = str(uuid.uuid4())
+        rec = DecisionExplanation(
+            explanation_id=explanation_id,
+            tick=tick,
+            explanation_type=explanation_type,
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            task_id=getattr(task, "id", None),
+            actor_id=getattr(actor, "id", None),
+            decision=decision,
+            primary_reason=primary_reason,
+            contributing_factors=dict(contributing_factors or {}),
+            score_snapshot=dict(score_snapshot or {}),
+            created_from=created_from,
+        )
+        store = getattr(self, "decision_explanations", None)
+        if not isinstance(store, list):
+            store = []
+            self.decision_explanations = store
+        store.append(rec)
+        if len(store) > 400:
+            del store[: len(store) - 400]
+            self._warn_simulation_validation("decision_explanation_overflow", ("decision_explanations", len(store)), "Decision explanation history exceeded bound and was trimmed.", metadata={"max_size": 400}, cooldown_ticks=240)
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if isinstance(trace_log, list):
+            trace_log.append({"tick": tick, "interaction_id": None, "actor_id": getattr(actor, "id", None), "action_type": "decision_explanation", "trace_type": "decision_explanation_created", "metadata": {"explanation_id": explanation_id, "task_id": getattr(task, "id", None), "decision": decision, "primary_reason": primary_reason}})
+        return explanation_id
+
+    def get_task_decision_explanation(self, task_id: str) -> str:
+        items = [e for e in getattr(self, "decision_explanations", []) if e.task_id == task_id]
+        if not items:
+            return f"No decision explanation recorded for task {task_id}."
+        latest = items[-1]
+        return f"Task {task_id} {latest.decision} because {latest.primary_reason}."
+
+    def get_actor_assignment_explanation(self, actor_id: int) -> str:
+        items = [e for e in getattr(self, "decision_explanations", []) if e.actor_id == actor_id and e.explanation_type in {"actor_assigned", "actor_skipped"}]
+        if not items:
+            return f"No assignment explanation recorded for actor {actor_id}."
+        latest = items[-1]
+        return f"Actor {actor_id} {latest.decision} because {latest.primary_reason}."
+
+    def get_recent_decision_explanations(self, limit: int = 20) -> list[dict[str, object]]:
+        limit = max(1, min(100, int(limit)))
+        items = list(getattr(self, "decision_explanations", []) or [])[-limit:]
+        return [
+            {
+                "explanation_id": e.explanation_id,
+                "tick": e.tick,
+                "type": e.explanation_type,
+                "task_id": e.task_id,
+                "actor_id": e.actor_id,
+                "decision": e.decision,
+                "reason": e.primary_reason,
+            }
+            for e in items
+        ]
+
+    def build_world_debug_snapshot(self, *, trace_limit: int = 20, warning_limit: int = 20, explanation_limit: int = 20) -> WorldDebugSnapshot:
+        try:
+            tick = int(getattr(self, "game_time", 0) or 0)
+            trace_limit = max(1, min(200, int(trace_limit)))
+            warning_limit = max(1, min(200, int(warning_limit)))
+            explanation_limit = max(1, min(200, int(explanation_limit)))
+            reserves = []
+            for target in getattr(self, "reserve_targets_by_id", {}).values():
+                shortage = max(0, int(target.desired_quantity) - int(target.current_quantity))
+                reserves.append({
+                    "reserve_target_id": target.reserve_target_id,
+                    "item": target.linked_item_type,
+                    "current": target.current_quantity,
+                    "minimum": target.minimum_quantity,
+                    "desired": target.desired_quantity,
+                    "shortage": shortage,
+                    "active_task_ids": list(target.active_task_ids)[:5],
+                    "cooldown_until_tick": target.cooldown_until_tick,
+                })
+            tasks = []
+            for task in getattr(self, "production_tasks_by_id", {}).values():
+                if task.status in {"completed", "failed", "cancelled"}:
+                    continue
+                tasks.append({"task_id": task.id, "task_type": task.task_type, "status": task.status, "priority": task.priority, "urgency": task.urgency, "blocked_reason": task.blocked_reason, "assigned_actor_ids": list(task.assigned_actor_ids), "reserved_entity_ids": list(task.reserved_entity_ids), "target_entity_id": task.target_entity_id, "routing_state": {"moving_to_workshop": bool(task.metadata.get("moving_to_workshop", False)), "moving_to_campfire": bool(task.metadata.get("moving_to_campfire", False))}})
+                tasks[-1]["inherited_priority"] = task.inherited_priority
+                tasks[-1]["prerequisite_item_types"] = list(task.prerequisite_item_types)
+                tasks[-1]["blocked_by_task_ids"] = list(task.blocked_by_task_ids)
+            interactions = []
+            for iid, interaction in getattr(getattr(self, "interaction_resolver", None), "active_interactions", {}).items():
+                interactions.append({"interaction_id": iid, "actor_id": getattr(interaction, "actor_id", None), "action_type": getattr(interaction, "action_type", None), "target_id": getattr(interaction, "target_id", None), "remaining_work": getattr(interaction, "remaining_work", None)})
+            actors = []
+            for actor in getattr(self, "village_npcs", []):
+                profile = getattr(actor, "actor_work_profile", {}) or {}
+                actors.append({"actor_id": getattr(actor, "id", None), "current_task": getattr(getattr(actor, "schedule", None), "current_task", None), "task_context": getattr(actor, "task_context", None), "work_identity_label": profile.get("work_identity_label"), "dominant_work_tag": profile.get("dominant_work_tag"), "fatigue_state": profile.get("fatigue_state"), "recent_work_summary": profile.get("recent_work_summary"), "cold_exposure": float(getattr(actor, "cold_exposure", 0.0) or 0.0), "sheltered_state": bool(getattr(actor, "sheltered_state", False)), "current_shelter_id": getattr(actor, "current_shelter_id", None), "survival_override_active": bool(getattr(actor, "survival_override_active", False)), "survival_override_reason": getattr(actor, "survival_override_reason", None), "survival_override_target_id": getattr(actor, "survival_override_target_id", None), "survival_override_target_position": getattr(actor, "survival_override_target_position", None), "survival_override_recovery_threshold": float(getattr(actor, "survival_override_recovery_threshold", 0.0) or 0.0), "survival_override_cooldown_until_tick": int(getattr(actor, "survival_override_cooldown_until_tick", 0) or 0), "route_target": getattr(getattr(actor, "schedule", None), "current_destination_coords", None)})
+            stockpiles = []
+            for sp in getattr(self, "stockpiles_by_id", {}).values():
+                stockpiles.append({"stockpile_id": sp.stockpile_id, "accepted_item_types": sorted(sp.accepted_item_types), "inventory": dict(sp.stored_inventory), "reservation_count": len(sp.reservations), "capacity": sp.max_item_count, "total_items": sp.total_item_count()})
+            workshops = []
+            for ws in getattr(self, "workshops_by_id", {}).values():
+                workshops.append({"workshop_id": ws.workshop_id, "type": ws.workshop_type, "occupied_by_actor_id": ws.occupied_by_actor_id, "active_interaction_id": ws.active_interaction_id, "input_buffer": dict(ws.input_buffer), "output_buffer": dict(ws.output_buffer), "operational": ws.operational})
+            campfires = []
+            for cf in getattr(self, "campfires_by_id", {}).values():
+                campfires.append({"campfire_id": cf.campfire_id, "position": (cf.x, cf.y), "lit": cf.lit, "operational": cf.operational, "fuel_quantity": cf.fuel_quantity, "min_fuel": cf.minimum_fuel_quantity, "max_fuel": cf.max_fuel_quantity, "linked_reserve_target_id": cf.linked_reserve_target_id, "last_burn_tick": cf.last_burn_tick, "last_refuel_tick": cf.last_refuel_tick})
+            explanations = self.get_recent_decision_explanations(explanation_limit)
+            warnings = list(getattr(self, "validation_warnings", []) or [])[-warning_limit:]
+            traces = list(getattr(self, "interaction_trace_log", []) or [])[-trace_limit:]
+            health = {"active_interaction_count": len(interactions), "active_task_count": len(tasks), "warning_count": len(getattr(self, "validation_warnings", []) or []), "decision_explanation_count": len(getattr(self, "decision_explanations", []) or []), "next_reserve_eval_tick": self.next_reserve_eval_tick, "next_production_eval_tick": self.next_production_eval_tick, "next_dependency_eval_tick": self.next_dependency_eval_tick, "score_cache_size": len(getattr(self, "_production_score_cache", {})), "suitability_cache_size": len(getattr(self, "_actor_suitability_cache", {})), "shelter_zone_count": len(getattr(self, "shelter_zones_by_id", {})), "ambient_temperature": self.ambient_temperature}
+            return WorldDebugSnapshot(tick=tick, reserve_targets=reserves, production_tasks=tasks, active_interactions=interactions, actor_work_profiles=actors, stockpiles=stockpiles, workshops=workshops + campfires, recent_decision_explanations=explanations, recent_validation_warnings=warnings, recent_traces=traces, runtime_health_summary=health)
+        except Exception:
+            self._warn_simulation_validation("debug_snapshot_build_failed", ("world_snapshot", int(getattr(self, "game_time", 0) or 0)), "World debug snapshot build failed.", cooldown_ticks=240)
+            return WorldDebugSnapshot(tick=int(getattr(self, "game_time", 0) or 0))
+
+    def render_world_debug_snapshot(self, snapshot: WorldDebugSnapshot) -> str:
+        lines = ["WORLD RUNTIME SNAPSHOT", f"Tick: {snapshot.tick}", "", "RESERVE PRESSURE"]
+        for reserve in snapshot.reserve_targets[:8]:
+            lines.append(f"- {reserve['reserve_target_id']}: {reserve['item']} {reserve['current']}/{reserve['minimum']}/{reserve['desired']} shortage={reserve['shortage']}")
+        lines.append("")
+        lines.append("PRODUCTION TASKS")
+        for task in snapshot.production_tasks[:10]:
+            lines.append(f"- {task['task_id']} {task['task_type']} status={task['status']} p={task['priority']} u={task['urgency']} blocked={task['blocked_reason']}")
+        lines.append("")
+        lines.append("ACTORS")
+        for actor in snapshot.actor_work_profiles[:10]:
+            lines.append(f"- {actor['actor_id']} {actor['work_identity_label']} dominant={actor['dominant_work_tag']} fatigue={actor['fatigue_state']} task={actor['current_task']}")
+        lines.append("")
+        lines.append("ACTIVE INTERACTIONS")
+        for interaction in snapshot.active_interactions[:10]:
+            lines.append(f"- {interaction['interaction_id']} {interaction['action_type']} actor={interaction['actor_id']} remaining={interaction['remaining_work']}")
+        lines.append("")
+        lines.append("LOGISTICS")
+        for ws in snapshot.workshops[:10]:
+            if "campfire_id" in ws:
+                lines.append(f"- campfire {ws['campfire_id']} fuel={ws['fuel_quantity']}/{ws['max_fuel']} lit={ws['lit']}")
+        lines.append("")
+        lines.append("RECENT DECISIONS")
+        for item in snapshot.recent_decision_explanations[:10]:
+            lines.append(f"- [{item.get('type')}] task={item.get('task_id')} actor={item.get('actor_id')} decision={item.get('decision')} reason={item.get('reason')}")
+        lines.append("")
+        lines.append("WARNINGS")
+        for warning in snapshot.recent_validation_warnings[:10]:
+            lines.append(f"- {warning.get('warning_type')} key={warning.get('key')}")
+        return "\n".join(lines)
+
+    def create_production_task(self, task_type: str, *, target_entity_id=None, metadata: dict | None = None, expiration_ticks: int = 600) -> ProductionTask:
+        now_tick = int(getattr(self, "game_time", 0) or 0)
+        payload = dict(metadata or {})
+        task = ProductionTask(
+            task_type=task_type,
+            target_entity_id=target_entity_id,
+            created_tick=now_tick,
+            expiration_tick=now_tick + max(1, int(expiration_ticks)),
+            metadata=payload,
+            priority=max(1, int(payload.get("priority", 1))),
+            urgency=max(0, int(payload.get("urgency", 0))),
+            last_progress_tick=now_tick,
+        )
+        self.production_tasks_by_id[task.id] = task
+        self._record_production_task_trace("production_task_created", task)
+        return task
+
+    def create_reserve_target(self, *, target_type: str = "stockpile_item", target_entity_id: str | None = None, linked_item_type: str = "raw_log", desired_quantity: int = 4, minimum_quantity: int = 1, priority: int = 2) -> ReserveTarget:
+        reserve_id = str(uuid.uuid4())
+        target = ReserveTarget(
+            reserve_target_id=reserve_id,
+            target_type=target_type,
+            target_entity_id=target_entity_id,
+            desired_quantity=max(1, int(desired_quantity)),
+            minimum_quantity=max(0, int(minimum_quantity)),
+            linked_item_type=linked_item_type,
+            priority=max(1, int(priority)),
+        )
+        self.reserve_targets_by_id[reserve_id] = target
+        self._record_production_task_trace("reserve_target_created", ProductionTask(task_type="reserve_target", id=reserve_id), metadata={"reserve_target_id": reserve_id, "target_type": target_type, "item_key": linked_item_type})
+        return target
+
+    def create_campfire_runtime(self, x: int, y: int, *, fuel_item_type: str = "raw_log", fuel_quantity: int = 4, max_fuel_quantity: int = 10, minimum_fuel_quantity: int = 2, burn_rate_per_tick: int = 1) -> CampfireRuntimeState:
+        campfire_id = str(uuid.uuid4())
+        cf = CampfireRuntimeState(campfire_id=campfire_id, x=int(x), y=int(y), fuel_item_type=fuel_item_type, fuel_quantity=max(0, int(fuel_quantity)), max_fuel_quantity=max(1, int(max_fuel_quantity)), minimum_fuel_quantity=max(0, int(minimum_fuel_quantity)), burn_rate_per_tick=max(1, int(burn_rate_per_tick)))
+        self.campfires_by_id[campfire_id] = cf
+        rt = self.create_reserve_target(target_type="campfire_fuel", target_entity_id=campfire_id, linked_item_type=fuel_item_type, desired_quantity=cf.max_fuel_quantity, minimum_quantity=cf.minimum_fuel_quantity, priority=4)
+        cf.linked_reserve_target_id = rt.reserve_target_id
+        self._record_production_task_trace("campfire_created", ProductionTask(task_type="campfire", id=campfire_id), metadata={"campfire_id": campfire_id, "fuel": cf.fuel_quantity})
+        return cf
+
+    def create_shelter_zone(self, positions: list[tuple[int, int]], *, shelter_type: str = "basic", exposure_reduction_modifier: float = 0.6, recovery_modifier: float = 1.2) -> str:
+        sid = str(uuid.uuid4())
+        erm = max(0.2, min(1.0, float(exposure_reduction_modifier)))
+        rm = max(1.0, min(2.0, float(recovery_modifier)))
+        self.shelter_zones_by_id[sid] = {"shelter_id": sid, "positions": set((int(x), int(y)) for x, y in positions), "shelter_type": shelter_type, "exposure_reduction_modifier": erm, "recovery_modifier": rm, "active": True}
+        return sid
+
+    def get_shelter_exposure_modifier(self, position: tuple[int, int]) -> tuple[bool, float, float, str | None]:
+        for sid, zone in self.shelter_zones_by_id.items():
+            if zone.get("active", True) and position in zone.get("positions", set()):
+                return True, float(zone.get("exposure_reduction_modifier", 0.6)), float(zone.get("recovery_modifier", 1.2)), sid
+        return False, 1.0, 1.0, None
+
+    def advance_campfires(self) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        for cf in self.campfires_by_id.values():
+            if not cf.operational or not cf.lit:
                 continue
+            if now <= cf.last_burn_tick:
+                continue
+            cf.last_burn_tick = now
+            cf.fuel_quantity -= cf.burn_rate_per_tick
+            self._record_production_task_trace("campfire_fuel_consumed", ProductionTask(task_type="campfire", id=cf.campfire_id), metadata={"campfire_id": cf.campfire_id, "fuel_quantity": cf.fuel_quantity, "burn_rate": cf.burn_rate_per_tick})
+            if cf.fuel_quantity <= cf.minimum_fuel_quantity:
+                self._record_production_task_trace("campfire_fuel_low", ProductionTask(task_type="campfire", id=cf.campfire_id), metadata={"campfire_id": cf.campfire_id, "fuel_quantity": cf.fuel_quantity})
+            if cf.fuel_quantity <= 0:
+                cf.fuel_quantity = 0
+                cf.lit = False
+                self._record_production_task_trace("campfire_fuel_depleted", ProductionTask(task_type="campfire", id=cf.campfire_id), metadata={"campfire_id": cf.campfire_id})
+                self._record_production_task_trace("campfire_warmth_field_lost", ProductionTask(task_type="campfire", id=cf.campfire_id), metadata={"campfire_id": cf.campfire_id})
+                self._record_decision_explanation(explanation_type="campfire_extinguished_explained", decision="extinguished", primary_reason="zero_fuel", source_entity_id=cf.campfire_id)
+            else:
+                self._record_production_task_trace("campfire_warmth_field_active", ProductionTask(task_type="campfire", id=cf.campfire_id), metadata={"campfire_id": cf.campfire_id, "fuel_quantity": cf.fuel_quantity})
 
-            result = self.interaction_resolver.advance_active_interaction(interaction_id, self)
-            if result:
-                # Apply cues and traces from result
-                if result.cues_to_fire and hasattr(self, "visual_effects"):
-                    for cue in result.cues_to_fire:
-                        if cue == "build":
-                            self.visual_effects.append(FloatingTextEffect(interaction.target_pos[0], interaction.target_pos[1], "*building*", color=(180, 180, 120)))
+    def advance_temperature_exposure(self) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        self.last_temperature_tick = now
+        for actor in [*getattr(self, "village_npcs", []), *getattr(self, "npcs", [])]:
+            if getattr(getattr(actor, "physical", None), "is_dead", False):
+                continue
+            warmed = False
+            nearest = None
+            for cf in self.campfires_by_id.values():
+                if not (cf.operational and cf.lit and cf.fuel_quantity > 0):
+                    continue
+                dist = abs(actor.x - cf.x) + abs(actor.y - cf.y)
+                if dist <= getattr(cf, "warmth_radius", 4):
+                    warmed = True
+                    nearest = cf
+                    break
+            sheltered, exposure_mod, recovery_mod, shelter_id = self.get_shelter_exposure_modifier((actor.x, actor.y))
+            was_sheltered = bool(getattr(actor, "sheltered_state", False))
+            actor.sheltered_state = sheltered
+            actor.current_shelter_id = shelter_id
+            actor.shelter_exposure_modifier = exposure_mod
+            if sheltered:
+                actor.last_sheltered_tick = now
+            if was_sheltered != sheltered:
+                self._record_production_task_trace("shelter_state_changed", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"sheltered_state": sheltered, "shelter_id": shelter_id})
+            if warmed:
+                actor.cold_exposure = max(0.0, float(getattr(actor, "cold_exposure", 0.0)) - (0.1 * recovery_mod))
+                actor.warmth_state = "warmed"
+                actor.last_warmed_tick = now
+                actor.exposure_fatigue_modifier = max(0.0, float(getattr(actor, "exposure_fatigue_modifier", 0.0)) - 0.02)
+                self._record_production_task_trace("actor_warmed_by_campfire", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"campfire_id": getattr(nearest, "campfire_id", None), "cold_exposure": actor.cold_exposure})
+                self._record_decision_explanation(explanation_type="actor_warmed_explained", decision="warmed", primary_reason="near_lit_campfire", actor=actor, source_entity_id=getattr(nearest, "campfire_id", None))
+                if sheltered:
+                    self._record_production_task_trace("shelter_recovery_modifier_applied", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"shelter_id": shelter_id, "recovery_modifier": recovery_mod})
+            else:
+                if self.ambient_temperature < self.cold_threshold:
+                    delta = 0.05 if self.ambient_temperature >= self.severe_cold_threshold else 0.1
+                    actor.cold_exposure = min(2.0, float(getattr(actor, "cold_exposure", 0.0)) + (delta * exposure_mod))
+                    actor.warmth_state = "cold"
+                    actor.last_cold_tick = now
+                    actor.exposure_fatigue_modifier = min(0.5, float(getattr(actor, "exposure_fatigue_modifier", 0.0)) + 0.02)
+                    self._record_production_task_trace("actor_cold_exposure_increased", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"cold_exposure": actor.cold_exposure, "ambient_temperature": self.ambient_temperature})
+                    self._record_production_task_trace("shelter_exposure_evaluated", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"sheltered_state": sheltered, "shelter_id": shelter_id, "exposure_modifier": exposure_mod, "recovery_modifier": recovery_mod, "ambient_temperature": self.ambient_temperature, "cold_exposure": actor.cold_exposure})
+                    if sheltered:
+                        self._record_production_task_trace("actor_sheltered_from_cold", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"shelter_id": shelter_id, "cold_exposure": actor.cold_exposure})
+                        self._record_decision_explanation(explanation_type="shelter_exposure_reduced", decision="mitigated", primary_reason="shelter_modifier_applied", actor=actor, source_entity_id=shelter_id, score_snapshot={"exposure_modifier": exposure_mod})
+                    else:
+                        self._record_production_task_trace("actor_unsheltered_exposure", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"cold_exposure": actor.cold_exposure})
+                    if actor.cold_exposure > 1.0:
+                        self._record_decision_explanation(explanation_type="cold_exposure_penalty", decision="penalized", primary_reason="cold_exposure_high", actor=actor, score_snapshot={"cold_exposure": actor.cold_exposure})
 
-                # Check if it was completed or cancelled
-                if interaction_id not in self.interaction_resolver.active_interactions:
-                    # It was removed! Let's clean up the NPC's schedule
-                    actor = self.get_entity_by_id(interaction.actor_id)
-                    if actor and hasattr(actor, "schedule") and getattr(actor.schedule, "active_interaction_id", None) == interaction_id:
-                        actor.schedule.active_interaction_id = None
-                        actor.schedule.current_path = []
-                        actor.schedule.current_destination_coords = None
-                        # Allow them to re-evaluate what to do next if they were constructing
-                        if getattr(actor, "task_context", None) == "construction":
-                            self._handle_npc_construction_task(actor)
+
+    def _is_valid_survival_target(self, target_id: str | None, position: tuple[int, int] | None) -> bool:
+        if position is None:
+            return False
+        if target_id and target_id.startswith("campfire:"):
+            cf = self.campfires_by_id.get(target_id.split(":", 1)[1])
+            return bool(cf and cf.operational and cf.lit and cf.fuel_quantity > 0)
+        if target_id and target_id.startswith("shelter:"):
+            shelter = self.shelter_zones_by_id.get(target_id.split(":", 1)[1])
+            return bool(shelter and shelter.get("active", True) and position in shelter.get("positions", set()))
+        return True
+
+    def _find_nearest_warmth_or_shelter_target(self, actor) -> tuple[str | None, tuple[int, int] | None]:
+        candidates: list[tuple[int, str, tuple[int, int]]] = []
+        for cf in sorted(self.campfires_by_id.values(), key=lambda c: c.campfire_id):
+            if not (cf.operational and cf.lit and cf.fuel_quantity > 0):
+                continue
+            pos = (int(cf.x), int(cf.y))
+            candidates.append((abs(actor.x - pos[0]) + abs(actor.y - pos[1]), f"campfire:{cf.campfire_id}", pos))
+        for sid, zone in sorted(self.shelter_zones_by_id.items(), key=lambda item: item[0]):
+            if not zone.get("active", True):
+                continue
+            positions = sorted(zone.get("positions", set()))
+            if not positions:
+                continue
+            best = min(positions, key=lambda p: abs(actor.x - p[0]) + abs(actor.y - p[1]))
+            candidates.append((abs(actor.x - best[0]) + abs(actor.y - best[1]), f"shelter:{sid}", best))
+        if not candidates:
+            return None, None
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        return candidates[0][1], candidates[0][2]
+
+    def advance_cold_survival_overrides(self) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        for actor in list(getattr(self, "village_npcs", [])):
+            exposure = float(getattr(actor, "cold_exposure", 0.0) or 0.0)
+            active = bool(getattr(actor, "survival_override_active", False))
+            if active and exposure <= float(getattr(actor, "survival_override_recovery_threshold", self.cold_recovery_threshold)):
+                actor.survival_override_active = False
+                actor.survival_override_reason = None
+                actor.survival_override_target_id = None
+                actor.survival_override_target_position = None
+                actor.survival_override_cooldown_until_tick = now + max(1, int(self.cold_override_cooldown_ticks))
+                self._record_production_task_trace("survival_override_recovered", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"actor_id": actor.id, "cold_exposure": exposure})
+                self._record_decision_explanation(explanation_type="cold_survival_recovered", decision="recovered", primary_reason="cold_exposure_recovered", actor=actor, score_snapshot={"cold_exposure": exposure})
+                continue
+            if active:
+                tid = getattr(actor, "survival_override_target_id", None)
+                tpos = getattr(actor, "survival_override_target_position", None)
+                if not self._is_valid_survival_target(tid, tpos):
+                    self._warn_simulation_validation("cold_survival_target_invalid", (actor.id, tid), "Cold survival target became invalid.", actor=actor, metadata={"target_id": tid})
+                    self._record_production_task_trace("survival_override_target_lost", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"target_id": tid})
+                    ntid, ntpos = self._find_nearest_warmth_or_shelter_target(actor)
+                    actor.survival_override_target_id, actor.survival_override_target_position = ntid, ntpos
+                    if ntpos is None:
+                        self._warn_simulation_validation("cold_survival_no_valid_target", (actor.id, now), "No valid warmth/shelter target found for cold override.", actor=actor)
+                        self._record_decision_explanation(explanation_type="cold_survival_no_target", decision="deferred", primary_reason="no_valid_warmth_or_shelter_target", actor=actor)
+                        continue
+                if tpos is not None:
+                    if abs(actor.x - tpos[0]) <= 1 and abs(actor.y - tpos[1]) <= 1:
+                        self._record_production_task_trace("survival_override_waiting_for_recovery", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"target_id": tid, "target_position": tpos, "cold_exposure": exposure})
+                        self._record_decision_explanation(explanation_type="cold_survival_target_selected", decision="waiting", primary_reason="already_near_survival_target", actor=actor, source_entity_id=tid, contributing_factors={"target_position": tpos})
+                    else:
+                        routed = self._route_actor_toward_position(actor, tpos, reason="cold_survival_override_route", task_id=getattr(actor, "survival_override_previous_task_id", None))
+                        if routed:
+                            self._record_production_task_trace("survival_override_route_started", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"target_id": tid, "target_position": tpos, "cold_exposure": exposure})
+                        else:
+                            self._warn_simulation_validation("cold_survival_routing_failed", (actor.id, tpos), "Cold survival override could not route actor.", actor=actor, metadata={"target_position": tpos})
+                continue
+            if now < int(getattr(actor, "survival_override_cooldown_until_tick", 0) or 0):
+                continue
+            if exposure < float(getattr(self, "cold_override_threshold", 0.7)):
+                continue
+            actor.survival_override_active = True
+            actor.survival_override_reason = "seeking_warmth"
+            actor.survival_override_started_tick = now
+            actor.survival_override_recovery_threshold = float(getattr(self, "cold_recovery_threshold", 0.35))
+            actor.survival_override_previous_task_id = str(getattr(actor, "task_context_data", {}).get("task_id") or "") or None
+            prev_task = getattr(getattr(actor, "schedule", None), "current_task", None)
+            tid, tpos = self._find_nearest_warmth_or_shelter_target(actor)
+            actor.survival_override_target_id, actor.survival_override_target_position = tid, tpos
+            self._record_production_task_trace("survival_override_started", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"actor_id": actor.id, "cold_exposure": exposure, "target_id": tid, "target_position": tpos, "previous_task_id": actor.survival_override_previous_task_id, "override_reason": actor.survival_override_reason, "recovery_threshold": actor.survival_override_recovery_threshold})
+            self._record_decision_explanation(explanation_type="cold_survival_override_started", decision="started", primary_reason="cold_exposure_threshold_reached", actor=actor, score_snapshot={"cold_exposure": exposure})
+            if getattr(self, "interaction_resolver", None):
+                result = self.interaction_resolver.cancel_actor_interaction(actor.id, self, reason="cold_survival_override")
+                if getattr(result, "cancelled", False):
+                    self._record_production_task_trace("cold_survival_interruption", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"previous_task": prev_task})
+                    self._record_decision_explanation(explanation_type="cold_survival_interrupted_task", decision="interrupted", primary_reason="cold_survival_override", actor=actor, contributing_factors={"previous_task": prev_task})
+            if tpos is None:
+                self._warn_simulation_validation("cold_survival_no_valid_target", (actor.id, now), "No valid warmth/shelter target found for cold override start.", actor=actor)
+                self._record_decision_explanation(explanation_type="cold_survival_no_target", decision="blocked", primary_reason="no_valid_warmth_or_shelter_target", actor=actor)
+                continue
+            self._record_production_task_trace("survival_override_target_selected", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"target_id": tid, "target_position": tpos, "cold_exposure": exposure})
+            self._record_decision_explanation(explanation_type="cold_survival_target_selected", decision="selected", primary_reason="nearest_valid_warmth_or_shelter_target", actor=actor, source_entity_id=tid, contributing_factors={"target_position": tpos})
+
+    def advance_reserve_targets(self) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        if now < int(getattr(self, "next_reserve_eval_tick", 0) or 0):
+            return
+        self.next_reserve_eval_tick = now + max(1, int(getattr(self, "scheduling_cadence_config", {}).get("reserve_eval_interval", 5)))
+        for target in list(self.reserve_targets_by_id.values()):
+            target.last_evaluated_tick = now
+            target.active_task_ids = [task_id for task_id in target.active_task_ids if task_id in self.production_tasks_by_id and self.production_tasks_by_id[task_id].status not in {"completed", "failed", "cancelled"}]
+            if now < max(0, target.cooldown_until_tick):
+                continue
+            quantity = 0
+            if target.target_type == "stockpile_item":
+                stockpile = self.stockpiles_by_id.get(target.target_entity_id or "")
+                if stockpile is None:
+                    self._warn_simulation_validation("reserve_task_orphaned", (target.reserve_target_id, target.target_entity_id), "Reserve target stockpile does not exist.", metadata={"reserve_target_id": target.reserve_target_id})
+                    continue
+                quantity = stockpile.quantity(target.linked_item_type)
+            elif target.target_type == "campfire_fuel":
+                cf = self.campfires_by_id.get(target.target_entity_id or "")
+                if cf is None:
+                    self._warn_simulation_validation("campfire_refuel_missing_target", (target.reserve_target_id, target.target_entity_id), "Campfire reserve target is missing campfire.", metadata={"reserve_target_id": target.reserve_target_id})
+                    continue
+                quantity = cf.fuel_quantity
+            target.current_quantity = quantity
+            self._record_production_task_trace("reserve_target_evaluated", ProductionTask(task_type="reserve_target", id=target.reserve_target_id), metadata={"reserve_target_id": target.reserve_target_id, "current_quantity": quantity, "minimum_quantity": target.minimum_quantity, "desired_quantity": target.desired_quantity, "item_key": target.linked_item_type})
+            if quantity >= target.minimum_quantity:
+                self._record_production_task_trace("reserve_target_satisfied", ProductionTask(task_type="reserve_target", id=target.reserve_target_id), metadata={"reserve_target_id": target.reserve_target_id, "quantity": quantity})
+                continue
+            shortage = max(0, target.desired_quantity - quantity)
+            self._record_production_task_trace("reserve_shortage_detected", ProductionTask(task_type="reserve_target", id=target.reserve_target_id), metadata={"reserve_target_id": target.reserve_target_id, "shortage": shortage, "item_key": target.linked_item_type})
+            if target.active_task_ids:
+                continue
+            if target.linked_item_type == "raw_log":
+                if target.target_type == "campfire_fuel":
+                    task = self.create_production_task("refill_campfire_fuel", metadata={"campfire_id": target.target_entity_id, "item_key": "raw_log", "priority": target.priority, "urgency": min(10, shortage)}, expiration_ticks=900)
+                    self._record_production_task_trace("campfire_refuel_task_created", task, metadata={"campfire_id": target.target_entity_id, "shortage": shortage})
+                    self._record_decision_explanation(explanation_type="campfire_refuel_task_generated", decision="generated_task", primary_reason="campfire_fuel_shortage", task=task, source_entity_id=target.target_entity_id, contributing_factors={"shortage": shortage})
+                else:
+                    task = self.create_production_task("produce_logs", metadata={"stockpile_id": target.target_entity_id, "target_quantity": target.desired_quantity, "item_key": "raw_log", "priority": target.priority, "urgency": min(10, shortage)}, expiration_ticks=900)
+            elif target.linked_item_type == "wooden_plank":
+                task = self.create_production_task("craft_plank", metadata={"priority": target.priority, "urgency": min(10, shortage)}, expiration_ticks=900)
+            else:
+                self._warn_simulation_validation("reserve_unreachable_supply", (target.reserve_target_id, target.linked_item_type), "No production mapping for reserve item type.", metadata={"reserve_target_id": target.reserve_target_id, "item_key": target.linked_item_type})
+                target.cooldown_until_tick = now + 120
+                continue
+            target.active_task_ids.append(task.id)
+            target.cooldown_until_tick = now + 60
+            self._record_production_task_trace("reserve_task_created", task, metadata={"reserve_target_id": target.reserve_target_id, "shortage": shortage})
+            self._record_decision_explanation(explanation_type="reserve_generated_task", decision="generated_task", primary_reason="reserve_shortage_detected", task=task, source_entity_id=target.reserve_target_id, contributing_factors={"shortage": shortage, "item_key": target.linked_item_type}, score_snapshot={"current_quantity": quantity, "desired_quantity": target.desired_quantity})
+
+    def _evaluate_production_dependencies(self, now: int) -> None:
+        if now < int(getattr(self, "next_dependency_eval_tick", 0) or 0):
+            return
+        self.next_dependency_eval_tick = now + max(1, int(getattr(self, "scheduling_cadence_config", {}).get("dependency_eval_interval", 4)))
+        active = [t for t in self.production_tasks_by_id.values() if t.status not in {"completed", "failed", "cancelled"}]
+        producers: dict[str, list[ProductionTask]] = {"raw_log": [t for t in active if t.task_type == "produce_logs"], "wooden_plank": [t for t in active if t.task_type == "craft_plank"]}
+        for task in active:
+            task.inherited_priority = 0
+            task.blocked_by_task_ids = []
+            task.blocking_task_ids = []
+            task.dependency_reason = None
+            task.last_dependency_eval_tick = now
+            if task.task_type == "build_component":
+                prereqs = ["wooden_plank"]
+            elif task.task_type == "craft_plank":
+                prereqs = ["raw_log"]
+            else:
+                prereqs = []
+            task.prerequisite_item_types = prereqs
+            if task.blocked_reason and prereqs:
+                for item in prereqs:
+                    prod = producers.get(item, [])
+                    if not prod:
+                        self._warn_simulation_validation("production_dependency_unresolved", (task.id, item), "Blocked task has unmet dependency with no producer task.", metadata={"task_id": task.id, "item": item}, cooldown_ticks=180)
+                        continue
+                    for p in prod:
+                        boost = min(5, max(1, int(task.priority // 2)))
+                        p.inherited_priority = min(10, p.inherited_priority + boost)
+                        p.blocking_task_ids.append(task.id)
+                        task.blocked_by_task_ids.append(p.id)
+                        task.dependency_reason = f"waiting_on:{item}"
+                        self._record_production_task_trace("production_priority_inherited", p, metadata={"from_task_id": task.id, "boost": boost, "item": item})
+                        self._record_decision_explanation(explanation_type="priority_inherited", decision="priority_boosted", primary_reason="blocked_high_priority_dependency", task=p, source_entity_id=task.id, contributing_factors={"item": item, "boost": boost}, score_snapshot={"inherited_priority": p.inherited_priority})
+
+
+    def _compute_production_task_score(self, task: ProductionTask, now: int) -> int:
+        cached = getattr(self, "_production_score_cache", {}).get(task.id)
+        if cached and now <= cached[1]:
+            self._record_decision_explanation(explanation_type="cached_score_used", decision="used_cached_score", primary_reason="score_cache_valid", task=task, score_snapshot={"score": cached[0], "cache_until_tick": cached[1]})
+            return int(cached[0])
+        starvation_age = max(0, now - max(task.last_progress_tick or task.created_tick, task.created_tick))
+        starvation_bonus = min(200, starvation_age // 20)
+        retry_penalty = min(100, max(0, task.retry_count) * 5)
+        cooldown_penalty = 1000 if now < max(0, task.cooldown_until_tick) else 0
+        pressure = max(0, int(task.resource_pressure_score or 0))
+        dependency_boost = min(200, int(getattr(task, "inherited_priority", 0)) * 20)
+        score = (task.priority * 100) + (task.urgency * 10) + starvation_bonus + pressure + dependency_boost - retry_penalty - cooldown_penalty
+        self._production_score_cache[task.id] = (score, now + 1)
+        return score
+
+    def _mark_production_task_blocked(self, task: ProductionTask, reason: str, now: int, *, cooldown: int = 30, warning_type: str = "production_task_resource_deadlock") -> None:
+        task.status = "blocked"
+        task.blocked_reason = reason
+        task.retry_count = max(0, task.retry_count) + 1
+        task.cooldown_until_tick = now + max(1, int(cooldown))
+        self._record_production_task_trace("production_task_blocked", task, metadata={"reason": reason, "cooldown_until_tick": task.cooldown_until_tick, "retry_count": task.retry_count})
+        self._record_decision_explanation(explanation_type="task_blocked", decision="blocked", primary_reason=reason, task=task, contributing_factors={"retry_count": task.retry_count, "cooldown_until_tick": task.cooldown_until_tick}, score_snapshot={"resource_pressure_score": task.resource_pressure_score})
+        self._warn_simulation_validation(warning_type, (task.id, reason), "Production task is blocked and cooled down.", metadata={"task_id": task.id, "task_type": task.task_type, "reason": reason, "retry_count": task.retry_count})
+
+    def _mark_production_task_progress(self, task: ProductionTask, now: int, *, actor=None, trace_type: str = "production_task_recovered", metadata: dict | None = None) -> None:
+        task.last_progress_tick = now
+        task.blocked_reason = None
+        task.cooldown_until_tick = 0
+        task.retry_count = max(0, task.retry_count - 1)
+        self._record_production_task_trace(trace_type, task, actor=actor, metadata=metadata)
+
+    def _work_tag_for_task(self, task_type: str) -> str:
+        return {
+            "produce_logs": "woodcutting",
+            "build_component": "construction",
+            "craft_plank": "crafting",
+        }.get(task_type, "hauling")
+
+    def _score_actor_suitability(self, actor, task: ProductionTask, *, work_tag: str, near: tuple[int, int] | None = None) -> int:
+        now = int(getattr(self, "game_time", 0) or 0)
+        key = (task.id, int(getattr(actor, "id", 0)), work_tag)
+        if now <= int(getattr(self, "actor_suitability_cache_until_tick", 0) or 0):
+            cached = self._actor_suitability_cache.get(key)
+            if cached is not None:
+                self._record_decision_explanation(explanation_type="cached_score_used", decision="used_cached_suitability", primary_reason="suitability_cache_valid", task=task, actor=actor, score_snapshot={"suitability_score": cached})
+                return int(cached)
+        skill = int(getattr(actor, "skill_levels", {}).get(work_tag, 1))
+        preferred = 8 if work_tag in set(getattr(actor, "preferred_work_types", []) or []) else 0
+        fatigue = float(getattr(actor, "fatigue_modifier", 0.0) or 0.0)
+        fatigue_penalty = int(min(40.0, max(0.0, fatigue) * 20.0))
+        history = list(getattr(actor, "recent_task_history", []) or [])
+        repetition_penalty = 10 if history and history[-1] == task.task_type else 0
+        if bool(getattr(actor, "survival_override_active", False)):
+            self._record_production_task_trace("actor_skipped_survival_override", task, actor=actor, metadata={"work_tag": work_tag})
+            self._record_decision_explanation(explanation_type="actor_skipped_survival_override", decision="skipped", primary_reason="active_cold_survival_override", task=task, actor=actor)
+            return -9999
+        busy_penalty = 30 if getattr(actor, "task_context", None) in {"hauling", "construction", "delivery", "stockpile_hauling"} else 0
+        dist_penalty = 0
+        if near is not None:
+            dist_penalty = min(30, abs(int(getattr(actor, "x", 0)) - near[0]) + abs(int(getattr(actor, "y", 0)) - near[1]))
+        score = (skill * 20) + preferred - fatigue_penalty - repetition_penalty - busy_penalty - dist_penalty
+        self._record_production_task_trace("actor_task_suitability_scored", task, actor=actor, metadata={"work_tag": work_tag, "score": score, "skill": skill, "fatigue": fatigue, "distance_penalty": dist_penalty})
+        self._record_decision_explanation(explanation_type="actor_scored", decision="scored", primary_reason="suitability_computed", task=task, actor=actor, contributing_factors={"work_tag": work_tag, "skill": skill, "fatigue_penalty": fatigue_penalty, "busy_penalty": busy_penalty, "distance_penalty": dist_penalty}, score_snapshot={"suitability_score": score})
+        self._actor_suitability_cache[key] = score
+        self.actor_suitability_cache_until_tick = now + max(1, int(getattr(self, "scheduling_cadence_config", {}).get("suitability_cache_interval", 2)))
+        if fatigue > 1.5:
+            self._warn_simulation_validation("actor_overwork_detected", (getattr(actor, "id", None), work_tag), "Actor fatigue is elevated during suitability scoring.", actor=actor, metadata={"fatigue": fatigue, "work_tag": work_tag}, cooldown_ticks=180)
+        return score
+
+    def _apply_actor_work_tick(self, actor, *, work_tag: str, task: ProductionTask) -> None:
+        levels = getattr(actor, "skill_levels", None)
+        if isinstance(levels, dict):
+            levels[work_tag] = min(10, int(levels.get(work_tag, 1)) + 1 if (int(getattr(self, "game_time", 0) or 0) % 200 == 0) else int(levels.get(work_tag, 1)))
+        actor.fatigue_modifier = min(2.0, float(getattr(actor, "fatigue_modifier", 0.0) or 0.0) + 0.04)
+        history = list(getattr(actor, "recent_task_history", []) or [])
+        history.append(task.task_type)
+        actor.recent_task_history = history[-10:]
+        if getattr(actor, "current_work_focus", None) != work_tag:
+            actor.current_work_focus = work_tag
+            self._record_production_task_trace("actor_work_focus_shifted", task, actor=actor, metadata={"work_tag": work_tag})
+        self._record_production_task_trace("actor_fatigue_increased", task, actor=actor, metadata={"work_tag": work_tag, "fatigue": actor.fatigue_modifier})
+        self._apply_actor_skill_experience(actor, work_tag=work_tag, progress_amount=1, task=task)
+
+    def _apply_actor_skill_experience(self, actor, *, work_tag: str, progress_amount: int, task: ProductionTask | None = None) -> None:
+        if actor is None or not work_tag:
+            return
+        now = int(getattr(self, "game_time", 0) or 0)
+        xp_map = getattr(actor, "skill_experience_by_tag", None)
+        if not isinstance(xp_map, dict):
+            xp_map = {}
+            actor.skill_experience_by_tag = xp_map
+        pressure = getattr(actor, "specialization_pressure", None)
+        if not isinstance(pressure, dict):
+            pressure = {}
+            actor.specialization_pressure = pressure
+        usage = list(getattr(actor, "recent_skill_usage", []) or [])
+        usage.append(work_tag)
+        actor.recent_skill_usage = usage[-20:]
+        repeat_count = actor.recent_skill_usage.count(work_tag)
+        gain = max(0.01, min(0.25, 0.03 * max(1, int(progress_amount)) * (1.0 - min(0.7, xp_map.get(work_tag, 0.0) / 300.0))))
+        xp_before = float(xp_map.get(work_tag, 0.0))
+        xp_after = min(500.0, xp_before + gain)
+        xp_map[work_tag] = xp_after
+        actor.last_skill_gain_tick = now
+        specialization_value = min(1.0, max(0.0, float(pressure.get(work_tag, 0.0)) * 0.98 + (repeat_count / 20.0) * 0.05))
+        pressure[work_tag] = specialization_value
+
+        level_map = getattr(actor, "skill_levels", None)
+        if not isinstance(level_map, dict):
+            level_map = {}
+            actor.skill_levels = level_map
+        old_level = int(level_map.get(work_tag, 1))
+        new_level = min(10, 1 + int((xp_after ** 0.5) // 3))
+        if new_level != old_level:
+            level_map[work_tag] = new_level
+            self._record_production_task_trace("actor_skill_level_changed", task or ProductionTask(task_type="skill_progress"), actor=actor, metadata={"work_tag": work_tag, "old_level": old_level, "new_level": new_level, "total_experience": xp_after})
+        self._record_production_task_trace("actor_skill_experience_gained", task or ProductionTask(task_type="skill_progress"), actor=actor, metadata={"work_tag": work_tag, "experience_gained": gain, "total_experience": xp_after, "resulting_skill_level": int(level_map.get(work_tag, 1))})
+        self._record_production_task_trace("actor_specialization_pressure_updated", task or ProductionTask(task_type="skill_progress"), actor=actor, metadata={"work_tag": work_tag, "specialization_pressure": specialization_value})
+        if specialization_value > 0.9:
+            self._record_production_task_trace("actor_work_identity_reinforced", task or ProductionTask(task_type="skill_progress"), actor=actor, metadata={"work_tag": work_tag, "specialization_pressure": specialization_value})
+            self._warn_simulation_validation("actor_specialization_lock", (getattr(actor, "id", None), work_tag), "Actor specialization pressure is very high.", actor=actor, metadata={"work_tag": work_tag, "specialization_pressure": specialization_value}, cooldown_ticks=240)
+        if xp_after >= 499.0:
+            self._warn_simulation_validation("actor_skill_growth_out_of_bounds", (getattr(actor, "id", None), work_tag), "Actor skill growth reached soft cap boundary.", actor=actor, metadata={"work_tag": work_tag, "experience": xp_after}, cooldown_ticks=240)
+        self._update_actor_work_profile(actor, work_tag=work_tag, task=task)
+
+    def _update_actor_work_profile(self, actor, *, work_tag: str | None = None, task: ProductionTask | None = None) -> None:
+        if actor is None:
+            return
+        profile = getattr(actor, "actor_work_profile", None)
+        if not isinstance(profile, dict):
+            self._warn_simulation_validation("actor_profile_update_failure", (getattr(actor, "id", None), "profile_missing"), "Actor profile state was missing during update.", actor=actor)
+            profile = {}
+            actor.actor_work_profile = profile
+        totals = profile.get("lifetime_work_totals")
+        if not isinstance(totals, dict):
+            totals = {"woodcutting": 0, "hauling": 0, "construction": 0, "crafting": 0}
+            profile["lifetime_work_totals"] = totals
+        if work_tag:
+            totals[work_tag] = int(totals.get(work_tag, 0)) + 1
+        ranked = sorted(totals.items(), key=lambda kv: (-int(kv[1]), kv[0]))
+        dominant = ranked[0][0] if ranked else "hauling"
+        profile["dominant_work_tag"] = dominant
+        history = list(getattr(actor, "recent_skill_usage", []) or [])
+        if len(history) > 50:
+            actor.recent_skill_usage = history[-50:]
+            self._warn_simulation_validation("actor_work_history_overflow", (getattr(actor, "id", None), len(history)), "Actor recent skill usage history exceeded bound and was trimmed.", actor=actor, cooldown_ticks=240)
+            history = actor.recent_skill_usage
+        profile["work_history_snapshot"] = history[-8:]
+        fatigue = float(getattr(actor, "fatigue_modifier", 0.0) or 0.0)
+        fatigue_state = "overworked" if fatigue >= 1.4 else "fatigued" if fatigue >= 0.7 else "rested"
+        profile["fatigue_state"] = fatigue_state
+        spec = getattr(actor, "specialization_pressure", {}) or {}
+        dominant_spec = float(spec.get(dominant, 0.0))
+        if dominant_spec >= 0.7:
+            label = f"Habitual {dominant.title()} Specialist"
+            self._record_production_task_trace("actor_specialization_emerged", task or ProductionTask(task_type="work_profile"), actor=actor, metadata={"dominant_work_tag": dominant, "specialization_pressure": dominant_spec})
+        elif dominant_spec >= 0.4:
+            label = f"Growing {dominant.title()} Worker"
+        else:
+            label = "General Laborer"
+        previous_label = profile.get("work_identity_label")
+        profile["work_identity_label"] = label
+        profile["preferred_task_bias"] = list(getattr(actor, "preferred_work_types", []) or [])
+        profile["specialization_summary"] = f"{dominant.title()} pressure {dominant_spec:.2f}"
+        profile["recent_work_summary"] = f"Recent focus: {', '.join(profile['work_history_snapshot'][-3:])}" if profile["work_history_snapshot"] else "No recent work recorded."
+        if previous_label and previous_label != label:
+            self._record_production_task_trace("actor_identity_shift_detected", task or ProductionTask(task_type="work_profile"), actor=actor, metadata={"previous_label": previous_label, "new_label": label, "dominant_work_tag": dominant})
+        self._record_production_task_trace("actor_work_profile_updated", task or ProductionTask(task_type="work_profile"), actor=actor, metadata={"dominant_work_tag": dominant, "fatigue_state": fatigue_state, "work_identity_label": label, "specialization_pressure": dominant_spec})
+
+    def get_actor_work_identity_summary(self, actor) -> str:
+        if actor is None:
+            return "Unknown worker identity."
+        self._update_actor_work_profile(actor, work_tag=None, task=None)
+        profile = getattr(actor, "actor_work_profile", {}) or {}
+        summary = f"{profile.get('work_identity_label', 'General Laborer')} with {profile.get('specialization_summary', 'balanced skills')} and {profile.get('fatigue_state', 'rested')} fatigue."
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if isinstance(trace_log, list):
+            trace_log.append({"tick": getattr(self, "game_time", None), "interaction_id": None, "actor_id": getattr(actor, "id", None), "action_type": "work_profile", "trace_type": "actor_work_summary_generated", "metadata": {"summary": summary, "dominant_work_tag": profile.get("dominant_work_tag"), "work_identity_label": profile.get("work_identity_label")}})
+        return summary
+
+    def get_actor_work_efficiency(self, actor, work_tag: str) -> tuple[float, dict]:
+        if actor is None:
+            self._warn_simulation_validation("interaction_efficiency_missing_actor", (work_tag, "none"), "Cannot compute work efficiency without an actor.", metadata={"work_tag": work_tag})
+            return 1.0, {"reason": "missing_actor"}
+        if not work_tag:
+            self._warn_simulation_validation("interaction_efficiency_missing_skill_tag", (getattr(actor, "id", None), "missing"), "Cannot compute work efficiency without a work tag.", actor=actor)
+            return 1.0, {"reason": "missing_work_tag"}
+        skill_level = int(getattr(actor, "skill_levels", {}).get(work_tag, 1))
+        fatigue = float(getattr(actor, "fatigue_modifier", 0.0) or 0.0) + float(getattr(actor, "exposure_fatigue_modifier", 0.0) or 0.0)
+        preferred = 0.08 if work_tag in set(getattr(actor, "preferred_work_types", []) or []) else 0.0
+        repetition_penalty = 0.05 if (list(getattr(actor, "recent_task_history", []) or [])[-1:] == [work_tag]) else 0.0
+        explicit_modifier = float(getattr(actor, "work_efficiency_modifiers", {}).get(work_tag, 1.0) or 1.0)
+        base_multiplier = 1.0 + min(0.4, max(0.0, (skill_level - 1) * 0.05)) + preferred - min(0.5, fatigue * 0.2) - repetition_penalty
+        base_multiplier += min(0.12, max(0.0, float(getattr(actor, "specialization_pressure", {}).get(work_tag, 0.0)) * 0.12))
+        multiplier = max(0.5, min(1.5, base_multiplier * explicit_modifier))
+        if multiplier <= 0.5 or multiplier >= 1.5:
+            self._warn_simulation_validation("actor_efficiency_out_of_bounds", (getattr(actor, "id", None), work_tag), "Actor work efficiency hit bounding limits.", actor=actor, metadata={"work_tag": work_tag, "computed_multiplier": multiplier})
+        meta = {"actor_id": getattr(actor, "id", None), "work_tag": work_tag, "skill_level": skill_level, "fatigue": fatigue, "preferred_bonus": preferred, "repetition_penalty": repetition_penalty, "explicit_modifier": explicit_modifier, "efficiency_multiplier": multiplier, "cold_exposure": float(getattr(actor, "cold_exposure", 0.0) or 0.0)}
+        trace_log = getattr(self, "interaction_trace_log", None)
+        if isinstance(trace_log, list):
+            trace_log.append({"tick": getattr(self, "game_time", None), "interaction_id": None, "actor_id": getattr(actor, "id", None), "action_type": "interaction_efficiency", "trace_type": "actor_work_efficiency_computed", "metadata": meta})
+        if multiplier > 1.45:
+            self._warn_simulation_validation("actor_efficiency_runaway", (getattr(actor, "id", None), work_tag), "Actor efficiency is near maximum bound.", actor=actor, metadata={"work_tag": work_tag, "efficiency_multiplier": multiplier}, cooldown_ticks=240)
+        return multiplier, meta
+
+    def _advance_produce_logs_task(self, task: ProductionTask) -> None:
+        stockpile = self.stockpiles_by_id.get(task.metadata.get("stockpile_id"))
+        now = int(getattr(self, "game_time", 0) or 0)
+        if stockpile is None:
+            task.status = "failed"
+            self._warn_simulation_validation("orphaned_production_task", (task.id, "stockpile_missing"), "ProduceLogsTask lost stockpile target.", metadata={"task_id": task.id})
+            self._record_production_task_trace("production_task_failed", task, metadata={"reason": "stockpile_missing"})
+            return
+        item_key = task.metadata.get("item_key", "raw_log")
+        target_qty = max(1, int(task.metadata.get("target_quantity", 1)))
+        if stockpile.quantity(item_key) >= target_qty:
+            task.status = "completed"
+            self._mark_production_task_progress(task, now, trace_type="production_task_completed", metadata={"quantity": stockpile.quantity(item_key)})
+            return
+        actors = [npc for npc in self.village_npcs if not getattr(getattr(npc, "physical", None), "is_dead", False)]
+        actors.sort(key=lambda a: (-self._score_actor_suitability(a, task, work_tag="woodcutting", near=stockpile.position), getattr(a, "id", 0)))
+        for actor in actors:
+            if getattr(actor, "task_context", None) == "stockpile_hauling":
+                self._handle_npc_stockpile_haul_task(actor)
+                continue
+            if getattr(actor, "task_context", None) in {"hauling", "construction", "delivery"}:
+                continue
+            if self._assign_source_to_stockpile_haul_task(actor, item_key=item_key):
+                if actor.id not in task.assigned_actor_ids:
+                    task.assigned_actor_ids.append(actor.id)
+                task.status = "hauling"
+                self._record_decision_explanation(explanation_type="actor_assigned", decision="assigned", primary_reason="best_available_suitability_for_produce_logs", task=task, actor=actor, contributing_factors={"work_tag": "woodcutting"}, score_snapshot={"task_status": task.status})
+                self._apply_actor_work_tick(actor, work_tag="woodcutting", task=task)
+                self._mark_production_task_progress(task, now, actor=actor, trace_type="production_task_selected", metadata={"status": task.status})
+                return
+        self._mark_production_task_blocked(task, "no_available_source_or_actor", now, warning_type="production_task_starvation")
+
+
+    def _advance_craft_production_task(self, task: ProductionTask) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        workshop = self.workshops_by_id.get(task.metadata.get("workshop_id"))
+        if workshop is None:
+            workshop = self._find_operational_workshop(task.metadata.get("workshop_type", "sawbench"))
+            if workshop is None:
+                self._mark_production_task_blocked(task, "workshop_deadlock", now, warning_type="workshop_deadlock")
+                return
+            task.metadata["workshop_id"] = workshop.workshop_id
+        candidates = [npc for npc in self.village_npcs if not getattr(getattr(npc, "physical", None), "is_dead", False)]
+        candidates.sort(key=lambda a: (-self._score_actor_suitability(a, task, work_tag="crafting", near=(workshop.x, workshop.y)), getattr(a, "id", 0)))
+        actor = candidates[0] if candidates else None
+        if actor is None:
+            self._record_decision_explanation(explanation_type="actor_skipped", decision="no_assignment", primary_reason="no_available_actor", task=task, contributing_factors={"work_tag": "crafting"})
+            self._mark_production_task_blocked(task, "no_available_actors", now, warning_type="production_task_assignment_conflict")
+            return
+        if not self._reserve_workshop_for_actor(workshop, actor.id):
+            self._mark_production_task_blocked(task, "workshop_assignment_conflict", now, warning_type="workshop_assignment_conflict")
+            return
+        if not self._is_actor_adjacent_to_position(actor, (workshop.x, workshop.y)):
+            task.metadata["moving_to_workshop"] = True
+            if self._route_actor_toward_position(actor, (workshop.x, workshop.y), reason="workshop_route_started", task_id=task.id):
+                self._record_production_task_trace("craft_task_moving_to_workshop", task, actor=actor, metadata={"workshop_id": workshop.workshop_id})
+                self._record_decision_explanation(explanation_type="interaction_waiting_for_range", decision="deferred", primary_reason="workshop_interaction_waiting_for_actor_range", task=task, actor=actor)
+                return
+            self._warn_simulation_validation("workshop_route_failed", (task.id, actor.id), "Unable to route actor toward workshop.", actor=actor, metadata={"workshop_id": workshop.workshop_id}, cooldown_ticks=120)
+            return
+        task.metadata["moving_to_workshop"] = False
+
+        if workshop.input_buffer.get("raw_log", 0) <= 0:
+            if workshop.reserved_input_entity_ids:
+                self._mark_production_task_blocked(task, "workshop_missing_inputs", now, cooldown=20, warning_type="workshop_missing_inputs")
+                return
+            source = None
+            if self.stockpiles_by_id:
+                source_sp = self.find_stockpile_for_item("raw_log", require_available=True)
+                if source_sp is not None:
+                    reservation = source_sp.create_reservation("raw_log", 1, task_id=task.id, current_tick=now)
+                    if reservation:
+                        workshop.reserved_input_entity_ids.append(f"stockpile:{source_sp.stockpile_id}:{reservation}")
+                        item = source_sp.withdraw_reserved_item_reference(reservation)
+                        if item is not None:
+                            workshop.input_buffer.add_item_reference(item)
+                            self._record_production_task_trace("workshop_inputs_delivered", task, metadata={"workshop_id": workshop.workshop_id, "item_key": "raw_log"})
+            if workshop.input_buffer.get("raw_log", 0) <= 0:
+                self._mark_production_task_blocked(task, "workshop_missing_inputs", now, cooldown=20, warning_type="workshop_missing_inputs")
+                return
+
+        intent = ActionIntent(actor_id=actor.id, action_type="workshop_transform", target_pos=(workshop.x, workshop.y), payload={"workshop_id": workshop.workshop_id, "recipe": "raw_log_to_plank", "production_task_id": task.id})
+        result = self.interaction_resolver.resolve(intent, self)
+        if not result.success:
+            self._mark_production_task_blocked(task, "workshop_interaction_start_failed", now, warning_type="workshop_deadlock")
+            return
+        workshop.active_interaction_id = result.started_interaction_id
+        task.status = "waiting_for_work"
+        self._record_decision_explanation(explanation_type="actor_assigned", decision="assigned", primary_reason="best_available_suitability_for_crafting", task=task, actor=actor, contributing_factors={"work_tag": "crafting", "workshop_id": workshop.workshop_id}, score_snapshot={"interaction_id": result.started_interaction_id})
+        self._apply_actor_work_tick(actor, work_tag="crafting", task=task)
+        self._mark_production_task_progress(task, now, actor=actor, trace_type="workshop_interaction_started", metadata={"workshop_id": workshop.workshop_id, "interaction_id": result.started_interaction_id})
+
+    def _advance_build_component_task(self, task: ProductionTask) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        blueprint = self.blueprints_by_id.get(task.metadata.get("blueprint_id"))
+        component_id = task.metadata.get("component_id")
+        if blueprint is None:
+            task.status = "failed"
+            self._record_production_task_trace("production_task_failed", task, metadata={"reason": "blueprint_missing"})
+            return
+        component = next((c for c in getattr(blueprint, "components", []) if c.id == component_id), None)
+        if component is None:
+            task.status = "failed"
+            self._record_production_task_trace("production_task_failed", task, metadata={"reason": "component_missing"})
+            return
+        if component.status == "complete":
+            task.status = "completed"
+            self._mark_production_task_progress(task, now, trace_type="production_task_completed", metadata={"reason": "component_complete"})
+            return
+        for actor in self.village_npcs:
+            if getattr(actor, "task_context", None) == "hauling":
+                self._handle_npc_hauling_task(actor)
+            elif getattr(actor, "task_context", None) == "construction":
+                self._handle_npc_construction_task(actor)
+            elif component.has_all_materials():
+                if self._assign_construction_task_to_npc(actor):
+                    self._mark_production_task_progress(task, now, actor=actor, trace_type="build_started", metadata={"component_id": component.id})
+            else:
+                self._assign_haul_task_to_npc(actor)
+        if not component.has_all_materials():
+            self._mark_production_task_blocked(task, "missing_materials", now, cooldown=15)
+            task.status = "delivering"
+        else:
+            task.status = "waiting_for_work"
+
+    def _advance_refill_campfire_fuel_task(self, task: ProductionTask) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        cf = self.campfires_by_id.get(task.metadata.get("campfire_id"))
+        if cf is None:
+            self._warn_simulation_validation("campfire_refuel_missing_target", (task.id, task.metadata.get("campfire_id")), "Refill task missing campfire target.", metadata={"task_id": task.id})
+            task.status = "failed"
+            return
+        if cf.fuel_quantity >= cf.max_fuel_quantity:
+            task.status = "completed"
+            return
+        actors = [npc for npc in self.village_npcs if not getattr(getattr(npc, "physical", None), "is_dead", False)]
+        if not actors:
+            self._mark_production_task_blocked(task, "no_available_actors", now)
+            return
+        actor = sorted(actors, key=lambda a: (-self._score_actor_suitability(a, task, work_tag="hauling", near=(cf.x, cf.y)), getattr(a, "id", 0)))[0]
+        item_key = task.metadata.get("item_key", "raw_log")
+        if actor.economic.npc_inventory.get(item_key, 0) <= 0:
+            source = self.find_stockpile_for_item(item_key, require_available=True, near=(cf.x, cf.y))
+            if source is None:
+                self._warn_simulation_validation("campfire_refuel_missing_fuel_source", (task.id, item_key), "No fuel source available for campfire refill.", actor=actor, metadata={"task_id": task.id})
+                self._record_decision_explanation(explanation_type="campfire_refuel_blocked", decision="blocked", primary_reason="missing_fuel_source", task=task, actor=actor)
+                self._mark_production_task_blocked(task, "missing_fuel_source", now)
+                return
+            item = source.withdraw_item_reference(item_key)
+            if item is None:
+                self._mark_production_task_blocked(task, "missing_fuel_source", now)
+                return
+            actor.economic.npc_inventory.add_item_reference(item)
+            self._record_production_task_trace("campfire_refuel_started", task, actor=actor, metadata={"campfire_id": cf.campfire_id, "source_stockpile_id": source.stockpile_id})
+            self._record_decision_explanation(explanation_type="campfire_refuel_actor_assigned", decision="assigned", primary_reason="hauler_selected_for_refuel", task=task, actor=actor)
+        if abs(actor.x - cf.x) > 1 or abs(actor.y - cf.y) > 1:
+            task.metadata["moving_to_campfire"] = True
+            self._record_production_task_trace("campfire_refuel_waiting_for_actor_range", task, actor=actor, metadata={"campfire_id": cf.campfire_id})
+            self._record_decision_explanation(explanation_type="delivery_waiting_for_range", decision="deferred", primary_reason="campfire_refuel_delivery_delayed_until_adjacent", task=task, actor=actor)
+            self._route_actor_toward_position(actor, (cf.x, cf.y), reason="campfire_refuel_route_started", task_id=task.id)
+            return
+        task.metadata["moving_to_campfire"] = False
+        carried = actor.economic.npc_inventory.pop_item_reference(item_key)
+        if carried is None:
+            self._warn_simulation_validation("campfire_fuel_delivery_mismatch", (task.id, actor.id), "Actor expected to deliver fuel but had none.", actor=actor, metadata={"campfire_id": cf.campfire_id})
+            return
+        cf.fuel_quantity = min(cf.max_fuel_quantity, cf.fuel_quantity + 1)
+        cf.lit = True
+        cf.last_refuel_tick = now
+        self._record_production_task_trace("campfire_refuel_delivered", task, actor=actor, metadata={"campfire_id": cf.campfire_id, "fuel_quantity": cf.fuel_quantity})
+        self._record_production_task_trace("campfire_refuel_completed", task, actor=actor, metadata={"campfire_id": cf.campfire_id})
+        task.status = "completed"
+
+    def advance_production_tasks(self) -> None:
+        now = int(getattr(self, "game_time", 0) or 0)
+        self._evaluate_production_dependencies(now)
+        if now < int(getattr(self, "next_production_eval_tick", 0) or 0):
+            self._record_decision_explanation(explanation_type="scheduler_timeslice_deferred", decision="deferred", primary_reason="production_eval_timeslice", score_snapshot={"next_production_eval_tick": self.next_production_eval_tick})
+            return
+        self.next_production_eval_tick = now + max(1, int(getattr(self, "scheduling_cadence_config", {}).get("production_eval_interval", 2)))
+        active_tasks: list[tuple[int, str, ProductionTask]] = []
+        for task in list(self.production_tasks_by_id.values()):
+            if task.status in {"completed", "failed", "cancelled"}:
+                continue
+            if task.expiration_tick is not None and now > task.expiration_tick:
+                task.status = "failed"
+                self._warn_simulation_validation("orphaned_production_task", (task.id, "expired"), "ProductionTask expired before completion.", metadata={"task_id": task.id, "task_type": task.task_type})
+                self._record_production_task_trace("production_task_failed", task, metadata={"reason": "expired"})
+                continue
+            score = self._compute_production_task_score(task, now)
+            self._record_production_task_trace("production_task_scored", task, metadata={"score": score, "blocked_reason": task.blocked_reason, "cooldown_until_tick": task.cooldown_until_tick})
+            self._record_decision_explanation(explanation_type="task_scored", decision="scored", primary_reason="arbitration_score_computed", task=task, contributing_factors={"blocked_reason": task.blocked_reason}, score_snapshot={"score": score, "cooldown_until_tick": task.cooldown_until_tick})
+            active_tasks.append((score, task.id, task))
+
+        active_tasks.sort(key=lambda entry: (-entry[0], entry[1]))
+        for index, (score, _, task) in enumerate(active_tasks):
+            if now < max(0, task.cooldown_until_tick):
+                self._record_production_task_trace("production_task_deferred", task, metadata={"score": score, "reason": "cooldown"})
+                self._record_decision_explanation(explanation_type="task_deferred", decision="deferred", primary_reason="cooldown_active", task=task, score_snapshot={"score": score, "cooldown_until_tick": task.cooldown_until_tick})
+                continue
+            if index > 0 and score > active_tasks[0][0] + 200:
+                self._warn_simulation_validation("production_task_priority_inversion", (task.id, score), "Lower-ranked task appears to exceed expected arbitration window.", metadata={"task_id": task.id, "score": score})
+            self._record_production_task_trace("production_task_selected", task, metadata={"score": score, "rank": index})
+            self._record_decision_explanation(explanation_type="task_selected", decision="selected", primary_reason="highest_ranked_runnable_task", task=task, score_snapshot={"score": score, "rank": index})
+            if task.task_type == "produce_logs":
+                self._advance_produce_logs_task(task)
+            elif task.task_type == "build_component":
+                self._advance_build_component_task(task)
+            elif task.task_type == "craft_plank":
+                self._advance_craft_production_task(task)
+            elif task.task_type == "refill_campfire_fuel":
+                self._advance_refill_campfire_fuel_task(task)
+            if (now - max(task.last_progress_tick or task.created_tick, task.created_tick)) > 200:
+                self._record_production_task_trace("production_task_starved", task, metadata={"score": score})
+                self._warn_simulation_validation("production_task_starvation", (task.id, task.task_type), "Production task has not progressed for an extended period.", metadata={"task_id": task.id, "task_type": task.task_type})
+            if task.retry_count > 8:
+                self._warn_simulation_validation("production_task_excessive_retries", (task.id, task.retry_count), "Production task is retrying excessively.", metadata={"task_id": task.id, "retry_count": task.retry_count})
 
     def _handle_npc_speech(self):
         current_time = time.time()

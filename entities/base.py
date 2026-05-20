@@ -286,6 +286,60 @@ class NPC:
             self._initialize_relationships(attitude_to_player, self.player_id)
 
         self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=NPCTaskState())
+        self.work_tags: set[str] = {"woodcutting", "hauling", "construction", "crafting"}
+        self.skill_levels: dict[str, int] = {"woodcutting": 1, "hauling": 1, "construction": 1, "crafting": 1}
+        self.preferred_work_types: list[str] = []
+        self.fatigue_modifier: float = 0.0
+        self.recent_task_history: list[str] = []
+        self.current_work_focus: str | None = None
+        self.work_efficiency_modifiers: dict[str, float] = {"woodcutting": 1.0, "hauling": 1.0, "construction": 1.0, "crafting": 1.0}
+        self.skill_experience_by_tag: dict[str, float] = {"woodcutting": 0.0, "hauling": 0.0, "construction": 0.0, "crafting": 0.0}
+        self.last_skill_gain_tick: int = 0
+        self.specialization_pressure: dict[str, float] = {"woodcutting": 0.0, "hauling": 0.0, "construction": 0.0, "crafting": 0.0}
+        self.recent_skill_usage: list[str] = []
+        self.actor_work_profile: dict[str, object] = {
+            "dominant_work_tag": "hauling",
+            "recent_work_summary": "No strong labor trend yet.",
+            "specialization_summary": "General labor profile.",
+            "fatigue_state": "rested",
+            "work_identity_label": "General Laborer",
+            "work_history_snapshot": [],
+            "preferred_task_bias": [],
+            "lifetime_work_totals": {"woodcutting": 0, "hauling": 0, "construction": 0, "crafting": 0},
+        }
+        self.cold_exposure: float = 0.0
+        self.warmth_state: str = "neutral"
+        self.last_warmed_tick: int = 0
+        self.last_cold_tick: int = 0
+        self.exposure_fatigue_modifier: float = 0.0
+        self.sheltered_state: bool = False
+        self.last_sheltered_tick: int = 0
+        self.current_shelter_id: str | None = None
+        self.shelter_exposure_modifier: float = 1.0
+        self.survival_override_reason: str | None = None
+        self.survival_override_active: bool = False
+        self.survival_override_started_tick: int = 0
+        self.survival_override_target_id: str | None = None
+        self.survival_override_target_position: tuple[int, int] | None = None
+        self.survival_override_recovery_threshold: float = 0.7
+        self.survival_override_previous_task_id: str | None = None
+        self.survival_override_cooldown_until_tick: int = 0
+        self.resting_state: bool = False
+        self.resting_since_tick: int = 0
+        self.current_rest_target_id: str | None = None
+        self.fatigue_recovery_modifier: float = 1.0
+        self.active_survival_pressure: str | None = None
+        self.deferred_survival_pressures: list[str] = []
+        self.survival_pressure_scores: dict[str, float] = {}
+        self.survival_pressure_records: dict[str, dict] = {}
+        self.last_survival_override_switch_tick: int = 0
+        self.hunger: float = 0.0
+        self.hunger_rate_per_tick: float = 0.01
+        self.hunger_override_threshold: float = 0.7
+        self.hunger_recovery_threshold: float = 0.3
+        self.hunger_last_eat_tick: int = 0
+        self.hunger_target_food_id: str | None = None
+        self.hunger_nutrition_pending: float = 0.0
         self.den_location: tuple[int, int] | None = None
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []

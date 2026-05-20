@@ -17,6 +17,8 @@ class TestSimulationSandbox(unittest.TestCase):
                 "delivery_basic",
                 "hunting_food_chain",
                 "settlement_growth",
+                "piece_construction_claims",
+                "construction_runtime_soak",
                 "starving_worker_interrupts_build",
                 "threat_overrides_task",
                 "target_disappears_cancels_task",
@@ -35,6 +37,79 @@ class TestSimulationSandbox(unittest.TestCase):
         self.assertTrue(report["assertions"])
         self.assertTrue(report["events"])
         self.assertIn("blueprint_created", {assertion["name"] for assertion in report["assertions"]})
+
+    def test_piece_construction_claims_coordinate_workers(self):
+        result = run_scenario("piece_construction_claims", seed=123, ticks=500)
+
+        self.assertEqual(result.result, "PASS")
+        event_types = {event.event_type for event in result.trace.events}
+        self.assertIn("component_claimed", event_types)
+        self.assertIn("component_claim_expired", event_types)
+
+    def test_construction_runtime_soak_reports_stable_metrics(self):
+        result = run_scenario("construction_runtime_soak", seed=123, ticks=1000)
+
+        self.assertEqual(result.result, "PASS")
+        metrics_event = next(event for event in result.trace.events if event.event_type == "soak_metrics")
+        self.assertTrue(metrics_event.metadata["completed"])
+        self.assertEqual(metrics_event.metadata["stuck_actor_count"], 0)
+        self.assertEqual(metrics_event.metadata["active_interaction_count"], 0)
+        self.assertEqual(metrics_event.metadata["unfinished_component_count"], 0)
+        self.assertLessEqual(metrics_event.metadata["max_duplicate_builds"], 1)
+        self.assertLess(metrics_event.metadata["warning_emitted"], metrics_event.metadata["warning_total"])
+
+    def test_validation_warnings_are_debounced_and_structured(self):
+        import engine
+        from engine import Building, NPC, World
+
+        engine.ENABLE_OLLAMA_CONNECTION = False
+        engine.ENABLE_LLM_CONNECTION = False
+        world = World(seed=123)
+        farm = Building(0, 0, 5, 5, building_type="farm", category="agricultural_workplace")
+        worker = NPC(0, 0, name="Validator")
+        worker.economic.profession = "Farmer"
+
+        invalid_subtask = {"id": "invalid_task"}
+        self.assertIsNone(world._find_target_coords_for_sub_task(worker, farm, invalid_subtask))
+        self.assertIsNone(world._find_target_coords_for_sub_task(worker, farm, invalid_subtask))
+
+        self.assertEqual(len(world.validation_warnings), 1)
+        self.assertEqual(world.validation_warnings[0]["warning_type"], "invalid_subtask")
+        self.assertEqual(world.validation_warning_counts[("invalid_subtask", (farm.id, "invalid_task", "missing_target_zone_tag"))], 2)
+        self.assertIn("invalid_subtask", [entry["trace_type"] for entry in world.interaction_trace_log])
+
+    def test_invalid_work_subtask_is_abandoned_without_retry_spam(self):
+        import engine
+        from engine import Building, NPC, World
+        from simulation.systems.work import update_npc_work_sub_tasks
+        from simulation.systems.task_types import TaskType
+
+        engine.ENABLE_OLLAMA_CONNECTION = False
+        engine.ENABLE_LLM_CONNECTION = False
+        world = World(seed=123)
+        workplace = Building(0, 0, 5, 5, building_type="workshop", category="commercial_workplace")
+        world.buildings_by_id[workplace.id] = workplace
+        worker = NPC(0, 0, name="Bad Task Worker")
+        worker.economic.profession = "Validator"
+        worker.schedule.work_building_id = workplace.id
+        worker.schedule.current_task = TaskType.AT_WORK
+
+        invalid_profession = {
+            "sub_tasks": [{"id": "bad_subtask"}],
+            "default_sub_task_sequence": ["bad_subtask"],
+        }
+        with patch("simulation.systems.work.get_profession_data", return_value=invalid_profession):
+            self.assertTrue(update_npc_work_sub_tasks(world, worker))
+            warning_count = len(world.validation_warnings)
+            self.assertTrue(update_npc_work_sub_tasks(world, worker))
+
+        self.assertEqual(worker.schedule.current_task, TaskType.AT_WORK)
+        self.assertIsNone(worker.current_sub_task)
+        self.assertGreater(getattr(worker, "_work_validation_retry_after_tick", 0), world.game_time)
+        self.assertEqual(len(world.validation_warnings), warning_count)
+        trace_types = [entry["trace_type"] for entry in world.interaction_trace_log]
+        self.assertIn("invalid_subtask", trace_types)
+        self.assertIn("task_abandoned", trace_types)
 
     def test_delivery_basic_emits_lifecycle_events_or_failed_assertion(self):
         result = run_scenario("delivery_basic", seed=123, ticks=500)

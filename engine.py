@@ -11398,9 +11398,9 @@ class World:
     def is_entity_edible(self, item_key: str) -> bool:
         item_def = ITEM_DEFINITIONS.get(str(item_key), {})
         tags = set(item_def.get("item_type_tags", []) or [])
-        if "consumable" in tags or "food" in tags:
+        if "food" in tags or "edible" in tags:
             return True
-        return ("edible" in tags) or (item_def.get("item_type") == "simple_food")
+        return (item_def.get("item_type") == "simple_food")
     def get_entity_nutrition_value(self, item_key: str) -> float:
         item_def = ITEM_DEFINITIONS.get(str(item_key), {})
         on_use = item_def.get("on_use", {}) or {}

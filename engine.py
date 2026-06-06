@@ -290,7 +290,6 @@ class FloatingTextEffect(VisualEffect):
         self.elapsed += dt
         return self.elapsed >= self.duration
 
-
 def _ambient_social_float_text(scene_indicator) -> str:
     if scene_indicator is None:
         return "*murmurs*"
@@ -305,7 +304,6 @@ def _ambient_social_float_text(scene_indicator) -> str:
     if scene_indicator.participant_count >= 4:
         return "*chatter*"
     return "*murmurs*"
-
 
 class ProjectileEffect(VisualEffect):
     """A simple projectile animation."""
@@ -333,7 +331,6 @@ class ProjectileEffect(VisualEffect):
         self.traveled += dist_step
         return self.traveled >= self.total_dist
 
-
 COMPLETED_WORK_SUB_TASK_COMMANDS: dict[str, CompletedWorkSubTaskCommand] = create_completed_work_sub_task_commands()
 NPC_WORK_TOOL_TYPES = {
     "chop_trees": "axe",
@@ -358,7 +355,6 @@ class PlayerState:
     original_char: int = 0xE000
     current_path: list[tuple[int, int]] = field(default_factory=list)
     move_cooldown: int = 0
-
 
 class Player:
     def __init__(self, x, y):
@@ -439,7 +435,6 @@ class Player:
         if not head_item_key:
             return False
         return bool(ITEM_DEFINITIONS.get(head_item_key, {}).get("properties", {}).get("conceals_identity", False))
-
 
     def take_damage(self, amount: int, world=None) -> int:
         """Applies damage to the player after accounting for armor, returns actual damage dealt."""
@@ -617,7 +612,6 @@ class ChunkManager:
 
     def is_chunk_active(self, chunk_coords: tuple[int, int]) -> bool:
         return chunk_coords in self.active_chunks
-
 
 class World:
     @property
@@ -930,7 +924,6 @@ class World:
         if getattr(self, "player", None) is not None:
             self.player.world_ref = self
             self._refresh_chunk_activity(force=True)
-
 
 
     def player_issue_action_intent(self, action_type: str, *, target_pos: tuple[int, int] | None = None, payload: dict | None = None):
@@ -2522,7 +2515,6 @@ class World:
             if (vx,vy) in self.items_on_map and self.items_on_map[(vx,vy)]:
                 npc.knowledge.perceived_item_tiles.append((vx,vy))
 
-
     def _update_light_level_and_fov(self):
         """Updates the current light level and FOV radius based on game time, handles torch burnout."""
         self._handle_player_light_source_burnout() # Check for burnout first
@@ -2545,14 +2537,12 @@ class World:
             if time_ratio == 1.0: # Exactly end of day, loop to first period
                  current_period = LIGHT_LEVEL_PERIODS[0]
 
-
         self.current_light_level_name = current_period["name"]
         self.current_fov_radius = self._ambient_fov_radius_for_light_level(self.current_light_level_name)
 
         # Optional: Log change for debugging
         # if self.game_time % 10 == 0: # Log less frequently
         #     print(f"Time: {self.game_time}, Ratio: {time_ratio:.2f}, Light: {self.current_light_level_name}, FOV: {self.current_fov_radius}")
-
 
     def _get_pathfinding_cost(self, old_x, old_y, new_x, new_y):
         """
@@ -2570,7 +2560,6 @@ class World:
         # For simplicity, we'll use 1 for cardinal and diagonal.
         # tcod's AStar handles cardinal/diagonal based on graph/diagnal params.
         return 1
-
 
     def calculate_path(self, start_x: int, start_y: int, end_x: int, end_y: int) -> list[tuple[int, int]]:
         """
@@ -2754,7 +2743,6 @@ class World:
                     npc.schedule.current_path = [] # Clear old path
                     npc.schedule.current_destination_coords = None
 
-
             elif npc.schedule.current_task == "combat_action_flee_from_player":
                  # Recalculate flee path if there isn't one or it's very short (destination reached)
                 if not npc.schedule.current_path or npc.schedule.current_destination_coords is None:
@@ -2840,7 +2828,6 @@ class World:
                         npc.schedule.current_task = "combat_action_hold_position"
 
             # (Keep other elif blocks for path recalculation like move_to_cover, etc.)
-
 
             # --- Check for Micro-Reactions (Pause) ---
             if hasattr(npc, "task_context_data") and isinstance(npc.task_context_data, dict):
@@ -2996,7 +2983,6 @@ class World:
                             # Increase relationship
                             npc.social.relationships[chat_partner.id] = min(100, npc.social.relationships.get(chat_partner.id, 50) + 5)
                             chat_partner.social.relationships[npc.id] = min(100, chat_partner.social.relationships.get(npc.id, 50) + 5)
-
 
                         npc.schedule.current_task = TaskType.IDLE # Done socializing for now
                     elif npc.schedule.current_task == "gathering_social":
@@ -3488,7 +3474,6 @@ class World:
                 pass
 
 
-
             # --- SCHEDULED UPDATES (Low Frequency) ---
             if self.game_time - npc.schedule.game_time_last_updated < NPC_SCHEDULE_UPDATE_INTERVAL:
                 continue
@@ -3574,7 +3559,6 @@ class World:
                                 npc.schedule.current_task = "defending_village"
                         continue
 
-
             current_time_in_day = self.game_time % DAY_LENGTH_TICKS
             time_of_day_str = self._get_time_of_day_str(self.game_time, DAY_LENGTH_TICKS)
 
@@ -3635,7 +3619,6 @@ class World:
                         threat = next((n for n in self.npcs if n.id == threat_id), None)
                         if not threat:
                             threat = next((n for n in self.village_npcs if n.id == threat_id), None)
-
 
                         if threat and not threat.physical.is_dead and 0 <= threat.x < WORLD_WIDTH and 0 <= threat.y < WORLD_HEIGHT and fov_map[int(threat.y), int(threat.x)]:
                             threats_still_visible = True
@@ -3714,7 +3697,6 @@ class World:
             elif hasattr(npc, "ai_brain"):
                 npc.ai_brain.take_turn(npc, self)
 
-
     def _run_humanoid_schedule_logic(self, npc: NPC) -> bool:
         """Delegate humanoid daily scheduling to the NPC brain and job strategies."""
         if npc.economic.profession != "Creature" and not npc.combat.is_hostile_to_player and \
@@ -3749,7 +3731,6 @@ class World:
                 update_npc_work_sub_tasks(self, npc)
 
         run_npc_traveling_merchant_policy(self, npc)
-
 
         npc.schedule.game_time_last_updated = self.game_time
         return True
@@ -3840,7 +3821,6 @@ class World:
                                 min_dist_sq = dist_sq
                                 closest_corpse_coords = (x, y)
         return closest_corpse_coords
-
 
     HUNTABLE_SPECIES = {"deer", "rabbit", "turkey", "sheep", "boar", "bison"}
     HUNTING_FOOD_ITEMS = {"raw_meat", "raw_venison", "raw_mutton", "raw_fish", "processed_meat", "cooked_meat", "cooked_venison", "cooked_mutton", "cooked_fish", "bread"}
@@ -4131,7 +4111,6 @@ class World:
         self._refresh_village_food_pressure(village)
         return output
 
-
     def _warn_simulation_validation(self, warning_type: str, key, message: str, *, actor=None, metadata: dict | None = None, cooldown_ticks: int = 120) -> bool:
         from simulation.validation import emit_validation_warning
 
@@ -4178,7 +4157,6 @@ class World:
 
         if target_zone_tag == "corpse":
             return self._find_nearest_corpse(npc)
-
 
         if target_zone_tag == "manager_spot":
             manager_spots = work_building.work_zone_tiles.get("manager_spot", [])
@@ -4609,7 +4587,6 @@ class World:
 
         return consumption_successful
 
-
     def _execute_completed_work_sub_task(self, npc: NPC, work_building: Building, sub_task_id: str, sub_task_data: dict):
         """Execute the command for a completed work sub-task."""
         command = COMPLETED_WORK_SUB_TASK_COMMANDS.get(sub_task_id, DefaultProduceOutputSubTaskCommand())
@@ -4997,7 +4974,6 @@ class World:
         # Clear cover target if not moving to cover
         if chosen_action != "move_to_cover":
             npc.task_target_coords = None
-
 
     def npc_attempt_attack_player(self, npc: NPC, player: Player):
         """
@@ -6437,7 +6413,6 @@ class World:
 
         result = self.interaction_resolver.resolve(intent, self)
 
-
         if result.success and result.started_interaction_id:
             npc.schedule.active_interaction_id = result.started_interaction_id
             npc.schedule.current_task = "active_interaction"
@@ -6570,13 +6545,13 @@ class World:
                 npc.schedule.current_task = "hauling_to_blueprint"
             else:
                 npc.schedule.current_task = "hauling_to_source"
-            self._warn_simulation_validation(
-                "task_recovered",
-                (getattr(npc, "id", None), haul_data.get("haul_task_id"), "hauling_schedule"),
-                "Recovered stale hauling schedule from task context.",
-                actor=npc,
-                metadata={"haul_task_id": haul_data.get("haul_task_id"), "restored_task": npc.schedule.current_task},
-            )
+            # self._warn_simulation_validation(
+            # "task_recovered",
+            # (getattr(npc, "id", None), haul_data.get("haul_task_id"), "hauling_schedule"),
+            # "Recovered stale hauling schedule from task context.",
+            # actor=npc,
+            # metadata={"haul_task_id": haul_data.get("haul_task_id"), "restored_task": npc.schedule.current_task},
+            # )
 
         if npc.schedule.current_task == "hauling_to_source":
             source_coords = tuple(haul_data.get("source", {}).get("coords", ()))
@@ -7042,7 +7017,6 @@ class World:
                 else: # Interior of the cell
                     self._change_map_tile((tile_x, tile_y), floor_def)
 
-
         # Move player to cell
         self._update_entity_position(self.player, cell_center_x, cell_center_y)
         self.player.state.is_jailed = True
@@ -7056,7 +7030,6 @@ class World:
 
         self._update_player_fov() # Update FOV from new position
 
-
         del self.player.economic.active_contracts[contract_id]
 
         # If chat UI was active, maybe close it or go back to general talk mode
@@ -7065,7 +7038,6 @@ class World:
                                            # For now, let's keep it open in talk mode.
                 # Add a follow-up generic line from NPC after payment.
                 self.chat_ui_history.append((turn_in_npc.name, "Anything else I can help you with?"))
-
 
         else:
             needed_more = qty_needed - player_has_qty
@@ -7563,7 +7535,6 @@ class World:
         for building in getattr(village, "buildings", []):
             self._sync_building_employment_tasks(building)
 
-
     def _activate_completed_building_owner(self, building: Building | None) -> None:
         if building is None or "workplace" not in str(getattr(building, "category", "")):
             return
@@ -7648,7 +7619,6 @@ class World:
         self.blueprints_by_id.pop(blueprint.id, None)
         self.blueprint_positions.pop((blueprint.x, blueprint.y), None)
         return True
-
 
     def _finalize_completed_blueprint_claim(self, blueprint: ConstructionBlueprint, building: Building | None) -> None:
         claim = self.land_claims_by_id.get(getattr(blueprint, "territory_claim_id", None))
@@ -7805,7 +7775,6 @@ class World:
             )
             if learned_count > 0:
                 self.add_message_to_chat_log(f"You learned about {learned_count} historical events from reading this book.")
-
 
     def player_attempt_loot_chest(self, x: int, y: int):
         """Handles the player interacting with a treasure chest."""
@@ -8291,7 +8260,6 @@ class World:
                 else:
                     npc.conversation_partner_id = None
 
-
     def _handle_ambient_activity_interactions(self):
         """Emit occasional lightweight dialogue around conversational activities."""
         if getattr(self, "game_state", "PLAYING") != "PLAYING":
@@ -8738,7 +8706,6 @@ class World:
                         quest_data["progress"] += 1
                         self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})")
 
-
         death_event = self.record_death_event(
             deceased=dead_npc,
             description="{subject} was killed by {target}.",
@@ -8920,7 +8887,6 @@ class World:
         # For now, let's assume death itself is not a loud sound unless it's a dramatic one.
         # self.emit_sound(dead_npc.x, dead_npc.y, "npc_death_cry", volume=8, source_entity_id=dead_npc.id)
 
-
     def player_attempt_pick_lock(self, target_x: int, target_y: int) -> bool:
         """Handles player's attempt to pick a lock."""
         if not self.player.has_item("lockpick"):
@@ -8972,7 +8938,6 @@ class World:
                     self.player.state.jail_cell_coords = None
                     # The door is now unlocked and will become passable after the toggle action.
                     return True # Escape successful
-
 
                 containing_building = self._get_building_by_tile_coords(target_x, target_y)
                 if containing_building and containing_building.building_inventory:
@@ -9186,7 +9151,6 @@ class World:
             else:
                 self.add_message_to_chat_log(f"Error: {self.get_entity_display_name(merchant_npc)} doesn't have that item in stock (inventory mismatch).")
 
-
     def player_attempt_toggle_door(self, target_x: int, target_y: int) -> bool:
         """Handles the player's attempt to open or close a door."""
         target_tile = self.get_tile_at(target_x, target_y)
@@ -9283,7 +9247,6 @@ class World:
             offer_text = f"I'm in a bit of a bind. I desperately need {quest.required_count} {quest.item_key.replace('_', ' ')}. Can you help me? (You can 'accept quest' or 'decline quest')"
             self.chat_ui_history.append((npc_display_name, offer_text))
 
-
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
 
@@ -9298,7 +9261,6 @@ class World:
 
         npc_display_name = self.get_entity_display_name(npc_target)
 
-        # --- Handle special keywords before general conversation ---
         # --- Handle special keywords before general conversation ---
         # Quest completion
         if 'complete quest' in player_input_text.lower():
@@ -9708,7 +9670,6 @@ class World:
             # Keep memory from growing too large
             if len(npc.knowledge.long_term_memory) > 20:
                 npc.knowledge.long_term_memory.pop(0)
-
 
     def _get_most_interesting_known_event(self, npc: NPC) -> Event | None:
         """Selects the most 'interesting' event from an NPC's knowledge based on type and recency."""
@@ -10420,7 +10381,6 @@ class World:
                                         # Also update the global transparency map for FOV
                                         self.transparency_map[world_x, world_y] = True # Trees are not transparent
 
-
                         # Sapling growth into tree
                         elif tile.name == "Sapling" and "growth_timer" in tile.properties:
                             tile.properties["growth_timer"] -= 1
@@ -10454,7 +10414,6 @@ class World:
                                         world_x = x_chunk * CHUNK_SIZE + x_local
                                         world_y = y_chunk * CHUNK_SIZE + y_local
                                         self._change_map_tile((world_x, world_y), new_tile_def)
-
 
     def _populate_npcs(self):
         """Compatibility helper for callers expecting explicit non-village NPC population."""
@@ -10654,7 +10613,6 @@ class World:
                         npc.economic.npc_inventory["iron_helmet"] = npc.economic.npc_inventory.get("iron_helmet", 0) + 1
                         npc.equipment.head = "iron_helmet"
 
-
                 self.village_npcs.append(npc)
                 self._mark_entity_positions_dirty()
                 self.add_message_to_chat_log(
@@ -10668,7 +10626,6 @@ class World:
                 self.add_message_to_chat_log(f"LLM Response: {llm_response}")
             except IndexError: # Ran out of homes or workplaces
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
-
 
     def apply_animation_cue(self, cue: str, *, interaction=None, result=None) -> None:
         if cue == "build" and hasattr(self, "visual_effects") and interaction is not None:
@@ -10704,7 +10661,6 @@ class World:
                     self._mark_production_task_progress(task, int(getattr(self, "game_time", 0) or 0), actor=actor, trace_type="craft_task_completed", metadata={"workshop_id": workshop_id})
             else:
                 self._warn_simulation_validation("craft_task_completion_mismatch", (workshop_id, getattr(interaction, "interaction_id", None)), "Workshop interaction completed without a matching craft task link.", actor=actor, cooldown_ticks=180)
-
 
     def on_tree_resource_created(self, *, item_key: str, coords: tuple[int, int], actor_id=None) -> None:
         if item_key != "raw_log":
@@ -10782,6 +10738,7 @@ class World:
         path = self.calculate_path(actor.x, actor.y, position[0], position[1]) or []
         actor.schedule.current_destination_coords = position
         actor.schedule.current_path = path
+        actor.schedule.current_task = reason
         self._record_decision_explanation(explanation_type="actor_routed_to_workshop" if "workshop" in reason else "actor_routed_to_campfire", decision="routed", primary_reason=reason, actor=actor, contributing_factors={"task_id": task_id, "target": position})
         return bool(path) or self._is_actor_adjacent_to_position(actor, position)
 
@@ -10908,7 +10865,7 @@ class World:
         store.append(rec)
         if len(store) > 400:
             del store[: len(store) - 400]
-            self._warn_simulation_validation("decision_explanation_overflow", ("decision_explanations", len(store)), "Decision explanation history exceeded bound and was trimmed.", metadata={"max_size": 400}, cooldown_ticks=240)
+            self._warn_simulation_validation("decision_explanation_overflow", ("decision_explanations", "bounded"), "Decision explanation history exceeded bound and was trimmed.", metadata={"max_size": 400}, cooldown_ticks=240)
         trace_log = getattr(self, "interaction_trace_log", None)
         if isinstance(trace_log, list):
             trace_log.append({"tick": tick, "interaction_id": None, "actor_id": getattr(actor, "id", None), "action_type": "decision_explanation", "trace_type": "decision_explanation_created", "metadata": {"explanation_id": explanation_id, "task_id": getattr(task, "id", None), "decision": decision, "primary_reason": primary_reason}})
@@ -10995,7 +10952,6 @@ class World:
         except Exception:
             self._warn_simulation_validation("debug_snapshot_build_failed", ("world_snapshot", int(getattr(self, "game_time", 0) or 0)), "World debug snapshot build failed.", cooldown_ticks=240)
             return WorldDebugSnapshot(tick=int(getattr(self, "game_time", 0) or 0))
-
 
 
     def get_available_player_commands(self, selection: dict | None, *, player_id: int | None = None) -> list[dict]:
@@ -11372,7 +11328,6 @@ class World:
                     if actor.cold_exposure > 1.0:
                         self._record_decision_explanation(explanation_type="cold_exposure_penalty", decision="penalized", primary_reason="cold_exposure_high", actor=actor, score_snapshot={"cold_exposure": actor.cold_exposure})
 
-
     def _is_valid_survival_target(self, target_id: str | None, position: tuple[int, int] | None) -> bool:
         if position is None:
             return False
@@ -11443,8 +11398,9 @@ class World:
     def is_entity_edible(self, item_key: str) -> bool:
         item_def = ITEM_DEFINITIONS.get(str(item_key), {})
         tags = set(item_def.get("item_type_tags", []) or [])
-        return ("edible" in tags) or (item_def.get("item_type") == "simple_food")
-
+        if "food" in tags or "edible" in tags:
+            return True
+        return (item_def.get("item_type") == "simple_food")
     def get_entity_nutrition_value(self, item_key: str) -> float:
         item_def = ITEM_DEFINITIONS.get(str(item_key), {})
         on_use = item_def.get("on_use", {}) or {}
@@ -11454,14 +11410,18 @@ class World:
         c=[]
         for coords, inv in sorted(getattr(self, "items_on_map", {}).items(), key=lambda x:x[0]):
             for k in ["simple_food", "cooked_meat", "food_ration", "rotten_food", "processed_meat"]:
-                if getattr(inv, "get", lambda *_:0)(k,0) > 0 and self.is_entity_edible(k):
-                    fid=f"ground:{coords[0]}:{coords[1]}:{k}";
+                has_it = False
+                if hasattr(inv, "has_item") and inv.has_item(k, 1): has_it = True
+                elif hasattr(inv, "iter_item_references") and any(ref.key == k for ref in inv.iter_item_references()): has_it = True
+                elif hasattr(inv, "get") and inv.get(k, 0) > 0: has_it = True
+                elif hasattr(inv, "has_item_reference_by_key") and inv.has_item_reference_by_key(k): has_it = True
+                if has_it and self.is_entity_edible(k):
+                    fid=f"ground:{coords[0]}:{coords[1]}:{k}"
                     rec = self.food_reservations_by_id.get(fid)
                     if rec and rec.get("reserved_by_actor_id") not in {None, getattr(actor, "id", None)}: continue
                     dist=abs(actor.x-coords[0])+abs(actor.y-coords[1]); c.append((dist,fid,coords,k)); break
         if not c: return None
         c.sort(key=lambda x:(x[0],x[1])); d,fid,coords,k=c[0]; return {"food_id":fid,"coords":coords,"item_key":k,"nutrition":self.get_entity_nutrition_value(k),"eat_work_required":4}
-
     def advance_actor_hunger(self) -> None:
         now = int(getattr(self, "game_time", 0) or 0)
         for actor in list(getattr(self, "village_npcs", [])):
@@ -11495,7 +11455,7 @@ class World:
             actor.survival_override_target_id, actor.survival_override_target_position = ntid, ntpos
             tid, tpos = ntid, ntpos
             if tpos is None:
-                self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, now, "cold"), "No valid warmth/shelter target found.", actor=actor)
+                self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, "cold"), "No valid warmth/shelter target found.", actor=actor)
                 self._record_decision_explanation(explanation_type="cold_survival_no_target", decision="blocked", primary_reason="no_valid_warmth_or_shelter_target", actor=actor)
                 return
         if abs(actor.x - tpos[0]) <= 1 and abs(actor.y - tpos[1]) <= 1:
@@ -11514,7 +11474,7 @@ class World:
         if tpos is None:
             tid,tpos = self._find_nearest_rest_target(actor); actor.survival_override_target_id, actor.survival_override_target_position = tid,tpos
         if tpos is None:
-            self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, now, "fatigue"), "No valid rest target found.", actor=actor)
+            self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, "fatigue"), "No valid rest target found.", actor=actor)
             return
         actor.current_rest_target_id = tid
         if abs(actor.x-tpos[0])<=1 and abs(actor.y-tpos[1])<=1:
@@ -11557,12 +11517,12 @@ class World:
                     actor.survival_override_active=False; actor.survival_override_reason=None; actor.survival_override_target_id=None; actor.survival_override_target_position=None; actor.resting_state=False
                     self._record_production_task_trace("survival_override_cleared", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"reason": "all_pressures_recovered"})
                 continue
-            reason = "seeking_warmth" if selected == "cold_exposure" else "seeking_rest"
+            reason = "seeking_warmth" if selected == "cold_exposure" else ("seeking_food" if selected == "hunger" else "seeking_rest")
             if getattr(actor, "survival_override_reason", None) != reason:
                 if getattr(actor, "survival_override_active", False):
                     self._record_production_task_trace("survival_override_switched", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"from": getattr(actor, "survival_override_reason", None), "to": reason})
                     actor.last_survival_override_switch_tick = now
-                actor.survival_override_active=True; actor.survival_override_reason=reason; actor.survival_override_started_tick=now; actor.survival_override_previous_task_id=str(getattr(actor, "task_context_data", {}).get("task_id") or "") or None
+                actor.survival_override_active=True; actor.survival_override_reason=reason; actor.survival_override_started_tick=now; actor.survival_override_previous_task_id=str(getattr(actor, "task_context_data", {}).get("task_id") or "") if isinstance(getattr(actor, "task_context_data", {}), dict) else None
                 if getattr(self, "interaction_resolver", None):
                     self.interaction_resolver.cancel_actor_interaction(actor.id, self, reason="survival_override_arbitrated")
                 self._record_production_task_trace("survival_override_selected", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"selected_pressure": selected})
@@ -11604,6 +11564,7 @@ class World:
                                 self._record_decision_explanation(explanation_type="eating_started_explained", decision="started", primary_reason="adjacent_to_food", actor=actor, source_entity_id=target["food_id"])
                         else:
                             if self._route_actor_toward_position(actor, target["coords"], reason="hunger_food_route_started", task_id=None):
+                                actor.schedule.current_task = "hunger_food_route_started"
                                 self._record_production_task_trace("hunger_food_route_started", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"food_id": target["food_id"], "target_position": target["coords"]})
                                 self._record_decision_explanation(explanation_type="hunger_food_target_selected", decision="routed", primary_reason="food_not_in_range", actor=actor, source_entity_id=target["food_id"])
             else:
@@ -11704,7 +11665,6 @@ class World:
                         self._record_production_task_trace("production_priority_inherited", p, metadata={"from_task_id": task.id, "boost": boost, "item": item})
                         self._record_decision_explanation(explanation_type="priority_inherited", decision="priority_boosted", primary_reason="blocked_high_priority_dependency", task=p, source_entity_id=task.id, contributing_factors={"item": item, "boost": boost}, score_snapshot={"inherited_priority": p.inherited_priority})
 
-
     def _compute_production_task_score(self, task: ProductionTask, now: int) -> int:
         cached = getattr(self, "_production_score_cache", {}).get(task.id)
         if cached and now <= cached[1]:
@@ -11720,14 +11680,14 @@ class World:
         self._production_score_cache[task.id] = (score, now + 1)
         return score
 
-    def _mark_production_task_blocked(self, task: ProductionTask, reason: str, now: int, *, cooldown: int = 30, warning_type: str = "production_task_resource_deadlock") -> None:
+    def _mark_production_task_blocked(self, task: ProductionTask, reason: str, now: int, *, cooldown: int = 30, warning_type: str = "production_task_resource_deadlock", suppress_warning: bool = False) -> None:
         task.status = "blocked"
         task.blocked_reason = reason
         task.retry_count = max(0, task.retry_count) + 1
         task.cooldown_until_tick = now + max(1, int(cooldown))
         self._record_production_task_trace("production_task_blocked", task, metadata={"reason": reason, "cooldown_until_tick": task.cooldown_until_tick, "retry_count": task.retry_count})
         self._record_decision_explanation(explanation_type="task_blocked", decision="blocked", primary_reason=reason, task=task, contributing_factors={"retry_count": task.retry_count, "cooldown_until_tick": task.cooldown_until_tick}, score_snapshot={"resource_pressure_score": task.resource_pressure_score})
-        self._warn_simulation_validation(warning_type, (task.id, reason), "Production task is blocked and cooled down.", metadata={"task_id": task.id, "task_type": task.task_type, "reason": reason, "retry_count": task.retry_count})
+        if not suppress_warning: self._warn_simulation_validation(warning_type, (task.id, reason), "Production task is blocked and cooled down.", metadata={"task_id": task.id, "task_type": task.task_type, "reason": reason, "retry_count": task.retry_count})
 
     def _mark_production_task_progress(self, task: ProductionTask, now: int, *, actor=None, trace_type: str = "production_task_recovered", metadata: dict | None = None) -> None:
         task.last_progress_tick = now
@@ -11941,7 +11901,6 @@ class World:
                 self._mark_production_task_progress(task, now, actor=actor, trace_type="production_task_selected", metadata={"status": task.status})
                 return
         self._mark_production_task_blocked(task, "no_available_source_or_actor", now, warning_type="production_task_starvation")
-
 
     def _advance_craft_production_task(self, task: ProductionTask) -> None:
         now = int(getattr(self, "game_time", 0) or 0)
@@ -12264,7 +12223,6 @@ class World:
             # For now, using first 150 chars as a simple summary.
             village_lore_summary = village.lore[:150].strip() + "..." if len(village.lore) > 150 else village.lore.strip()
             if not village_lore_summary: village_lore_summary = "A quiet, unassuming village."
-
 
         inhabitant_details_parts = []
         if building.residents:
@@ -13347,7 +13305,6 @@ class World:
                 local_y = wy % CHUNK_SIZE
                 tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
 
-
     def _generate_ruin_layout(self, chunk: Chunk, global_chunk_x: int, global_chunk_y: int):
         """Generates a multi-room ruined structure within a chunk."""
         tiles = chunk.tiles if chunk.tiles else [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
@@ -13418,7 +13375,6 @@ class World:
                 rdy = random.randint(ry + 1, ry + rh - 2)
                 tiles[rdy][rdx] = Tile(rubble_decor["char"], rubble_decor["color"], rubble_decor["passable"], rubble_decor["name"], rubble_decor["properties"])
 
-
             # Maybe spawn a hostile entity
             if random.random() < 0.7:
                 ex, ey = random.randint(rx + 1, rx + rw - 2), random.randint(ry + 1, ry + rh - 2)
@@ -13452,7 +13408,6 @@ class World:
                     new_entity.color = (150, 0, 150) # Purple
                     self.npcs.append(new_entity)
 
-
         # Add a Treasure Chest in the last room
         last_room = rooms[-1]
         cx, cy = last_room[0] + last_room[2]//2, last_room[1] + last_room[3]//2
@@ -13472,7 +13427,6 @@ class World:
 
         self._mark_entity_positions_dirty()
         return tiles
-
 
     def _draw_building(self, tiles, building, wall_tile_key, floor_tile_key="wood_floor"):
         for i in range(building.height):
@@ -13609,7 +13563,6 @@ class World:
             # This means sounds last for one full game tick cycle.
             self.sound_events.clear()
 
-
             # Check for pass-through yields (e.g., from tall grass)
             if hasattr(destination_tile, 'properties') and "yields_on_pass_through" in destination_tile.properties:
                 yield_data = destination_tile.properties["yields_on_pass_through"]
@@ -13629,7 +13582,6 @@ class World:
                     self.chunks[chunk_y][chunk_x].tiles[local_y][local_x] = Tile(
                         plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], plains_def.get("properties", {})
                     )
-
 
             return movement_cost
         return 0 # No movement if tile is not passable
@@ -14787,7 +14739,6 @@ class World:
                         self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} left their job as {old_profession} to become a {npc.economic.profession}.")
 
 
-
         # --- Business Ownership & Hiring Logic ---
         processed_villages = set()
         for npc in list(self.village_npcs):
@@ -14896,7 +14847,6 @@ class World:
             building_id=work_building.id,
         )
         return True
-
 
     def _spawn_raiding_party(self, source_village, target_village):
         """Spawns a raiding party from source_village to attack target_village."""
@@ -15728,7 +15678,6 @@ class World:
                                     for prod_item_key, prod_qty in produces.items():
                                         village.supply[prod_item_key] = village.supply.get(prod_item_key, 0) + prod_qty
 
-
                     # Wildlife hunting: offscreen abstraction must still consume ecology population.
                     self._process_offscreen_hunting_for_village(village, [npc for npc in village_npcs if self._is_hunter_role(npc)])
 
@@ -15815,7 +15764,6 @@ class World:
                                         location=village.interaction_points.get("town_square_center", (0,0))
                                     )
                                     village.local_events.append(self.global_events[-1])
-
 
                             # Make peace if at war but relationships recover (unlikely without intervention but possible)
                             if other_village.id in village.at_war_with and village.village_relationships.get(other_village.id, 0) > -10:
@@ -16254,7 +16202,6 @@ class World:
             self.player.gain_skill_experience("crafting", 5)
         self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
 
-
     def use_item(self, item_key: str):
         """Uses an item from the player's inventory."""
         item_def = ITEM_DEFINITIONS.get(item_key)
@@ -16335,7 +16282,6 @@ class World:
                     update_player_needs_system(self, initial_setup=True) # Update status messages immediately
                 else:
                     self.add_message_to_chat_log(f"You are not hungry enough to eat the {item_def['name']}.")
-
 
             reduces_thirst_amount = on_use_dict.get("reduces_thirst")
             if reduces_thirst_amount:
@@ -16478,7 +16424,6 @@ class World:
                 quest_giver_npc.physical.hunger = 0
                 quest_giver_npc.physical.thirst = 0
                 quest_giver_npc.social.relationships[self.player.id] = quest_giver_npc.social.relationships.get(self.player.id, 50) + 15
-
 
             self.add_message_to_chat_log(log_message)
             if hasattr(self.player, "gain_skill_experience"):

@@ -6570,10 +6570,9 @@ class World:
                 npc.schedule.current_task = "hauling_to_blueprint"
             else:
                 npc.schedule.current_task = "hauling_to_source"
-            self._warn_simulation_validation(
+            self._record_production_task_trace(
                 "task_recovered",
-                (getattr(npc, "id", None), haul_data.get("haul_task_id"), "hauling_schedule"),
-                "Recovered stale hauling schedule from task context.",
+                ProductionTask(task_type="haul", id=str(haul_data.get("haul_task_id") or getattr(npc, "id", 0))),
                 actor=npc,
                 metadata={"haul_task_id": haul_data.get("haul_task_id"), "restored_task": npc.schedule.current_task},
             )
@@ -10908,7 +10907,7 @@ class World:
         store.append(rec)
         if len(store) > 400:
             del store[: len(store) - 400]
-            self._warn_simulation_validation("decision_explanation_overflow", ("decision_explanations", len(store)), "Decision explanation history exceeded bound and was trimmed.", metadata={"max_size": 400}, cooldown_ticks=240)
+            self._warn_simulation_validation("decision_explanation_overflow", ("decision_explanations", "bounded"), "Decision explanation history exceeded bound and was trimmed.", metadata={"max_size": 400}, cooldown_ticks=240)
         trace_log = getattr(self, "interaction_trace_log", None)
         if isinstance(trace_log, list):
             trace_log.append({"tick": tick, "interaction_id": None, "actor_id": getattr(actor, "id", None), "action_type": "decision_explanation", "trace_type": "decision_explanation_created", "metadata": {"explanation_id": explanation_id, "task_id": getattr(task, "id", None), "decision": decision, "primary_reason": primary_reason}})
@@ -10993,7 +10992,7 @@ class World:
             health = {"active_interaction_count": len(interactions), "active_task_count": len(tasks), "warning_count": len(getattr(self, "validation_warnings", []) or []), "decision_explanation_count": len(getattr(self, "decision_explanations", []) or []), "next_reserve_eval_tick": self.next_reserve_eval_tick, "next_production_eval_tick": self.next_production_eval_tick, "next_dependency_eval_tick": self.next_dependency_eval_tick, "score_cache_size": len(getattr(self, "_production_score_cache", {})), "suitability_cache_size": len(getattr(self, "_actor_suitability_cache", {})), "shelter_zone_count": len(getattr(self, "shelter_zones_by_id", {})), "ambient_temperature": self.ambient_temperature, "edible_entity_count": sum(1 for inv in getattr(self, "items_on_map", {}).values() if any(getattr(inv, "get", lambda *_:0)(k,0)>0 for k in ["simple_food","processed_meat","cooked_meat","food_ration","rotten_food"])), "reserved_food_count": len(getattr(self, "food_reservations_by_id", {}) or {}), "active_food_reservations": list((getattr(self, "food_reservations_by_id", {}) or {}).keys())[:10], "player_runtime_status": self.get_player_runtime_status() if hasattr(self, "get_player_runtime_status") else {}, "selected_target": None, "available_player_commands": []}
             return WorldDebugSnapshot(tick=tick, reserve_targets=reserves, production_tasks=tasks, active_interactions=interactions, actor_work_profiles=actors, stockpiles=stockpiles, workshops=workshops + campfires, recent_decision_explanations=explanations, recent_validation_warnings=warnings, recent_traces=traces, runtime_health_summary=health)
         except Exception:
-            self._warn_simulation_validation("debug_snapshot_build_failed", ("world_snapshot", int(getattr(self, "game_time", 0) or 0)), "World debug snapshot build failed.", cooldown_ticks=240)
+            self._warn_simulation_validation("debug_snapshot_build_failed", ("world_snapshot", "build"), "World debug snapshot build failed.", metadata={"tick": int(getattr(self, "game_time", 0) or 0)}, cooldown_ticks=240)
             return WorldDebugSnapshot(tick=int(getattr(self, "game_time", 0) or 0))
 
 
@@ -11069,6 +11068,11 @@ class World:
             return self.cancel_player_active_interaction(reason="player_command_cancel")
         if action == "inspect":
             return {"success": True, "payload": None}
+        if action == "chop_tree":
+            target = tuple(command.get("position", (player.x, player.y)))
+            res = self.player_issue_action_intent("chop_tree", target_pos=target, payload=command.get("intent_payload", {}))
+            self._record_decision_explanation(explanation_type="player_command_intent_created", decision="intent_created", primary_reason="chop_tree", actor=player)
+            return res
         if action == "eat_food":
             res = self.player_issue_action_intent("eat_food", target_pos=tuple(command.get("intent_payload", {}).get("food_pos", (player.x, player.y))), payload=command.get("intent_payload", {}))
             self._record_decision_explanation(explanation_type="player_command_intent_created", decision="intent_created", primary_reason="eat_food", actor=player)
@@ -11098,6 +11102,40 @@ class World:
             lines.append(f"[{i}] {c.get('label', c.get('command_id'))}{suffix}")
         return "\n".join(lines)
 
+    def _iter_inventory_item_counts(self, inv):
+        """Yield item counts from dict-like inventories and Inventory wrappers."""
+        yielded_keys = set()
+        items_attr = getattr(inv, "items", None)
+        iterable = None
+        if callable(items_attr):
+            try:
+                iterable = items_attr()
+            except TypeError:
+                iterable = None
+        elif hasattr(items_attr, "items"):
+            iterable = items_attr.items()
+        elif items_attr is not None:
+            iterable = items_attr
+
+        if iterable is not None:
+            for item in iterable:
+                try:
+                    key, value = item
+                    quantity = int(value)
+                except (TypeError, ValueError):
+                    continue
+                yielded_keys.add(key)
+                yield key, quantity
+
+        if hasattr(inv, "iter_item_references"):
+            reference_counts = {}
+            for ref in inv.iter_item_references():
+                key = getattr(ref, "key", None)
+                if key is not None and key not in yielded_keys:
+                    reference_counts[key] = reference_counts.get(key, 0) + 1
+            for key, quantity in reference_counts.items():
+                yield key, quantity
+
     def resolve_selection_target(self, position: tuple[int, int]) -> dict | None:
         x, y = int(position[0]), int(position[1])
         # 1) actor/player
@@ -11121,8 +11159,9 @@ class World:
                 return {"target_type": "stockpile", "id": sp.stockpile_id, "position": (x, y)}
         # 4) item/tile
         inv = getattr(self, "items_on_map", {}).get((x, y))
-        if inv is not None and hasattr(inv, "items") and any(int(v)>0 for v in inv.items.values()):
-            return {"target_type": "resource", "id": f"item:{x}:{y}", "position": (x, y)}
+        if inv is not None:
+            if any(quantity > 0 for _, quantity in self._iter_inventory_item_counts(inv)):
+                return {"target_type": "resource", "id": f"item:{x}:{y}", "position": (x, y)}
         try:
             tile = self.get_tile_at(x, y)
             if tile and bool(getattr(tile, "properties", {}).get("is_tree", False)):
@@ -11170,7 +11209,7 @@ class World:
                 item_key = None
                 qty = 0
                 if inv is not None:
-                    for k,v in getattr(inv, "items", {}).items():
+                    for k, v in self._iter_inventory_item_counts(inv):
                         if int(v)>0: item_key=k; qty=int(v); break
                 payload.update({"display_name": f"Resource @{pos}", "item_key": item_key, "quantity": qty, "edible": bool(self.is_entity_edible(item_key)) if item_key else False, "nutrition": self.get_entity_nutrition_value(item_key) if item_key and self.is_entity_edible(item_key) else 0.0, "reserved_by_actor_id": (getattr(self, "food_reservations_by_id", {}).get(f"ground:{pos[0]}:{pos[1]}:{item_key}", {}) or {}).get("reserved_by_actor_id") if item_key else None})
             elif t == "tile":
@@ -11183,7 +11222,7 @@ class World:
                 payload["available_commands"] = self.get_available_player_commands(selection, player_id=getattr(getattr(self, "player", None), "id", None))[:8]
             return payload
         except Exception:
-            self._warn_simulation_validation("inspection_payload_build_failed", (str(selection), int(getattr(self, "game_time", 0) or 0)), "Inspection payload build failed.", cooldown_ticks=120)
+            self._warn_simulation_validation("inspection_payload_build_failed", (str(selection), "build"), "Inspection payload build failed.", metadata={"tick": int(getattr(self, "game_time", 0) or 0)}, cooldown_ticks=120)
             return {"target_type": "error", "display_name": "Inspection Error"}
 
     def render_inspection_payload(self, payload: dict) -> str:
@@ -11410,7 +11449,7 @@ class World:
         for fid, rec in dict(getattr(self, "food_reservations_by_id", {}) or {}).items():
             exp = int((rec or {}).get("reservation_expiration_tick", 0) or 0)
             if exp > 0 and now > exp:
-                self._warn_simulation_validation("hunger_food_reservation_stale", (fid, now), "Food reservation expired and was cleaned up.", metadata={"food_id": fid}, cooldown_ticks=120)
+                self._warn_simulation_validation("hunger_food_reservation_stale", (fid, "expired"), "Food reservation expired and was cleaned up.", metadata={"food_id": fid, "tick": now}, cooldown_ticks=120)
                 self._record_production_task_trace("food_reservation_released", ProductionTask(task_type="survival", id=str(fid)), metadata={"food_id": fid, "reason": "expired"})
             else:
                 kept[fid] = rec
@@ -11443,7 +11482,9 @@ class World:
     def is_entity_edible(self, item_key: str) -> bool:
         item_def = ITEM_DEFINITIONS.get(str(item_key), {})
         tags = set(item_def.get("item_type_tags", []) or [])
-        return ("edible" in tags) or (item_def.get("item_type") == "simple_food")
+        if "food" in tags or "edible" in tags:
+            return True
+        return item_def.get("item_type") == "simple_food"
 
     def get_entity_nutrition_value(self, item_key: str) -> float:
         item_def = ITEM_DEFINITIONS.get(str(item_key), {})
@@ -11454,8 +11495,15 @@ class World:
         c=[]
         for coords, inv in sorted(getattr(self, "items_on_map", {}).items(), key=lambda x:x[0]):
             for k in ["simple_food", "cooked_meat", "food_ration", "rotten_food", "processed_meat"]:
-                if getattr(inv, "get", lambda *_:0)(k,0) > 0 and self.is_entity_edible(k):
-                    fid=f"ground:{coords[0]}:{coords[1]}:{k}";
+                has_item = False
+                if hasattr(inv, "has_item") and inv.has_item(k, 1):
+                    has_item = True
+                elif hasattr(inv, "iter_item_references") and any(ref.key == k for ref in inv.iter_item_references()):
+                    has_item = True
+                elif hasattr(inv, "get") and inv.get(k, 0) > 0:
+                    has_item = True
+                if has_item and self.is_entity_edible(k):
+                    fid=f"ground:{coords[0]}:{coords[1]}:{k}"
                     rec = self.food_reservations_by_id.get(fid)
                     if rec and rec.get("reserved_by_actor_id") not in {None, getattr(actor, "id", None)}: continue
                     dist=abs(actor.x-coords[0])+abs(actor.y-coords[1]); c.append((dist,fid,coords,k)); break
@@ -11495,7 +11543,7 @@ class World:
             actor.survival_override_target_id, actor.survival_override_target_position = ntid, ntpos
             tid, tpos = ntid, ntpos
             if tpos is None:
-                self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, now, "cold"), "No valid warmth/shelter target found.", actor=actor)
+                self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, "cold"), "No valid warmth/shelter target found.", actor=actor, metadata={"tick": now})
                 self._record_decision_explanation(explanation_type="cold_survival_no_target", decision="blocked", primary_reason="no_valid_warmth_or_shelter_target", actor=actor)
                 return
         if abs(actor.x - tpos[0]) <= 1 and abs(actor.y - tpos[1]) <= 1:
@@ -11514,7 +11562,7 @@ class World:
         if tpos is None:
             tid,tpos = self._find_nearest_rest_target(actor); actor.survival_override_target_id, actor.survival_override_target_position = tid,tpos
         if tpos is None:
-            self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, now, "fatigue"), "No valid rest target found.", actor=actor)
+            self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, "fatigue"), "No valid rest target found.", actor=actor, metadata={"tick": now})
             return
         actor.current_rest_target_id = tid
         if abs(actor.x-tpos[0])<=1 and abs(actor.y-tpos[1])<=1:
@@ -11545,7 +11593,7 @@ class World:
             deferred = [p for p in selectable if p != selected]
             actor.deferred_survival_pressures = deferred[:4]
             if len(deferred) > 4:
-                self._warn_simulation_validation("survival_override_deferred_overflow", (actor.id, now), "Deferred survival pressure list exceeded bounds.", actor=actor)
+                self._warn_simulation_validation("survival_override_deferred_overflow", (actor.id, "deferred_pressures"), "Deferred survival pressure list exceeded bounds.", actor=actor, metadata={"tick": now})
             actor.active_survival_pressure = selected
             self._record_production_task_trace("survival_override_arbitrated", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"selected_pressure": selected, "deferred_pressures": deferred, "scores": actor.survival_pressure_scores})
             if deferred:
@@ -11557,12 +11605,14 @@ class World:
                     actor.survival_override_active=False; actor.survival_override_reason=None; actor.survival_override_target_id=None; actor.survival_override_target_position=None; actor.resting_state=False
                     self._record_production_task_trace("survival_override_cleared", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"reason": "all_pressures_recovered"})
                 continue
-            reason = "seeking_warmth" if selected == "cold_exposure" else "seeking_rest"
+            reason = "seeking_warmth" if selected == "cold_exposure" else ("seeking_food" if selected == "hunger" else "seeking_rest")
             if getattr(actor, "survival_override_reason", None) != reason:
                 if getattr(actor, "survival_override_active", False):
                     self._record_production_task_trace("survival_override_switched", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"from": getattr(actor, "survival_override_reason", None), "to": reason})
                     actor.last_survival_override_switch_tick = now
-                actor.survival_override_active=True; actor.survival_override_reason=reason; actor.survival_override_started_tick=now; actor.survival_override_previous_task_id=str(getattr(actor, "task_context_data", {}).get("task_id") or "") or None
+                task_context_data = getattr(actor, "task_context_data", None)
+                previous_task_id = task_context_data.get("task_id") if isinstance(task_context_data, dict) else None
+                actor.survival_override_active=True; actor.survival_override_reason=reason; actor.survival_override_started_tick=now; actor.survival_override_previous_task_id=str(previous_task_id or "") or None
                 if getattr(self, "interaction_resolver", None):
                     self.interaction_resolver.cancel_actor_interaction(actor.id, self, reason="survival_override_arbitrated")
                 self._record_production_task_trace("survival_override_selected", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"selected_pressure": selected})
@@ -11584,7 +11634,7 @@ class World:
                 else:
                     target = self._find_nearest_edible_food_target(actor)
                     if target is None:
-                        self._warn_simulation_validation("hunger_no_edible_food", (actor.id, now), "No edible food found for hungry actor.", actor=actor, cooldown_ticks=120)
+                        self._warn_simulation_validation("hunger_no_edible_food", (actor.id, "no_food"), "No edible food found for hungry actor.", actor=actor, metadata={"tick": now}, cooldown_ticks=120)
                         self._record_decision_explanation(explanation_type="hunger_no_food_available", decision="blocked", primary_reason="no_edible_food_found", actor=actor)
                     else:
                         actor.hunger_target_food_id = target["food_id"]
@@ -11850,7 +11900,7 @@ class World:
         history = list(getattr(actor, "recent_skill_usage", []) or [])
         if len(history) > 50:
             actor.recent_skill_usage = history[-50:]
-            self._warn_simulation_validation("actor_work_history_overflow", (getattr(actor, "id", None), len(history)), "Actor recent skill usage history exceeded bound and was trimmed.", actor=actor, cooldown_ticks=240)
+            self._warn_simulation_validation("actor_work_history_overflow", (getattr(actor, "id", None), "recent_skill_usage"), "Actor recent skill usage history exceeded bound and was trimmed.", actor=actor, metadata={"history_length": len(history)}, cooldown_ticks=240)
             history = actor.recent_skill_usage
         profile["work_history_snapshot"] = history[-8:]
         fatigue = float(getattr(actor, "fatigue_modifier", 0.0) or 0.0)
@@ -16774,8 +16824,3 @@ class World:
             for item_key, qty in blueprint.remaining_materials().items()
         )
         self.add_message_to_chat_log(f"You place a construction site for {recipe['name']}. Needed: {remaining_items}.")
-        if action == "chop_tree":
-            target = tuple(command.get("position", (player.x, player.y)))
-            res = self.player_issue_action_intent("chop_tree", target_pos=target, payload=command.get("intent_payload", {}))
-            self._record_decision_explanation(explanation_type="player_command_intent_created", decision="intent_created", primary_reason="chop_tree", actor=player)
-            return res

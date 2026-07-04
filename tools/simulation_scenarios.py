@@ -2235,12 +2235,15 @@ def run_in_world_visual_feedback_smoke(seed: int, ticks: int, snapshot_config: S
     chunk.tiles[11][10] = Tile(char="T", color=(34,139,34), passable=False, name="Tree", properties={"is_tree": True})
     chop = world.player_issue_action_intent("chop_tree", target_pos=(10,11))
     world.create_stockpile(12, 10, accepted_item_types={"raw_log"}, max_item_count=20)
-    world.items_on_map[(10,10)] = Inventory(); world.items_on_map[(10,10)].add_item_reference(ItemReference("processed_meat"))
+    food_pos = (10, 10)
+    world.items_on_map[food_pos] = Inventory(); world.items_on_map[food_pos].add_item_reference(ItemReference("processed_meat"))
     world.create_campfire_runtime(11,10, fuel_item_type="raw_log", fuel_quantity=0, max_fuel_quantity=6, minimum_fuel_quantity=1, burn_rate_per_tick=1)
     for _ in range(ticks):
         run_world_tick(world)
     # eat via same runtime path
-    world.player_issue_action_intent("eat_food", target_pos=(10,10), payload={"food_id":"ground:10:10:processed_meat","food_pos":(10,10),"item_key":"processed_meat","nutrition_value":0.2,"eat_work_required":2})
+    food_inv = world.items_on_map.get(food_pos)
+    food_key = next((key for key, quantity in world._iter_inventory_item_counts(food_inv) if quantity > 0), "processed_meat")
+    world.player_issue_action_intent("eat_food", target_pos=food_pos, payload={"food_id":f"ground:{food_pos[0]}:{food_pos[1]}:{food_key}","food_pos":food_pos,"item_key":food_key,"nutrition_value":0.2,"eat_work_required":2})
     for _ in range(10): run_world_tick(world)
     snap = world.build_world_debug_snapshot()
     traces=[e.get("trace_type") for e in getattr(world, "interaction_trace_log", [])]
@@ -2250,7 +2253,7 @@ def run_in_world_visual_feedback_smoke(seed: int, ticks: int, snapshot_config: S
     trace.assert_check(ticks, "player_eat_started", "eating_interaction_started" in traces or "eating_interaction_completed" in traces, "player can start/complete eating interaction")
     trace.assert_check(ticks, "player_status_visible", "hunger" in st and "active_interaction_id" in st, "player runtime HUD status should be exposed")
     rendered = world.render_world_debug_snapshot(snap)
-    trace.assert_check(ticks, "debug_overlay_sections", ("PLAYER STATUS" in rendered) and ("STOCKPILES" in rendered), "snapshot renderer should expose player/stockpile sections")
+    trace.assert_check(ticks, "debug_overlay_sections", ("PLAYER STATUS" in rendered) and ("LOGISTICS" in rendered), "snapshot renderer should expose player/logistics sections")
     trace.assert_check(ticks, "campfire_state_visible", ("campfire" in rendered.lower()), "campfire visual state should be represented in debug renderer")
     from tools.simulation_snapshot import render_snapshot
     snap_txt = render_snapshot(world, "/tmp/in_world_visual_feedback_smoke.txt", force_text=True)
@@ -2268,11 +2271,11 @@ def run_selection_inspection_runtime_smoke(seed: int, ticks: int, snapshot_confi
     from entities.items import ItemReference, Inventory
     scenario = "selection_inspection_runtime_smoke"
     trace = SimulationTrace(); artifacts: dict[str, Any] = {}
-    world, chunk = _create_headless_world(seed); _create_village(world, chunk, center=(8, 8))
+    world, chunk = _create_headless_world(seed); village = _create_village(world, chunk, center=(8, 8))
     actor = NPC(10,10,name="Inspect NPC"); world.village_npcs.append(actor)
     sp = world.create_stockpile(12, 10, accepted_item_types={"raw_log","processed_meat"}, max_item_count=50)
     cf = world.create_campfire_runtime(11,10, fuel_item_type="raw_log", fuel_quantity=2, max_fuel_quantity=6, minimum_fuel_quantity=1, burn_rate_per_tick=1)
-    bp = world.create_blueprint(14, 10, 2, 2, {"raw_log": 2})
+    bp = world.place_construction_blueprint("wooden_chair", 14, 10, settlement_id=village.id)
     inv = Inventory(); inv.add_item_reference(ItemReference("processed_meat")); world.items_on_map[(9,10)] = inv
     for _ in range(ticks): run_world_tick(world)
     sel_actor = world.resolve_selection_target((10,10)); p_actor = world.build_inspection_payload(sel_actor)
@@ -2299,17 +2302,17 @@ def run_player_contextual_commands_runtime_smoke(seed: int, ticks: int, snapshot
     from tile_types import Tile
     scenario = "player_contextual_commands_runtime_smoke"
     trace = SimulationTrace(); artifacts: dict[str, Any] = {}
-    world, chunk = _create_headless_world(seed); _create_village(world, chunk, center=(8, 8))
+    world, chunk = _create_headless_world(seed); village = _create_village(world, chunk, center=(8, 8))
     player = world.player; player.x, player.y = 10, 10
     chunk.tiles[11][10] = Tile(char="T", color=(34,139,34), passable=False, name="Tree", properties={"is_tree": True})
-    inv = Inventory(); inv.add_item_reference(ItemReference("processed_meat")); world.items_on_map[(10,10)] = inv
+    inv = Inventory(); inv.add_item_reference(ItemReference("processed_meat")); world.items_on_map[(9,10)] = inv
     camp = world.create_campfire_runtime(11,10, fuel_item_type="raw_log", fuel_quantity=0, max_fuel_quantity=6, minimum_fuel_quantity=1, burn_rate_per_tick=1)
-    bp = world.create_blueprint(12, 10, 2, 2, {"raw_log": 1})
+    bp = world.place_construction_blueprint("wooden_chair", 12, 10, settlement_id=village.id)
     sel_tree = world.resolve_selection_target((10,11))
     cmds_tree = world.get_available_player_commands(sel_tree, player_id=player.id)
     chop_cmd = next((c for c in cmds_tree if c.get("command_id")=="chop"), None)
     chop_res = world.execute_player_command(chop_cmd, player_id=player.id) if chop_cmd else None
-    sel_food = world.resolve_selection_target((10,10)); cmds_food = world.get_available_player_commands(sel_food, player_id=player.id)
+    sel_food = world.resolve_selection_target((9,10)); cmds_food = world.get_available_player_commands(sel_food, player_id=player.id)
     eat_cmd = next((c for c in cmds_food if c.get("command_id")=="eat"), None)
     if eat_cmd: world.execute_player_command(eat_cmd, player_id=player.id)
     sel_camp = world.resolve_selection_target((11,10)); cmds_camp = world.get_available_player_commands(sel_camp, player_id=player.id)

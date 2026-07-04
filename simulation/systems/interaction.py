@@ -412,7 +412,14 @@ class EatingInteraction(ActiveInteraction):
                 reporter("eating_out_of_range", (self.actor_id, self.food_id, "start"), "Actor must be adjacent to food to start eating.", actor=actor, metadata={"food_id": self.food_id})
             return False
         inv = getattr(world, "items_on_map", {}).get(self.food_pos)
-        return bool(inv and getattr(inv, "get", lambda *_:0)(self.item_key,0) > 0)
+        if inv is None:
+            return False
+        if hasattr(inv, "has_item") and inv.has_item(self.item_key, 1):
+            return True
+        counter = getattr(world, "_iter_inventory_item_counts", None)
+        if callable(counter):
+            return any(key == self.item_key and quantity > 0 for key, quantity in counter(inv))
+        return bool(getattr(inv, "get", lambda *_:0)(self.item_key,0) > 0)
 
     def can_continue(self, world: Any) -> bool:
         return self.can_start(world)

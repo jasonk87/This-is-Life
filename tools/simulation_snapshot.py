@@ -84,6 +84,7 @@ def render_snapshot(
     layout, ownership, pathing, and actor placement.
     """
 
+    return_path = str(path)
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     overlay_set = set(DEFAULT_OVERLAYS if overlays is None else overlays)
@@ -91,13 +92,13 @@ def render_snapshot(
 
     if force_text or output_path.suffix.lower() not in {".png"}:
         output_path.write_text(canvas.text(), encoding="utf-8")
-        return str(output_path)
+        return return_path
 
     try:
         write_canvas_png(output_path, canvas)
     except Exception:
         output_path.write_text(canvas.text(), encoding="utf-8")
-    return str(output_path)
+    return return_path
 
 
 def write_snapshot_artifact(

@@ -263,6 +263,34 @@ WEATHER_SPRITES = {
 }
 
 
+# Equipment overlay sprite definitions.
+# Maps equipment item keys from entities/items.py to (codepoint, anchor_x, anchor_y, z_order).
+# Anchor (x, y) is a fraction within the zoomed cell grid (0.0–1.0 from top-left).
+# z_order controls draw order: 0 = bottom (body armour), 2 = top (held items).
+EQUIPMENT_OVERLAY_SPRITES: dict[str, tuple[int, float, float, int]] = {
+    # Weapons (z=2 — held in hand, drawn on top)
+    "rusty_sword":    (ITEM_SPRITES["rusty_sword"],     0.60, 0.35, 2),
+    "iron_sword":     (ITEM_SPRITES["iron_sword"],      0.60, 0.35, 2),
+    "crude_spear":    (ITEM_SPRITES["crude_spear"],     0.65, 0.25, 2),
+    "short_bow":      (ITEM_SPRITES["short_bow"],       0.55, 0.20, 2),
+    "knife_stone":    (ITEM_SPRITES["knife_stone"],     0.55, 0.40, 2),
+    "axe_stone":      (ITEM_SPRITES["axe_stone"],       0.58, 0.30, 2),
+    "stone_pickaxe":  (ITEM_SPRITES["stone_pickaxe"],   0.58, 0.30, 2),
+    "stone_hoe":      (ITEM_SPRITES["stone_hoe"],       0.58, 0.30, 2),
+    "fishing_rod":    (ITEM_SPRITES["fishing_rod"],     0.62, 0.35, 2),
+    # Shields (z=2 — held in off-hand)
+    "wooden_shield":  (ITEM_SPRITES["wooden_shield"],   0.10, 0.35, 2),
+    # Head wear (z=1 — mid layer)
+    "iron_helmet":    (ITEM_SPRITES["iron_helmet"],     0.30, 0.05, 1),
+    "hooded_cowl":    (ITEM_SPRITES["hooded_cowl"],     0.30, 0.05, 1),
+    # Body armour (z=0 — under layer)
+    "leather_jerkin":   (ITEM_SPRITES["leather_jerkin"],    0.25, 0.25, 0),
+    "iron_breastplate": (ITEM_SPRITES["iron_breastplate"],  0.25, 0.25, 0),
+    "fur_cloak":        (ITEM_SPRITES["fur_cloak"],         0.25, 0.20, 0),
+    "cloth_tunic":      (ITEM_SPRITES["cloth_tunic"],       0.25, 0.25, 0),
+}
+
+
 def get_human_sprite(
     gender: str | None = None,
     profession: str | None = None,
@@ -309,6 +337,46 @@ def get_entity_sprite(entity) -> int:
         profession=profession,
         age=getattr(entity, "age", None),
     )
+
+
+def _get_equipment_overlays(entity) -> list[tuple[int, float, float, int]]:
+    """
+    Return a list of (codepoint, anchor_x, anchor_y, z_order) tuples for
+    every piece of visible equipment the entity is wearing or holding.
+    Returns an empty list if the entity has no equipment or no matching
+    overlay sprite is defined.
+    """
+    overlays: list[tuple[int, float, float, int]] = []
+    equipment = getattr(entity, "equipment", None)
+    if equipment is None:
+        return overlays
+
+    seen_sprites: set[int] = set()
+
+    def try_add(item_key: str | None):
+        if item_key is None:
+            return
+        entry = EQUIPMENT_OVERLAY_SPRITES.get(item_key)
+        if entry is not None:
+            codepoint, ax, ay, az = entry
+            if codepoint not in seen_sprites:
+                seen_sprites.add(codepoint)
+                overlays.append((codepoint, ax, ay, az))
+
+    # Check EquipmentSlot-based slots
+    try_add(getattr(getattr(equipment, "head", None), "item_key", None))
+    try_add(getattr(getattr(equipment, "body", None), "item_key", None))
+    try_add(getattr(getattr(equipment, "weapon", None), "item_key", None))
+
+    # Check equipped_armor dict (fallback for head/body items stored there)
+    armor = getattr(equipment, "equipped_armor", {})
+    if isinstance(armor, dict):
+        try_add(armor.get("head"))
+        try_add(armor.get("body"))
+
+    # Sort by z_order so body armour is drawn first and weapons last
+    overlays.sort(key=lambda x: x[3])
+    return overlays
 
 
 def all_catalog_codepoints() -> dict[str, int]:

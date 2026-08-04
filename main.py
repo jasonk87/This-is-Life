@@ -23,6 +23,7 @@ from config import (
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from rendering.console_renderer import draw
+from rendering.sprite_atlas import register_zoomed_dawnlike_tiles
 from save_manager import save_game, load_game
 from ui_requests import apply_ui_requests
 
@@ -780,6 +781,7 @@ def load_custom_tileset():
             for c in range(cols):
                 tile_arr = arr[r * tile_height:(r + 1) * tile_height, c * tile_width:(c + 1) * tile_width, :]
                 tileset.set_tile(base_code + (r * cols) + c, tile_arr)
+        register_zoomed_dawnlike_tiles(tileset, TILESET_PATH)
 
     except Exception as e:
         print(f"Warning: Could not load DawnLike tileset: {e}")
@@ -897,6 +899,8 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         console.print(console.width // 2, console.height // 2, "Generating World...", alignment=libtcodpy.CENTER)
         context.present(console)
         world = World(player_first_name=normalize_player_first_name(player_first_name))
+        # Pre-simulate the world so NPCs spread to their daily routines
+        world._pre_simulate_world()
 
     _ensure_zoom_state(world)
 

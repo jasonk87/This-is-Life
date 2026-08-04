@@ -41,6 +41,7 @@ from config import (
     # NPC Scheduling Configs
     USE_LLM_FOR_SCHEDULES, DAY_LENGTH_TICKS, NPC_SCHEDULE_UPDATE_INTERVAL,
     WORK_START_TIME_RATIO, WORK_END_TIME_RATIO,
+    PRE_SIMULATION_HOURS,
     # Reputation Configs
     INITIAL_CRIMINAL_POINTS, INITIAL_HERO_POINTS,
     REP_CRIMINAL, REP_HERO,
@@ -51,6 +52,7 @@ from config import (
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME,
     # Abstract Simulation Configs
     ABSTRACT_SIMULATION_DISTANCE_CHUNKS,
+    INITIAL_TIME_OF_DAY,
     # Season and Temperature Configs
     DAYS_PER_SEASON,
     SEASON_TEMPERATURE_MODIFIERS,
@@ -659,7 +661,7 @@ class World:
         self.mouse_y = 0
         self.game_state = "PLAYING"
         self.entities_by_chunk = {} # Map (chunk_x, chunk_y) -> set(npc_id)
-        self.game_time = 0
+        self.game_time = INITIAL_TIME_OF_DAY
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
         self.needs_text_input = False
         self._llm_warning_issued = False
@@ -6308,12 +6310,20 @@ class World:
         if not self._is_construction_worker_role(npc) and not is_owner_or_manager:
             return False
 
+        npc_id = getattr(npc, "id", None)
+        # If NPC is already assigned to a buildable blueprint, consider it already assigned.
+        for blueprint in self._get_buildable_blueprints():
+            if npc_id in getattr(blueprint, "assigned_workers", []):
+                npc.schedule.current_task = "constructing_site"
+                npc.task_context = "construction"
+                return True
+
         best_blueprint = None
         best_distance = None
         for blueprint in self._get_buildable_blueprints():
-            if is_owner_or_manager and self._has_available_construction_worker(blueprint, excluding_id=getattr(npc, "id", None)):
+            if is_owner_or_manager and self._has_available_construction_worker(blueprint, excluding_id=npc_id):
                 continue
-            if getattr(npc, "id", None) in getattr(blueprint, "assigned_workers", []):
+            if npc_id in getattr(blueprint, "assigned_workers", []):
                 continue
             distance = abs(npc.x - blueprint.x) + abs(npc.y - blueprint.y)
             if best_distance is None or distance < best_distance:
@@ -10491,7 +10501,9 @@ class World:
         # chunk_global_start_x and chunk_global_start_y are now implicitly handled by Building.global_center_x/y
         # No longer need to calculate chunk_global_start_x/y here from chunk_coord_x/y for NPC placement if using building centers.
 
-        num_npcs = random.randint(max(1, len(village.buildings) // 2), len(village.buildings))
+        min_npcs = max(3, len(village.buildings))
+        max_npcs = max(min_npcs, len(village.buildings) * 2)
+        num_npcs = random.randint(min_npcs, max_npcs)
         if not village.buildings:
             num_npcs = 0
 
@@ -10633,25 +10645,48 @@ class World:
                         well_coords = village.interaction_points["well"][0]
                         npc.knowledge.known_locations["the village well"] = well_coords
 
-                # Chance to give NPC a healing salve
-                if random.random() < 0.33: # 33% chance
-                    npc.economic.npc_inventory["healing_salve"] = npc.economic.npc_inventory.get("healing_salve", 0) + 1
-                    # self.add_message_to_chat_log(f"Debug: {npc.name} received a healing salve.")
-
-                # Assign starting equipment based on role/behavior
+                # Assign profession-based equipment so NPCs look distinct
                 if npc.economic.profession in ["Sheriff", "Guard"] or npc.combat.combat_behavior == "aggressive":
                     if "rusty_sword" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["rusty_sword"] = npc.economic.npc_inventory.get("rusty_sword", 0) + 1
                         npc.equipment.weapon = "rusty_sword"
-                        # self.add_message_to_chat_log(f"Debug: {npc.name} equipped a rusty_sword.")
                     if "leather_jerkin" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["leather_jerkin"] = npc.economic.npc_inventory.get("leather_jerkin", 0) + 1
                         npc.equipment.body = "leather_jerkin"
-                        # self.add_message_to_chat_log(f"Debug: {npc.name} equipped a leather_jerkin.")
-                    # Optionally, add a helmet too
-                    if random.random() < 0.5 and "iron_helmet" in ITEM_DEFINITIONS: # 50% chance for guards/aggressive to also have helmet
+                    if random.random() < 0.5 and "iron_helmet" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["iron_helmet"] = npc.economic.npc_inventory.get("iron_helmet", 0) + 1
                         npc.equipment.head = "iron_helmet"
+                    if random.random() < 0.4 and "wooden_shield" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["wooden_shield"] = npc.economic.npc_inventory.get("wooden_shield", 0) + 1
+                elif npc.economic.profession in ["Blacksmith", "Woodcutter", "Lumber Mill Foreman"]:
+                    if "axe_stone" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["axe_stone"] = npc.economic.npc_inventory.get("axe_stone", 0) + 1
+                        npc.equipment.weapon = "axe_stone"
+                elif npc.economic.profession in ["Farmer", "Cowherd"]:
+                    if "knife_stone" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["knife_stone"] = npc.economic.npc_inventory.get("knife_stone", 0) + 1
+                        npc.equipment.weapon = "knife_stone"
+                    if "hooded_cowl" in ITEM_DEFINITIONS and random.random() < 0.4:
+                        npc.economic.npc_inventory["hooded_cowl"] = npc.economic.npc_inventory.get("hooded_cowl", 0) + 1
+                        npc.equipment.head = "hooded_cowl"
+                elif npc.economic.profession in ["Hunter"]:
+                    if "short_bow" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["short_bow"] = npc.economic.npc_inventory.get("short_bow", 0) + 1
+                        npc.equipment.weapon = "short_bow"
+                    if "hooded_cowl" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["hooded_cowl"] = npc.economic.npc_inventory.get("hooded_cowl", 0) + 1
+                        npc.equipment.head = "hooded_cowl"
+                elif npc.economic.profession in ["Merchant", "Tavern Keeper"]:
+                    if "knife_stone" in ITEM_DEFINITIONS and random.random() < 0.5:
+                        npc.economic.npc_inventory["knife_stone"] = npc.economic.npc_inventory.get("knife_stone", 0) + 1
+                        npc.equipment.weapon = "knife_stone"
+                elif npc.economic.profession in ["Miner"]:
+                    if "stone_pickaxe" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["stone_pickaxe"] = npc.economic.npc_inventory.get("stone_pickaxe", 0) + 1
+                        npc.equipment.weapon = "stone_pickaxe"
+                # General chance for any NPC to have a healing salve
+                if random.random() < 0.25:
+                    npc.economic.npc_inventory["healing_salve"] = npc.economic.npc_inventory.get("healing_salve", 0) + 1
 
 
                 self.village_npcs.append(npc)
@@ -14685,6 +14720,37 @@ class World:
 
             npc.economic.money += wage
             npc.schedule.last_paid_day = current_day
+
+    def _pre_simulate_world(self) -> None:
+        """
+        Run a lightweight pre-simulation after world generation to spread NPCs
+        into their daily routines before the player takes control.
+        NPCs follow schedules, walk to workplaces, and scatter across the village.
+        """
+        hours = PRE_SIMULATION_HOURS
+        ticks_per_hour = max(1, DAY_LENGTH_TICKS // 24)
+        total_ticks = int(hours * ticks_per_hour)
+        step_size = max(1, total_ticks // 50)  # Break into ~50 steps
+        tick = 0
+
+        while tick < total_ticks:
+            step = min(step_size, total_ticks - tick)
+            self.game_time += step
+            tick += step
+
+            # Run NPC schedule logic for all active NPCs
+            for npc in list(self.village_npcs):
+                if npc.physical.is_dead or getattr(npc, "is_sleeping", False):
+                    continue
+                # Give each NPC a chance to pick a daily routine
+                run_npc_humanoid_scheduling_flow(self, npc)
+
+            # Process NPC movement
+            self._update_npc_movement()
+
+        # After pre-simulation, ensure the player's surroundings are still valid
+        self.ensure_player_surroundings_generated()
+        self._rebuild_entity_positions()
 
     def _update_npc_careers(self):
         """

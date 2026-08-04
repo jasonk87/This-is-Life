@@ -32,6 +32,11 @@ class TestMainInputHelpers(unittest.TestCase):
         self.assertEqual(main.normalize_player_first_name("  "), "Player")
         self.assertEqual(main.normalize_player_first_name("1234!!!"), "Player")
 
+    def test_new_world_starts_at_configured_initial_time(self):
+        world = World(seed=123)
+
+        self.assertEqual(world.game_time, config.INITIAL_TIME_OF_DAY)
+
     def test_open_interaction_menu_skips_entities_without_actions(self):
         world = SimpleNamespace(
             interaction_context={},
@@ -719,6 +724,14 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
 
 
 class TestConsoleRendererEntities(unittest.TestCase):
+    def test_format_world_clock_uses_configured_day_length(self):
+        self.assertEqual(console_renderer._format_world_clock(0), "Day 0, 00:00")
+        self.assertEqual(console_renderer._format_world_clock(config.INITIAL_TIME_OF_DAY), "Day 0, 08:00")
+        self.assertEqual(
+            console_renderer._format_world_clock(config.DAY_LENGTH_TICKS + config.INITIAL_TIME_OF_DAY),
+            "Day 1, 08:00",
+        )
+
     def test_get_hover_inspect_returns_tile_coords_entity_and_building(self):
         tile = SimpleNamespace(name="Wood Floor")
         villager = {"type": "npc", "name": "Mira"}
@@ -891,6 +904,46 @@ class TestConsoleRendererEntities(unittest.TestCase):
         glyph_calls = [call for call in console.print_calls if call["string"] == "."]
         self.assertEqual(len(glyph_calls), 1)
 
+    def test_draw_world_tile_uses_textured_fill_for_zoomed_terrain(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(2.0,), zoom_index=0)
+        floor_tile = SimpleNamespace(name="Wood Floor", char=ord("."), color=(120, 80, 40))
+
+        with patch("rendering.console_renderer.zoomed_sprite_codepoint", side_effect=AssertionError("terrain should not stamp sprites")):
+            console_renderer._draw_world_tile(console, world, 0, 0, 1, 1, floor_tile, (120, 80, 40), (60, 40, 20))
+
+        self.assertEqual(len(console.print_calls), 4)
+        self.assertTrue(all(call.get("bg") is not None for call in console.print_calls))
+
+    def test_draw_world_tile_uses_zoomed_sprite_stamp_when_available(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(2.0,), zoom_index=0)
+        tile = SimpleNamespace(name="Tree", char=0xE000, color=(90, 180, 90))
+
+        with patch("rendering.console_renderer.zoomed_sprite_codepoint", side_effect=lambda _base, _zoom, x, y: 0xF0000 + (y * 2) + x):
+            console_renderer._draw_world_tile(console, world, 0, 0, 1, 1, tile, (90, 180, 90), (10, 30, 10))
+
+        self.assertEqual(len(console.print_calls), 4)
+        self.assertEqual(
+            {call["string"] for call in console.print_calls},
+            {chr(0xF0000), chr(0xF0001), chr(0xF0002), chr(0xF0003)},
+        )
+        self.assertTrue(all(call.get("bg") == (10, 30, 10) for call in console.print_calls))
+
     def test_draw_entities_uses_logical_visibility_not_stale_render_position(self):
         class FakeConsole:
             def __init__(self):
@@ -1005,6 +1058,44 @@ class TestConsoleRendererEntities(unittest.TestCase):
         self.assertEqual(len(console.print_calls), 1)
         self.assertEqual(console.print_calls[0]["string"], "@")
         self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (1, 1))
+
+    def test_draw_entities_uses_zoomed_sprite_stamp_when_available(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+                self.bg = np.zeros((4, 4, 3), dtype=np.uint8)
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        player = SimpleNamespace(
+            x=1,
+            y=1,
+            render_x=1.0,
+            render_y=1.0,
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=2),
+        )
+        world = SimpleNamespace(
+            npcs=[],
+            village_npcs=[],
+            player=player,
+            zoom_levels=(2.0,),
+            zoom_index=0,
+        )
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True), \
+             patch("rendering.console_renderer.get_entity_sprite", return_value=0xE000), \
+             patch("rendering.console_renderer.zoomed_sprite_codepoint", side_effect=lambda _base, _zoom, x, y: 0xF0100 + (y * 2) + x):
+            console_renderer._draw_entities(console, world, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 4)
+        self.assertEqual(
+            {call["string"] for call in console.print_calls},
+            {chr(0xF0100), chr(0xF0101), chr(0xF0102), chr(0xF0103)},
+        )
+        self.assertTrue(all("bg" not in call for call in console.print_calls))
 
     def test_entity_marker_skips_overlay_cell_outside_visibility(self):
         class FakeConsole:

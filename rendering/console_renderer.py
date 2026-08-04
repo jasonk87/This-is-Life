@@ -8,15 +8,16 @@ from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
     MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
     COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT,
-    WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE
+    WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE, DAY_LENGTH_TICKS
 )
 from data.tiles import TILE_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from data.environment import WEATHER_DEFINITIONS
-from data.dawnlike import get_entity_sprite
+from data.dawnlike import get_entity_sprite, _get_equipment_overlays
 from entities.animal import Animal
 from engine import Player
+from rendering.sprite_atlas import ZOOMED_DAWNLIKE_LEVELS, zoomed_sprite_codepoint
 from presentation.ambient_speech import (
     format_ambient_speech_for_player,
     visible_ambient_speech_lines,
@@ -31,25 +32,70 @@ from presentation.social_feedback import (
 TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
 
 TERRAIN_BACKGROUNDS = {
-    "plains": (22, 36, 20),
-    "forest": (12, 28, 14),
-    "road": (54, 48, 40),
-    "wood_wall": (55, 34, 18),
-    "stone_wall": (48, 48, 52),
-    "door": (72, 48, 24),
-    "wood_floor": (64, 42, 22),
-    "window": (30, 48, 60),
-    "water": (10, 30, 72),
-    "deep_water": (4, 16, 48),
-    "mountain": (42, 42, 46),
-    "snow": (110, 118, 128),
-    "tall_grass": (22, 44, 20),
-    "flower": (60, 28, 44),
-    "well": (46, 52, 64),
-    "tilled_soil": (70, 42, 26),
-    "wheat_plant_growing": (38, 60, 22),
-    "wheat_plant_mature": (90, 82, 26),
-    "fire_trap_active": (88, 18, 12),
+    "plains": (36, 64, 34),
+    "forest": (18, 44, 24),
+    "road": (82, 72, 56),
+    "wood_wall": (58, 38, 24),
+    "stone_wall": (54, 56, 60),
+    "door": (78, 52, 28),
+    "wood_floor": (76, 51, 31),
+    "stone_floor": (58, 60, 63),
+    "brick_floor": (76, 48, 38),
+    "dirt_floor": (66, 45, 30),
+    "window": (26, 49, 60),
+    "water": (20, 55, 96),
+    "deep_water": (8, 30, 70),
+    "mountain": (66, 66, 70),
+    "snow": (142, 152, 156),
+    "tall_grass": (30, 68, 30),
+    "flower": (64, 42, 58),
+    "well": (50, 56, 66),
+    "tilled_soil": (82, 50, 32),
+    "wheat_plant_growing": (58, 84, 34),
+    "wheat_plant": (122, 102, 36),
+    "fire_trap_active": (96, 22, 12),
+}
+
+TERRAIN_FILL_TILE_KEYS = {
+    "plains",
+    "road",
+    "wood_floor",
+    "stone_floor",
+    "brick_floor",
+    "dirt_floor",
+    "water",
+    "deep_water",
+    "snow",
+    "tilled_soil",
+    "forest",
+    "mountain",
+    "tall_grass",
+    "flower",
+    "wheat_plant_growing",
+    "wheat_plant",
+    "fire_trap_hidden",
+    "fire_trap_active",
+    "mossy_cobblestone",
+}
+
+TERRAIN_ACCENTS = {
+    "plains": ("'", (86, 126, 66), 5),
+    "road": (".", (112, 98, 72), 7),
+    "wood_floor": (".", (112, 74, 42), 8),
+    "stone_floor": (".", (98, 100, 104), 7),
+    "brick_floor": (".", (112, 70, 58), 7),
+    "dirt_floor": (".", (96, 66, 42), 5),
+    "water": ("~", (80, 132, 184), 4),
+    "deep_water": ("~", (48, 88, 142), 5),
+    "snow": (".", (210, 220, 220), 6),
+    "tilled_soil": (",", (118, 74, 44), 3),
+    "forest": ("'", (72, 122, 60), 4),
+    "mountain": ("^", (132, 132, 132), 7),
+    "tall_grass": ("'", (94, 150, 70), 3),
+    "flower": ("*", (226, 122, 180), 8),
+    "wheat_plant_growing": ("'", (128, 186, 86), 3),
+    "wheat_plant": ("'", (208, 174, 64), 3),
+    "mossy_cobblestone": (".", (95, 120, 75), 6),
 }
 
 _LEGACY_UNUSED_DISPLAY_CHARS = {
@@ -70,7 +116,7 @@ _LEGACY_UNUSED_DISPLAY_CHARS = {
     "well": "O",
     "tilled_soil": "≈",
     "wheat_plant_growing": "i",
-    "wheat_plant_mature": "I",
+    "wheat_plant": "I",
     "fire_trap_active": "x",
 }
 
@@ -137,10 +183,67 @@ def _get_tile_char(tile):
     return chr(tile.char)
 
 
+def _format_world_clock(game_time):
+    day_length = max(1, int(DAY_LENGTH_TICKS))
+    tick = max(0, int(game_time))
+    day = tick // day_length
+    tick_in_day = tick % day_length
+    minute_of_day = int((tick_in_day / day_length) * 24 * 60)
+    hour = (minute_of_day // 60) % 24
+    minute = minute_of_day % 60
+    return f"Day {day}, {hour:02d}:{minute:02d}"
+
+
 def _tune_floor_colors(tile_key, fg_color, bg_color):
     if tile_key == "wood_floor":
         return _dim_color(fg_color, 0.72), _lighten(bg_color, 0.06)
     return fg_color, bg_color
+
+
+def _color_shift(color, amount):
+    return _clamp_color((color[0] + amount, color[1] + amount, color[2] + amount))
+
+
+def _visual_noise(world_x, world_y, local_x=0, local_y=0, salt=0):
+    value = (
+        (int(world_x) * 73856093)
+        ^ (int(world_y) * 19349663)
+        ^ (int(local_x) * 83492791)
+        ^ (int(local_y) * 2654435761)
+        ^ int(salt)
+    )
+    return value & 0xFFFFFFFF
+
+
+def _is_terrain_fill_tile(tile, tile_key):
+    if tile is None:
+        return False
+    if tile_key in TERRAIN_FILL_TILE_KEYS:
+        return True
+    lowered = tile.name.lower()
+    return any(term in lowered for term in ("floor", "plains", "dirt", "soil", "road", "water", "snow", "cobblestone"))
+
+
+def _draw_terrain_fill(console, rect, tile_key, glyph, *, fg, bg, world_x, world_y):
+    if rect is None:
+        return
+    x0, y0, x1, y1 = rect
+    if (x1 - x0 + 1) == 1 and (y1 - y0 + 1) == 1:
+        console.print(x=x0, y=y0, string=glyph, fg=fg, bg=bg)
+        return
+
+    accent, accent_fg, cadence = TERRAIN_ACCENTS.get(tile_key or "", (" ", fg, 99))
+    for draw_y in range(y0, y1 + 1):
+        for draw_x in range(x0, x1 + 1):
+            local_x = draw_x - x0
+            local_y = draw_y - y0
+            noise = _visual_noise(world_x, world_y, local_x, local_y, salt=17)
+            shade = ((noise % 5) - 2) * 3
+            cell_bg = _color_shift(bg, shade)
+            mark = " "
+            if cadence > 0 and noise % cadence == 0:
+                mark = accent
+            console.print(x=draw_x, y=draw_y, string=mark, fg=accent_fg, bg=cell_bg)
 
 
 def _is_groundlike_tile(tile, tile_key):
@@ -148,7 +251,7 @@ def _is_groundlike_tile(tile, tile_key):
         return False
     if tile_key in {
         "plains", "grass", "dirt", "road", "wood_floor", "water", "deep_water",
-        "forest", "mountain", "tilled_soil", "wheat_plant_growing", "wheat_plant_mature",
+        "forest", "mountain", "tilled_soil", "wheat_plant_growing", "wheat_plant",
         "fire_trap_active",
     }:
         return True
@@ -162,6 +265,11 @@ def _draw_world_tile(console, world, camera_x, camera_y, world_x, world_y, tile,
         return
     tile_key = _get_tile_key(tile)
     glyph = _get_tile_char(tile)
+    if _is_terrain_fill_tile(tile, tile_key):
+        _draw_terrain_fill(console, rect, tile_key, glyph, fg=fg_color, bg=bg_color, world_x=world_x, world_y=world_y)
+        return
+    if tile is not None and _draw_zoomed_sprite(console, world, rect, int(tile.char), fg=(255, 255, 255), bg=bg_color):
+        return
     if _is_groundlike_tile(tile, tile_key):
         _draw_zoomed_glyph(console, rect, glyph, fg=fg_color, bg=bg_color)
         return
@@ -236,6 +344,44 @@ def _draw_zoomed_glyph(console, rect, glyph, *, fg, bg=None):
             console.print(**kwargs)
 
 
+def _integer_zoom_for_rect(world, rect):
+    if rect is None:
+        return None
+    zoom = _get_zoom_factor(world)
+    integer_zoom = int(round(zoom))
+    if abs(zoom - integer_zoom) > 0.01 or integer_zoom not in ZOOMED_DAWNLIKE_LEVELS:
+        return None
+    x0, y0, x1, y1 = rect
+    if (x1 - x0 + 1) != integer_zoom or (y1 - y0 + 1) != integer_zoom:
+        return None
+    return integer_zoom
+
+
+def _draw_zoomed_sprite(console, world, rect, base_codepoint, *, fg, bg=None):
+    zoom = _integer_zoom_for_rect(world, rect)
+    if zoom is None:
+        return False
+    x0, y0, _, _ = rect
+    draw_calls = []
+    for offset_y in range(zoom):
+        for offset_x in range(zoom):
+            codepoint = zoomed_sprite_codepoint(base_codepoint, zoom, offset_x, offset_y)
+            if codepoint is None:
+                return False
+            kwargs = {
+                "x": x0 + offset_x,
+                "y": y0 + offset_y,
+                "string": chr(codepoint),
+                "fg": fg,
+            }
+            if bg is not None:
+                kwargs["bg"] = bg
+            draw_calls.append(kwargs)
+    for kwargs in draw_calls:
+        console.print(**kwargs)
+    return True
+
+
 def _screen_point_for_world(world, camera_x, camera_y, world_x, world_y):
     rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
     if rect is None:
@@ -263,10 +409,29 @@ def _draw_items(console, world, camera_x, camera_y):
         item_char = chr(char_val) if isinstance(char_val, int) else str(char_val)
         item_color = item_def.get("color", (255, 245, 160))
 
+        rect = _world_to_screen_rect(world, camera_x, camera_y, item_x, item_y)
+        if rect is not None and isinstance(char_val, int) and _draw_zoomed_sprite(console, world, rect, char_val, fg=(255, 255, 255)):
+            continue
+
         screen_point = _screen_point_for_world(world, camera_x, camera_y, item_x, item_y)
         if screen_point is not None:
             screen_x, screen_y = screen_point
             console.print(x=screen_x, y=screen_y, string=item_char, fg=item_color)
+
+def _draw_overlay_stamp(console, world, rect, overlay_codepoint, anchor_x, anchor_y, *, fg):
+    """Stamp a single overlay sprite cell nearest to the anchor within a zoomed entity rect."""
+    zoom = _integer_zoom_for_rect(world, rect)
+    if zoom is None or zoom < 2:
+        return False
+    x0, y0, _, _ = rect
+    ox = min(zoom - 1, int(anchor_x * zoom))
+    oy = min(zoom - 1, int(anchor_y * zoom))
+    sub_codepoint = zoomed_sprite_codepoint(overlay_codepoint, zoom, ox, oy)
+    if sub_codepoint is None:
+        return False
+    console.print(x=x0 + ox, y=y0 + oy, string=chr(sub_codepoint), fg=fg)
+    return True
+
 
 def _draw_entities(console, world, camera_x, camera_y):
     for entity in _iter_render_entities(world):
@@ -295,7 +460,26 @@ def _draw_entities(console, world, camera_x, camera_y):
             else:
                 fg = _ensure_entity_contrast(fg, cell_bg)
             screen_x, screen_y = screen_point
-            console.print(x=screen_x, y=screen_y, string=chr(get_entity_sprite(entity)), fg=fg)
+            sprite = get_entity_sprite(entity)
+            rect = _world_to_screen_rect(world, camera_x, camera_y, draw_x, draw_y)
+            sprite_fg = (180, 180, 180) if getattr(getattr(entity, "physical", None), "is_dead", False) else (255, 255, 255)
+            zoomed = False
+            if rect is not None and _draw_zoomed_sprite(console, world, rect, sprite, fg=sprite_fg):
+                zoomed = True
+
+            # Stamp equipment overlays on top of the base sprite
+            if not getattr(getattr(entity, "physical", None), "is_dead", False):
+                overlays = _get_equipment_overlays(entity)
+                if overlays and rect is not None:
+                    overlay_fg = (210, 210, 220)
+                    for overlay_codepoint, ax, ay, _az in overlays:
+                        if zoomed:
+                            _draw_overlay_stamp(console, world, rect, overlay_codepoint, ax, ay, fg=overlay_fg)
+                        else:
+                            console.print(x=screen_x, y=screen_y, string=chr(overlay_codepoint), fg=overlay_fg)
+
+            if not zoomed:
+                console.print(x=screen_x, y=screen_y, string=chr(sprite), fg=fg)
 
 def _get_entity_marker(entity, world=None):
     if getattr(getattr(entity, "physical", None), "is_dead", False):
@@ -940,10 +1124,7 @@ def _draw_status_panel_legacy(console, world):
     y = 2
 
     # --- Time & Season ---
-    day = world.game_time // (24 * 60)
-    hour = (world.game_time // 60) % 24
-    minute = world.game_time % 60
-    time_str = f"Day {day}, {hour:02d}:{minute:02d}"
+    time_str = _format_world_clock(world.game_time)
     season = world.seasons[world.current_season_index]
     weather = world.weather.replace('_', ' ').title()
 
@@ -1060,10 +1241,7 @@ def draw_status_panel(console, world, camera_x, camera_y):
     )
 
     y = 2
-    day = world.game_time // (24 * 60)
-    hour = (world.game_time // 60) % 24
-    minute = world.game_time % 60
-    time_str = f"Day {day}, {hour:02d}:{minute:02d}"
+    time_str = _format_world_clock(world.game_time)
     season = world.seasons[world.current_season_index]
     weather = world.weather.replace("_", " ").title()
     standing_on, focus_target = _get_focus_summary(world)

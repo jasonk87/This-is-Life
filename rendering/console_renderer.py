@@ -1088,8 +1088,35 @@ def _draw_chatter_panel(console, world, panel_y):
 def _light_radius_for_world(world):
     return max(3, int(getattr(world, "current_fov_radius", 15)))
 
+
+# Subtle per-channel color wash applied on top of the existing brightness
+# dimming in _apply_lighting_and_depth, keyed by world.current_light_level_name:
+# a cool/blue cast at night, a warm/orange cast at dawn and dusk. DAY and any
+# unrecognized light level name are left neutral (no tint).
+LIGHT_LEVEL_TINTS = {
+    "DAWN": (1.12, 1.0, 0.88),
+    "DUSK": (1.15, 0.95, 0.85),
+    "NIGHT": (0.85, 0.92, 1.15),
+    "PITCH BLACK": (0.78, 0.86, 1.22),
+}
+
+
+def _tint_for_light_level(color, light_level_name):
+    """Apply the time-of-day color wash for `light_level_name` to `color`.
+
+    Returns the color unchanged (clamped) for DAY or any light level name
+    without a configured tint, so this is safe to call unconditionally.
+    """
+    multipliers = LIGHT_LEVEL_TINTS.get(light_level_name)
+    if multipliers is None:
+        return _clamp_color(color)
+    r_mult, g_mult, b_mult = multipliers
+    return _clamp_color((color[0] * r_mult, color[1] * g_mult, color[2] * b_mult))
+
+
 def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     light_radius = _light_radius_for_world(world)
+    light_level_name = getattr(world, "current_light_level_name", "DAY")
     console_height = min(MAP_HEIGHT, getattr(console, "height", MAP_HEIGHT), console.bg.shape[0], console.fg.shape[0])
     console_width = min(MAP_WIDTH, getattr(console, "width", MAP_WIDTH), console.bg.shape[1], console.fg.shape[1])
 
@@ -1112,15 +1139,18 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
             falloff = max(0.28, 1.0 - max(0, dist - 1) / max(4, light_radius + 2))
             edge_falloff = 0.92 - (0.12 * max(x / max(1, MAP_WIDTH - 1), y / max(1, MAP_HEIGHT - 1)))
             light_strength = max(0.2, min(1.0, falloff * edge_falloff))
-            console.fg[y, x] = _dim_color(tuple(console.fg[y, x]), 0.65 + (0.45 * light_strength))
-            console.bg[y, x] = _dim_color(tuple(console.bg[y, x]), 0.55 + (0.5 * light_strength))
+            dimmed_fg = _dim_color(tuple(console.fg[y, x]), 0.65 + (0.45 * light_strength))
+            dimmed_bg = _dim_color(tuple(console.bg[y, x]), 0.55 + (0.5 * light_strength))
+            console.fg[y, x] = _tint_for_light_level(dimmed_fg, light_level_name)
+            console.bg[y, x] = _tint_for_light_level(dimmed_bg, light_level_name)
 
             if getattr(tile, "blocks_fov", False):
                 for shadow_dx, shadow_dy in ((1, 0), (0, 1), (1, 1)):
                     sx = x + shadow_dx
                     sy = y + shadow_dy
                     if 0 <= sx < console_width and 0 <= sy < console_height:
-                        console.bg[sy, sx] = _dim_color(tuple(console.bg[sy, sx]), 0.75)
+                        shadowed_bg = _dim_color(tuple(console.bg[sy, sx]), 0.75)
+                        console.bg[sy, sx] = _tint_for_light_level(shadowed_bg, light_level_name)
 
 def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
     for entity in itertools.chain(world.npcs, world.village_npcs):

@@ -1361,6 +1361,56 @@ class TestConsoleRendererLighting(unittest.TestCase):
         with patch("rendering.console_renderer.is_visible", return_value=True):
             console_renderer._apply_lighting_and_depth(console, world, 0, 0)
 
+    def test_tint_for_light_level_leaves_day_and_unknown_levels_unchanged(self):
+        self.assertEqual(console_renderer._tint_for_light_level((100, 150, 200), "DAY"), (100, 150, 200))
+        self.assertEqual(console_renderer._tint_for_light_level((100, 150, 200), "SOME_UNKNOWN_LEVEL"), (100, 150, 200))
+
+    def test_tint_for_light_level_casts_cool_at_night(self):
+        r, g, b = console_renderer._tint_for_light_level((200, 200, 200), "NIGHT")
+        self.assertLess(r, b)
+        r2, g2, b2 = console_renderer._tint_for_light_level((200, 200, 200), "PITCH BLACK")
+        self.assertLess(r2, b2)
+
+    def test_tint_for_light_level_casts_warm_at_dawn_and_dusk(self):
+        r, g, b = console_renderer._tint_for_light_level((200, 200, 200), "DAWN")
+        self.assertGreater(r, b)
+        r2, g2, b2 = console_renderer._tint_for_light_level((200, 200, 200), "DUSK")
+        self.assertGreater(r2, b2)
+
+    def _run_single_cell_lighting(self, light_level_name):
+        console = SimpleNamespace(
+            width=1,
+            height=1,
+            fg=np.full((1, 1, 3), 200, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 200, dtype=np.uint8),
+        )
+        world = SimpleNamespace(
+            player=SimpleNamespace(x=0, y=0),
+            current_light_level_name=light_level_name,
+            get_tile_at=lambda x, y: SimpleNamespace(blocks_fov=False),
+        )
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._apply_lighting_and_depth(console, world, 0, 0)
+        return tuple(console.fg[0, 0]), tuple(console.bg[0, 0])
+
+    def test_apply_lighting_and_depth_applies_night_tint_end_to_end(self):
+        day_fg, day_bg = self._run_single_cell_lighting("DAY")
+        night_fg, night_bg = self._run_single_cell_lighting("NIGHT")
+
+        # DAY applies no tint, so the uniform brightness dim keeps channels equal.
+        self.assertEqual(day_fg[0], day_fg[2])
+        # NIGHT casts a cool wash: blue ends up stronger than red on the same
+        # starting color, unlike the neutral DAY pass above.
+        self.assertLess(night_fg[0], night_fg[2])
+        self.assertLess(night_bg[0], night_bg[2])
+
+    def test_apply_lighting_and_depth_applies_dusk_tint_end_to_end(self):
+        dusk_fg, dusk_bg = self._run_single_cell_lighting("DUSK")
+
+        # DUSK casts a warm wash: red ends up stronger than blue.
+        self.assertGreater(dusk_fg[0], dusk_fg[2])
+        self.assertGreater(dusk_bg[0], dusk_bg[2])
+
 
 class TestConsoleRendererFocusBadge(unittest.TestCase):
     def test_focus_badge_does_not_pulse_plain_tile_focus(self):

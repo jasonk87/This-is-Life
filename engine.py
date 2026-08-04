@@ -336,6 +336,37 @@ class ProjectileEffect(VisualEffect):
         return self.traveled >= self.total_dist
 
 
+class HitFlashEffect(VisualEffect):
+    """Brief flashing marker stamped over an entity that was just hit.
+
+    This is a screen overlay rather than a perturbation of the entity's own
+    render position: entity draw coordinates are rounded to whole world
+    tiles (see World.update_animations / console_renderer._draw_entities),
+    so a true sub-tile "shake" of the sprite itself wouldn't be visible at
+    the current render granularity. Combining a flash color with a small
+    alternating cell offset here gets a comparable "hit" read (flash +
+    jitter) without touching entity movement/render-interpolation code.
+    """
+    effect_type = "hit_flash"
+
+    def __init__(self, x, y, color=(255, 60, 60), duration=0.28, magnitude=1):
+        self.x = float(x)
+        self.y = float(y)
+        self.color = color
+        self.duration = duration
+        self.magnitude = magnitude
+        self.elapsed = 0.0
+
+    def update(self, dt: float) -> bool:
+        self.elapsed += dt
+        return self.elapsed >= self.duration
+
+    def shake_offset(self) -> tuple[int, int]:
+        """Return a small alternating (dx, dy) screen-cell offset for 'shake'."""
+        step = int(self.elapsed * 30)
+        return (self.magnitude if step % 2 == 0 else -self.magnitude, 0)
+
+
 COMPLETED_WORK_SUB_TASK_COMMANDS: dict[str, CompletedWorkSubTaskCommand] = create_completed_work_sub_task_commands()
 NPC_WORK_TOOL_TYPES = {
     "chop_trees": "axe",
@@ -480,6 +511,7 @@ class Player:
 
         if world_ref:
             world_ref.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 0, 0)))
+            world_ref.visual_effects.append(HitFlashEffect(self.x, self.y))
 
         if self.combat.hp <= 0 and world_ref:
             world_ref.game_state = "PLAYER_DEAD"

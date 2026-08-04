@@ -888,8 +888,9 @@ class NPC:
 
         # Add visual effect if world is passed
         if world:
-            from engine import FloatingTextEffect
+            from engine import FloatingTextEffect, HitFlashEffect
             world.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 50, 50)))
+            world.visual_effects.append(HitFlashEffect(self.x, self.y))
 
         if self.combat.hp <= 0:
             self.combat.hp = 0

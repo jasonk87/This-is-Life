@@ -722,6 +722,65 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
         self.assertIn("12", rendered)
         self.assertIn("*", rendered)
 
+    def test_hit_flash_effect_expires_after_its_duration(self):
+        effect = engine.HitFlashEffect(3, 4, duration=0.28)
+
+        self.assertEqual(effect.effect_type, "hit_flash")
+        self.assertFalse(effect.update(0.1))
+        self.assertFalse(effect.update(0.1))
+        self.assertTrue(effect.update(0.2))
+
+    def test_hit_flash_effect_alternates_a_small_screen_offset(self):
+        effect = engine.HitFlashEffect(3, 4, magnitude=1)
+
+        offsets = set()
+        for _ in range(6):
+            offsets.add(effect.shake_offset())
+            effect.update(1 / 30)
+
+        self.assertEqual(offsets, {(1, 0), (-1, 0)})
+
+    def test_draw_visual_effect_renders_hit_flash_with_shake_offset(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        effect = engine.HitFlashEffect(5, 6, color=(255, 60, 60))
+
+        console_renderer._draw_visual_effect(console, world, effect, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 1)
+        call = console.print_calls[0]
+        self.assertEqual(call["string"], "*")
+        self.assertEqual(call["fg"], (255, 60, 60))
+        # Base position is (5, 6); shake_offset() at elapsed=0 is (magnitude, 0).
+        self.assertEqual((call["x"], call["y"]), (6, 6))
+
+    def test_player_take_damage_triggers_hit_flash_alongside_floating_text(self):
+        player = engine.Player(2, 3)
+        world = SimpleNamespace(visual_effects=[], add_message_to_chat_log=lambda *a, **k: None)
+
+        player.take_damage(5, world=world)
+
+        effect_types = [getattr(e, "effect_type", None) for e in world.visual_effects]
+        self.assertIn("floating_text", effect_types)
+        self.assertIn("hit_flash", effect_types)
+
+    def test_npc_take_damage_triggers_hit_flash_alongside_floating_text(self):
+        npc = engine.NPC(4, 5, name="Target Dummy")
+        world = SimpleNamespace(visual_effects=[], add_message_to_chat_log=lambda *a, **k: None)
+
+        npc.take_damage(5, world)
+
+        effect_types = [getattr(e, "effect_type", None) for e in world.visual_effects]
+        self.assertIn("floating_text", effect_types)
+        self.assertIn("hit_flash", effect_types)
+
 
 class TestConsoleRendererEntities(unittest.TestCase):
     def test_format_world_clock_uses_configured_day_length(self):

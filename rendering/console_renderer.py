@@ -1337,6 +1337,15 @@ def _draw_visual_effect(console, world, effect, camera_x, camera_y):
         console.print(x=draw_x, y=draw_y, string=getattr(effect, "text", ""), fg=getattr(effect, "color", (255, 255, 255)))
     elif effect_type == "projectile":
         console.print(x=draw_x, y=draw_y, string=getattr(effect, "char", "*"), fg=getattr(effect, "color", (255, 255, 0)))
+    elif effect_type == "hit_flash":
+        shake_fn = getattr(effect, "shake_offset", None)
+        offset_x, offset_y = shake_fn() if shake_fn else (0, 0)
+        console.print(
+            x=draw_x + offset_x,
+            y=draw_y + offset_y,
+            string="*",
+            fg=getattr(effect, "color", (255, 60, 60)),
+        )
 
 def draw(console, world, camera_x, camera_y):
     """Draws the main game screen."""

@@ -4522,8 +4522,25 @@ class World:
 
         # 1. Consume from NPC inventory (if defined)
         consumes_from_npc_def = sub_task_data.get("consumes_item_from_npc_inventory")
+        consumes_from_building_def = sub_task_data.get("consumes_item_from_workplace")
         deposits_to_building_def = sub_task_data.get("deposits_item_to_workplace", {}) or {}
         transferred_to_building: dict[str, int] = {}
+
+        # Validate every required consumption up front, before mutating either
+        # side, so this function commits atomically. Previously, step 1 below
+        # could consume items from the NPC's personal inventory and only then
+        # discover in step 2 that the workplace didn't have enough of what the
+        # task also needed, leaving the NPC's items gone with nothing produced
+        # or deposited in return (a partial-transaction / item-loss bug).
+        if consumes_from_npc_def:
+            for item_key, quantity_needed in consumes_from_npc_def.items():
+                if npc.economic.npc_inventory.get(item_key, 0) < quantity_needed:
+                    return False
+        if consumes_from_building_def:
+            for item_key, quantity_needed in consumes_from_building_def.items():
+                if work_building.building_inventory.get(item_key, 0) < quantity_needed:
+                    return False
+
         if consumes_from_npc_def:
             for item_key, quantity_needed in consumes_from_npc_def.items():
                 current_npc_qty = npc.economic.npc_inventory.get(item_key, 0)
@@ -4568,12 +4585,16 @@ class World:
                     consumption_successful = False
                     break # Stop further processing for this sub-task if NPC consumption fails
             if not consumption_successful:
-                return # Early exit if NPC couldn't provide required items from its inventory
+                return False # Early exit if NPC couldn't provide required items from its inventory
 
         # 2. Consume from Workplace inventory (if defined)
-        # This should only happen if NPC consumption (if any) was successful
+        # This should only happen if NPC consumption (if any) was successful.
+        # In the normal case this can no longer fail here: the up-front
+        # validation above already confirmed the workplace has enough of
+        # everything consumes_from_building_def needs before step 1 touched
+        # the NPC's inventory. This block (and its own rollback-free early
+        # return) is kept as a defensive fallback, not the primary guarantee.
         if consumption_successful:
-            consumes_from_building_def = sub_task_data.get("consumes_item_from_workplace")
             if consumes_from_building_def:
                 for item_key, quantity_needed in consumes_from_building_def.items():
                     current_building_qty = work_building.building_inventory.get(item_key, 0)
@@ -4587,10 +4608,13 @@ class World:
                         consumption_successful = False
                         break # Stop further processing if building consumption fails
                 if not consumption_successful:
-                    # TODO: What if NPC items were consumed but building items were not? Rollback NPC consumption?
-                    # For now, if building consumption fails, the process stops, potentially leaving NPC items consumed.
-                    # This implies sub-tasks should be designed carefully (e.g., consume from NPC then deposit to building is one flow,
-                    # consume from building to produce to building is another).
+                    # Resolved: this used to be reachable whenever the workplace
+                    # ran short after NPC items were already consumed in step 1,
+                    # destroying the NPC's items with nothing produced/deposited
+                    # in return. The up-front validation at the top of this
+                    # function now checks both sides before either is touched,
+                    # so this path should be unreachable in normal operation;
+                    # it remains only as a defensive fallback.
                     return False # Indicate consumption failed
 
         # 3. Deposit items to Workplace (if defined, and all consumptions were successful)

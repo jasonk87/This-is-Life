@@ -1310,6 +1310,159 @@ class TestConsoleRendererEntities(unittest.TestCase):
 
         self.assertEqual(console.print_calls, [])
 
+    def test_mini_health_bar_fills_fully_at_full_health(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 0, 0, 5, 10, 10)
+
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual(console.print_calls[0]["string"], "#####")
+
+    def test_mini_health_bar_empties_fully_at_zero_health(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 0, 0, 5, 0, 10)
+
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual(console.print_calls[0]["string"], "-----")
+
+    def test_mini_health_bar_shows_at_least_one_filled_cell_when_barely_alive(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 0, 0, 5, 1, 100)
+
+        fill_calls = [c for c in console.print_calls if "#" in c["string"]]
+        self.assertEqual(fill_calls[0]["string"], "#")
+
+    def test_mini_health_bar_splits_proportionally_for_partial_health(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 2, 3, 5, 5, 10)
+
+        calls_by_string_prefix = {c["string"][0]: c for c in console.print_calls}
+        self.assertEqual(calls_by_string_prefix["#"]["string"], "##")
+        self.assertEqual(calls_by_string_prefix["#"]["x"], 2)
+        self.assertEqual(calls_by_string_prefix["-"]["string"], "---")
+        self.assertEqual(calls_by_string_prefix["-"]["x"], 4)
+
+    def _make_combat_npc(self, x, y, *, hostile=False, hp=8, max_hp=10, dead=False):
+        return SimpleNamespace(
+            x=x,
+            y=y,
+            is_sleeping=False,
+            physical=SimpleNamespace(is_dead=dead),
+            combat=SimpleNamespace(is_hostile_to_player=hostile, hp=hp, max_hp=max_hp),
+        )
+
+    def test_draw_entity_health_bars_draws_for_hostile_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=4, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertTrue(len(console.print_calls) >= 1)
+
+    def test_draw_entity_health_bars_draws_for_targeted_non_hostile_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=False, hp=6, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus={"entity": npc})
+
+        self.assertTrue(len(console.print_calls) >= 1)
+
+    def test_draw_entity_health_bars_skips_neutral_untargeted_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=False, hp=6, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_entity_health_bars_skips_dead_hostile_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=0, max_hp=10, dead=True)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_entity_health_bars_skips_cells_outside_visibility(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=4, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=False):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertEqual(console.print_calls, [])
+
     def test_draw_orders_entities_after_world_lighting_and_before_overlays(self):
         class FakeConsole:
             def __init__(self):

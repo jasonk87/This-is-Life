@@ -841,6 +841,26 @@ def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_c
         console.print(x=x + len(label) + 1 + filled_width, y=y, string="-" * (safe_width - filled_width), fg=empty_color)
     console.print(x=x + width - len(f"{value}/{maximum}"), y=y, string=f"{value}/{maximum}", fg=(255, 255, 255))
 
+def _draw_mini_health_bar(console, x, y, width, value, maximum, fill_color=(255, 90, 90), empty_color=(70, 25, 25)):
+    """Draw a compact, label-less HP bar for overhead display above an
+    entity in the world view.
+
+    Unlike _draw_meter (used in the status panel, where there's room for a
+    text label and a numeric "value/max" readout), this is stamped directly
+    above a tile-sized sprite, so it's just a row of filled/empty cells.
+    """
+    maximum = max(1, maximum)
+    ratio = max(0.0, min(1.0, value / maximum))
+    filled_width = int(round(width * ratio))
+    if value > 0:
+        filled_width = max(1, filled_width)  # any remaining HP shows at least a sliver
+    filled_width = min(width, filled_width)
+    if filled_width > 0:
+        console.print(x=x, y=y, string="#" * filled_width, fg=fill_color)
+    if filled_width < width:
+        console.print(x=x + filled_width, y=y, string="-" * (width - filled_width), fg=empty_color)
+
+
 def _pulse(world, speed=14.0, low=0.55, high=1.0, phase=0.0):
     normalized = (math.sin((world.game_time / speed) + phase) + 1.0) * 0.5
     return low + (high - low) * normalized
@@ -1169,6 +1189,41 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
         if screen_point is not None:
             screen_x, screen_y = screen_point
             console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
+
+HEALTH_BAR_WIDTH = 5
+
+
+def _draw_entity_health_bars(console, world, camera_x, camera_y, focus=None):
+    """Draw a compact HP bar above any NPC that's hostile to the player or
+    is the player's current focus/interaction target, so combat state is
+    visible directly in the world view rather than only in the side panel.
+    """
+    focused_entity = focus.get("entity") if isinstance(focus, dict) else None
+    for entity in itertools.chain(world.npcs, world.village_npcs):
+        if getattr(getattr(entity, "physical", None), "is_dead", False):
+            continue
+        combat = getattr(entity, "combat", None)
+        if combat is None:
+            continue
+        is_hostile = getattr(combat, "is_hostile_to_player", False)
+        is_targeted = focused_entity is entity
+        if not (is_hostile or is_targeted):
+            continue
+
+        max_hp = getattr(combat, "max_hp", None)
+        hp = getattr(combat, "hp", None)
+        if not max_hp or hp is None:
+            continue
+
+        bar_world_y = entity.y - 1
+        if not _is_entity_overlay_visible(world, entity, bar_world_y):
+            continue
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, bar_world_y)
+        if screen_point is None:
+            continue
+        screen_x, screen_y = screen_point
+        bar_x = screen_x - (HEALTH_BAR_WIDTH // 2)
+        _draw_mini_health_bar(console, bar_x, screen_y, HEALTH_BAR_WIDTH, hp, max_hp)
 
 def _draw_social_indicators(console, world, camera_x, camera_y, max_markers=8):
     marked = 0
@@ -1560,6 +1615,7 @@ def draw(console, world, camera_x, camera_y):
         _draw_visual_effect(console, world, effect, camera_x, camera_y)
 
     focus = _get_focus_target(world, camera_x, camera_y)
+    _draw_entity_health_bars(console, world, camera_x, camera_y, focus)
     _draw_entity_markers(console, world, camera_x, camera_y, focus)
     _draw_world_markers(console, world, camera_x, camera_y)
     _draw_ambient_speech(console, world, camera_x, camera_y)

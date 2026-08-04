@@ -14,7 +14,7 @@ from data.tiles import TILE_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from data.environment import WEATHER_DEFINITIONS
-from data.dawnlike import get_entity_sprite, _get_equipment_overlays
+from data.dawnlike import get_entity_sprite, _get_equipment_overlays, ITEM_SPRITES
 from entities.animal import Animal
 from engine import Player
 from rendering.sprite_atlas import ZOOMED_DAWNLIKE_LEVELS, zoomed_sprite_codepoint
@@ -430,6 +430,29 @@ def _draw_overlay_stamp(console, world, rect, overlay_codepoint, anchor_x, ancho
     if sub_codepoint is None:
         return False
     console.print(x=x0 + ox, y=y0 + oy, string=chr(sub_codepoint), fg=fg)
+    return True
+
+
+def _get_item_icon_codepoint(item_key):
+    """Return the DawnLike codepoint for an item's menu icon, if catalogued."""
+    if not item_key:
+        return None
+    return ITEM_SPRITES.get(item_key)
+
+
+def _draw_item_icon(console, x, y, item_key, *, fg=(255, 255, 255)):
+    """Draw a single unzoomed item-sprite icon at a console cell for menu UI.
+
+    Menu screens are drawn at native 1x console scale (not the zoomed world
+    camera), so this stamps the base DawnLike codepoint directly instead of
+    going through the zoomed sprite-splitting path used for the map.
+    Returns True if an icon was drawn, False if this item has no catalogued
+    sprite (callers should fall back to text-only layout in that case).
+    """
+    codepoint = _get_item_icon_codepoint(item_key)
+    if codepoint is None:
+        return False
+    console.print(x=x, y=y, string=chr(codepoint), fg=fg)
     return True
 
 
@@ -1607,7 +1630,10 @@ def draw_crafting_menu(console, world):
             color = (255, 255, 255) if can_craft else (128, 128, 128)
             if list_index == selected_index:
                 color = (0, 255, 255)
-            console.print(x=x + 2, y=y + 1 + i, string=item_name, fg=color)
+            row_y = y + 1 + i
+            icon_drawn = _draw_item_icon(console, x + 2, row_y, recipe_key)
+            text_x = x + 4 if icon_drawn else x + 2
+            console.print(x=text_x, y=row_y, string=item_name, fg=color)
 
     # Display selected recipe details
     if 0 <= selected_index < num_recipes:
@@ -2144,7 +2170,7 @@ def draw_inventory_menu(console, world):
         item_name = item_def.get("name", item_key)
         tags = item_def.get("item_type_tags", [])
 
-        entry = f"{item_name} x{quantity}"
+        entry = (f"{item_name} x{quantity}", item_key)
 
         if "armor" in tags or "weapon" in tags:
             categories["Weapons/Armor"].append(entry)
@@ -2155,20 +2181,22 @@ def draw_inventory_menu(console, world):
         else:
             categories["Miscellaneous"].append(entry)
 
-    # Build the flattened list of lines to draw
+    # Build the flattened list of (text, item_key) lines to draw. item_key is
+    # None for headers/blank/money lines, which have no icon; the icon itself
+    # provides the visual indent for item lines, so no leading spaces needed.
     lines = []
-    lines.append(f"Money: {world.player.economic.money} coins")
-    lines.append("")
+    lines.append((f"Money: {world.player.economic.money} coins", None))
+    lines.append(("", None))
 
     for cat_name, items in categories.items():
         if items:
-            lines.append(f"--- {cat_name} ---")
-            for item_line in items:
-                lines.append(f"  {item_line}")
-            lines.append("")
+            lines.append((f"--- {cat_name} ---", None))
+            for item_text, item_key in items:
+                lines.append((item_text, item_key))
+            lines.append(("", None))
 
     if not lines:
-        lines.append("Your inventory is empty.")
+        lines.append(("Your inventory is empty.", None))
 
     # Implement scrolling
     max_lines_to_display = menu_height - 4
@@ -2190,13 +2218,17 @@ def draw_inventory_menu(console, world):
     for i in range(max_lines_to_display):
         list_index = scroll_offset + i
         if list_index < len(lines):
-            line_text = lines[list_index]
+            line_text, item_key = lines[list_index]
             fg_color = (255, 255, 255)
             if line_text.startswith("--- "):
                 fg_color = (255, 215, 0)
             elif line_text.startswith("Money:"):
                 fg_color = (150, 255, 150)
-            console.print(x=x + 2, y=y + 2 + i, string=line_text[:menu_width-4], fg=fg_color)
+            row_y = y + 2 + i
+            icon_drawn = item_key is not None and _draw_item_icon(console, x + 2, row_y, item_key)
+            text_x = x + 4 if icon_drawn else x + 2
+            max_text_width = (menu_width - 6) if icon_drawn else (menu_width - 4)
+            console.print(x=text_x, y=row_y, string=line_text[:max_text_width], fg=fg_color)
 
     # Draw scrollbar if needed
     if len(lines) > max_lines_to_display:
@@ -2234,10 +2266,14 @@ def draw_trade_menu(console, world):
         item_key, quantity, price = items[item_index]
         item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
         color = (0, 255, 255) if item_index == selected_index else (255, 255, 255)
+        row_y = y + 5 + row
+        icon_drawn = _draw_item_icon(console, x + 2, row_y, item_key)
+        text_x = x + 4 if icon_drawn else x + 2
+        name_width = 26 if icon_drawn else 28
         console.print(
-            x=x + 2,
-            y=y + 5 + row,
-            string=f"{item_name[:28]:28} x{quantity:<3} {price:>4}g",
+            x=text_x,
+            y=row_y,
+            string=f"{item_name[:name_width]:{name_width}} x{quantity:<3} {price:>4}g",
             fg=color,
         )
 

@@ -1675,3 +1675,102 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.assertEqual(npc.social.title, "the Bold")
         self.assertFalse(hasattr(npc, "title"))
+
+
+class TestMenuItemIcons(unittest.TestCase):
+    """Item sprite icons wired into the inventory/trade/crafting menu screens."""
+
+    class FakeConsole:
+        def __init__(self):
+            self.print_calls = []
+
+        def draw_frame(self, *args, **kwargs):
+            pass
+
+        def draw_rect(self, *args, **kwargs):
+            pass
+
+        def print(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def print_box(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+    def test_get_item_icon_codepoint_returns_none_for_unknown_item(self):
+        self.assertIsNone(console_renderer._get_item_icon_codepoint(None))
+        self.assertIsNone(console_renderer._get_item_icon_codepoint("not_a_real_item"))
+
+    def test_get_item_icon_codepoint_returns_catalogued_sprite(self):
+        from data.dawnlike import ITEM_SPRITES
+
+        self.assertEqual(
+            console_renderer._get_item_icon_codepoint("healing_salve"),
+            ITEM_SPRITES["healing_salve"],
+        )
+
+    def test_draw_item_icon_draws_for_known_item_and_skips_unknown(self):
+        console = self.FakeConsole()
+
+        drawn = console_renderer._draw_item_icon(console, 3, 4, "healing_salve")
+        self.assertTrue(drawn)
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (3, 4))
+
+        console.print_calls.clear()
+        skipped = console_renderer._draw_item_icon(console, 3, 4, "not_a_real_item")
+        self.assertFalse(skipped)
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_inventory_menu_draws_icon_next_to_known_item(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            player=SimpleNamespace(
+                economic=SimpleNamespace(
+                    inventory=[{"key": "healing_salve", "quantity": 2}],
+                    money=10,
+                )
+            ),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)
+
+        from data.dawnlike import ITEM_SPRITES
+
+        icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["healing_salve"])]
+        self.assertEqual(len(icon_calls), 1)
+        text_calls = [c for c in console.print_calls if "Healing Salve" in c.get("string", "")]
+        self.assertEqual(len(text_calls), 1)
+        # Icon sits two columns left of the text it labels.
+        self.assertEqual(icon_calls[0]["y"], text_calls[0]["y"])
+        self.assertEqual(text_calls[0]["x"] - icon_calls[0]["x"], 2)
+
+    def test_draw_trade_menu_draws_icon_next_to_item_row(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            trade_ui_npc_target=SimpleNamespace(name="Merchant Sam"),
+            trade_ui_player_selling=False,
+            trade_ui_merchant_inventory_snapshot=[("rusty_sword", 1, 25)],
+            trade_ui_merchant_item_index=0,
+        )
+
+        console_renderer.draw_trade_menu(console, world)
+
+        from data.dawnlike import ITEM_SPRITES
+
+        icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["rusty_sword"])]
+        self.assertEqual(len(icon_calls), 1)
+
+    def test_draw_crafting_menu_draws_icon_next_to_recipe(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            crafting_menu_context={"all_recipes": ["healing_salve"], "selected_recipe_index": 0, "scroll_offset": 0},
+            player_can_craft=lambda key: True,
+        )
+
+        console_renderer.draw_crafting_menu(console, world)
+
+        from data.dawnlike import ITEM_SPRITES
+
+        icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["healing_salve"])]
+        self.assertEqual(len(icon_calls), 1)

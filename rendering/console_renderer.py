@@ -456,6 +456,52 @@ def _draw_item_icon(console, x, y, item_key, *, fg=(255, 255, 255)):
     return True
 
 
+QUALITY_ORDER = ("Poor", "Normal", "Fine", "Masterwork")
+QUALITY_TEXT_COLORS = {
+    "Poor": (150, 150, 150),
+    "Normal": (255, 255, 255),
+    "Fine": (110, 220, 130),
+    "Masterwork": (255, 195, 60),
+}
+
+
+def _quality_text_color(quality):
+    """Return the display color for an item's quality tier, defaulting to
+    the Normal-tier color for unrecognized or missing values."""
+    return QUALITY_TEXT_COLORS.get(quality, QUALITY_TEXT_COLORS["Normal"])
+
+
+def _get_trade_row_item_reference(world, item_key, *, selling):
+    """Best-effort lookup of a representative ItemReference for a trade row.
+
+    Used only for quality-aware name/color display - never mutates state.
+    The trade snapshot itself (built in engine.py) intentionally still
+    aggregates by raw item_key/quantity/price; reworking that into
+    quality-aware stacks would change trade mechanics (separate prices per
+    quality tier, buy/sell indexing) rather than just how a row is drawn,
+    so this only reaches into the underlying inventory to borrow one
+    instance's quality/name for display.
+    """
+    if selling:
+        inventory = getattr(getattr(world.player, "economic", None), "inventory", None)
+        return inventory.get_item_reference(item_key) if inventory is not None else None
+
+    npc_target = getattr(world, "trade_ui_npc_target", None)
+    if npc_target is None:
+        return None
+    npc_inventory = getattr(getattr(npc_target, "economic", None), "npc_inventory", None)
+    if npc_inventory is not None:
+        ref = npc_inventory.get_item_reference(item_key)
+        if ref is not None:
+            return ref
+    building_id = getattr(getattr(npc_target, "schedule", None), "work_building_id", None)
+    building = world.buildings_by_id.get(building_id) if building_id else None
+    building_inventory = getattr(building, "building_inventory", None)
+    if building_inventory is not None:
+        return building_inventory.get_item_reference(item_key)
+    return None
+
+
 def _draw_entities(console, world, camera_x, camera_y):
     for entity in _iter_render_entities(world):
         if isinstance(entity, Player) and entity.state.is_riding:
@@ -1250,10 +1296,10 @@ def draw_status_panel(console, world, camera_x, camera_y):
         if quest["type"] == "fetch":
             item_key = quest["item_to_fetch_key"]
             req = quest["item_fetch_count"]
-            curr = 0
-            for item in world.player.economic.inventory:
-                if item["key"] == item_key:
-                    curr += item.get("quantity", 1)
+            # world.player.economic.inventory is an Inventory (dict of
+            # item_key -> total count), so a plain get() already gives the
+            # aggregate quantity - no need to iterate instances here.
+            curr = world.player.economic.inventory.get(item_key, 0)
 
             color = (0, 255, 0) if curr >= req else (220, 220, 220)
             console.print(x=panel_x + 2, y=y, string=f"Fetch {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)}: {curr}/{req}", fg=color)
@@ -2159,18 +2205,35 @@ def draw_inventory_menu(console, world):
         "Miscellaneous": []
     }
 
-    display_inventory = {}
-    for item in world.player.economic.inventory:
-        key = item["key"]
-        qty = item.get("quantity", 1)
-        display_inventory[key] = display_inventory.get(key, 0) + qty
+    # Group individual item instances by (item_key, quality, title) instead
+    # of by raw item_key alone. world.player.economic.inventory is an
+    # Inventory (dict of item_key -> total count) backed by per-instance
+    # ItemReference objects; grouping only by item_key would silently merge
+    # different quality tiers (and differently-titled unique items, e.g.
+    # written books) into one line and lose that info entirely.
+    inventory = world.player.economic.inventory
+    grouped = {}
+    group_order = []
+    for item_key in list(inventory.keys()):
+        for item_ref in inventory.iter_item_references(item_key):
+            group_key = (item_key, item_ref.quality, item_ref.title)
+            if group_key not in grouped:
+                grouped[group_key] = [item_ref, 0]
+                group_order.append(group_key)
+            grouped[group_key][1] += 1
 
-    for item_key, quantity in sorted(display_inventory.items()):
+    def _quality_sort_rank(quality):
+        return QUALITY_ORDER.index(quality) if quality in QUALITY_ORDER else len(QUALITY_ORDER)
+
+    group_order.sort(key=lambda k: (k[0], _quality_sort_rank(k[1]), k[2] or ""))
+
+    for group_key in group_order:
+        item_key, quality, _title = group_key
+        item_ref, quantity = grouped[group_key]
         item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
-        item_name = item_def.get("name", item_key)
         tags = item_def.get("item_type_tags", [])
 
-        entry = (f"{item_name} x{quantity}", item_key)
+        entry = (f"{item_ref.name} x{quantity}", item_key, quality)
 
         if "armor" in tags or "weapon" in tags:
             categories["Weapons/Armor"].append(entry)
@@ -2181,22 +2244,23 @@ def draw_inventory_menu(console, world):
         else:
             categories["Miscellaneous"].append(entry)
 
-    # Build the flattened list of (text, item_key) lines to draw. item_key is
-    # None for headers/blank/money lines, which have no icon; the icon itself
-    # provides the visual indent for item lines, so no leading spaces needed.
+    # Build the flattened list of (text, item_key, quality) lines to draw.
+    # item_key/quality are None for headers/blank/money lines, which have no
+    # icon and use the default text color; the icon itself provides the
+    # visual indent for item lines, so no leading spaces needed.
     lines = []
-    lines.append((f"Money: {world.player.economic.money} coins", None))
-    lines.append(("", None))
+    lines.append((f"Money: {world.player.economic.money} coins", None, None))
+    lines.append(("", None, None))
 
     for cat_name, items in categories.items():
         if items:
-            lines.append((f"--- {cat_name} ---", None))
-            for item_text, item_key in items:
-                lines.append((item_text, item_key))
-            lines.append(("", None))
+            lines.append((f"--- {cat_name} ---", None, None))
+            for item_text, item_key, quality in items:
+                lines.append((item_text, item_key, quality))
+            lines.append(("", None, None))
 
     if not lines:
-        lines.append(("Your inventory is empty.", None))
+        lines.append(("Your inventory is empty.", None, None))
 
     # Implement scrolling
     max_lines_to_display = menu_height - 4
@@ -2218,12 +2282,14 @@ def draw_inventory_menu(console, world):
     for i in range(max_lines_to_display):
         list_index = scroll_offset + i
         if list_index < len(lines):
-            line_text, item_key = lines[list_index]
+            line_text, item_key, quality = lines[list_index]
             fg_color = (255, 255, 255)
             if line_text.startswith("--- "):
                 fg_color = (255, 215, 0)
             elif line_text.startswith("Money:"):
                 fg_color = (150, 255, 150)
+            elif quality is not None:
+                fg_color = _quality_text_color(quality)
             row_y = y + 2 + i
             icon_drawn = item_key is not None and _draw_item_icon(console, x + 2, row_y, item_key)
             text_x = x + 4 if icon_drawn else x + 2
@@ -2264,8 +2330,17 @@ def draw_trade_menu(console, world):
             break
 
         item_key, quantity, price = items[item_index]
-        item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-        color = (0, 255, 255) if item_index == selected_index else (255, 255, 255)
+        item_ref = _get_trade_row_item_reference(world, item_key, selling=world.trade_ui_player_selling)
+        if item_ref is not None:
+            item_name = item_ref.name
+        else:
+            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+        if item_index == selected_index:
+            color = (0, 255, 255)
+        elif item_ref is not None:
+            color = _quality_text_color(item_ref.quality)
+        else:
+            color = (255, 255, 255)
         row_y = y + 5 + row
         icon_drawn = _draw_item_icon(console, x + 2, row_y, item_key)
         text_x = x + 4 if icon_drawn else x + 2
@@ -2419,11 +2494,10 @@ def draw_quest_menu(console, world):
             item_name = selected_quest["item_to_fetch_key"].replace("_", " ").title()
             count = selected_quest["item_fetch_count"]
 
-            # Check player inventory for progress display
-            current_count = 0
-            for item in world.player.economic.inventory:
-                if item["key"] == selected_quest["item_to_fetch_key"]:
-                    current_count += item.get("quantity", 1)
+            # Check player inventory for progress display. inventory is an
+            # Inventory (dict of item_key -> total count), so get() already
+            # gives the aggregate quantity - no need to iterate instances.
+            current_count = world.player.economic.inventory.get(selected_quest["item_to_fetch_key"], 0)
 
             progress_str = f"- Fetch {item_name}: {current_count}/{count}"
             color = (0, 255, 0) if current_count >= count else (255, 255, 255)

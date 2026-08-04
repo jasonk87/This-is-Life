@@ -1680,6 +1680,19 @@ class TestDialogueStateRegression(unittest.TestCase):
 class TestMenuItemIcons(unittest.TestCase):
     """Item sprite icons wired into the inventory/trade/crafting menu screens."""
 
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        self.real_world = World(seed=17)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
     class FakeConsole:
         def __init__(self):
             self.print_calls = []
@@ -1695,6 +1708,9 @@ class TestMenuItemIcons(unittest.TestCase):
 
         def print_box(self, **kwargs):
             self.print_calls.append(kwargs)
+
+        def get_height_rect(self, **kwargs):
+            return 1
 
     def test_get_item_icon_codepoint_returns_none_for_unknown_item(self):
         self.assertIsNone(console_renderer._get_item_icon_codepoint(None))
@@ -1722,11 +1738,15 @@ class TestMenuItemIcons(unittest.TestCase):
         self.assertEqual(console.print_calls, [])
 
     def test_draw_inventory_menu_draws_icon_next_to_known_item(self):
+        from entities.items import Inventory
+
         console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 2)
         world = SimpleNamespace(
             player=SimpleNamespace(
                 economic=SimpleNamespace(
-                    inventory=[{"key": "healing_salve", "quantity": 2}],
+                    inventory=inventory,
                     money=10,
                 )
             ),
@@ -1745,6 +1765,62 @@ class TestMenuItemIcons(unittest.TestCase):
         self.assertEqual(icon_calls[0]["y"], text_calls[0]["y"])
         self.assertEqual(text_calls[0]["x"] - icon_calls[0]["x"], 2)
 
+    def test_draw_inventory_menu_uses_real_inventory_object_not_list_of_dicts(self):
+        """Regression test: world.player.economic.inventory is an
+        entities.items.Inventory (a dict subclass backed by per-instance
+        ItemReference stacks), not a list of {"key", "quantity"} dicts.
+        Iterating it directly used to raise TypeError as soon as the menu
+        had any items in it."""
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 1)
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(inventory=inventory, money=0)),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)  # must not raise
+
+    def test_draw_inventory_menu_shows_quality_prefixed_name_and_color(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 1, quality="Masterwork")
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(inventory=inventory, money=0)),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)
+
+        matches = [c for c in console.print_calls if "Masterwork Healing Salve" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Masterwork"])
+
+    def test_draw_inventory_menu_keeps_different_qualities_as_separate_lines(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 2, quality="Fine")
+        inventory.add_item("healing_salve", 1, quality="Poor")
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(inventory=inventory, money=0)),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)
+
+        fine_lines = [c for c in console.print_calls if c.get("string", "").startswith("Fine Healing Salve x2")]
+        poor_lines = [c for c in console.print_calls if c.get("string", "").startswith("Poor Healing Salve x1")]
+        self.assertEqual(len(fine_lines), 1)
+        self.assertEqual(len(poor_lines), 1)
+        self.assertEqual(fine_lines[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Fine"])
+        self.assertEqual(poor_lines[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Poor"])
+
     def test_draw_trade_menu_draws_icon_next_to_item_row(self):
         console = self.FakeConsole()
         world = SimpleNamespace(
@@ -1760,6 +1836,74 @@ class TestMenuItemIcons(unittest.TestCase):
 
         icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["rusty_sword"])]
         self.assertEqual(len(icon_calls), 1)
+
+    def test_draw_trade_menu_shows_quality_prefixed_name_and_color_for_unselected_row(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        npc_inventory = Inventory()
+        npc_inventory.add_item("rusty_sword", 1, quality="Fine")
+        world = SimpleNamespace(
+            trade_ui_npc_target=SimpleNamespace(
+                name="Merchant Sam",
+                economic=SimpleNamespace(npc_inventory=npc_inventory),
+                schedule=SimpleNamespace(work_building_id=None),
+            ),
+            trade_ui_player_selling=False,
+            trade_ui_merchant_inventory_snapshot=[("rusty_sword", 1, 25)],
+            trade_ui_merchant_item_index=5,  # not the row being drawn -> not "selected"
+            buildings_by_id={},
+        )
+
+        console_renderer.draw_trade_menu(console, world)
+
+        matches = [c for c in console.print_calls if "Fine Rusty Sword" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Fine"])
+
+    def test_draw_status_panel_fetch_quest_progress_does_not_crash_with_real_inventory(self):
+        """Regression test: draw_status_panel's fetch-quest progress counter
+        had the same broken `for item in inventory: item["key"]` pattern as
+        draw_inventory_menu - it would raise TypeError on the very first
+        frame drawn after accepting a fetch quest with any item carried."""
+        world = self.real_world
+        world.player.economic.inventory.add_item("raw_log", 3)
+        world.player.knowledge.active_quests["quest_1"] = {
+            "title": "Gather Logs",
+            "description": "Bring 5 logs.",
+            "type": "fetch",
+            "quest_giver_id": None,
+            "item_to_fetch_key": "raw_log",
+            "item_fetch_count": 5,
+            "progress": 0,
+        }
+        console = self.FakeConsole()
+
+        console_renderer.draw_status_panel(console, world, 0, 0)  # must not raise
+
+        matches = [c for c in console.print_calls if "Fetch Raw Log: 3/5" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+
+    def test_draw_quest_menu_fetch_progress_does_not_crash_with_real_inventory(self):
+        """Same regression as above, for the quest log's fetch progress line."""
+        world = self.real_world
+        world.player.economic.inventory.add_item("raw_log", 2)
+        world.player.knowledge.active_quests["quest_1"] = {
+            "title": "Gather Logs",
+            "description": "Bring 5 logs.",
+            "type": "fetch",
+            "quest_giver_id": None,
+            "item_to_fetch_key": "raw_log",
+            "item_fetch_count": 5,
+            "progress": 0,
+        }
+        world.quest_menu_context = {"selected_quest_index": 0}
+        console = self.FakeConsole()
+
+        console_renderer.draw_quest_menu(console, world)  # must not raise
+
+        matches = [c for c in console.print_calls if "Fetch Raw Log: 2/5" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
 
     def test_draw_crafting_menu_draws_icon_next_to_recipe(self):
         console = self.FakeConsole()

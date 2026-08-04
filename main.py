@@ -906,6 +906,15 @@ def start_game(context, console, world_state=None, player_first_name: str | None
 
     last_time = time.perf_counter()
 
+    # Menu fade-in: tracks how long the current game_state has been active
+    # so draw() can ramp a just-opened menu in from the world view over a
+    # few frames instead of popping in at full opacity. MENU_FADE_DURATION
+    # is in seconds, not frames, so the ramp feels consistent regardless of
+    # framerate.
+    MENU_FADE_DURATION = 0.18
+    menu_fade_state = world.game_state
+    menu_fade_start_time = last_time
+
     while True:
         # Calculate Delta Time
         current_time = time.perf_counter()
@@ -919,8 +928,13 @@ def start_game(context, console, world_state=None, player_first_name: str | None
             render_game_over(console, context)
             break # Break to return to main menu
 
+        if world.game_state != menu_fade_state:
+            menu_fade_state = world.game_state
+            menu_fade_start_time = current_time
+        menu_fade_ratio = min(1.0, (current_time - menu_fade_start_time) / MENU_FADE_DURATION)
+
         camera_x, camera_y = _get_camera_origin(world)
-        draw(console, world, camera_x, camera_y)
+        draw(console, world, camera_x, camera_y, menu_fade_ratio=menu_fade_ratio)
         context.present(console)
 
         # Handle Input

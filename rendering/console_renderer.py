@@ -1546,7 +1546,86 @@ def _draw_visual_effect(console, world, effect, camera_x, camera_y):
             if 0 <= px < MAP_WIDTH and 0 <= py < MAP_HEIGHT:
                 console.print(x=px, y=py, string=char, fg=color)
 
-def draw(console, world, camera_x, camera_y):
+def _draw_active_game_state_menu(console, world):
+    """Draw whichever menu draw_*_menu function matches world.game_state,
+    if any. Extracted out of draw() so it can be wrapped with a fade-in
+    ramp (see _draw_active_game_state_menu_with_fade) without duplicating
+    this dispatch list."""
+    if world.game_state == "CRAFTING_MENU":
+        draw_crafting_menu(console, world)
+
+    if world.game_state == "BUILDING_MENU":
+        draw_building_menu(console, world)
+
+    if world.game_state == "INFO_MENU":
+        draw_info_menu(console, world)
+
+    if world.game_state == "INVENTORY_MENU":
+        draw_inventory_menu(console, world)
+
+    if world.game_state == "KNOWLEDGE_MENU":
+        draw_knowledge_menu(console, world)
+
+    if world.game_state == "QUEST_MENU":
+        draw_quest_menu(console, world)
+
+    if world.game_state == "NOTICEBOARD_MENU":
+        draw_noticeboard_menu(console, world)
+
+    if world.game_state == "COMPANY_LEDGER_MENU":
+        draw_company_ledger_menu(console, world)
+
+    if world.game_state == "SOCIAL_MENU":
+        draw_social_menu(console, world)
+
+    if world.game_state == "GOVERNANCE_MENU":
+        draw_governance_menu(console, world)
+
+    if world.game_state == "DIALOGUE" or world.chat_ui_active:
+        draw_dialogue_menu(console, world)
+
+    if world.game_state == "BOOK_READING":
+        draw_book_reading_ui(console, world)
+
+    if world.game_state == "TRADE_MENU" or world.trade_ui_active:
+        draw_trade_menu(console, world)
+
+    if world.game_state == "HELP_MENU":
+        draw_help_menu(console)
+
+
+def _draw_active_game_state_menu_with_fade(console, world, fade_ratio):
+    """Draw the active game_state menu (if any), fading it in from the
+    world view underneath over the first few frames after it opens.
+
+    tcod menus are drawn as plain console.print/print_box/draw_frame calls
+    with no shared opacity concept, and there are ~14 unrelated menu draw
+    functions dispatched above - threading an opacity parameter through
+    every one of them (and every console.print call inside each) would be
+    a large, risky change for a "few frames of fade" polish pass. Instead
+    this snapshots the console's fg/bg buffers before the menu draws (i.e.
+    the already-rendered world view/status panel), lets the menu draw
+    normally on top, then linearly blends the "before" and "after" buffers
+    by fade_ratio. At fade_ratio >= 1.0 - the steady state once a menu has
+    been open past the fade window, and the default when no caller passes
+    a ratio at all - this is a no-op passthrough with no snapshot/blend
+    cost, so callers that don't care about fades (including every existing
+    test that calls draw() directly) are unaffected.
+    """
+    if fade_ratio >= 1.0 or not hasattr(console, "fg") or not hasattr(console, "bg"):
+        _draw_active_game_state_menu(console, world)
+        return
+
+    fg_before = console.fg.copy()
+    bg_before = console.bg.copy()
+    _draw_active_game_state_menu(console, world)
+
+    ratio = max(0.0, fade_ratio)
+    console.fg[:] = fg_before + (console.fg.astype("int16") - fg_before.astype("int16")) * ratio
+    console.bg[:] = bg_before + (console.bg.astype("int16") - bg_before.astype("int16")) * ratio
+
+
+def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
     """Draws the main game screen."""
     console.clear()
 
@@ -1652,47 +1731,7 @@ def draw(console, world, camera_x, camera_y):
     if world.interaction_context["active"]:
         draw_interaction_menu(console, world)
 
-    if world.game_state == "CRAFTING_MENU":
-        draw_crafting_menu(console, world)
-
-    if world.game_state == "BUILDING_MENU":
-        draw_building_menu(console, world)
-
-    if world.game_state == "INFO_MENU":
-        draw_info_menu(console, world)
-
-    if world.game_state == "INVENTORY_MENU":
-        draw_inventory_menu(console, world)
-
-    if world.game_state == "KNOWLEDGE_MENU":
-        draw_knowledge_menu(console, world)
-
-    if world.game_state == "QUEST_MENU":
-        draw_quest_menu(console, world)
-
-    if world.game_state == "NOTICEBOARD_MENU":
-        draw_noticeboard_menu(console, world)
-
-    if world.game_state == "COMPANY_LEDGER_MENU":
-        draw_company_ledger_menu(console, world)
-
-    if world.game_state == "SOCIAL_MENU":
-        draw_social_menu(console, world)
-
-    if world.game_state == "GOVERNANCE_MENU":
-        draw_governance_menu(console, world)
-
-    if world.game_state == "DIALOGUE" or world.chat_ui_active:
-        draw_dialogue_menu(console, world)
-
-    if world.game_state == "BOOK_READING":
-        draw_book_reading_ui(console, world)
-
-    if world.game_state == "TRADE_MENU" or world.trade_ui_active:
-        draw_trade_menu(console, world)
-
-    if world.game_state == "HELP_MENU":
-        draw_help_menu(console)
+    _draw_active_game_state_menu_with_fade(console, world, menu_fade_ratio)
 
     # Draw weather overlay
     draw_weather_overlay(console, world, camera_x, camera_y)

@@ -1527,6 +1527,75 @@ class TestConsoleRendererEntities(unittest.TestCase):
 
         self.assertEqual(order, ["lighting", "entities", "entity_markers", "world_markers"])
 
+    def test_draw_forwards_menu_fade_ratio_to_active_menu_dispatch(self):
+        class FakeConsole:
+            def __init__(self):
+                self.width = 1
+                self.height = 1
+                self.fg = np.zeros((1, 1, 3), dtype=np.uint8)
+                self.bg = np.zeros((1, 1, 3), dtype=np.uint8)
+                self.print_calls = []
+
+            def clear(self):
+                pass
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+            def draw_frame(self, *args, **kwargs):
+                pass
+
+        tile = SimpleNamespace(name="Plains", char=ord("."), color=(10, 20, 30), blocks_fov=False)
+        chunk = SimpleNamespace(is_terrain_generated=True, tiles=[[tile]])
+        player = SimpleNamespace(x=0, y=0, state=SimpleNamespace(current_path=[]))
+        world = SimpleNamespace(
+            explored_map=np.zeros((1, 1), dtype=bool),
+            player_fov_map=np.ones((1, 1), dtype=bool),
+            chunks=[[chunk]],
+            _generate_chunk_detail=lambda *args, **kwargs: None,
+            get_tile_at=lambda x, y: tile,
+            visual_effects=[],
+            npcs=[],
+            village_npcs=[],
+            player=player,
+            items_on_map={},
+            weather="clear",
+            mouse_x=-1,
+            mouse_y=-1,
+            interaction_context={"active": False},
+            game_state="INVENTORY_MENU",
+            game_time=0,
+            chat_ui_active=False,
+            trade_ui_active=False,
+            chat_log=[],
+        )
+        console = FakeConsole()
+        captured_ratios = []
+
+        with patch.object(console_renderer, "MAP_WIDTH", 1), \
+             patch.object(console_renderer, "MAP_HEIGHT", 1), \
+             patch.object(console_renderer, "WORLD_WIDTH", 1), \
+             patch.object(console_renderer, "WORLD_HEIGHT", 1), \
+             patch.object(console_renderer, "CHUNK_SIZE", 1), \
+             patch("rendering.console_renderer._apply_lighting_and_depth"), \
+             patch("rendering.console_renderer._draw_entities"), \
+             patch("rendering.console_renderer._draw_entity_markers"), \
+             patch("rendering.console_renderer._draw_world_markers"), \
+             patch("rendering.console_renderer.draw_status_panel"), \
+             patch("rendering.console_renderer.draw_cursor_info"), \
+             patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
+             patch("rendering.console_renderer._draw_focus_badge"), \
+             patch("rendering.console_renderer.draw_weather_overlay"), \
+             patch("rendering.console_renderer._get_visible_nearby_entities", return_value=[]), \
+             patch(
+                 "rendering.console_renderer._draw_active_game_state_menu_with_fade",
+                 side_effect=lambda c, w, ratio: captured_ratios.append(ratio),
+             ):
+            console_renderer.draw(console, world, 0, 0, menu_fade_ratio=0.4)
+            console_renderer.draw(console, world, 0, 0)  # default should be 1.0
+
+        self.assertEqual(captured_ratios, [0.4, 1.0])
+
     def test_draw_skips_label_when_overlay_cell_is_not_visible(self):
         class FakeConsole:
             def __init__(self):
@@ -1601,6 +1670,90 @@ class TestConsoleRendererEntities(unittest.TestCase):
 
         label_calls = [call for call in console.print_calls if call.get("string") == "Villager"]
         self.assertEqual(label_calls, [])
+
+
+class TestMenuFadeTransition(unittest.TestCase):
+    """Menu fade-in: _draw_active_game_state_menu_with_fade blends the
+    console's world-view buffers with the freshly-drawn menu buffers by
+    fade_ratio, instead of threading opacity through every menu draw fn."""
+
+    def test_skips_blend_and_draws_directly_at_full_ratio(self):
+        console = SimpleNamespace(
+            fg=np.zeros((1, 1, 3), dtype=np.uint8),
+            bg=np.zeros((1, 1, 3), dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu") as mock_draw:
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 1.0)
+
+        mock_draw.assert_called_once_with(console, world)
+
+    def test_falls_back_to_direct_draw_when_console_has_no_pixel_buffers(self):
+        class FakeConsole:
+            pass
+
+        console = FakeConsole()
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu") as mock_draw:
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 0.3)  # must not raise
+
+        mock_draw.assert_called_once_with(console, world)
+
+    def test_blends_halfway_between_world_view_and_menu_color_at_half_ratio(self):
+        console = SimpleNamespace(
+            fg=np.full((1, 1, 3), 50, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 20, dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        def fake_menu_draw(c, w):
+            c.fg[:] = 250
+            c.bg[:] = 220
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu", side_effect=fake_menu_draw):
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 0.5)
+
+        self.assertEqual(tuple(int(v) for v in console.fg[0, 0]), (150, 150, 150))
+        self.assertEqual(tuple(int(v) for v in console.bg[0, 0]), (120, 120, 120))
+
+    def test_stays_at_world_view_color_at_ratio_zero(self):
+        console = SimpleNamespace(
+            fg=np.full((1, 1, 3), 50, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 20, dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        def fake_menu_draw(c, w):
+            c.fg[:] = 250
+            c.bg[:] = 220
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu", side_effect=fake_menu_draw):
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 0.0)
+
+        self.assertEqual(tuple(int(v) for v in console.fg[0, 0]), (50, 50, 50))
+        self.assertEqual(tuple(int(v) for v in console.bg[0, 0]), (20, 20, 20))
+
+    def test_reaches_full_menu_color_once_ratio_hits_one_after_a_partial_fade(self):
+        # Sanity check that a menu which has finished fading in (ratio 1.0)
+        # shows the menu's real color, not something still blended toward
+        # the world view from an earlier frame.
+        console = SimpleNamespace(
+            fg=np.full((1, 1, 3), 50, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 20, dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        def fake_menu_draw(c, w):
+            c.fg[:] = 250
+            c.bg[:] = 220
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu", side_effect=fake_menu_draw):
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 1.0)
+
+        self.assertEqual(tuple(int(v) for v in console.fg[0, 0]), (250, 250, 250))
+        self.assertEqual(tuple(int(v) for v in console.bg[0, 0]), (220, 220, 220))
 
 
 class TestConsoleRendererLighting(unittest.TestCase):

@@ -367,6 +367,50 @@ class HitFlashEffect(VisualEffect):
         return (self.magnitude if step % 2 == 0 else -self.magnitude, 0)
 
 
+class ParticleBurstEffect(VisualEffect):
+    """Brief scatter of small dust/spark glyphs around a world position.
+
+    Used for footstep dust (movement) and crafting/construction completion
+    sparks. Like HitFlashEffect, this is a screen overlay of a handful of
+    small offsets around (x, y) rather than true sub-tile particles, since
+    entity/tile draw positions are rounded to whole console cells.
+    """
+    effect_type = "particle_burst"
+
+    _KIND_STYLES = {
+        "dust": {"chars": (".", ","), "color": (170, 150, 120)},
+        "spark": {"chars": ("*", "+", "'"), "color": (255, 210, 80)},
+    }
+    _OFFSETS = ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1))
+
+    def __init__(self, x, y, kind="dust", count=3, duration=0.35, rng=None):
+        self.x = float(x)
+        self.y = float(y)
+        self.kind = kind if kind in self._KIND_STYLES else "dust"
+        self.duration = duration
+        self.elapsed = 0.0
+
+        style = self._KIND_STYLES[self.kind]
+        self.color = style["color"]
+        chooser = rng if rng is not None else random
+        offsets = list(self._OFFSETS)
+        chooser.shuffle(offsets)
+        self.particles = [
+            (offsets[i % len(offsets)][0], offsets[i % len(offsets)][1], chooser.choice(style["chars"]))
+            for i in range(max(1, count))
+        ]
+
+    def update(self, dt: float) -> bool:
+        self.elapsed += dt
+        return self.elapsed >= self.duration
+
+    def fade_ratio(self) -> float:
+        """0..1 remaining-life ratio, used to fade the particles out."""
+        if self.duration <= 0:
+            return 0.0
+        return max(0.0, 1.0 - (self.elapsed / self.duration))
+
+
 COMPLETED_WORK_SUB_TASK_COMMANDS: dict[str, CompletedWorkSubTaskCommand] = create_completed_work_sub_task_commands()
 NPC_WORK_TOOL_TYPES = {
     "chop_trees": "axe",
@@ -7712,6 +7756,8 @@ class World:
         self.town_board.remove_blueprint_tasks(blueprint.id)
         self.blueprints_by_id.pop(blueprint.id, None)
         self.blueprint_positions.pop((blueprint.x, blueprint.y), None)
+        if hasattr(self, "visual_effects"):
+            self.visual_effects.append(ParticleBurstEffect(blueprint.x, blueprint.y, kind="spark", count=4))
         return True
 
 
@@ -13720,7 +13766,11 @@ class World:
             self.player.state.last_dx, self.player.state.last_dy = dx, dy # Always update facing direction
 
         if destination_tile and destination_tile.passable:
+            origin_x, origin_y = self.player.x, self.player.y
             self._update_entity_position(self.player, new_x, new_y)
+
+            if hasattr(self, "visual_effects") and random.random() < 0.6:
+                self.visual_effects.append(ParticleBurstEffect(origin_x, origin_y, kind="dust", count=2, duration=0.25))
 
             movement_cost = int(destination_tile.properties.get("movement_cost", 1))
 
@@ -16424,6 +16474,8 @@ class World:
         self.player.add_item(item_key, 1)
         if hasattr(self.player, "gain_skill_experience"):
             self.player.gain_skill_experience("crafting", 5)
+        if hasattr(self, "visual_effects"):
+            self.visual_effects.append(ParticleBurstEffect(self.player.x, self.player.y, kind="spark"))
         self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
 
 

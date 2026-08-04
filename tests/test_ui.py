@@ -781,6 +781,112 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
         self.assertIn("floating_text", effect_types)
         self.assertIn("hit_flash", effect_types)
 
+    def test_particle_burst_effect_expires_after_its_duration(self):
+        effect = engine.ParticleBurstEffect(3, 4, kind="dust", duration=0.35)
+
+        self.assertEqual(effect.effect_type, "particle_burst")
+        self.assertFalse(effect.update(0.2))
+        self.assertTrue(effect.update(0.2))
+
+    def test_particle_burst_effect_generates_requested_particle_count(self):
+        effect = engine.ParticleBurstEffect(0, 0, kind="spark", count=4)
+
+        self.assertEqual(len(effect.particles), 4)
+        for offset_x, offset_y, char in effect.particles:
+            self.assertIn(char, engine.ParticleBurstEffect._KIND_STYLES["spark"]["chars"])
+
+    def test_particle_burst_effect_falls_back_to_dust_for_unknown_kind(self):
+        effect = engine.ParticleBurstEffect(0, 0, kind="not_a_real_kind")
+
+        self.assertEqual(effect.kind, "dust")
+        self.assertEqual(effect.color, engine.ParticleBurstEffect._KIND_STYLES["dust"]["color"])
+
+    def test_particle_burst_fade_ratio_decreases_toward_zero(self):
+        effect = engine.ParticleBurstEffect(0, 0, duration=1.0)
+
+        self.assertEqual(effect.fade_ratio(), 1.0)
+        effect.update(0.5)
+        self.assertAlmostEqual(effect.fade_ratio(), 0.5)
+        effect.update(0.5)
+        self.assertEqual(effect.fade_ratio(), 0.0)
+
+    def test_draw_visual_effect_renders_particle_burst_at_full_brightness_when_fresh(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        effect = engine.ParticleBurstEffect(5, 6, kind="spark", count=3)
+
+        console_renderer._draw_visual_effect(console, world, effect, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 3)
+        for call in console.print_calls:
+            self.assertEqual(call["fg"], effect.color)
+
+    def test_draw_visual_effect_dims_particle_burst_color_as_it_fades(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        effect = engine.ParticleBurstEffect(5, 6, kind="spark", count=2, duration=1.0)
+        effect.update(0.9)  # nearly expired -> mostly faded
+
+        console_renderer._draw_visual_effect(console, world, effect, 0, 0)
+
+        for call in console.print_calls:
+            self.assertLess(call["fg"][0], effect.color[0])
+
+    def test_player_movement_triggers_dust_particle_burst(self):
+        mock_ollama_patcher = patch('engine.World._call_llm')
+        mock_call_llm = mock_ollama_patcher.start()
+        self.addCleanup(mock_ollama_patcher.stop)
+        mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        world = World(seed=17)
+        origin_x, origin_y = world.player.x, world.player.y
+
+        with patch("engine.random.random", return_value=0.0):  # force the dust roll to succeed
+            movement_cost = world.handle_player_movement(1, 0)
+
+        self.assertGreater(movement_cost, 0)
+        self.assertEqual((world.player.x, world.player.y), (origin_x + 1, origin_y))
+
+        burst_effects = [e for e in world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(len(burst_effects), 1)
+        self.assertEqual(burst_effects[0].kind, "dust")
+        # Dust kicks up where the player stepped from, not where they landed.
+        self.assertEqual((burst_effects[0].x, burst_effects[0].y), (float(origin_x), float(origin_y)))
+
+    def test_player_movement_skips_dust_particle_burst_on_failed_roll(self):
+        mock_ollama_patcher = patch('engine.World._call_llm')
+        mock_call_llm = mock_ollama_patcher.start()
+        self.addCleanup(mock_ollama_patcher.stop)
+        mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        world = World(seed=17)
+
+        with patch("engine.random.random", return_value=0.99):  # force the dust roll to fail
+            world.handle_player_movement(1, 0)
+
+        burst_effects = [e for e in world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(burst_effects, [])
+
 
 class TestConsoleRendererEntities(unittest.TestCase):
     def test_format_world_clock_uses_configured_day_length(self):

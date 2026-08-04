@@ -516,6 +516,18 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertEqual(completed.requester_id, self.world.player.id)
         self.assertTrue(completed.player_owned)
 
+    def test_completed_construction_spawns_spark_particle_burst_at_blueprint_position(self):
+        blueprint = self.world.place_construction_blueprint("workshop", 8, 8, owner_id=self.world.player.id, requester_id=self.world.player.id)
+        self._fully_supply_blueprint(blueprint)
+        blueprint_x, blueprint_y = blueprint.x, blueprint.y
+
+        self.assertTrue(self.world._complete_construction_blueprint(blueprint))
+
+        burst_effects = [e for e in self.world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(len(burst_effects), 1)
+        self.assertEqual(burst_effects[0].kind, "spark")
+        self.assertEqual((burst_effects[0].x, burst_effects[0].y), (float(blueprint_x), float(blueprint_y)))
+
     def test_owner_built_workplace_activates_owner_management_without_public_vacancy(self):
         owner = NPC(8, 8, name="Owner Builder")
         owner.economic.profession = "Unemployed"

@@ -1482,6 +1482,14 @@ def _draw_visual_effect(console, world, effect, camera_x, camera_y):
             string="*",
             fg=getattr(effect, "color", (255, 60, 60)),
         )
+    elif effect_type == "particle_burst":
+        fade_fn = getattr(effect, "fade_ratio", None)
+        fade = fade_fn() if fade_fn else 1.0
+        color = _dim_color(getattr(effect, "color", (200, 200, 200)), 0.35 + (0.65 * fade))
+        for offset_x, offset_y, char in getattr(effect, "particles", []):
+            px, py = draw_x + offset_x, draw_y + offset_y
+            if 0 <= px < MAP_WIDTH and 0 <= py < MAP_HEIGHT:
+                console.print(x=px, y=py, string=char, fg=color)
 
 def draw(console, world, camera_x, camera_y):
     """Draws the main game screen."""

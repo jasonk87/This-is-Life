@@ -1918,3 +1918,124 @@ class TestMenuItemIcons(unittest.TestCase):
 
         icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["healing_salve"])]
         self.assertEqual(len(icon_calls), 1)
+
+
+class TestEntityPortraits(unittest.TestCase):
+    """NPC portrait stamped in the dialogue and social menus."""
+
+    class FakeConsole:
+        def __init__(self):
+            self.print_calls = []
+
+        def draw_frame(self, *args, **kwargs):
+            pass
+
+        def draw_rect(self, *args, **kwargs):
+            pass
+
+        def print(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def print_box(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def get_height_rect(self, **kwargs):
+            return 1
+
+    def test_draw_entity_portrait_falls_back_to_single_cell_when_zoom_registry_empty(self):
+        # In headless/test mode register_zoomed_dawnlike_tiles() never runs,
+        # so zoomed_sprite_codepoint returns None - the portrait helper must
+        # degrade to a single unzoomed cell instead of drawing nothing.
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Villager")
+
+        drawn = console_renderer._draw_entity_portrait(console, 5, 6, npc)
+
+        self.assertTrue(drawn)
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (5, 6))
+
+    def test_draw_entity_portrait_stamps_full_zoom_grid_when_registry_populated(self):
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Villager")
+
+        with patch(
+            "rendering.console_renderer.zoomed_sprite_codepoint",
+            side_effect=lambda _base, zoom, ox, oy: 0xF0000 + (oy * zoom) + ox,
+        ):
+            drawn = console_renderer._draw_entity_portrait(console, 10, 10, npc, zoom=3)
+
+        self.assertTrue(drawn)
+        self.assertEqual(len(console.print_calls), 9)
+        positions = {(c["x"], c["y"]) for c in console.print_calls}
+        self.assertEqual(positions, {(10 + ox, 10 + oy) for ox in range(3) for oy in range(3)})
+
+    def test_draw_social_menu_draws_portrait_beside_npc_name(self):
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Merchant Sam", economic=SimpleNamespace(profession="Merchant"))
+        world = SimpleNamespace(
+            get_social_menu_target=lambda: npc,
+            get_social_attitude_label=lambda n: ("Friendly", 5),
+            social_menu_context={"mode": "root", "selected_action_index": 0},
+            get_social_menu_actions=lambda: ["Give Gift", "Share Gossip"],
+        )
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_social_menu(console, world)
+
+        mock_portrait.assert_called_once()
+        call_args = mock_portrait.call_args
+        self.assertIs(call_args[0][0], console)
+        self.assertIs(call_args[0][3], npc)
+        # Portrait sits inside the menu frame, to the right of the name line.
+        menu_width = 74
+        x = (config.MAP_WIDTH - menu_width) // 2
+        expected_portrait_x = x + menu_width - 2 - console_renderer.PORTRAIT_ZOOM
+        self.assertEqual(call_args[0][1], expected_portrait_x)
+
+    def test_draw_social_menu_skips_portrait_when_no_target(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(get_social_menu_target=lambda: None)
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_social_menu(console, world)
+
+        mock_portrait.assert_not_called()
+
+    def test_draw_dialogue_menu_draws_portrait_and_shifts_history_down(self):
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Merchant Sam")
+        world = SimpleNamespace(
+            chat_ui_target_npc=npc,
+            chat_ui_history=[("Merchant Sam", "Hello there, traveler!")],
+            chat_ui_input_line="",
+            get_entity_display_name=lambda entity, include_relationship=False: entity.name,
+        )
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_dialogue_menu(console, world)
+
+        mock_portrait.assert_called_once()
+        call_args = mock_portrait.call_args
+        self.assertIs(call_args[0][3], npc)
+
+        name_calls = [c for c in console.print_calls if c.get("string") == "Merchant Sam"]
+        self.assertEqual(len(name_calls), 1)
+
+        history_calls = [c for c in console.print_calls if "Hello there, traveler!" in c.get("string", "")]
+        self.assertEqual(len(history_calls), 1)
+        # History must be drawn below the portrait header, not overlapping it.
+        self.assertGreater(history_calls[0]["y"], name_calls[0]["y"])
+
+    def test_draw_dialogue_menu_skips_portrait_when_no_target_npc(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            chat_ui_target_npc=None,
+            chat_ui_history=[],
+            chat_ui_input_line="",
+        )
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_dialogue_menu(console, world)  # must not raise
+
+        mock_portrait.assert_not_called()

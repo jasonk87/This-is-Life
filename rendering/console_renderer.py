@@ -382,6 +382,43 @@ def _draw_zoomed_sprite(console, world, rect, base_codepoint, *, fg, bg=None):
     return True
 
 
+PORTRAIT_ZOOM = 3
+
+
+def _draw_entity_portrait(console, x, y, entity, *, zoom=PORTRAIT_ZOOM, fg=(255, 255, 255)):
+    """Draw an entity's sprite as a small NxN portrait for menu UI (dialogue,
+    social) at a fixed console-relative position.
+
+    This intentionally does NOT reuse _draw_zoomed_sprite, because that
+    helper derives its zoom level from the world camera's current zoom
+    state (_get_zoom_factor/_integer_zoom_for_rect) and is meant for
+    map-camera rects. A menu portrait has nothing to do with what zoom
+    level the player currently has the map scrolled to, so this stamps
+    the same pre-split DawnLike codepoints (via zoomed_sprite_codepoint)
+    at a fixed zoom instead.
+
+    Falls back to a single unzoomed sprite cell if the split-tile registry
+    for `zoom` hasn't been populated (e.g. headless/test mode, where
+    register_zoomed_dawnlike_tiles() is never called), so callers never
+    need their own fallback branch.
+    """
+    base_codepoint = get_entity_sprite(entity)
+    if base_codepoint is None:
+        return False
+
+    draw_calls = []
+    for offset_y in range(zoom):
+        for offset_x in range(zoom):
+            codepoint = zoomed_sprite_codepoint(base_codepoint, zoom, offset_x, offset_y)
+            if codepoint is None:
+                console.print(x=x, y=y, string=chr(base_codepoint), fg=fg)
+                return True
+            draw_calls.append({"x": x + offset_x, "y": y + offset_y, "string": chr(codepoint), "fg": fg})
+    for kwargs in draw_calls:
+        console.print(**kwargs)
+    return True
+
+
 def _screen_point_for_world(world, camera_x, camera_y, world_x, world_y):
     rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
     if rect is None:
@@ -1954,6 +1991,11 @@ def draw_social_menu(console, world):
     attitude_label, attitude_score = world.get_social_attitude_label(npc)
     profession = getattr(getattr(npc, "economic", None), "profession", "Unemployed") or "Unemployed"
     mode = world.social_menu_context.get("mode", "root")
+
+    portrait_x = x + menu_width - 2 - PORTRAIT_ZOOM
+    portrait_y = y + 2
+    _draw_entity_portrait(console, portrait_x, portrait_y, npc)
+
     console.print(x=x + 2, y=y + 2, string=f"Name: {npc.name}", fg=(255, 255, 0))
     console.print(x=x + 2, y=y + 3, string=f"Job: {profession}", fg=(220, 220, 220))
     console.print(x=x + 2, y=y + 4, string=f"Attitude: {attitude_label} ({attitude_score:+d})", fg=(200, 255, 255))
@@ -2387,14 +2429,28 @@ def draw_dialogue_menu(console, world):
     title = f" Conversation with {npc_name} "
     
     console.draw_frame(x=x, y=y, width=width, height=height, title=title, clear=True, fg=(255, 255, 255), bg=(12, 14, 20))
-    
+
     import textwrap
-    max_history_lines = height - 4
-    wrapped_lines = []
-    
+
     target_npc = getattr(world, 'chat_ui_target_npc', None)
     raw_target_name = getattr(target_npc, 'name', None)
     display_target_name = world.get_entity_display_name(target_npc) if target_npc else None
+
+    portrait_top = y + 1
+    header_rows = 0
+    if target_npc is not None:
+        _draw_entity_portrait(console, x + 2, portrait_top, target_npc)
+        console.print(
+            x=x + 2 + PORTRAIT_ZOOM + 1,
+            y=portrait_top + (PORTRAIT_ZOOM // 2),
+            string=(display_target_name or npc_name)[: width - 4 - PORTRAIT_ZOOM - 1],
+            fg=(255, 255, 0),
+        )
+        header_rows = PORTRAIT_ZOOM + 1
+
+    history_start_y = y + 2 + header_rows
+    max_history_lines = max(1, height - 4 - header_rows)
+    wrapped_lines = []
 
     for speaker, text in getattr(world, 'chat_ui_history', []):
         if raw_target_name and speaker == raw_target_name:
@@ -2404,11 +2460,11 @@ def draw_dialogue_menu(console, world):
         lines = textwrap.wrap(prefix + text, width=width - 4)
         for line in lines:
             wrapped_lines.append((line, color))
-            
+
     start_idx = max(0, len(wrapped_lines) - max_history_lines)
     display_lines = wrapped_lines[start_idx:]
-    
-    cur_y = y + 2
+
+    cur_y = history_start_y
     for line_text, color in display_lines:
         console.print(x=x + 2, y=cur_y, string=line_text, fg=color)
         cur_y += 1

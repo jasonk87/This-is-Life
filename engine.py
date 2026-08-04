@@ -11289,7 +11289,7 @@ class World:
         lines = ["WORLD RUNTIME SNAPSHOT", f"Tick: {snapshot.tick}"]
         prs = (snapshot.runtime_health_summary or {}).get("player_runtime_status", {}) if isinstance(snapshot.runtime_health_summary, dict) else {}
         if prs:
-            lines += ["", "PLAYER STATUS", f"- hunger={prs.get("hunger", 0):.2f} cold={prs.get("cold_exposure", 0):.2f} fatigue={prs.get("fatigue", 0):.2f}", f"- warmth={prs.get("warmth_state")} sheltered={prs.get("sheltered_state")} override={prs.get("active_survival_pressure")}", f"- carrying={prs.get("carried_item")} active={prs.get("active_interaction_type")} remaining={prs.get("active_interaction_remaining_work")}"]
+            lines += ["", "PLAYER STATUS", f"- hunger={prs.get('hunger', 0):.2f} cold={prs.get('cold_exposure', 0):.2f} fatigue={prs.get('fatigue', 0):.2f}", f"- warmth={prs.get('warmth_state')} sheltered={prs.get('sheltered_state')} override={prs.get('active_survival_pressure')}", f"- carrying={prs.get('carried_item')} active={prs.get('active_interaction_type')} remaining={prs.get('active_interaction_remaining_work')}"]
         lines += ["", "RESERVE PRESSURE"]
         for reserve in snapshot.reserve_targets[:8]:
             lines.append(f"- {reserve['reserve_target_id']}: {reserve['item']} {reserve['current']}/{reserve['minimum']}/{reserve['desired']} shortage={reserve['shortage']}")

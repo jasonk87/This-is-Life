@@ -1172,11 +1172,32 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
                         shadowed_bg = _dim_color(tuple(console.bg[sy, sx]), 0.75)
                         console.bg[sy, sx] = _tint_for_light_level(shadowed_bg, light_level_name)
 
+def _entity_shows_health_bar(entity, focused_entity):
+    """True if _draw_entity_health_bars would draw a bar for this entity
+    (alive, with valid HP data, and either hostile or the current focus
+    target). Shared with _draw_entity_markers so the "!" marker can avoid
+    the health bar's row instead of overwriting one of its cells - both
+    are drawn on entity.y - 1 by default.
+    """
+    if getattr(getattr(entity, "physical", None), "is_dead", False):
+        return False
+    combat = getattr(entity, "combat", None)
+    if combat is None:
+        return False
+    is_hostile = getattr(combat, "is_hostile_to_player", False)
+    is_targeted = focused_entity is entity
+    if not (is_hostile or is_targeted):
+        return False
+    max_hp = getattr(combat, "max_hp", None)
+    hp = getattr(combat, "hp", None)
+    return bool(max_hp) and hp is not None
+
+
 def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
+    focused_entity = focus.get("entity") if isinstance(focus, dict) else None
     for entity in itertools.chain(world.npcs, world.village_npcs):
         if getattr(entity, "is_sleeping", False):
             continue
-        focused_entity = focus.get("entity") if isinstance(focus, dict) else None
         if focused_entity is not entity:
             continue
         marker = _get_entity_marker(entity, world)
@@ -1188,6 +1209,20 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
         screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, marker_world_y)
         if screen_point is not None:
             screen_x, screen_y = screen_point
+            # This entity also gets a health bar drawn on this same row
+            # (see _draw_entity_health_bars, entity.y - 1) - without an
+            # offset the marker would land dead center on the bar and
+            # overwrite one of its cells. Shifting the marker to y - 2
+            # (the row used by the overhead name label) isn't a real fix
+            # either: a marker only ever draws for the focused entity, and
+            # the label always draws for the focused entity too, so that
+            # would trade one guaranteed collision for another. Nudging
+            # the marker sideways past the bar's right edge keeps all
+            # three overlays legible without touching the label's row.
+            if _entity_shows_health_bar(entity, focused_entity):
+                offset_x = (HEALTH_BAR_WIDTH // 2) + 1
+                if screen_x + offset_x < MAP_WIDTH:
+                    screen_x += offset_x
             console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
 
 HEALTH_BAR_WIDTH = 5
@@ -1200,19 +1235,7 @@ def _draw_entity_health_bars(console, world, camera_x, camera_y, focus=None):
     """
     focused_entity = focus.get("entity") if isinstance(focus, dict) else None
     for entity in itertools.chain(world.npcs, world.village_npcs):
-        if getattr(getattr(entity, "physical", None), "is_dead", False):
-            continue
-        combat = getattr(entity, "combat", None)
-        if combat is None:
-            continue
-        is_hostile = getattr(combat, "is_hostile_to_player", False)
-        is_targeted = focused_entity is entity
-        if not (is_hostile or is_targeted):
-            continue
-
-        max_hp = getattr(combat, "max_hp", None)
-        hp = getattr(combat, "hp", None)
-        if not max_hp or hp is None:
+        if not _entity_shows_health_bar(entity, focused_entity):
             continue
 
         bar_world_y = entity.y - 1
@@ -1223,7 +1246,7 @@ def _draw_entity_health_bars(console, world, camera_x, camera_y, focus=None):
             continue
         screen_x, screen_y = screen_point
         bar_x = screen_x - (HEALTH_BAR_WIDTH // 2)
-        _draw_mini_health_bar(console, bar_x, screen_y, HEALTH_BAR_WIDTH, hp, max_hp)
+        _draw_mini_health_bar(console, bar_x, screen_y, HEALTH_BAR_WIDTH, entity.combat.hp, entity.combat.max_hp)
 
 def _draw_social_indicators(console, world, camera_x, camera_y, max_markers=8):
     marked = 0

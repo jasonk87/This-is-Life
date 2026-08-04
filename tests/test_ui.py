@@ -1463,6 +1463,72 @@ class TestConsoleRendererEntities(unittest.TestCase):
 
         self.assertEqual(console.print_calls, [])
 
+    def test_hostile_focused_npc_marker_does_not_overlap_health_bar_center(self):
+        """Regression test: an entity that's both hostile and the current
+        focus target gets both a "!" marker (_draw_entity_markers) and an
+        HP bar (_draw_entity_health_bars), and both used to draw on the
+        same row (entity.y - 1) with the marker landing dead center on the
+        bar, overwriting one of its cells. The marker should now be nudged
+        sideways past the bar instead."""
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=4, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+        focus = {"entity": npc}
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=focus)
+            console_renderer._draw_entity_markers(console, world, 0, 0, focus=focus)
+
+        bar_calls = [c for c in console.print_calls if c["string"][0] in "#-"]
+        marker_calls = [c for c in console.print_calls if c["string"] == "!"]
+        self.assertEqual(len(marker_calls), 1)
+        self.assertTrue(bar_calls)
+
+        bar_y = bar_calls[0]["y"]
+        bar_columns = set()
+        for call in bar_calls:
+            bar_columns.update(range(call["x"], call["x"] + len(call["string"])))
+
+        marker_call = marker_calls[0]
+        self.assertEqual(marker_call["y"], bar_y)  # still on the same overhead row
+        self.assertNotIn(marker_call["x"], bar_columns)  # but no longer inside the bar
+
+    def test_marker_position_is_unchanged_for_focused_entity_without_health_bar(self):
+        """An entity that's focused but neither hostile nor otherwise
+        eligible for a health bar should keep the original centered marker
+        position - the sideways nudge should only kick in when a bar is
+        actually being drawn on that row."""
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        merchant = SimpleNamespace(
+            x=5,
+            y=5,
+            is_sleeping=False,
+            economic=SimpleNamespace(profession="Merchant"),
+            combat=SimpleNamespace(is_hostile_to_player=False),
+            physical=SimpleNamespace(is_dead=False),
+        )
+        world = SimpleNamespace(npcs=[merchant], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_markers(console, world, 0, 0, {"entity": merchant})
+
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (5, 4))
+
     def test_draw_orders_entities_after_world_lighting_and_before_overlays(self):
         class FakeConsole:
             def __init__(self):

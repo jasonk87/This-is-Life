@@ -91,6 +91,13 @@ class HerdingBehavior:
 
 
 class PredatorBehavior:
+    # Desperate-predation tuning (see _try_escalate_to_desperate_predation
+    # for the full design rationale). Kept as class constants rather than
+    # inline magic numbers so the thresholds are easy to find/tune later.
+    DESPERATE_HUNGER_THRESHOLD_RATIO = 0.9  # above the 0.7 "start hunting" ratio, below the 0.95 starvation-damage ratio
+    DESPERATE_ESCALATION_CHANCE = 0.15  # per-tick roll, once hunger/no-prey conditions are already met
+    DESPERATE_TARGET_SEARCH_RADIUS = 20  # matches _find_nearest_prey's existing search radius
+
     def _find_nearest_prey(self, entity, world):
         nearest_prey = None
         min_dist_sq = float("inf")
@@ -105,6 +112,80 @@ class PredatorBehavior:
                 min_dist_sq = dist_sq
                 nearest_prey = other_npc
         return nearest_prey
+
+    def _find_nearest_desperate_npc_target(self, entity, world):
+        """Nearest living human (non-animal) village NPC within search
+        radius, for a starving predator with no wild prey or corpse left."""
+        nearest = None
+        min_dist_sq = float("inf")
+        radius_sq = self.DESPERATE_TARGET_SEARCH_RADIUS ** 2
+        for other in getattr(world, "village_npcs", []):
+            if other.id == entity.id or other.physical.is_dead:
+                continue
+            if getattr(other, "animal_type", None) is not None:
+                continue  # not a human NPC
+            dist_sq = (entity.x - other.x) ** 2 + (entity.y - other.y) ** 2
+            if dist_sq < min_dist_sq and dist_sq < radius_sq:
+                min_dist_sq = dist_sq
+                nearest = other
+        return nearest
+
+    def _try_escalate_to_desperate_predation(self, entity, world) -> bool:
+        """
+        Last-resort escalation for a genuinely starving predator that has
+        already failed to find wild prey or a corpse to scavenge this tick.
+
+        Gates (deliberately compound, so this stays rare - flagging the
+        reasoning per request):
+        - hunger >= 90% of max_hunger: meaningfully hungrier than the 70%
+          threshold that starts ordinary wild-prey hunting, and just short
+          of the 95% threshold where StarvationBehavior starts rolling
+          self-damage. This is "truly starving," not "peckish."
+        - Only reached after this tick's wild-prey search (_find_nearest_prey)
+          and corpse search (_find_nearest_corpse) BOTH failed - a predator
+          with any accessible natural food never reaches this branch.
+        - A 15% per-tick roll on top of the above, so even a starving,
+          prey-less predator doesn't escalate the instant conditions are
+          met - it takes a few ticks on average, echoing the same
+          probabilistic idiom StarvationBehavior already uses for its own
+          10%-per-tick damage roll.
+
+        Target preference: nearest human village NPC first (reuses the
+        existing generic world.npc_attempt_attack_npc() combat path via the
+        normal "hunting" task/current_task machinery, so this gets real
+        damage, real death, corpse placement, and witness memories for
+        free). Falls back to the player only if no NPC is in range, via the
+        existing combat.is_hostile_to_player + pursuit-state system already
+        used by every other hostile creature - no new player-attack code.
+        Livestock is deliberately out of scope here: sheep predation already
+        happens today via the normal wild-prey path (wolf's prey list
+        already includes "sheep") and is unchanged by this feature.
+        """
+        is_predator = "prey" in entity.animal_definition
+        if not is_predator:
+            return False
+        if entity.physical.hunger < entity.physical.max_hunger * self.DESPERATE_HUNGER_THRESHOLD_RATIO:
+            return False
+        if random.random() >= self.DESPERATE_ESCALATION_CHANCE:
+            return False
+
+        nearest_human = self._find_nearest_desperate_npc_target(entity, world)
+        if nearest_human is not None:
+            entity.schedule.current_task = "hunting"
+            entity.task_target_entity_id = nearest_human.id
+            return True
+
+        player = getattr(world, "player", None)
+        if player is not None and not getattr(entity.combat, "is_hostile_to_player", False):
+            distance_to_player = abs(entity.x - player.x) + abs(entity.y - player.y)
+            if distance_to_player <= self.DESPERATE_TARGET_SEARCH_RADIUS:
+                entity.combat.is_hostile_to_player = True
+                world.add_message_to_chat_log(
+                    f"{world.get_entity_display_name(entity)}, starving, turns on you!"
+                )
+                return True
+
+        return False
 
     def _take_player_pursuit_turn(self, entity, world) -> bool:
         if not getattr(getattr(entity, "combat", None), "is_hostile_to_player", False):
@@ -161,6 +242,16 @@ class PredatorBehavior:
             if nearest_prey:
                 entity.schedule.current_task = "hunting"
                 entity.task_target_entity_id = nearest_prey.id
+            elif entity.physical.hunger >= entity.physical.max_hunger * self.DESPERATE_HUNGER_THRESHOLD_RATIO:
+                # No wild prey found at all, but hungry enough for desperate
+                # predation to get a chance to fire below. Falls through into
+                # the "hunting" task's no-target handling (tries a corpse
+                # first, then desperate escalation) rather than doing
+                # nothing, which is what happens today for a merely-hungry
+                # (70-90%) predator with no prey - that in-between case is
+                # deliberately left unchanged.
+                entity.schedule.current_task = "hunting"
+                entity.task_target_entity_id = None
 
         if entity.schedule.current_task == "hunting":
             prey = world._get_predator_target(entity)
@@ -198,8 +289,17 @@ class PredatorBehavior:
                     entity.schedule.current_path = path
                 else:
                     entity.schedule.current_task = TaskType.IDLE
-            else:
-                entity.schedule.current_task = TaskType.IDLE
+                entity.task_target_entity_id = None
+                return True
+
+            # No wild prey and no corpse: a truly starving predator may
+            # escalate to attacking a human NPC (or the player) as a last
+            # resort. See _try_escalate_to_desperate_predation for the
+            # gating (hunger threshold, per-tick roll, search radius).
+            if self._try_escalate_to_desperate_predation(entity, world):
+                return True
+
+            entity.schedule.current_task = TaskType.IDLE
             entity.task_target_entity_id = None
             return True
 

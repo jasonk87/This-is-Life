@@ -2785,7 +2785,13 @@ class World:
     def _get_predator_target(self, predator):
         if not predator.task_target_entity_id:
             return None
-        return next((n for n in self.npcs if n.id == predator.task_target_entity_id), None)
+        # Searches all_npcs (village_npcs + npcs), not just npcs, so this
+        # can resolve both ordinary wild-prey targets (which live in npcs)
+        # and a desperate predator's human NPC target (which lives in
+        # village_npcs - see PredatorBehavior._try_escalate_to_desperate_predation
+        # in entities/behaviors.py). Strict superset of the old behavior:
+        # every wild-prey ID that resolved before still resolves the same way.
+        return next((n for n in self.all_npcs if n.id == predator.task_target_entity_id), None)
 
     def _update_npc_movement(self):
         """Updates NPC positions based on their current path."""

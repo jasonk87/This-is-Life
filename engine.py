@@ -1418,17 +1418,32 @@ class World:
         return heirs
 
     def _transfer_building_inheritance(self, deceased: NPC) -> None:
-        """Transfer a dead NPC's owned property to the nearest living heir."""
+        """
+        Transfer a dead NPC's owned property AND money to the nearest living
+        heir (see _get_living_family_heirs: partner > adult children, oldest
+        first > adult siblings > parents).
+
+        Money inheritance matches the existing building pattern rather than
+        introducing a new one: everything goes to a single primary heir, not
+        split across multiple heirs (buildings never split either - each one
+        goes entirely to heirs[0]). If there is no living heir, buildings
+        become unowned (owner_id=None) and money is simply lost with the
+        deceased - there's no "ownerless money" concept to fall back to,
+        which is also just what already happened before this change.
+
+        Judgment call: only a positive money balance is transferred. Debt
+        (a negative balance, if that's ever possible elsewhere) is not
+        inherited - it disappears with the deceased rather than saddling an
+        heir with it. Kept silent (no chat message/event) to match how
+        building inheritance itself has always behaved here.
+        """
+        heirs = self._get_living_family_heirs(deceased)
+        primary_heir = heirs[0] if heirs else None
+
         owned_buildings = [
             building for building in self.buildings_by_id.values()
             if getattr(building, "owner_id", None) == deceased.id
         ]
-        if not owned_buildings:
-            return
-
-        heirs = self._get_living_family_heirs(deceased)
-        primary_heir = heirs[0] if heirs else None
-
         for building in owned_buildings:
             if primary_heir is None:
                 building.owner_id = None
@@ -1439,6 +1454,13 @@ class World:
                 primary_heir.schedule.home_building_id = building.id
             if primary_heir not in building.residents and building.category == "residential":
                 building.residents.append(primary_heir)
+
+        deceased_economic = getattr(deceased, "economic", None)
+        deceased_money = getattr(deceased_economic, "money", 0) if deceased_economic is not None else 0
+        if deceased_money > 0:
+            if primary_heir is not None and getattr(primary_heir, "economic", None) is not None:
+                primary_heir.economic.money = getattr(primary_heir.economic, "money", 0) + deceased_money
+            deceased_economic.money = 0
 
     def _cleanup_family_ties_after_death(self, deceased: NPC) -> None:
         """Remove stale partner/sibling references that point at the deceased."""

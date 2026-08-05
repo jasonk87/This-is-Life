@@ -14873,6 +14873,63 @@ class World:
         self.ensure_player_surroundings_generated()
         self._rebuild_entity_positions()
 
+    def _maybe_advance_career_level(self, entity) -> bool:
+        """
+        Promotes an employed entity's CareerState.level after a sustained
+        run of good performance, so staying in a job and performing well is
+        a real path to advancement - not just a cosmetic side effect of
+        set_role() (which only sets level once, from a static role->level
+        lookup, and never again). Works for both NPCs and the player, since
+        both expose the same `.career` (CareerState) / `.economic.work_performance`
+        shape and `_update_player_career` already reuses "standardized NPC
+        logic" for everything else.
+
+        Judgment calls (flagged, not silently picked):
+        - Promotion check runs every 30 tenure_days (a little over a
+          real-world "month" at this game's 1-age-unit-per-day scale) with
+          work_performance >= 55 required at that check. 30 days is meant to
+          feel earned rather than either trivially fast or so rare a player
+          would never observe it; 55 is comfortably above the neutral 50
+          baseline `work_performance` resets to, but well below the 80
+          threshold that already grants a wage bonus elsewhere, so this
+          isn't just re-testing "already doing great," it's testing
+          "reliably above average."
+        - Capped at level 5. infer_career_level() (the static role->level
+          baseline) only ever returns 0-2, so a level-5 ceiling gives
+          meaningful room for tenure-based growth on top of that baseline
+          without being unbounded. The level feeds into
+          roll_crafted_item_quality()'s craftsmanship_score via
+          `career_level * 0.08`; at level 5 that's a +0.4 bonus, roughly
+          double the maximum +0.2 that work_performance alone can
+          contribute - a real, noticeable-but-not-dominant edge for a
+          long-tenured veteran.
+        - Quitting or being fired already resets this for free: _clear_npc_job
+          routes through _set_entity_profession -> career.set_role(), which
+          resets both level and tenure_days to their role-based baseline.
+          So "quit and get rehired" no longer beats "stay and advance," and
+          leaving a job still has a real seniority cost.
+        """
+        career = getattr(entity, "career", None)
+        economic = getattr(entity, "economic", None)
+        if career is None or economic is None:
+            return False
+        if career.is_unemployed() or career.is_creature():
+            return False
+
+        max_level = 5
+        if career.level >= max_level:
+            return False
+
+        promotion_interval_days = 30
+        min_performance_for_promotion = 55
+        if career.tenure_days <= 0 or career.tenure_days % promotion_interval_days != 0:
+            return False
+        if getattr(economic, "work_performance", 0) < min_performance_for_promotion:
+            return False
+
+        career.level += 1
+        return True
+
     def _update_npc_careers(self):
         """
         Simulates a job market where NPCs can quit unhappy jobs and find new ones.
@@ -14897,6 +14954,10 @@ class World:
             if npc.economic.profession.lower() != "unemployed":
                 if hasattr(npc, "career"):
                     npc.career.advance_day()
+                    if self._maybe_advance_career_level(npc):
+                        self.add_message_to_chat_log(
+                            f"{self.get_entity_display_name(npc)} has grown more skilled and experienced as a {npc.career.current_role} through steady, reliable work."
+                        )
                 # Factors affecting satisfaction
                 satisfaction_change = 0
 
@@ -15631,6 +15692,10 @@ class World:
             return
 
         self.player.career.advance_day()
+        if self._maybe_advance_career_level(self.player):
+            self.add_message_to_chat_log(
+                f"You have grown more skilled and experienced as a {self.player.career.current_role} through steady, reliable work."
+            )
 
         # 1. Decay performance (natural attrition if not working)
         # Check if player is currently at work (end of day check is harsh but simple)

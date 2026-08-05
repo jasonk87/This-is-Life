@@ -16224,6 +16224,39 @@ class World:
                                     )
                                     village.local_events.append(self.global_events[-1])
 
+    def _find_married_couples_eligible_for_birth(self, village_npcs) -> list[tuple[NPC, NPC]]:
+        """
+        Returns (parent1, parent2) pairs for every mutually-married couple
+        in village_npcs where both partners are aged 18-50. "Married" means
+        family_ties partner_id/spouse_id points from each NPC to the other -
+        the same fields set by the real courtship pipeline (see
+        simulation/systems/scheduling.py's "seeking_partner"/"courting"
+        tasks and engine.py's marriage-on-arrival handling). A one-sided or
+        stale tie (e.g. left over after a bug, or pointing at someone no
+        longer in this village) does not count.
+        """
+        couples: list[tuple[NPC, NPC]] = []
+        matched_ids: set[int] = set()
+        for npc in village_npcs:
+            if npc.id in matched_ids:
+                continue
+            if npc.physical.is_dead or not (18 < npc.age < 50):
+                continue
+            ties = getattr(getattr(npc, "social", None), "family_ties", None) or {}
+            partner_id = ties.get("partner_id") or ties.get("spouse_id")
+            if partner_id is None:
+                continue
+            partner = next((other for other in village_npcs if other.id == partner_id), None)
+            if partner is None or partner.physical.is_dead or not (18 < partner.age < 50):
+                continue
+            partner_ties = getattr(getattr(partner, "social", None), "family_ties", None) or {}
+            if (partner_ties.get("partner_id") or partner_ties.get("spouse_id")) != npc.id:
+                continue
+            matched_ids.add(npc.id)
+            matched_ids.add(partner.id)
+            couples.append((npc, partner))
+        return couples
+
     def _simulate_village_population_lifecycle(self, village, village_npcs, location):
         """
         Runs daily birth and old-age death simulation for a single village.
@@ -16233,8 +16266,8 @@ class World:
         happens.
 
         Judgment calls (flagged per Jason's request, not silently chosen):
-        - Birth/death rates (5% daily chance with 2+ eligible parents aged
-          18-50; death chance of (age-70)/100 per day past age 70) are left
+        - Birth/death rates (5% daily chance when an eligible couple exists;
+          death chance of (age-70)/100 per day past age 70) are left
           numerically UNCHANGED from the original abstract-only logic. This
           fix is about making the mechanic actually run everywhere and
           actually remove the dead, not about retuning population growth.
@@ -16246,76 +16279,102 @@ class World:
           when this only ran for rarely-observed distant villages, but would
           let the player's own village grow unbounded once births run there
           too. This cap is a new addition, not part of the original logic.
+        - NEW (this pass): births now require an actual married couple -
+          two NPCs whose family_ties partner_id/spouse_id mutually point at
+          each other (set by the real courtship pipeline in
+          simulation/systems/scheduling.py's "seeking_partner"/"courting"
+          tasks), both aged 18-50. Unmarried random pairing is REMOVED
+          entirely, not just deprioritized - a village with no married
+          couples now simply has no births that day, same as it would have
+          no births with zero eligible NPCs before. This is a deliberate
+          choice, not a compromise: the courtship/marriage system was
+          already fully built and already unused by birth, and grafting
+          "prefer married, fall back to random" on top would keep the
+          exact inconsistency (parentless-in-spirit spontaneous children)
+          this is meant to fix, while also being harder to reason about.
+          The real cost is pacing - population growth is now gated behind
+          courtship's own gates (1% per leisure-check to start seeking a
+          partner, then a relationship score > 70 to actually marry), so
+          growth will be visibly slower and more front-loaded-then-quiet
+          than before, especially early in a save. That's an intentional
+          trade for population growth actually meaning something now,
+          consistent with the "real simulation, no hand-holding" direction
+          from earlier in this project - flagging clearly in case the
+          resulting pacing needs a second look once it's observable in play.
+        - Scope note: only NPC-NPC marriages recorded in village_npcs are
+          eligible parents, same as before this change. The player can marry
+          an NPC (see engine.py's player-marriage flow), but the player was
+          never a birth-eligible "parent" in this system and this change
+          doesn't add that - kept out to avoid scope creep beyond what was
+          asked.
         """
         # --- Birth Simulation ---
         if len(village_npcs) < MAX_NPCS_PER_VILLAGE:
-            # Find potential couples (for simplicity, any two adults living together)
-            potential_parents = [npc for npc in village_npcs if 18 < npc.age < 50]
-            if len(potential_parents) >= 2 and random.random() < 0.05: # 5% chance of a birth event per day
-                parent1 = random.choice(potential_parents)
-                parent2 = random.choice(potential_parents)
-                if parent1.id != parent2.id:
-                    # Create a new Child NPC
-                    child_name = f"Child of {parent1.name}"
-                    # Inherit home from parent1
-                    home_id = parent1.schedule.home_building_id
-                    home_coords = (parent1.x, parent1.y) # Default to parent's location if home not found
-                    if home_id:
-                        home_building = self.buildings_by_id.get(home_id)
-                        if home_building:
-                            home_coords = (home_building.global_center_x, home_building.global_center_y)
+            married_couples = self._find_married_couples_eligible_for_birth(village_npcs)
+            if married_couples and random.random() < 0.05: # 5% chance of a birth event per day
+                parent1, parent2 = random.choice(married_couples)
 
-                    child = NPC(
-                        x=home_coords[0],
-                        y=home_coords[1],
-                        name=child_name,
-                        dialogue=["Goo goo gaga."],
-                        personality="child",
-                        player_id=self.player.id
+                # Create a new Child NPC
+                child_name = f"Child of {parent1.name}"
+                # Inherit home from parent1
+                home_id = parent1.schedule.home_building_id
+                home_coords = (parent1.x, parent1.y) # Default to parent's location if home not found
+                if home_id:
+                    home_building = self.buildings_by_id.get(home_id)
+                    if home_building:
+                        home_coords = (home_building.global_center_x, home_building.global_center_y)
+
+                child = NPC(
+                    x=home_coords[0],
+                    y=home_coords[1],
+                    name=child_name,
+                    dialogue=["Goo goo gaga."],
+                    personality="child",
+                    player_id=self.player.id
+                )
+                child.age = 0
+                self._set_entity_profession(child, "Child", reason="birth")
+                child.schedule.home_building_id = home_id
+
+                # Add to family ties
+                child.social.family_ties["mother_id"] = parent1.id # Simplified
+                child.social.family_ties["father_id"] = parent2.id
+                existing_siblings = [
+                    other for other in self.village_npcs
+                    if isinstance(other, NPC)
+                    and (
+                        getattr(getattr(other, "social", None), "family_ties", {}).get("mother_id") == parent1.id
+                        or getattr(getattr(other, "social", None), "family_ties", {}).get("father_id") == parent2.id
                     )
-                    child.age = 0
-                    self._set_entity_profession(child, "Child", reason="birth")
-                    child.schedule.home_building_id = home_id
+                ]
+                if existing_siblings:
+                    child.social.family_ties["sibling_ids"] = [sibling.id for sibling in existing_siblings]
+                    for sibling in existing_siblings:
+                        sibling_ties = getattr(getattr(sibling, "social", None), "family_ties", {})
+                        sibling_ids = sibling_ties.setdefault("sibling_ids", [])
+                        if child.id not in sibling_ids:
+                            sibling_ids.append(child.id)
+                for parent in (parent1, parent2):
+                    parent_ties = getattr(getattr(parent, "social", None), "family_ties", {})
+                    child_ids = parent_ties.setdefault("child_ids", [])
+                    if child.id not in child_ids:
+                        child_ids.append(child.id)
 
-                    # Add to family ties
-                    child.social.family_ties["mother_id"] = parent1.id # Simplified
-                    child.social.family_ties["father_id"] = parent2.id
-                    existing_siblings = [
-                        other for other in self.village_npcs
-                        if isinstance(other, NPC)
-                        and (
-                            getattr(getattr(other, "social", None), "family_ties", {}).get("mother_id") == parent1.id
-                            or getattr(getattr(other, "social", None), "family_ties", {}).get("father_id") == parent2.id
-                        )
-                    ]
-                    if existing_siblings:
-                        child.social.family_ties["sibling_ids"] = [sibling.id for sibling in existing_siblings]
-                        for sibling in existing_siblings:
-                            sibling_ties = getattr(getattr(sibling, "social", None), "family_ties", {})
-                            sibling_ids = sibling_ties.setdefault("sibling_ids", [])
-                            if child.id not in sibling_ids:
-                                sibling_ids.append(child.id)
-                    for parent in (parent1, parent2):
-                        parent_ties = getattr(getattr(parent, "social", None), "family_ties", {})
-                        child_ids = parent_ties.setdefault("child_ids", [])
-                        if child.id not in child_ids:
-                            child_ids.append(child.id)
+                # Add to world
+                self.village_npcs.append(child)
+                village_npcs.append(child)
+                self._mark_entity_positions_dirty()
+                if home_id:
+                    home_building = self.buildings_by_id.get(home_id)
+                    if home_building:
+                        home_building.residents.append(child)
 
-                    # Add to world
-                    self.village_npcs.append(child)
-                    village_npcs.append(child)
-                    self._mark_entity_positions_dirty()
-                    if home_id:
-                        home_building = self.buildings_by_id.get(home_id)
-                        if home_building:
-                            home_building.residents.append(child)
-
-                    self.record_birth_event(
-                        child=child,
-                        parent_ids=(parent1.id, parent2.id),
-                        description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
-                        location=location,
-                    )
+                self.record_birth_event(
+                    child=child,
+                    parent_ids=(parent1.id, parent2.id),
+                    description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
+                    location=location,
+                )
 
         # --- Death Simulation (Old Age) ---
         elderly_npcs = [npc for npc in village_npcs if npc.age > 70]

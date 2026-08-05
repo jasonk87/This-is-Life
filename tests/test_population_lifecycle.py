@@ -24,6 +24,12 @@ class TestPopulationLifecycle(unittest.TestCase):
         npc.age = age
         return npc
 
+    def _marry(self, npc_a, npc_b):
+        npc_a.social.family_ties["partner_id"] = npc_b.id
+        npc_a.social.family_ties["spouse_id"] = npc_b.id
+        npc_b.social.family_ties["partner_id"] = npc_a.id
+        npc_b.social.family_ties["spouse_id"] = npc_a.id
+
     def test_old_age_death_actually_removes_npc_from_world(self):
         """Regression test for the bug where old-age death only logged a
         DeathRecord and never removed the NPC from village_npcs/npcs."""
@@ -42,27 +48,13 @@ class TestPopulationLifecycle(unittest.TestCase):
         self.assertNotIn(elder, self.world.npcs)
 
     def test_birth_adds_child_with_expected_starting_state(self):
-        import random as random_module
-
         parent1 = self._make_npc("Parent One", age=25)
         parent2 = self._make_npc("Parent Two", age=27)
+        self._marry(parent1, parent2)
         village_npcs = [parent1, parent2]
         starting_world_count = len(self.world.village_npcs)
 
-        original_choice = random_module.choice
-        picks = iter([parent1, parent2])
-
-        def fake_choice(seq):
-            # Only the first two random.choice calls are the parent
-            # selection; NPC() construction (e.g. gender) also calls
-            # random.choice internally and should use real randomness.
-            try:
-                return next(picks)
-            except StopIteration:
-                return original_choice(seq)
-
-        with patch("random.random", return_value=0.0), \
-             patch("random.choice", side_effect=fake_choice):
+        with patch("random.random", return_value=0.0):
             self.world._simulate_village_population_lifecycle(
                 village=None, village_npcs=village_npcs, location=(parent1.x, parent1.y)
             )
@@ -84,6 +76,10 @@ class TestPopulationLifecycle(unittest.TestCase):
             self._make_npc(f"Villager {i}", age=25)
             for i in range(config.MAX_NPCS_PER_VILLAGE)
         ]
+        # Include a married couple so there IS an eligible birth that would
+        # happen if not for the cap - otherwise this test wouldn't actually
+        # exercise the cap at all now that unmarried pairing is gone.
+        self._marry(village_npcs[0], village_npcs[1])
 
         with patch("random.random", return_value=0.0):
             self.world._simulate_village_population_lifecycle(
@@ -91,6 +87,75 @@ class TestPopulationLifecycle(unittest.TestCase):
             )
 
         self.assertEqual(len(village_npcs), config.MAX_NPCS_PER_VILLAGE)
+
+    def test_unmarried_pair_never_produces_a_birth(self):
+        """Core of this change: births now require an actual married couple.
+        Two single adults living in the same village no longer spontaneously
+        have a child together, even with the daily-chance roll forced to
+        succeed."""
+        single1 = self._make_npc("Single One", age=25)
+        single2 = self._make_npc("Single Two", age=27)
+        village_npcs = [single1, single2]
+
+        with patch("random.random", return_value=0.0):
+            self.world._simulate_village_population_lifecycle(
+                village=None, village_npcs=village_npcs, location=(0, 0)
+            )
+
+        self.assertEqual(len(village_npcs), 2)
+
+    def test_one_sided_partner_tie_does_not_count_as_married(self):
+        npc_a = self._make_npc("A", age=25)
+        npc_b = self._make_npc("B", age=27)
+        # Stale/one-sided tie: A considers itself partnered to B, but B's
+        # own ties don't point back - should not be treated as a real couple.
+        npc_a.social.family_ties["partner_id"] = npc_b.id
+        village_npcs = [npc_a, npc_b]
+
+        with patch("random.random", return_value=0.0):
+            self.world._simulate_village_population_lifecycle(
+                village=None, village_npcs=village_npcs, location=(0, 0)
+            )
+
+        self.assertEqual(len(village_npcs), 2)
+
+    def test_married_partner_outside_age_range_excludes_the_couple(self):
+        npc_a = self._make_npc("A", age=25)
+        npc_b = self._make_npc("B", age=60)  # outside the 18-50 eligible range
+        self._marry(npc_a, npc_b)
+        village_npcs = [npc_a, npc_b]
+
+        with patch("random.random", return_value=0.0):
+            self.world._simulate_village_population_lifecycle(
+                village=None, village_npcs=village_npcs, location=(0, 0)
+            )
+
+        self.assertEqual(len(village_npcs), 2)
+
+    def test_dead_partner_excludes_the_couple(self):
+        npc_a = self._make_npc("A", age=25)
+        npc_b = self._make_npc("B", age=27)
+        self._marry(npc_a, npc_b)
+        npc_b.physical.is_dead = True
+        village_npcs = [npc_a, npc_b]
+
+        with patch("random.random", return_value=0.0):
+            self.world._simulate_village_population_lifecycle(
+                village=None, village_npcs=village_npcs, location=(0, 0)
+            )
+
+        self.assertEqual(len(village_npcs), 2)
+
+    def test_find_married_couples_eligible_for_birth_unit(self):
+        npc_a = self._make_npc("A", age=25)
+        npc_b = self._make_npc("B", age=27)
+        self._marry(npc_a, npc_b)
+        single = self._make_npc("Single", age=30)
+
+        couples = self.world._find_married_couples_eligible_for_birth([npc_a, npc_b, single])
+
+        self.assertEqual(len(couples), 1)
+        self.assertEqual({couples[0][0].id, couples[0][1].id}, {npc_a.id, npc_b.id})
 
     def test_child_transitions_to_adult_profession_at_eighteen(self):
         child = self._make_npc("Child Test", age=17)

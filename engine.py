@@ -52,6 +52,7 @@ from config import (
     DEFAULT_HEARING_RADIUS, DEFAULT_SPEECH_VOLUME,
     # Abstract Simulation Configs
     ABSTRACT_SIMULATION_DISTANCE_CHUNKS,
+    MAX_NPCS_PER_VILLAGE,
     INITIAL_TIME_OF_DAY,
     # Season and Temperature Configs
     DAYS_PER_SEASON,
@@ -8835,7 +8836,7 @@ class World:
 
         # self.add_message_to_chat_log(f"Debug: {npc.name} has {reason}.")
 
-    def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None):
+    def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None, description: str | None = None, cause_of_death: str | None = None):
         if isinstance(dead_npc, Animal) and hasattr(self, "ecology"):
             self.ecology.note_animal_death(dead_npc)
         dead_npc_name = self.get_entity_display_name(dead_npc)
@@ -8852,10 +8853,10 @@ class World:
 
         death_event = self.record_death_event(
             deceased=dead_npc,
-            description="{subject} was killed by {target}.",
+            description=description or "{subject} was killed by {target}.",
             killer_id=killer_id,
             location=(dead_npc.x, dead_npc.y),
-            cause_of_death="killed",
+            cause_of_death=cause_of_death or "killed",
         )
 
         if killer_id is not None and not isinstance(dead_npc, Animal):
@@ -14635,6 +14636,20 @@ class World:
         if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
             for npc in self.all_npcs:
                 npc.age += 1
+                # Child -> adult transition. Nothing in the codebase previously
+                # moved a "Child" NPC out of that profession as they aged, so
+                # children lived forever as children. Age 18 is used here
+                # because it's already the established "adulthood" threshold
+                # used elsewhere in this codebase (election voter eligibility,
+                # family-migration eligibility, courtship-candidate exclusion)
+                # - it's a game-time-day count, not literal years, but reusing
+                # the existing convention rather than inventing a new number.
+                # Deliberately scoped to profession only: housing/home-building
+                # assignment is left untouched, so a newly-adult NPC keeps
+                # living in the parental home until they move via existing
+                # migration/courtship mechanics.
+                if getattr(getattr(npc, "economic", None), "profession", None) == "Child" and npc.age >= 18:
+                    self._set_entity_profession(npc, "Unemployed", reason="came_of_age")
 
     def _update_inventory_spoilage(self):
         """Checks for food spoilage in all inventories once per day."""
@@ -15892,9 +15907,28 @@ class World:
                 # Calculate distance to player
                 dist = max(abs(x_chunk - player_chunk_x), abs(y_chunk - player_chunk_y))
 
+                village = chunk.village
+                village_npcs = [npc for npc in self.village_npcs if self._get_village_for_npc(npc) == village]
+
+                # Population lifecycle (births + old-age deaths) used to live
+                # entirely inside the `dist > ABSTRACT_SIMULATION_DISTANCE_CHUNKS`
+                # block below, which meant the player's own nearby, actively
+                # simulated home village never aged, had children, or lost
+                # elders - the "living breathing world" only applied to
+                # villages nobody was watching. It now runs once per day for
+                # every village regardless of distance. Everything else in
+                # this function (abstracted economic production/consumption,
+                # trade caravans, diplomacy/warfare/raiding) remains a
+                # deliberate simplification for off-screen villages and stays
+                # distance-gated exactly as before.
+                if village_npcs:
+                    self._simulate_village_population_lifecycle(
+                        village,
+                        village_npcs,
+                        location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
+                    )
+
                 if dist > ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
-                    village = chunk.village
-                    village_npcs = [npc for npc in self.village_npcs if self._get_village_for_npc(npc) == village]
                     if not village_npcs:
                         continue
 
@@ -16064,91 +16098,119 @@ class World:
                                     )
                                     village.local_events.append(self.global_events[-1])
 
-                    # --- Birth Simulation ---
-                    # Find potential couples (for simplicity, any two adults living together)
-                    potential_parents = [npc for npc in village_npcs if 18 < npc.age < 50]
-                    if len(potential_parents) >= 2 and random.random() < 0.05: # 5% chance of a birth event per day
-                        parent1 = random.choice(potential_parents)
-                        parent2 = random.choice(potential_parents)
-                        if parent1.id != parent2.id:
-                            # Create a new Child NPC
-                            child_name = f"Child of {parent1.name}"
-                            # Inherit home from parent1
-                            home_id = parent1.schedule.home_building_id
-                            home_coords = (parent1.x, parent1.y) # Default to parent's location if home not found
-                            if home_id:
-                                home_building = self.buildings_by_id.get(home_id)
-                                if home_building:
-                                    home_coords = (home_building.global_center_x, home_building.global_center_y)
+    def _simulate_village_population_lifecycle(self, village, village_npcs, location):
+        """
+        Runs daily birth and old-age death simulation for a single village.
+        Called unconditionally (both for the player's nearby village and for
+        distant abstracted ones) from `_update_abstract_simulation`, so this
+        is where the "living breathing world" generational turnover actually
+        happens.
 
-                            child = NPC(
-                                x=home_coords[0],
-                                y=home_coords[1],
-                                name=child_name,
-                                dialogue=["Goo goo gaga."],
-                                personality="child",
-                                player_id=self.player.id
-                            )
-                            child.age = 0
-                            self._set_entity_profession(child, "Child", reason="birth")
-                            child.schedule.home_building_id = home_id
+        Judgment calls (flagged per Jason's request, not silently chosen):
+        - Birth/death rates (5% daily chance with 2+ eligible parents aged
+          18-50; death chance of (age-70)/100 per day past age 70) are left
+          numerically UNCHANGED from the original abstract-only logic. This
+          fix is about making the mechanic actually run everywhere and
+          actually remove the dead, not about retuning population growth.
+          Now that this is directly observable in the player's home village,
+          the rates may be worth revisiting for pacing - flagging that as a
+          follow-up, not doing it here.
+        - NEW: births are now capped at `MAX_NPCS_PER_VILLAGE` (config.py,
+          currently 15). The original code had no cap at all, which was fine
+          when this only ran for rarely-observed distant villages, but would
+          let the player's own village grow unbounded once births run there
+          too. This cap is a new addition, not part of the original logic.
+        """
+        # --- Birth Simulation ---
+        if len(village_npcs) < MAX_NPCS_PER_VILLAGE:
+            # Find potential couples (for simplicity, any two adults living together)
+            potential_parents = [npc for npc in village_npcs if 18 < npc.age < 50]
+            if len(potential_parents) >= 2 and random.random() < 0.05: # 5% chance of a birth event per day
+                parent1 = random.choice(potential_parents)
+                parent2 = random.choice(potential_parents)
+                if parent1.id != parent2.id:
+                    # Create a new Child NPC
+                    child_name = f"Child of {parent1.name}"
+                    # Inherit home from parent1
+                    home_id = parent1.schedule.home_building_id
+                    home_coords = (parent1.x, parent1.y) # Default to parent's location if home not found
+                    if home_id:
+                        home_building = self.buildings_by_id.get(home_id)
+                        if home_building:
+                            home_coords = (home_building.global_center_x, home_building.global_center_y)
 
-                            # Add to family ties
-                            child.social.family_ties["mother_id"] = parent1.id # Simplified
-                            child.social.family_ties["father_id"] = parent2.id
-                            existing_siblings = [
-                                other for other in self.village_npcs
-                                if isinstance(other, NPC)
-                                and (
-                                    getattr(getattr(other, "social", None), "family_ties", {}).get("mother_id") == parent1.id
-                                    or getattr(getattr(other, "social", None), "family_ties", {}).get("father_id") == parent2.id
-                                )
-                            ]
-                            if existing_siblings:
-                                child.social.family_ties["sibling_ids"] = [sibling.id for sibling in existing_siblings]
-                                for sibling in existing_siblings:
-                                    sibling_ties = getattr(getattr(sibling, "social", None), "family_ties", {})
-                                    sibling_ids = sibling_ties.setdefault("sibling_ids", [])
-                                    if child.id not in sibling_ids:
-                                        sibling_ids.append(child.id)
-                            for parent in (parent1, parent2):
-                                parent_ties = getattr(getattr(parent, "social", None), "family_ties", {})
-                                child_ids = parent_ties.setdefault("child_ids", [])
-                                if child.id not in child_ids:
-                                    child_ids.append(child.id)
+                    child = NPC(
+                        x=home_coords[0],
+                        y=home_coords[1],
+                        name=child_name,
+                        dialogue=["Goo goo gaga."],
+                        personality="child",
+                        player_id=self.player.id
+                    )
+                    child.age = 0
+                    self._set_entity_profession(child, "Child", reason="birth")
+                    child.schedule.home_building_id = home_id
 
-                            # Add to world
-                            self.village_npcs.append(child)
-                            self._mark_entity_positions_dirty()
-                            if home_id:
-                                home_building = self.buildings_by_id.get(home_id)
-                                if home_building:
-                                    home_building.residents.append(child)
+                    # Add to family ties
+                    child.social.family_ties["mother_id"] = parent1.id # Simplified
+                    child.social.family_ties["father_id"] = parent2.id
+                    existing_siblings = [
+                        other for other in self.village_npcs
+                        if isinstance(other, NPC)
+                        and (
+                            getattr(getattr(other, "social", None), "family_ties", {}).get("mother_id") == parent1.id
+                            or getattr(getattr(other, "social", None), "family_ties", {}).get("father_id") == parent2.id
+                        )
+                    ]
+                    if existing_siblings:
+                        child.social.family_ties["sibling_ids"] = [sibling.id for sibling in existing_siblings]
+                        for sibling in existing_siblings:
+                            sibling_ties = getattr(getattr(sibling, "social", None), "family_ties", {})
+                            sibling_ids = sibling_ties.setdefault("sibling_ids", [])
+                            if child.id not in sibling_ids:
+                                sibling_ids.append(child.id)
+                    for parent in (parent1, parent2):
+                        parent_ties = getattr(getattr(parent, "social", None), "family_ties", {})
+                        child_ids = parent_ties.setdefault("child_ids", [])
+                        if child.id not in child_ids:
+                            child_ids.append(child.id)
 
-                            self.record_birth_event(
-                                child=child,
-                                parent_ids=(parent1.id, parent2.id),
-                                description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
-                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
-                            )
-                            # self.add_message_to_chat_log(f"A child was born in a distant village.")
+                    # Add to world
+                    self.village_npcs.append(child)
+                    village_npcs.append(child)
+                    self._mark_entity_positions_dirty()
+                    if home_id:
+                        home_building = self.buildings_by_id.get(home_id)
+                        if home_building:
+                            home_building.residents.append(child)
 
-                    # --- Death Simulation (Old Age) ---
-                    elderly_npcs = [npc for npc in village_npcs if npc.age > 70]
-                    for elder in elderly_npcs:
-                        # Chance of dying increases with age
-                        if random.random() < (elder.age - 70) / 100.0:
-                            self.record_death_event(
-                                deceased=elder,
-                                description="{subject} died of old age.",
-                                location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
-                                cause_of_death="old_age",
-                                settlement_id=getattr(village, "id", None),
-                                region_id=getattr(village, "region_id", None),
-                            )
-                            # In a full abstract sim, we would remove the NPC from the world here.
-                            # For now, we just log it. A more complex system would be needed to truly remove them.
-                            # self.handle_npc_death(elder) # This could be problematic if the NPC is referenced elsewhere.
+                    self.record_birth_event(
+                        child=child,
+                        parent_ids=(parent1.id, parent2.id),
+                        description=f"A child, {child.name}, was born to {parent1.name} and {parent2.name}.",
+                        location=location,
+                    )
+
+        # --- Death Simulation (Old Age) ---
+        elderly_npcs = [npc for npc in village_npcs if npc.age > 70]
+        for elder in elderly_npcs:
+            # Chance of dying increases with age
+            if random.random() < (elder.age - 70) / 100.0:
+                # Bug fix: this used to only call record_death_event (a log
+                # entry) and never actually removed the NPC from the world -
+                # so "dead" elders kept walking around forever. handle_npc_death
+                # is the single canonical death path used by combat/predation
+                # (inheritance transfer, family-tie cleanup, immediate removal
+                # from village_npcs/npcs, etc.) and is cause-agnostic when
+                # killer_id is left at its default of None, so it's reused
+                # here rather than duplicating that logic.
+                elder.physical.is_dead = True
+                self.handle_npc_death(
+                    elder,
+                    killer_id=None,
+                    description="{subject} died of old age.",
+                    cause_of_death="old_age",
+                )
 
     def _process_npc_witness_events(self):
         """

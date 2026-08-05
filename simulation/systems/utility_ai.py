@@ -196,8 +196,16 @@ def _execute_steal_food(world, npc):
 
                     # Small chance to be caught by a sheriff/guard
                     if random.random() < 0.2:
-                        # Report crime logic here if needed
-                        pass
+                        world.add_message_to_chat_log(
+                            f"{world.get_entity_display_name(npc)} was caught stealing!"
+                        )
+                        world.record_crime_event(
+                            crime_kind="theft",
+                            suspect_id=npc.id,
+                            description="{subject} was caught stealing from a building.",
+                            location=(npc.x, npc.y),
+                        )
+                        world._accrue_crime_bounty(npc, "theft")
                     return
     # Failed to steal
     npc.schedule.current_task = TaskType.IDLE

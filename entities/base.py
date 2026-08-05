@@ -212,6 +212,12 @@ class Schedule:
     previous_task: str = TaskType.IDLE
     game_time_last_updated: int = 0
     last_paid_day: int = 0
+    # NPC jail state (mirrors PlayerState.is_jailed/jail_cell_coords/
+    # jail_time_remaining, but lives on Schedule since NPCs have no
+    # PlayerState). See World._serve_npc_jail_time in engine.py.
+    is_jailed: bool = False
+    jail_cell_coords: tuple[int, int] | None = None
+    jail_time_remaining: int = 0
 
 @dataclass
 class Equipment:

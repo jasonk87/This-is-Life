@@ -63,6 +63,22 @@ from config import (
     LLM_BACKEND, ENABLE_LLM_CONNECTION, GOOGLE_API_KEY
 )
 
+# --- NPC Crime & Law Enforcement ---
+# Bounty accrued per witnessed/recorded crime, keyed by crime kind. Shared by
+# the player's existing witnessed-crime flow and the new autonomous NPC
+# crime paths (theft via _execute_steal_food, assault via
+# npc_attempt_attack_npc, murder via handle_npc_death).
+CRIME_BOUNTY_VALUES = {"theft": 30, "assault": 50, "murder": 100}
+NPC_ARREST_BOUNTY_THRESHOLD = 100  # Matches the player's existing threshold.
+# Judgment call: an NPC's jail sentence is intentionally shorter than the
+# player's 500-tick sentence (see serve_jail_time). NPCs are load-bearing
+# parts of the simulation (jobs, families, businesses); a jailed NPC is
+# fully idle while inside, so a long sentence risks stalling whatever they
+# were doing far more than it does for the player. 250 ticks is long enough
+# to feel like a real consequence (a full work shift missed) without
+# parking an NPC out of the simulation for an extended stretch.
+NPC_JAIL_DURATION_TICKS = 250
+
 from data.tiles import TILE_DEFINITIONS, COLORS # For TILE_DEFINITIONS
 from tile_types import Tile # For Tile class
 from entities.tree import Tree # For isinstance check
@@ -3549,6 +3565,12 @@ class World:
             if hasattr(npc_inventory, "process_tick"):
                 npc_inventory.process_tick()
 
+            if getattr(npc.schedule, "is_jailed", False):
+                npc.schedule.jail_time_remaining -= 1
+                if npc.schedule.jail_time_remaining <= 0:
+                    self._release_npc_from_jail(npc)
+                continue
+
             if npc.schedule.current_task == "execute_political_warrant" and npc.task_target_entity_id is not None:
                 continue
 
@@ -3842,6 +3864,23 @@ class World:
                     self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} spots you and moves to arrest you for your crimes!")
                     npc.combat.is_hostile_to_player = True
                     # Their combat AI will now handle moving towards the player to "attack" (which will be arrest)
+
+        # --- Autonomous pursuit of wanted NPCs (bounty >= NPC_ARREST_BOUNTY_THRESHOLD) ---
+        # NPC equivalent of the player check above: reuses the
+        # execute_political_warrant task/pursuit machinery (see
+        # _update_npc_movement) without going through issue_political_warrant,
+        # since this is guards doing their ordinary job, not a formal
+        # player-issued civic warrant (no office-holding or treasury cost).
+        if (npc.economic.profession in ["Sheriff", "Guard"]
+                and not npc.combat.is_hostile_to_player
+                and npc.schedule.current_task not in ("execute_political_warrant", "jailed")):
+            wanted_suspect = self._find_wanted_npc_in_sight(npc)
+            if wanted_suspect is not None:
+                self.add_message_to_chat_log(
+                    f"{self.get_entity_display_name(npc)} spots {self.get_entity_display_name(wanted_suspect)} and moves to make an arrest!"
+                )
+                npc.task_target_entity_id = wanted_suspect.id
+                npc.schedule.current_task = "execute_political_warrant"
 
         # After all task decisions and path assignments:
         # If NPC is at work, handle specific work sub-tasks or general production.
@@ -5242,6 +5281,41 @@ class World:
         """Handles an NPC's attempt to attack another NPC."""
         if attacker.physical.is_dead or target.physical.is_dead:
             return
+
+        # --- ARREST LOGIC (mirrors npc_attempt_attack_player's arrest check) ---
+        if (attacker.economic.profession in ["Sheriff", "Guard"]
+                and getattr(target.economic, "bounty", 0) >= NPC_ARREST_BOUNTY_THRESHOLD
+                and not getattr(target.schedule, "is_jailed", False)):
+            self.add_message_to_chat_log(
+                f"{self.get_entity_display_name(attacker)} apprehends {self.get_entity_display_name(target)}!"
+            )
+            self._serve_npc_jail_time(target)
+            attacker.task_target_entity_id = None
+            attacker.schedule.current_task = TaskType.IDLE
+            attacker.schedule.current_path = []
+            return
+
+        # --- CRIME RECORDING for genuine civilian-on-civilian violence ---
+        # Excludes: animals (predation, e.g. a desperate wolf, isn't "crime"),
+        # guards actively executing a lawful warrant (that's law enforcement,
+        # not the crime), and raider/faction combat (that's war, not crime).
+        is_civilian_assault = (
+            not isinstance(attacker, Animal)
+            and not isinstance(target, Animal)
+            and attacker.schedule.current_task != "execute_political_warrant"
+            and getattr(attacker, "faction_id", None) is None
+            and getattr(attacker, "enemy_faction_id", None) is None
+        )
+        if is_civilian_assault:
+            self.record_crime_event(
+                crime_kind="assault",
+                suspect_id=attacker.id,
+                victim_id=target.id,
+                witness_ids=tuple(w.id for w in self._get_witnesses_to_action(attacker.x, attacker.y, "assault")),
+                description="{subject} assaulted {target}.",
+                location=(attacker.x, attacker.y),
+            )
+            self._accrue_crime_bounty(attacker, "assault")
 
         # Simple damage calculation for now, bypassing LLM for NPC vs NPC
         damage = random.randint(1, 4) # Example: 1d4 damage
@@ -8971,6 +9045,7 @@ class World:
                              self.add_message_to_chat_log("Your infamy increases for this public act of violence.")
                          else:
                              self.add_message_to_chat_log(f"{self.get_entity_display_name(killer)}'s infamy increases.")
+                         self._accrue_crime_bounty(killer, "murder")
 
         npc_chunk_x, npc_chunk_y = dead_npc.x // CHUNK_SIZE, dead_npc.y // CHUNK_SIZE
         npc_local_x, npc_local_y = dead_npc.x % CHUNK_SIZE, dead_npc.y % CHUNK_SIZE
@@ -10369,6 +10444,133 @@ class World:
         )
         create_public_event_seed_from_record(self, crime_record)
         return crime_record
+
+    def _accrue_crime_bounty(self, criminal, crime_kind: str) -> None:
+        """Increments a criminal's bounty for a recorded crime. Shared by the
+        player's existing witnessed-crime flow (_handle_witness_reaction) and
+        the new autonomous NPC crime paths (theft/assault/murder). Works for
+        both Player and NPC criminals since bounty lives on the generic
+        EconomicState. Once a criminal's bounty reaches
+        NPC_ARREST_BOUNTY_THRESHOLD (100, matching the player's existing
+        threshold), Sheriff/Guard NPCs will autonomously pursue and jail them
+        - see _find_wanted_npc_in_sight and the arrest check in
+        npc_attempt_attack_npc/npc_attempt_attack_player."""
+        amount = CRIME_BOUNTY_VALUES.get(crime_kind)
+        economic = getattr(criminal, "economic", None)
+        if not amount or economic is None:
+            return
+        economic.bounty = getattr(economic, "bounty", 0) + amount
+        if isinstance(criminal, Player):
+            self.add_message_to_chat_log(
+                f"Your bounty has increased by {amount} for {crime_kind}. Total bounty: {economic.bounty}."
+            )
+
+    def _find_wanted_npc_in_sight(self, guard: NPC):
+        """Finds the nearest non-guard NPC with an outstanding bounty
+        (>= NPC_ARREST_BOUNTY_THRESHOLD) that this guard can currently see
+        and who isn't already jailed. Used for autonomous NPC-target arrest
+        dispatch, mirroring how issue_political_warrant dispatches guards for
+        a player-issued warrant, but without requiring player office-holding
+        or treasury payment - this is guards doing their ordinary job, not a
+        formal civic action."""
+        if guard.id not in self.npc_fov_maps:
+            return None
+        fov_map = self.npc_fov_maps[guard.id]
+        best = None
+        best_dist = None
+        for other in self.village_npcs:
+            if other.id == guard.id or other.physical.is_dead:
+                continue
+            if other.economic.profession in ["Sheriff", "Guard"]:
+                continue
+            if getattr(other.economic, "bounty", 0) < NPC_ARREST_BOUNTY_THRESHOLD:
+                continue
+            if getattr(other.schedule, "is_jailed", False):
+                continue
+            if not (0 <= other.x < WORLD_WIDTH and 0 <= other.y < WORLD_HEIGHT):
+                continue
+            if not fov_map[other.y, other.x]:
+                continue
+            dist = abs(guard.x - other.x) + abs(guard.y - other.y)
+            if best_dist is None or dist < best_dist:
+                best = other
+                best_dist = dist
+        return best
+
+    def _serve_npc_jail_time(self, npc: NPC) -> None:
+        """NPC equivalent of serve_jail_time(): a Sheriff/Guard NPC delivers a
+        wanted NPC (bounty >= NPC_ARREST_BOUNTY_THRESHOLD) to the nearest
+        jail cell. Mirrors the player's flow (same cell-carving logic) but
+        stores jail state on the NPC's Schedule component instead of
+        PlayerState, since NPCs don't have one. Judgment call: unlike the
+        player (who can only escape via lockpicking - there's no auto-release
+        timer wired up for the player currently), NPC jail time actually
+        ticks down and auto-releases (see the is_jailed check in
+        _update_npc_schedules) since no other NPC can lockpick a fellow
+        villager out of a cell - a real timer is the only way an NPC term
+        ever ends. Duration: NPC_JAIL_DURATION_TICKS (shorter than the
+        player's 500 ticks - see that constant's comment for reasoning)."""
+        sheriff_office = None
+        min_dist_sq = float('inf')
+        for building in self.buildings_by_id.values():
+            if building.building_type == "sheriff_office":
+                dist_sq = (npc.x - building.global_center_x) ** 2 + (npc.y - building.global_center_y) ** 2
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    sheriff_office = building
+
+        if not sheriff_office:
+            self.add_message_to_chat_log(
+                f"There's nowhere to hold {self.get_entity_display_name(npc)}, so they're let go for now."
+            )
+            npc.economic.bounty = npc.economic.bounty // 2
+            return
+
+        cell_origin_x = sheriff_office.global_origin_x + 1
+        cell_origin_y = sheriff_office.global_origin_y + 1
+        cell_center_x = cell_origin_x + 1
+        cell_center_y = cell_origin_y + 1
+        door_x, door_y = cell_origin_x + 1, cell_origin_y + 2
+
+        jail_bar_def = TILE_DEFINITIONS["jail_bars"]
+        iron_door_def = DECORATION_ITEM_DEFINITIONS["iron_door_closed"]
+        floor_def = TILE_DEFINITIONS["wood_floor"]
+
+        for y_offset in range(3):
+            for x_offset in range(3):
+                is_border = x_offset == 0 or x_offset == 2 or y_offset == 0 or y_offset == 2
+                tile_x, tile_y = cell_origin_x + x_offset, cell_origin_y + y_offset
+
+                if is_border:
+                    if y_offset == 2 and x_offset == 1:  # Door on the bottom wall
+                        self._change_map_tile((tile_x, tile_y), iron_door_def)
+                    else:
+                        self._change_map_tile((tile_x, tile_y), jail_bar_def)
+                else:  # Interior of the cell
+                    self._change_map_tile((tile_x, tile_y), floor_def)
+
+        self._update_entity_position(npc, cell_center_x, cell_center_y)
+        npc.schedule.is_jailed = True
+        npc.schedule.jail_cell_coords = (door_x, door_y)
+        npc.schedule.jail_time_remaining = NPC_JAIL_DURATION_TICKS
+        npc.schedule.current_task = "jailed"
+        npc.schedule.current_path = []
+        npc.task_target_entity_id = None
+        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} is thrown in jail!")
+
+        npc.economic.bounty = 0
+
+    def _release_npc_from_jail(self, npc: NPC) -> None:
+        """Releases an NPC whose jail_time_remaining has counted down to
+        zero, returning them to their cell's door and normal scheduling."""
+        cell_coords = npc.schedule.jail_cell_coords
+        npc.schedule.is_jailed = False
+        npc.schedule.jail_cell_coords = None
+        npc.schedule.jail_time_remaining = 0
+        npc.schedule.current_task = TaskType.IDLE
+        if cell_coords:
+            self._update_entity_position(npc, cell_coords[0], cell_coords[1])
+        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has served their time and is released from jail.")
 
     def record_migration_event(
         self,
@@ -16592,6 +16794,7 @@ class World:
             description=f"{{subject}} was witnessed by {witness.name} committing the crime of {crime_type}.",
             location=(witness.x, witness.y),
         )
+        self._accrue_crime_bounty(criminal, crime_type)
 
         prompt = LLM_PROMPTS["npc_witness_reaction"].format(
             witness_name=witness.name,

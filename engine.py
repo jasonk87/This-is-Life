@@ -5643,6 +5643,7 @@ class World:
         for settlement in settlements:
             self._sync_village_employment_tasks(settlement)
             self._seed_settlement_macro_knowledge(settlement)
+            self._maybe_trigger_npc_owned_construction(settlement)
 
         sleeping_npcs = [
             npc for npc in self.village_npcs
@@ -15806,6 +15807,66 @@ class World:
             blueprint.refresh_status()
             self._refresh_blueprint_map_marker(blueprint)
         return blueprint
+
+    def _maybe_trigger_npc_owned_construction(self, village: Village) -> None:
+        """
+        Gives ambitious, well-off NPCs a real (but rare) chance to found their
+        own business, wiring _npc_maybe_start_construction_project - fully
+        implemented but previously never called from live simulation, only
+        exercised by tests/test_construction_foundation.py - into daily play.
+        Called once per settlement per day from process_macro_daily_tick,
+        which already iterates every village unconditionally (not
+        distance-gated), matching how the rest of that function works.
+
+        This intentionally layers several independent gates so it stays
+        rare and plausible rather than spammy - flagging each, per request:
+        - Village-need gate (pre-existing, unchanged): only proceeds if
+          _select_village_construction_project(village) actually returns a
+          project. An NPC-owned business only gets founded where the village
+          would build there anyway (a housing shortage, storage overflow, or
+          unmet service need) - this was already the only gate the dead code
+          had, and it stays exactly as strict as before.
+        - Project-in-progress gate (pre-existing, unchanged): skipped if the
+          village already has an active blueprint, so this never queues up a
+          second project on top of one already underway.
+        - NEW "ambitious and wealthy" gate: candidates are restricted to
+          employed NPCs with aspiration.aspiration_type == WEALTH (the
+          existing AspirationComponent every NPC already has, also used to
+          drive real emigration decisions) and economic.money >= 300. For
+          scale, starting NPC funds are 10-50 and a freshly-spawned merchant
+          gets 200-500, so 300 represents genuinely above-average savings,
+          not routine pocket money.
+        - NEW daily-chance gate: even with an eligible, motivated NPC and
+          genuine village need, there's only a 3% chance per day this fires
+          at all. Combined with the need + wealth + aspiration gates above,
+          this keeps NPC-founded businesses an occasional, noteworthy event
+          rather than a routine one.
+        """
+        if self._get_village_blueprints(village):
+            return
+        if self._select_village_construction_project(village) is None:
+            return
+
+        wealthy_ambitious_candidates = [
+            npc for npc in self.village_npcs
+            if not npc.physical.is_dead
+            and npc.economic.profession.lower() != "unemployed"
+            and getattr(npc.economic, "money", 0) >= 300
+            and getattr(getattr(npc, "aspiration", None), "aspiration_type", None) == AspirationType.WEALTH
+            and self._get_village_for_npc(npc) is village
+        ]
+        if not wealthy_ambitious_candidates:
+            return
+
+        if random.random() >= 0.03:  # rare: ~3% chance per eligible village per day
+            return
+
+        founder = random.choice(wealthy_ambitious_candidates)
+        blueprint = self._npc_maybe_start_construction_project(founder, village=village)
+        if blueprint is not None:
+            self.add_message_to_chat_log(
+                f"{self.get_entity_display_name(founder)} has invested their savings into building a new {blueprint.target_build} for the village."
+            )
 
     def _is_blueprint_active(self, blueprint: ConstructionBlueprint | None) -> bool:
         if blueprint is None:

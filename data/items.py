@@ -447,6 +447,22 @@ ITEM_DEFINITIONS = {
             "heal_amount": 10
         }
     },
+    "herbal_remedy": {
+        "name": "Herbal Remedy",
+        "description": "A bitter infusion of medicinal herbs that breaks a fever.",
+        "char": ITEM_SPRITES["herbal_remedy"],
+        "color": COLORS["light_green"],
+        "value": 12,
+        "weight": 0.3,
+        "stackable": True,
+        "item_type_tags": ["consumable", "healing"],
+        "crafting_recipe": {
+            "medicinal_herb": 2
+        },
+        "on_use": {
+            "cures_sickness": True
+        }
+    },
     "unlit_torch": {
         "name": "Unlit Torch",
         "description": "A stick with oil-soaked rags, needs to be lit.",

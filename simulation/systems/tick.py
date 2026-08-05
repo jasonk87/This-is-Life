@@ -6,6 +6,7 @@ from entities.social import MEMORY_DECAY_INTERVAL_TICKS, decay_known_facts
 from presentation.ambient_speech import cleanup_ambient_speech
 from simulation.activity import advance_activity
 from simulation.systems import survival
+from simulation.systems import illness
 
 
 def advance_player_auto_movement(world) -> None:
@@ -237,6 +238,7 @@ def run_world_tick(world) -> None:
     survival.apply_temperature_effects(world, world.player, is_player=True)
     survival.update_player_wetness(world)
     survival.update_player_needs(world)
+    illness.update_entity_illness(world, world.player)
     for actor in [world.player, *world.all_npcs]:
         if not getattr(getattr(actor, "physical", None), "is_dead", False):
             advance_activity(actor, world)
@@ -246,6 +248,8 @@ def run_world_tick(world) -> None:
     for npc in world.all_npcs:
         if not npc.physical.is_dead:
             survival.update_npc_survival(world, npc)
+            illness.update_entity_illness(world, npc)
+    illness.spread_contagion(world)
     world._tick_world_item_inventories()
     world.process_abstract_simulation()
     world.process_macro_daily_tick()

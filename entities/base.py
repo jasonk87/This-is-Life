@@ -75,6 +75,7 @@ class PhysicalState:
     is_dead: bool = False
     hunger_level_msg: str = ""
     thirst_level_msg: str = ""
+    sickness_level_msg: str = ""
     is_wet: bool = False
     wetness_timer: int = 0
     is_sheltered: bool = False
@@ -111,6 +112,22 @@ class PhysicalState:
     @max_thirst.setter
     def max_thirst(self, value: int) -> None:
         self.metabolism.max_thirst = value
+
+    @property
+    def sickness(self) -> int:
+        return self.metabolism.sickness
+
+    @sickness.setter
+    def sickness(self, value: int) -> None:
+        self.metabolism.sickness = value
+
+    @property
+    def max_sickness(self) -> int:
+        return self.metabolism.max_sickness
+
+    @max_sickness.setter
+    def max_sickness(self, value: int) -> None:
+        self.metabolism.max_sickness = value
 
     @property
     def temperature(self) -> float:

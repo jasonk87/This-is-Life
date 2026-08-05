@@ -209,6 +209,7 @@ ITEM_SPRITES = {
     "broken_tool_handle": dawnlike(0, 243),
     "lockpick": dawnlike(2, 243),
     "healing_salve": dawnlike(7, 241),
+    "herbal_remedy": dawnlike(7, 241),  # Shares the salve sprite, matching the existing water_flask precedent below.
     "unlit_torch": dawnlike(2, 240),
     "torch_lit": dawnlike(0, 240),
     "burnt_out_torch": dawnlike(7, 240),

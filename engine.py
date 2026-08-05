@@ -159,6 +159,7 @@ from simulation.systems.survival import (
     update_player_needs as update_player_needs_system,
 )
 from simulation.systems.medical import update_npc_medical_state
+from simulation.systems.illness import recover_from_sickness, SICK_STATUS_EFFECT
 from simulation.systems.perception import update_npc_sound_perception
 from simulation.systems.incidents import (
     create_harmful_incident,
@@ -17015,6 +17016,12 @@ class World:
         # Existing healing logic (or other on_use dictionary based effects)
         on_use_dict = item_def.get("on_use")
         if on_use_dict:
+            # Pre-existing bug fix noticed while adding cures_sickness below:
+            # `consumed` was referenced (`if not consumed:`) further down
+            # without ever being initialized, so any item whose on_use only
+            # had reduces_hunger/reduces_thirst/cures_sickness (no
+            # heal_amount) would raise UnboundLocalError.
+            consumed = False
             heal_amount = on_use_dict.get("heal_amount")
             if heal_amount:
                 if self.player.combat.hp >= self.player.combat.max_hp:
@@ -17025,6 +17032,16 @@ class World:
                     self.add_message_to_chat_log(f"You used a {item_def['name']} and healed {heal_amount} HP.")
                     self.visual_effects.append(FloatingTextEffect(self.player.x, self.player.y, f"+{heal_amount}", color=(0, 255, 0)))
                     consumed = True
+
+            cures_sickness = on_use_dict.get("cures_sickness")
+            if cures_sickness:
+                if SICK_STATUS_EFFECT in self.player.physical.status_effects:
+                    recover_from_sickness(self.player)
+                    self.player.remove_item(item_key, 1)
+                    self.add_message_to_chat_log(f"You take the {item_def.get('name', item_key)}. Your fever breaks and you feel much better.")
+                    consumed = True
+                else:
+                    self.add_message_to_chat_log(f"You don't feel sick enough to need the {item_def.get('name', item_key)}.")
 
             reduces_hunger_amount = on_use_dict.get("reduces_hunger")
             if reduces_hunger_amount:

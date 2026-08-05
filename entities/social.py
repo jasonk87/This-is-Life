@@ -608,6 +608,21 @@ class KnowledgeComponent:
     REPUTATION_EVENT_SCORES = {
         "murder": -50,
         "unpaid_wages": -20,
+        # Witnessed crime (theft, assault, etc. - see engine.py's
+        # record_crime_event / _process_npc_witness_events, which log these
+        # with event_type="crime_witnessed") previously wasn't in this table
+        # at all, so a witnessed theft or assault never touched reputation -
+        # only unpaid wages and murder actually fed pricing/elections.
+        # -25 is a judgment call: worse than unpaid_wages (-20), a purely
+        # economic/civil wrong, since this covers real criminal acts against
+        # people or property including violence, but well short of murder
+        # (-50). This is a single flat value for all crime_kind values
+        # (theft, assault, etc. alike) - REPUTATION_EVENT_SCORES has no
+        # mechanism to differentiate by crime_kind today (murder/unpaid_wages
+        # are flat single values too), so a theft and an assault currently
+        # cost a witness's opinion the same amount. Splitting that out would
+        # be a reasonable follow-up but is a bigger change than this pass.
+        "crime_witnessed": -25,
         "crafted_masterwork": 10,
         "quest_complete": 15,
         "heroic_rescue": 25,

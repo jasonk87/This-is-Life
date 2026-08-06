@@ -89,6 +89,25 @@ VILLAGE_SUPPLY_DAILY_SPOILAGE_RATE = 0.03
 # straddle the timeout.
 NPC_HOSTILITY_DECAY_SAFE_RADIUS = 20
 
+# --- Individual voter agency (elections) ---
+# Judgment calls (see World._score_candidate_for_voter / evaluate_elections).
+# Replaces the old single pre-summed fame/infamy/reputation formula with
+# each eligible voter independently scoring every candidate and casting one
+# vote; votes are tallied normally, ties break by summed score then by
+# candidate order (first-seen), matching the old formula's tie-break
+# behavior (it also broke ties by candidate order, via strict ">").
+# Weights below are all relative to each other and to the 0-100ish scale
+# entities.social's relationship/reputation numbers already live on -
+# there's no single "correct" value, these are a reasonable starting point.
+VOTER_PROFESSION_AFFINITY_BONUS = 10  # shared PROFESSION_TRACKS category ("law", "trade", "care", ...)
+VOTER_RELATIONSHIP_WEIGHT = 0.5  # applied to (relationship - 50), so the 0-100 relationship scale contributes roughly -25..+25
+VOTER_EMPLOYER_RELATIONSHIP_WEIGHT = 0.5  # extra weight on top of the base relationship term when the candidate is the voter's employer (owns their workplace)
+VOTER_FAMILY_BONUS = 15  # candidate is voter's spouse/partner/parent/child/sibling
+VOTER_NAME_RECOGNITION_FAME_WEIGHT = 3  # was *5 in the old pre-summed formula - reduced so it doesn't just re-derive the old result on its own
+VOTER_NAME_RECOGNITION_INFAMY_WEIGHT = 2  # was *3
+VOTER_SCORE_JITTER = 3  # small per-voter random noise, so strangers with identical default reputation/relationship data don't deterministically bloc-vote
+CAPTAIN_OF_GUARD_LAW_PROFESSION_BONUS = 20  # unchanged from the old formula's Captain-of-the-Guard eligibility bump
+
 # --- NPC Crime & Law Enforcement ---
 # Bounty accrued per witnessed/recorded crime, keyed by crime kind. Shared by
 # the player's existing witnessed-crime flow and the new autonomous NPC
@@ -157,6 +176,7 @@ from simulation.social_scene import (
 )
 from simulation.careers import (
     CareerState,
+    PROFESSION_TRACKS,
     entity_has_any_profession,
     entity_has_capability,
     entity_has_profession,
@@ -1700,17 +1720,64 @@ class World:
         holder = self.get_office_holder(office_name)
         return getattr(holder, "name", "Vacant")
 
-    def _get_political_support_score(self, candidate, voters: list) -> int:
-        support_score = int(getattr(getattr(candidate, "social", None), "fame", 0)) * 5
-        support_score -= int(getattr(getattr(candidate, "social", None), "infamy", 0)) * 3
-        for voter in voters:
-            if voter is candidate:
-                continue
-            knowledge = getattr(voter, "knowledge", None)
-            if knowledge is None or not hasattr(knowledge, "get_reputation_towards"):
-                continue
-            support_score += knowledge.get_reputation_towards(candidate)
-        return support_score
+    def _score_candidate_for_voter(self, voter, candidate, office_name: str) -> float:
+        """One voter's individual opinion of one candidate for one office.
+
+        Replaces the old pre-summed _get_political_support_score formula
+        (fame*5 - infamy*3 + sum of every voter's reputation) with a
+        per-voter score built entirely from data that already exists per-
+        NPC: their own reputation towards the candidate, a self-interest
+        weighting from shared profession/career track and personal
+        relationship (boosted if the candidate is their employer or
+        family), and a reduced-weight "name recognition" term from the
+        candidate's own fame/infamy so a well-known or infamous figure
+        still matters without single-handedly deciding the outcome the way
+        the old formula's fame*5 could. See evaluate_elections for how
+        these per-voter scores turn into an actual vote.
+        """
+        knowledge = getattr(voter, "knowledge", None)
+        if knowledge is not None and hasattr(knowledge, "get_reputation_towards"):
+            score = float(knowledge.get_reputation_towards(candidate))
+        else:
+            score = 0.0
+
+        voter_profession = normalize_profession(getattr(getattr(voter, "economic", None), "profession", ""))
+        candidate_profession = normalize_profession(getattr(getattr(candidate, "economic", None), "profession", ""))
+        if voter_profession != "Unemployed" and PROFESSION_TRACKS.get(voter_profession) == PROFESSION_TRACKS.get(candidate_profession):
+            score += VOTER_PROFESSION_AFFINITY_BONUS
+
+        candidate_id = getattr(candidate, "id", None)
+        relationships = getattr(getattr(voter, "social", None), "relationships", {}) or {}
+        relationship = relationships.get(candidate_id, 50)
+        score += (relationship - 50) * VOTER_RELATIONSHIP_WEIGHT
+
+        work_building_id = getattr(getattr(voter, "schedule", None), "work_building_id", None)
+        work_building = self.buildings_by_id.get(work_building_id) if work_building_id else None
+        if work_building is not None and candidate_id is not None and getattr(work_building, "owner_id", None) == candidate_id:
+            score += (relationship - 50) * VOTER_EMPLOYER_RELATIONSHIP_WEIGHT
+
+        family_ties = getattr(getattr(voter, "social", None), "family_ties", {}) or {}
+        family_member_ids = {
+            family_ties.get("spouse_id"),
+            family_ties.get("partner_id"),
+            family_ties.get("mother_id"),
+            family_ties.get("father_id"),
+            *family_ties.get("child_ids", []),
+            *family_ties.get("sibling_ids", []),
+        }
+        if candidate_id is not None and candidate_id in family_member_ids:
+            score += VOTER_FAMILY_BONUS
+
+        fame = int(getattr(getattr(candidate, "social", None), "fame", 0))
+        infamy = int(getattr(getattr(candidate, "social", None), "infamy", 0))
+        score += fame * VOTER_NAME_RECOGNITION_FAME_WEIGHT
+        score -= infamy * VOTER_NAME_RECOGNITION_INFAMY_WEIGHT
+
+        if office_name == "Captain of the Guard" and candidate_profession in {"Guard", "Sheriff", "Deputy"}:
+            score += CAPTAIN_OF_GUARD_LAW_PROFESSION_BONUS
+
+        score += random.uniform(-VOTER_SCORE_JITTER, VOTER_SCORE_JITTER)
+        return score
 
     def evaluate_elections(self, *, force: bool = False) -> None:
         current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
@@ -1725,17 +1792,44 @@ class World:
             if current_holder is not None and not force:
                 continue
 
+            # Each voter independently scores every candidate and casts one
+            # vote for their own top choice - no pre-summed formula. Votes
+            # are tallied per candidate; each candidate's summed score
+            # (across the voters who picked them) is kept only as a
+            # tie-breaker.
+            vote_counts: dict[int, int] = {}
+            score_totals: dict[int, float] = {}
+            for voter in voters:
+                best_candidate = None
+                best_score = None
+                for candidate in candidates:
+                    score = self._score_candidate_for_voter(voter, candidate, office_name)
+                    if best_score is None or score > best_score:
+                        best_candidate = candidate
+                        best_score = score
+                if best_candidate is not None:
+                    cid = best_candidate.id
+                    vote_counts[cid] = vote_counts.get(cid, 0) + 1
+                    score_totals[cid] = score_totals.get(cid, 0.0) + best_score
+
+            if not vote_counts:
+                continue
+
+            # Winner = most votes; ties break by summed score, then by
+            # candidate order (first-seen) - iterating `candidates` in order
+            # with a strict `>` comparison means an exact (votes, score)
+            # tie keeps whichever candidate was encountered first, matching
+            # the old formula's tie-break behavior.
             best_candidate = None
-            best_score = None
+            best_key = None
             for candidate in candidates:
-                score = self._get_political_support_score(candidate, voters)
-                if office_name == "Captain of the Guard":
-                    profession = normalize_profession(getattr(getattr(candidate, "economic", None), "profession", ""))
-                    if profession in {"Guard", "Sheriff", "Deputy"}:
-                        score += 20
-                if best_score is None or score > best_score:
+                cid = candidate.id
+                if cid not in vote_counts:
+                    continue
+                key = (vote_counts[cid], score_totals.get(cid, 0.0))
+                if best_key is None or key > best_key:
                     best_candidate = candidate
-                    best_score = score
+                    best_key = key
 
             office.holder_id = getattr(best_candidate, "id", None)
             office.last_elected_day = current_day

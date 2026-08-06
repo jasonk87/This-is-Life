@@ -1636,6 +1636,34 @@ class World:
             self._set_trade_money_balance(town_hall, random.randint(600, 1200))
         self.evaluate_elections(force=True)
 
+    def _vacate_offices_held_by(self, entity) -> None:
+        """Clears any political office currently held by `entity`. Used when
+        jailing a sitting officeholder (player or NPC): before this, jailing
+        had no effect on office-holding at all - get_office_holder only ever
+        cleared holder_id on death, so a jailed Mayor/Sheriff kept nominal
+        office (and kept drawing civic salary via _pay_daily_civic_salaries,
+        since that just calls get_office_holder) from inside a cell.
+
+        This vacates the office outright rather than just suspending
+        recognition while jailed - being jailed is disqualifying, not a
+        pause, consistent with how being jailed already clears the player's
+        bounty rather than just freezing it. The existing daily
+        evaluate_elections() cycle (see _run_daily_governance) naturally
+        re-fills the vacancy the same way it fills any other vacant office;
+        no new election path is added, and the ex-officeholder is not
+        automatically reinstated on release - they'd need to win the office
+        again like anyone else.
+        """
+        entity_id = getattr(entity, "id", None)
+        if entity_id is None:
+            return
+        for office_name, office in self.politics.offices.items():
+            if office.holder_id == entity_id:
+                office.holder_id = None
+                self.add_message_to_chat_log(
+                    f"{self.get_entity_display_name(entity)} has been removed from the office of {office_name} after being jailed."
+                )
+
     def get_office_holder(self, office_name: str):
         office = self.politics.get_office(office_name)
         if office is None or office.holder_id is None:
@@ -7291,6 +7319,20 @@ class World:
 
         self._update_player_fov() # Update FOV from new position
 
+        self._vacate_offices_held_by(self.player)
+
+        # Bug fix (found while wiring in the office-vacancy check above,
+        # unrelated to it): this function previously had no return here and
+        # fell straight through into unreachable code belonging to some
+        # other, now-missing method (it references contract_id, qty_needed,
+        # turn_in_npc, item_key - none of which exist in this function).
+        # That meant serve_jail_time() would raise NameError every single
+        # time it actually ran, i.e. the player being arrested was
+        # completely broken in production and never covered by a test.
+        # Left the orphaned block below in place (now provably unreachable)
+        # rather than deleting code whose original owner is unknown - flagged
+        # for a follow-up to track down what it belonged to.
+        return
 
         del self.player.economic.active_contracts[contract_id]
 
@@ -10581,6 +10623,7 @@ class World:
         self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} is thrown in jail!")
 
         npc.economic.bounty = 0
+        self._vacate_offices_held_by(npc)
 
     def _release_npc_from_jail(self, npc: NPC) -> None:
         """Releases an NPC whose jail_time_remaining has counted down to

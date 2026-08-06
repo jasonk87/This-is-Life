@@ -3850,7 +3850,17 @@ class World:
         if npc.economic.profession != "Creature" and not npc.combat.is_hostile_to_player and \
            npc.schedule.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player",
                                              "holding_position_combat", "combat_action_use_healing_item",
-                                             "combat_action_move_to_cover", "investigating_sound"]:
+                                             "combat_action_move_to_cover", "investigating_sound",
+                                             # Medical states (simulation/systems/medical.py): without this
+                                             # exclusion, update_npc_daily_goal_policy's work-hours check
+                                             # unconditionally overwrites current_task with GOING_TO_WORK on
+                                             # the very same tick medical.py routes a sick/injured NPC toward
+                                             # treatment, since none of its policies check for these states.
+                                             # Bug affected broken_leg from the start; illness's "sick" status
+                                             # made it materially worse since a working, untreated NPC also
+                                             # never isolates and keeps spreading contagion at their job.
+                                             "seeking_healer", "waiting_for_treatment", "resting_in_bed",
+                                             "treating_patient"]:
 
             update_npc_environmental_tasks_system(self, npc)
 

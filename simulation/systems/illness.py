@@ -91,7 +91,11 @@ def update_entity_illness(world, entity) -> None:
         physical.sickness = min(physical.max_sickness, physical.sickness + WORSENING_SICKNESS_GAIN)
         if random.random() < WORSENING_DAMAGE_CHANCE:
             world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)}'s illness is taking a toll...")
-            entity.take_damage(1, world=world)
+            # apply_hostility=False: this is status-effect damage, not an
+            # attack - without it, NPC.take_damage's generic fallback would
+            # flag the (possibly bedridden, possibly nowhere near the
+            # player) sick entity as permanently hostile to the player.
+            entity.take_damage(1, world=world, apply_hostility=False)
 
 
 def spread_contagion(world) -> None:

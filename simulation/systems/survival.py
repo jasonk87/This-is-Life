@@ -76,14 +76,18 @@ def apply_temperature_effects(world, entity, *, is_player: bool = False) -> None
     if world.game_time % ticks_for_temp_damage != 0:
         return
 
+    # apply_hostility=False on both: this is environmental/status-effect
+    # damage, not an attack - Player.take_damage doesn't have a hostility
+    # flag at all so this only actually matters for NPCs, but is applied to
+    # both calls uniformly since take_damage is a shared entry point.
     if "Freezing" in entity.physical.status_effects:
         if is_player:
             world.add_message_to_chat_log("You are freezing cold!")
-        entity.take_damage(1, world=world)
+        entity.take_damage(1, world=world, apply_hostility=False)
     elif "Overheating" in entity.physical.status_effects:
         if is_player:
             world.add_message_to_chat_log("You are burning up!")
-        entity.take_damage(1, world=world)
+        entity.take_damage(1, world=world, apply_hostility=False)
 
 
 def update_player_wetness(world) -> None:

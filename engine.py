@@ -74,6 +74,21 @@ from config import (
 # spoilage of aggregate stores instead.
 VILLAGE_SUPPLY_DAILY_SPOILAGE_RATE = 0.03
 
+# --- Incidental NPC hostility decay ---
+# Judgment call (see World._decay_incidental_npc_hostility and
+# CombatStats.hostility_grace_expires_tick in entities/base.py). Only
+# hostility set via NPC.take_damage's generic, attacker-agnostic fallback
+# (which now also stamps hostility_grace_expires_tick) is eligible to
+# decay - deliberate hostility from raider logic, wanted-NPC pursuit,
+# Sheriff/Guard bounty response, and wolf-desperation attacks all set
+# is_hostile_to_player directly at their own call sites, never populate
+# that field, and are untouched by this - they persist exactly as before.
+# NPC_HOSTILITY_DECAY_SAFE_RADIUS: how far from (or how out-of-sight of) the
+# player an NPC needs to be before its expired grace period is allowed to
+# actually clear the flag, so this can't cut short a fight that happens to
+# straddle the timeout.
+NPC_HOSTILITY_DECAY_SAFE_RADIUS = 20
+
 # --- NPC Crime & Law Enforcement ---
 # Bounty accrued per witnessed/recorded crime, keyed by crime kind. Shared by
 # the player's existing witnessed-crime flow and the new autonomous NPC
@@ -547,8 +562,15 @@ class Player:
         return bool(ITEM_DEFINITIONS.get(head_item_key, {}).get("properties", {}).get("conceals_identity", False))
 
 
-    def take_damage(self, amount: int, world=None) -> int:
-        """Applies damage to the player after accounting for armor, returns actual damage dealt."""
+    def take_damage(self, amount: int, world=None, *, apply_hostility: bool = True) -> int:
+        """Applies damage to the player after accounting for armor, returns actual damage dealt.
+
+        apply_hostility is accepted but unused here - the player has no
+        is_hostile_to_player flag of their own. It exists purely so shared
+        call sites (e.g. survival.apply_temperature_effects, which handles
+        both the player and NPCs through the same entity.take_damage(...)
+        call) can pass it uniformly without needing an is_player branch.
+        """
         effective_damage = max(0, amount - self.combat.defense_bonus)
 
         remaining_damage = effective_damage
@@ -3590,6 +3612,50 @@ class World:
                                     new_home.residents.append(npc)
                                     self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has found a new home.")
 
+    def _decay_incidental_npc_hostility(self, npc: NPC) -> None:
+        """Clears is_hostile_to_player once its grace period elapses - but
+        only for hostility set via NPC.take_damage's generic, attacker-
+        agnostic fallback (entities/base.py), which is the only thing that
+        populates combat.hostility_grace_expires_tick. Deliberate hostility
+        (raiders, wanted-NPC pursuit, Sheriff/Guard bounty response, wolf-
+        desperation attacks) is set directly at its own call sites, never
+        touches that field, and is left completely alone here - it persists
+        exactly as it did before this change.
+
+        Judgment call: only decays once the NPC can no longer see the player
+        AND isn't within NPC_HOSTILITY_DECAY_SAFE_RADIUS tiles, so this can't
+        cut short a fight that happens to straddle the grace-period timeout.
+        Reuses the NPC's own (possibly slightly stale, throttled-update) FOV
+        map rather than forcing a fresh calculation, consistent with how the
+        rest of this loop already treats NPC FOV as good enough for hostile-
+        state decisions.
+        """
+        grace_expires_tick = getattr(npc.combat, "hostility_grace_expires_tick", None)
+        if not npc.combat.is_hostile_to_player or grace_expires_tick is None:
+            return
+        if self.game_time < grace_expires_tick:
+            return
+
+        can_see_player = False
+        if npc.id in self.npc_fov_maps and 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT:
+            can_see_player = self.npc_fov_maps[npc.id][self.player.y, self.player.x]
+        manhattan_distance_to_player = abs(npc.x - self.player.x) + abs(npc.y - self.player.y)
+
+        if can_see_player or manhattan_distance_to_player <= NPC_HOSTILITY_DECAY_SAFE_RADIUS:
+            return  # still in the vicinity - don't decay mid-encounter
+
+        npc.combat.is_hostile_to_player = False
+        npc.combat.hostility_grace_expires_tick = None
+        if npc.schedule.current_task in (
+            "combat_action_hold_position",
+            "combat_action_attack_player",
+            "combat_action_flee_from_player",
+            "wandering_hostile",
+        ):
+            npc.schedule.current_task = TaskType.IDLE
+            npc.schedule.current_path = []
+        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} calms down.")
+
     def _update_npc_schedules(self):
         """
         Periodically updates NPC tasks based on game time and current state.
@@ -3615,6 +3681,8 @@ class World:
                 continue
 
             update_npc_medical_state(self, npc)
+
+            self._decay_incidental_npc_hostility(npc)
 
             # --- Real-time Logic (Runs every tick or frequently) ---
             if npc.combat.is_hostile_to_player:

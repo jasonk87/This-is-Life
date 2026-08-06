@@ -7,7 +7,15 @@ import random
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
+from config import DAY_LENGTH_TICKS, DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
+
+# Judgment call (see CombatStats.hostility_grace_expires_tick / NPC.take_damage):
+# how long incidental (non-deliberate) hostility lingers before it's eligible
+# to decay in World._decay_incidental_npc_hostility. A few in-game hours -
+# long enough that a genuinely ongoing scuffle doesn't get cut short by a
+# lucky timing window, short enough that a villager who got hurt by illness
+# or a stray hit doesn't stay a permanent enemy.
+NPC_HOSTILITY_GRACE_TICKS = DAY_LENGTH_TICKS // 4
 from data.dawnlike import ANIMAL_SPRITES, get_human_sprite
 from data.items import ITEM_DEFINITIONS
 from entities.anatomy import Anatomy
@@ -35,6 +43,15 @@ class CombatStats:
     anatomy: Anatomy = field(default_factory=Anatomy.humanoid)
     toughness: str = "average"
     is_hostile_to_player: bool = False
+    # Set only when is_hostile_to_player is flipped True by take_damage's
+    # generic, attacker-agnostic fallback (below) - the least purpose-built
+    # of the game's hostility triggers, as opposed to raider logic, the
+    # wanted-NPC pursuit system, Sheriff/Guard bounty response, or
+    # wolf-desperation attacks, which all set is_hostile_to_player directly
+    # at their own call sites for a deliberate narrative reason and leave
+    # this field untouched. See World._decay_incidental_npc_hostility in
+    # engine.py, which is the only thing that reads it.
+    hostility_grace_expires_tick: int | None = None
     combat_behavior: str = "defensive"
     base_attack_name: str = "fists"
     base_attack_damage_dice: str = "1d3"
@@ -861,10 +878,25 @@ class NPC:
                     world.add_message_to_chat_log(f"{self.name}'s {item_name} broke!")
         return result
 
-    def take_damage(self, amount: int, world) -> bool:
+    def take_damage(self, amount: int, world, *, apply_hostility: bool = True) -> bool:
         """
         Applies damage to the NPC, accounting for armor, and handles death.
         Returns True if the NPC was killed, False otherwise.
+
+        apply_hostility: whether a non-lethal hit is allowed to flip
+        is_hostile_to_player True via the fallback below. Defaults True to
+        preserve existing combat behavior (player-vs-NPC and NPC-vs-NPC
+        melee both still go through this path unchanged). Status-effect/
+        environmental damage that isn't really "combat" at all - illness's
+        untreated-worsening tick (simulation/systems/illness.py) and
+        Freezing/Overheating (simulation/systems/survival.py) - now passes
+        apply_hostility=False, since a villager taking incidental illness
+        or weather damage becoming permanently hostile to a player who was
+        nowhere near them was a real bug, not intended behavior. Checked
+        starvation too: NPC hunger/thirst never calls take_damage at all
+        today (only the player's own starvation does, via the separate
+        Player.take_damage, which has no hostility flag to begin with), so
+        there's nothing to change there.
         """
         if self.physical.is_dead:
             return False
@@ -919,9 +951,24 @@ class NPC:
             self.combat.hp = 0
             self.physical.is_dead = True
             return True
-        if not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
+        if apply_hostility and not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
             self.combat.is_hostile_to_player = True
-            if world:
+            # This fallback is attacker-agnostic (it doesn't know or care who
+            # actually dealt the damage - could be the player, could be
+            # another NPC), which makes it the bluntest, least deliberate
+            # hostility trigger in the game, unlike raider logic/wanted-NPC
+            # pursuit/Sheriff-Guard bounty response/wolf-desperation attacks,
+            # which all set is_hostile_to_player directly for a specific,
+            # deliberate reason and are meant to persist. Give this one a
+            # grace window instead, so a villager who got tagged as hostile
+            # from an isolated hit doesn't stay locked into combat AI against
+            # a player who's since moved on (or was never actually involved -
+            # see the apply_hostility=False callers above). World's tick loop
+            # (_decay_incidental_npc_hostility in engine.py) clears it once
+            # the grace period passes and the NPC isn't still near/seeing
+            # the player.
+            if world is not None:
+                self.combat.hostility_grace_expires_tick = getattr(world, "game_time", 0) + NPC_HOSTILITY_GRACE_TICKS
                 world.add_message_to_chat_log(f"{self.name} becomes hostile!")
         return False
 

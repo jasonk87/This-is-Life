@@ -63,6 +63,17 @@ from config import (
     LLM_BACKEND, ENABLE_LLM_CONNECTION, GOOGLE_API_KEY
 )
 
+# --- Village-level food supply decay ---
+# Judgment call (see World._decay_village_food_supply): 3%/day, applied to
+# every item tagged "food" in village.supply. Deliberately NOT derived from
+# individual items' per-tick spoilage_chance (see ItemReference.update_tick
+# in entities/items.py) - those are calibrated for a single item ticking
+# every world tick, and applied literally to a bulk village-level quantity
+# they would wipe out an entire stockpile within seconds of game time. This
+# rate is its own, separately-tuned number meant to read as slow, ongoing
+# spoilage of aggregate stores instead.
+VILLAGE_SUPPLY_DAILY_SPOILAGE_RATE = 0.03
+
 # --- NPC Crime & Law Enforcement ---
 # Bounty accrued per witnessed/recorded crime, keyed by crime kind. Shared by
 # the player's existing witnessed-crime flow and the new autonomous NPC
@@ -16295,6 +16306,8 @@ class World:
                         location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
                     )
 
+                self._decay_village_food_supply(village)
+
                 if dist > ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
                     if not village_npcs:
                         continue
@@ -16497,6 +16510,69 @@ class World:
             matched_ids.add(partner.id)
             couples.append((npc, partner))
         return couples
+
+    def _decay_village_food_supply(self, village) -> None:
+        """Applies slow, aggregate spoilage to a village's abstracted food
+        ledger (village.supply), once per day (see _update_abstract_simulation,
+        which calls this at the same daily cadence as population lifecycle).
+
+        village.supply previously never decayed at all - unlike
+        building_inventory/ground loot/personal npc_inventory, which all
+        spoil per-item via ItemReference.update_tick()'s spoilage_chance/
+        rots_into (see entities/items.py), ticked every world tick through
+        _tick_world_item_inventories. village.supply is the ledger that
+        actually drives village-level food-consumption/starvation checks
+        (see the food-shortfall accounting later in this file), so an
+        ever-growing, non-perishable stockpile there made village-level food
+        security feel unrealistically permanent once any surplus built up -
+        inconsistent with the very real spoilage governing physical goods.
+
+        See VILLAGE_SUPPLY_DAILY_SPOILAGE_RATE's comment for why this uses
+        its own rate instead of the individual items' spoilage_chance values.
+        The set of affected items is still taken directly from that same
+        physical system though: an item_key only decays here if its
+        ITEM_DEFINITIONS entry has spoilage_chance > 0 and a rots_into
+        target, the exact same condition ItemReference.update_tick checks.
+        That was chosen over a tag-based check (e.g. "food" in
+        item_type_tags) deliberately: wheat/flour, for instance, are tagged
+        "food_ingredient" but have no spoilage_chance/rots_into at all in
+        ITEM_DEFINITIONS - dry grain doesn't spoil in the physical system
+        either, so it shouldn't here. Reusing the same condition keeps this
+        automatically in sync with the physical system rather than
+        maintaining a second, potentially-drifting list of "what counts as
+        perishable". Decayed quantity converts to "rotten_food" rather than
+        vanishing outright, mirroring how individual food items behave when
+        they spoil (rots_into is "rotten_food" for every current perishable).
+        """
+        supply = getattr(village, "supply", None)
+        if not supply:
+            return
+
+        for item_key in list(supply.keys()):
+            item_def = ITEM_DEFINITIONS.get(item_key)
+            if not item_def:
+                continue
+            properties = item_def.get("properties", {}) or {}
+            rots_into = properties.get("rots_into")
+            if not (properties.get("spoilage_chance", 0) > 0 and rots_into):
+                continue
+
+            quantity = supply.get(item_key, 0)
+            if quantity <= 0:
+                continue
+
+            expected_loss = quantity * VILLAGE_SUPPLY_DAILY_SPOILAGE_RATE
+            lost = int(expected_loss)
+            if random.random() < (expected_loss - lost):
+                lost += 1
+            lost = min(lost, quantity)
+            if lost <= 0:
+                continue
+
+            supply[item_key] -= lost
+            if supply[item_key] <= 0:
+                del supply[item_key]
+            supply[rots_into] = supply.get(rots_into, 0) + lost
 
     def _simulate_village_population_lifecycle(self, village, village_npcs, location):
         """

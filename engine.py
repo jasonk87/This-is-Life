@@ -824,6 +824,10 @@ class World:
         self.game_state = "PLAYING"
         self.entities_by_chunk = {} # Map (chunk_x, chunk_y) -> set(npc_id)
         self.game_time = INITIAL_TIME_OF_DAY
+        # Per-tick cache for calculate_path's per-tile movement-cost lookups
+        # (see _get_pathfinding_tile_cost) - performance only, see that
+        # method's docstring for why keying on game_time keeps this safe.
+        self._pathfinding_tile_cost_cache: dict = {}
         self.last_talked_to_npc = None # Store the NPC targeted by 'T'alk (may be superseded by menu target)
         self.needs_text_input = False
         self._llm_warning_issued = False
@@ -1091,6 +1095,7 @@ class World:
         self.sheltered_rest_bonus = float(getattr(self, "sheltered_rest_bonus", 0.04))
         self.survival_override_switch_cooldown_ticks = int(getattr(self, "survival_override_switch_cooldown_ticks", 15) or 15)
         self.food_reservations_by_id = getattr(self, "food_reservations_by_id", {})
+        self._pathfinding_tile_cost_cache = {}
         if getattr(self, "player", None) is not None:
             self.player.world_ref = self
             self._refresh_chunk_activity(force=True)
@@ -2932,6 +2937,49 @@ class World:
         # tcod's AStar handles cardinal/diagonal based on graph/diagnal params.
         return 1
 
+    def _get_pathfinding_tile_cost(self, x_world: int, y_world: int) -> float:
+        """Per-tile movement cost lookup used by calculate_path's cost grid,
+        cached for the duration of the current game tick.
+
+        The cache is keyed on self.game_time and wiped whenever that value
+        changes, so a stale entry can never outlive "since the start of the
+        current tick" - this is a performance optimization only. It doesn't
+        try to invalidate on individual tile mutations (there are multiple
+        mutation call sites, e.g. _change_map_tile and direct
+        chunk.tiles[y][x] writes such as corpse placement in
+        handle_npc_death); instead it sidesteps that entirely by never
+        serving data older than the current tick. Logic here must stay in
+        exact lockstep with the per-cell cost computation it replaces.
+        """
+        cache = self._pathfinding_tile_cost_cache
+        tick = self.game_time
+        if cache.get("tick") != tick:
+            cache.clear()
+            cache["tick"] = tick
+
+        key = (x_world, y_world)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        tile = self.get_tile_at(x_world, y_world)
+        if not tile or not tile.passable:
+            cost = 0.0
+        else:
+            base_cost = 1.0
+            if hasattr(tile, 'properties') and tile.properties:
+                base_cost = float(tile.properties.get("movement_cost", 1.0))
+
+            if tile.is_hazard:
+                hazard_cost_value = 50
+                if tile.hazard_type == "fire_trap_active": hazard_cost_value = 100
+                elif tile.hazard_type == "water_deep": hazard_cost_value = 75
+                cost = base_cost + hazard_cost_value
+            else:
+                cost = base_cost
+
+        cache[key] = cost
+        return cost
 
     def calculate_path(self, start_x: int, start_y: int, end_x: int, end_y: int) -> list[tuple[int, int]]:
         """
@@ -2956,22 +3004,7 @@ class World:
         for y_local in range(local_height):
             for x_local in range(local_width):
                 x_world, y_world = min_x + x_local, min_y + y_local
-                tile = self.get_tile_at(x_world, y_world)
-
-                if not tile or not tile.passable:
-                    cost[y_local, x_local] = 0
-                else:
-                    base_cost = 1.0
-                    if hasattr(tile, 'properties') and tile.properties:
-                        base_cost = float(tile.properties.get("movement_cost", 1.0))
-
-                    if tile.is_hazard:
-                        hazard_cost_value = 50
-                        if tile.hazard_type == "fire_trap_active": hazard_cost_value = 100
-                        elif tile.hazard_type == "water_deep": hazard_cost_value = 75
-                        cost[y_local, x_local] = base_cost + hazard_cost_value
-                    else:
-                        cost[y_local, x_local] = base_cost
+                cost[y_local, x_local] = self._get_pathfinding_tile_cost(x_world, y_world)
 
         astar = tcod.path.AStar(cost=cost, diagonal=1.41)
 

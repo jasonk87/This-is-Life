@@ -524,6 +524,11 @@ class KnowledgeComponent:
     perceived_item_tiles: list[tuple[int, int]] = field(default_factory=list)
     active_quests: dict = field(default_factory=dict)
     completed_quests: list[str] = field(default_factory=list)
+    # Quests that became permanently uncompletable (currently: their giver
+    # NPC died - see World._fail_quests_orphaned_by_death) rather than being
+    # finished. Kept separate from completed_quests so quest-log UI/logic
+    # can distinguish "done" from "failed" if it ever wants to.
+    failed_quests: list[str] = field(default_factory=list)
     claimed_tasks: list[str] = field(default_factory=list)
     known_books: set[str] = field(default_factory=set)
     recently_spoken_topic_ids: list[str] = field(default_factory=list)

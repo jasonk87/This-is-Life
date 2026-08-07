@@ -9281,6 +9281,53 @@ class World:
 
         # self.add_message_to_chat_log(f"Debug: {npc.name} has {reason}.")
 
+    def _fail_quests_orphaned_by_death(self, dead_npc: NPC) -> None:
+        """Bug-hunt audit item 3a: a quest-giver dying used to leave the
+        player's active_quests entry sitting there forever - complete_quest
+        can only ever be reached through a dialogue interaction with the
+        (now-dead, removed-from-village_npcs) giver, which never happens
+        again, so the quest silently became permanently stuck with no
+        failure state and no notice. Confirmed live before this fix.
+
+        Judgment call: fail-with-notice rather than reassignment. A
+        fallback "find a new quest giver" path would need per-quest-type
+        logic to pick a sensible replacement (who else could plausibly want
+        this fetched item / offer this contract?) that doesn't obviously
+        generalize, whereas an honest "this can't be finished anymore" is
+        simple, always correct, and mirrors how a real quest-giver's death
+        would actually resolve the situation.
+
+        Two different keys have been used for "who gave this quest" across
+        the three quest-acceptance call sites in this file - quest_giver_id
+        (dialogue-offered fetch quests) and giver_id (mercenary contract
+        quests) - checked here so both are covered. Quests with neither key
+        (e.g. noticeboard-posted shortage quests, which aren't tied to any
+        one NPC) are left untouched, since there's no giver to have died.
+        """
+        active_quests = getattr(getattr(self.player, "knowledge", None), "active_quests", None)
+        if not active_quests:
+            return
+        failed_quests = self.player.knowledge.failed_quests
+
+        for quest_id, quest_data in list(active_quests.items()):
+            giver_id = quest_data.get("quest_giver_id", quest_data.get("giver_id"))
+            if giver_id is None or giver_id != dead_npc.id:
+                continue
+
+            title = quest_data.get("title", "A quest")
+            del active_quests[quest_id]
+            failed_quests.append(quest_id)
+            self.add_message_to_chat_log(
+                f"Quest failed: '{title}' can no longer be completed - "
+                f"{self.get_entity_display_name(dead_npc)} has died."
+            )
+            self.log_event(
+                event_type="quest_failed",
+                description="{subject}'s quest '" + title + "' failed when its giver died.",
+                subject_id=self.player.id,
+                location=(dead_npc.x, dead_npc.y),
+            )
+
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None, description: str | None = None, cause_of_death: str | None = None):
         if isinstance(dead_npc, Animal) and hasattr(self, "ecology"):
             self.ecology.note_animal_death(dead_npc)
@@ -9295,6 +9342,8 @@ class World:
                         quest_data["progress"] += 1
                         self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})")
 
+        if not isinstance(dead_npc, Animal):
+            self._fail_quests_orphaned_by_death(dead_npc)
 
         death_event = self.record_death_event(
             deceased=dead_npc,

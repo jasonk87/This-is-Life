@@ -229,6 +229,39 @@ class EcologySystem:
             return 1.0
         return total_prey_population / total_prey_capacity
 
+    def _predator_pressure_ratio(self, region_populations: dict[str, "RegionalWildlifePopulation"], species_key: str) -> float | None:
+        """
+        Reciprocal of _prey_availability_ratio: returns how much predator
+        pressure a PREY species is under in this region, as the highest
+        population/carrying_capacity ("how full is the predator's own
+        capacity") among predator species that list species_key in their
+        prey_species, or None if no known predator preys on this species
+        (every non-prey species today, and predators w.r.t. their own
+        predators - nothing preys on wolves).
+
+        Closes the gap flagged separately from the predator-side balance
+        pass above: that pass only ever constrained a PREDATOR's growth
+        based on prey scarcity, never the reverse. Missing predator
+        population data is skipped (not treated as zero pressure), matching
+        _prey_availability_ratio's same "don't penalize based on absent
+        data" stance.
+        """
+        predator_pressures = []
+        for predator_key, predator_def in WILDLIFE_SPECIES.items():
+            prey_keys = predator_def.get("prey_species")
+            if not prey_keys or species_key not in prey_keys:
+                continue
+            predator_population = region_populations.get(predator_key)
+            if predator_population is None or predator_population.carrying_capacity <= 0:
+                continue
+            predator_pressures.append(
+                max(0, predator_population.population_count) / predator_population.carrying_capacity
+            )
+
+        if not predator_pressures:
+            return None
+        return max(predator_pressures)
+
     def _recover_wildlife_populations(self, world) -> None:
         # Slow abstract recovery: sparse populations recover gradually, never above carrying capacity.
         if getattr(world, "game_time", 0) % 1000 != 0:
@@ -271,6 +304,27 @@ class EcologySystem:
                     growth_chance = min(1.0, max(0.0, prey_availability_ratio))
                     if random.random() >= growth_chance:
                         recovery = 0
+
+                # --- Predator-prey balance (prey side, reciprocal) ---
+                # Mirrors the predator-side block above but inverted: when
+                # predator pressure (e.g. wolves relative to THEIR OWN
+                # carrying capacity) is high in this region, a PREY
+                # species's recovery is throttled too, using the exact same
+                # "growth is granted probabilistically, never actively
+                # reduced" idiom - no prey species population is ever
+                # decremented here, only its recovery chance this cycle.
+                # Real predation already removes prey through actual
+                # hunt/kill events (note_animal_death); this only makes
+                # abstract recovery slower while predators are numerous,
+                # it doesn't add a second abstract die-off on top of that.
+                # If recovery was already zeroed by some other check above,
+                # skip the (harmless but pointless) extra roll.
+                if recovery > 0:
+                    predator_pressure_ratio = self._predator_pressure_ratio(region_populations, population.species_key)
+                    if predator_pressure_ratio is not None:
+                        growth_chance = min(1.0, max(0.0, 1.0 - predator_pressure_ratio))
+                        if random.random() >= growth_chance:
+                            recovery = 0
 
                 population.population_count = min(population.carrying_capacity, population.population_count + recovery)
                 population.last_recovery_tick = getattr(world, "game_time", 0)

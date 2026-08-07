@@ -96,6 +96,52 @@ class TestTheftCrimeHook(unittest.TestCase):
 
         self.assertEqual(thief.economic.bounty, 0)
 
+    def test_stealing_the_last_unit_of_an_item_does_not_raise_keyerror(self):
+        """Regression: Inventory.__setitem__ deletes a key the instant it's
+        decremented to 0 (see entities.items.Inventory), so the old code's
+        follow-up `building_inventory[item] == 0` lookup on that now-missing
+        key raised KeyError instead of ever reaching the "caught stealing"
+        branch. Found via the integrated poverty-crime-jail investigation."""
+        from simulation.systems.utility_ai import _execute_steal_food
+        from engine import Building
+
+        thief = NPC(5, 5, name="Thief", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
+        building = Building(0, 0, 5, 5, building_type="general_store", category="commercial")
+        building.building_inventory["bread"] = 1  # exactly one unit left
+        self.world._get_building_global_center_coords = MagicMock(return_value=(5, 5))
+
+        with patch.object(self.world, "_get_village_for_npc") as mock_village:
+            fake_village = MagicMock()
+            fake_village.buildings = [building]
+            mock_village.return_value = fake_village
+            with patch("simulation.systems.utility_ai.random.random", return_value=0.0):
+                _execute_steal_food(self.world, thief)  # must not raise KeyError
+
+        self.assertEqual(thief.economic.bounty, 30)
+        self.assertNotIn("bread", building.building_inventory)
+
+    def test_stealing_the_last_unit_from_a_plain_dict_inventory_also_works(self):
+        """Same fix, but for a building_inventory that's a plain dict (no
+        Inventory.__setitem__ auto-delete) - the .get()/.pop() cleanup should
+        still leave no lingering zero-quantity key."""
+        from simulation.systems.utility_ai import _execute_steal_food
+        from engine import Building
+
+        thief = NPC(5, 5, name="Thief", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
+        building = Building(0, 0, 5, 5, building_type="general_store", category="commercial")
+        building.building_inventory = {"bread": 1}  # plain dict, not Inventory
+        self.world._get_building_global_center_coords = MagicMock(return_value=(5, 5))
+
+        with patch.object(self.world, "_get_village_for_npc") as mock_village:
+            fake_village = MagicMock()
+            fake_village.buildings = [building]
+            mock_village.return_value = fake_village
+            with patch("simulation.systems.utility_ai.random.random", return_value=0.0):
+                _execute_steal_food(self.world, thief)  # must not raise KeyError
+
+        self.assertEqual(thief.economic.bounty, 30)
+        self.assertNotIn("bread", building.building_inventory)
+
 
 class TestNpcAttemptAttackNpcCrimeAndArrest(unittest.TestCase):
     def setUp(self):

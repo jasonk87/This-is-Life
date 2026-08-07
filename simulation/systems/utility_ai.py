@@ -223,8 +223,16 @@ def _execute_steal_food(world, npc):
             for item in food_items:
                 if item in target_building.building_inventory and target_building.building_inventory[item] > 0:
                     target_building.building_inventory[item] -= 1
-                    if target_building.building_inventory[item] == 0:
-                        del target_building.building_inventory[item]
+                    # Defensive re-check instead of a raw [] lookup: some
+                    # building_inventory implementations (see items.Inventory
+                    # .__setitem__) already delete a key the instant it's
+                    # decremented to 0, so a follow-up target_building
+                    # .building_inventory[item] here would KeyError on the
+                    # now-missing key. .get()/.pop() tolerate that either way,
+                    # whether the entry auto-deleted itself or is just sitting
+                    # at 0 in a plain-dict-style inventory.
+                    if target_building.building_inventory.get(item, 0) <= 0:
+                        target_building.building_inventory.pop(item, None)
                     if hasattr(npc, "physical") and hasattr(npc.physical, "hunger"):
                         npc.physical.hunger = max(0, npc.physical.hunger - 50)
                     npc.schedule.current_task = TaskType.IDLE

@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 
+from entities.pickle_compat import dataclass_setstate
+
 
 DEFAULT_HUMANOID_PARTS = {
     "head": 5,
@@ -26,6 +28,9 @@ class BodyPart:
     def ensure_status(self, effect: str) -> None:
         if effect not in self.status_effects:
             self.status_effects.append(effect)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 
 class BodyPartValueProxy(MutableMapping):
@@ -59,6 +64,16 @@ class Anatomy:
     parts: dict[str, BodyPart] = field(default_factory=dict)
 
     def __post_init__(self):
+        self._hp_proxy = BodyPartValueProxy(self, "hp")
+        self._max_hp_proxy = BodyPartValueProxy(self, "max_hp")
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+        # _hp_proxy/_max_hp_proxy are set in __post_init__, not declared as
+        # dataclass fields, so dataclass_setstate's field-backfill can't see
+        # them - rebuild fresh ones unconditionally rather than trusting
+        # whatever pickle restored (cheap, stateless wrappers; safer than
+        # assuming an old pickle's proxy objects are still bound correctly).
         self._hp_proxy = BodyPartValueProxy(self, "hp")
         self._max_hp_proxy = BodyPartValueProxy(self, "max_hp")
 

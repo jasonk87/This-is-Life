@@ -46,6 +46,7 @@ from entities.social import (
 from simulation.activity import ensure_activity_state
 from simulation.careers import CareerState, infer_career_level, normalize_profession, set_entity_profession
 from simulation.skills import SkillTracker
+from entities.pickle_compat import backfill_missing_plain_attributes, dataclass_setstate
 
 PLACEHOLDER_FAMILY_NAME_RE = re.compile(r"^(Mother|Father|Brother|Sister)\s+Family_\d+$", re.IGNORECASE)
 
@@ -95,6 +96,9 @@ class CombatStats:
     @hp.setter
     def hp(self, value):
         self.anatomy.set_total_hp(value)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 @dataclass
 class PhysicalState:
@@ -185,6 +189,9 @@ class PhysicalState:
     def process_tick(self, **kwargs) -> None:
         self.metabolism.process_tick(status_effects=self.status_effects, **kwargs)
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 @dataclass
 class SocialState:
     """Stores social and reputational attributes for an entity."""
@@ -214,6 +221,9 @@ class SocialState:
     # LLM-generated base string) is never rewritten by drift.
     trait_pressure: dict[str, int] = field(default_factory=dict)
     activated_traits: list[str] = field(default_factory=list)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 @dataclass
 class EconomicState:
@@ -252,6 +262,17 @@ class EconomicState:
     @job_performance.setter
     def job_performance(self, value: int) -> None:
         self.work_performance = int(value)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+        # npc_inventory's __setattr__ coercion (above) only runs for normal
+        # attribute assignment, which dataclass_setstate's dict-restore and
+        # default_factory backfill both bypass - if npc_inventory ended up
+        # missing and got backfilled, it's already a fresh Inventory() from
+        # its own default_factory, but defensively re-coerce in case a
+        # legacy save had it as a plain dict before Inventory existed.
+        if not isinstance(self.__dict__.get("npc_inventory"), Inventory):
+            self.npc_inventory = self.__dict__.get("npc_inventory") or {}
 
 @dataclass
 class Schedule:
@@ -292,6 +313,9 @@ class Schedule:
     crime_kinds_since_last_jailing: list = field(default_factory=list)
     jail_intake_crime_kinds: list = field(default_factory=list)
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 @dataclass
 class Equipment:
     """Stores entity equipment."""
@@ -307,6 +331,9 @@ class Equipment:
         if name in {"weapon", "body", "head"} and not isinstance(value, EquipmentSlot):
             value = EquipmentSlot(value)
         super().__setattr__(name, value)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 Knowledge = KnowledgeComponent
 
@@ -425,6 +452,71 @@ class NPC:
         self.defense_bonus = 0
         self.debug_autonomy: dict = {}
         set_entity_profession(self, self.economic.profession, reason="spawn")
+
+    # Identity/random-per-instance attributes that have existed since NPC's
+    # earliest version, set in the first few lines of __init__ above - these
+    # can never legitimately be "missing" from a real save, so __setstate__
+    # below never backfills them from the defaults template even
+    # defensively, since doing so would silently overwrite a real NPC's
+    # identity rather than filling in a genuinely absent field.
+    _PICKLE_TEMPLATE_SKIP_ATTRS = frozenset({
+        "x", "y", "name", "render_x", "render_y", "age", "gender", "char",
+        "color", "speed", "id", "dialogue", "player_id",
+    })
+    _pickle_defaults_template = None
+
+    @classmethod
+    def _get_pickle_defaults_template(cls):
+        """Lazily-built, process-wide "freshly constructed NPC" used only
+        as a source of default values for NPC.__setstate__ (see below) -
+        NPC isn't a dataclass, so its ~100 plain instance attributes can't
+        use the generic dataclass-field backfill in entities/pickle_compat.py.
+        Built the same way every worldgen NPC already is; not mutated."""
+        if cls._pickle_defaults_template is None:
+            cls._pickle_defaults_template = NPC(
+                0, 0, name="__pickle_defaults_template__", dialogue=["Hi"], personality="villager",
+            )
+        return cls._pickle_defaults_template
+
+    def __setstate__(self, state):
+        """Post-unpickle migration: pickle bypasses __init__ entirely and
+        just replays the old __dict__, so any attribute (component object
+        or plain literal) added to NPC since a save was written is simply
+        absent from a restored instance - the next line of code that
+        touches it raises AttributeError. See entities/pickle_compat.py for
+        the full rationale; this mirrors World.__setstate__'s migration
+        pattern in engine.py, adapted for a non-dataclass class with a very
+        large, fast-growing attribute list where hand-enumerating every
+        field (as World's does) would itself become a maintenance hazard.
+        """
+        self.__dict__.update(state)
+
+        # Component objects: each has its own __setstate__ (see CombatStats/
+        # PhysicalState/SocialState/EconomicState/Schedule/Equipment above,
+        # and KnowledgeComponent/AspirationComponent/TravelComponent/
+        # CareerState/SkillTracker elsewhere) that backfills ITS OWN missing
+        # fields automatically as part of being unpickled. This only covers
+        # the more extreme case of a whole component attribute being absent.
+        if not hasattr(self, "combat"): self.combat = CombatStats()
+        if not hasattr(self, "physical"): self.physical = PhysicalState()
+        if not hasattr(self, "social"): self.social = SocialState()
+        if not hasattr(self, "economic"): self.economic = EconomicState()
+        if not hasattr(self, "schedule"): self.schedule = Schedule()
+        if not hasattr(self, "equipment"): self.equipment = Equipment()
+        if not hasattr(self, "knowledge"): self.knowledge = Knowledge()
+        if not hasattr(self, "career"): self.career = CareerState()
+        if not hasattr(self, "skills"): self.skills = SkillTracker()
+        if not hasattr(self, "aspiration"):
+            self.aspiration = AspirationComponent(aspiration_type=random.choice(list(AspirationType)))
+        if not hasattr(self, "travel"): self.travel = TravelComponent()
+
+        # Everything else: the many plain `self.x = ...` attributes set
+        # directly in __init__ (cold_exposure, work_efficiency_modifiers,
+        # actor_work_profile, etc.) rather than as dataclass fields.
+        backfill_missing_plain_attributes(
+            self, self._get_pickle_defaults_template(), skip=self._PICKLE_TEMPLATE_SKIP_ATTRS
+        )
+        ensure_activity_state(self)
 
     def _task_state_holder(self):
         ai_brain = getattr(self, "ai_brain", None)

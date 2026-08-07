@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from entities.pickle_compat import dataclass_setstate
+
 
 UNEMPLOYED_PROFESSIONS = {"Unemployed", "unemployed", ""}
 CREATURE_PROFESSIONS = {"Creature"}
@@ -77,6 +79,9 @@ class CareerHistoryEntry:
     reason: str = ""
     game_time: int | None = None
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class CareerState:
@@ -85,6 +90,9 @@ class CareerState:
     level: int = 0
     tenure_days: int = 0
     history: list[CareerHistoryEntry] = field(default_factory=list)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
     def set_role(self, role: str, reason: str = "", game_time: int | None = None):
         normalized = normalize_profession(role)

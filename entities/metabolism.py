@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from entities.pickle_compat import dataclass_setstate
+
 
 @dataclass
 class MetabolismComponent:
@@ -57,3 +59,6 @@ class MetabolismComponent:
             status_effects.append("Freezing")
         elif self.temperature > 38.5:
             status_effects.append("Overheating")
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)

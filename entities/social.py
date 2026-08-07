@@ -8,6 +8,7 @@ import random
 from typing import Any
 
 from config import DAY_LENGTH_TICKS
+from entities.pickle_compat import dataclass_setstate
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,9 @@ class GrudgeRecord:
     decay_days: int = 5
     persistent: bool = False
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class LocalOpinionRecord:
@@ -62,6 +66,9 @@ class LocalOpinionRecord:
     evidence_count: int = 0
     last_updated_day: int = 0
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class HistoryFactReactionState:
@@ -71,6 +78,9 @@ class HistoryFactReactionState:
     reacted_source_type: str = ""
     last_reaction_tick: int = 0
     applied_reaction_strength: float = 0.0
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 
 @dataclass(frozen=True)
@@ -776,6 +786,9 @@ class KnowledgeComponent:
             )
             self.known_memories.pop(lowest_priority.id, None)
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 class AspirationType(str, Enum):
     WEALTH = "wealth"
@@ -789,6 +802,9 @@ class AspirationComponent:
     target_settlement_id: str | None = None
     last_evaluated_day: int = -1
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class TravelComponent:
@@ -800,3 +816,6 @@ class TravelComponent:
     group_leader_id: int | None = None
     group_member_ids: list[int] = field(default_factory=list)
     target_employment_task_id: str | None = None
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)

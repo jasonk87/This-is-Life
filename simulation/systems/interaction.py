@@ -281,11 +281,36 @@ class BuildInteraction(ActiveInteraction):
         )
 
     def cancel(self, world: Any, reason: str) -> ActionResult:
+        blueprint = world.blueprints_by_id.get(self.blueprint_id)
         if reason in {"cannot_continue", "blueprint_not_found", "component_unavailable"}:
-            blueprint = world.blueprints_by_id.get(self.blueprint_id)
             releaser = getattr(world, "_release_construction_component_claim", None)
             if callable(releaser):
                 releaser(blueprint, self.component_id, self.actor_id, reason=f"build_cancelled:{reason}")
+
+        # Regardless of reason: the actor is no longer actively working
+        # this blueprint right now, so their entry in the coarser
+        # blueprint.assigned_workers list needs to go. That list is a
+        # separate tracking structure from the fine-grained component
+        # claim above (see World._assign_construction_task_to_npc, which
+        # appends here just for being "sent toward" a blueprint, and has
+        # its own early-return fast path that treats anyone still in this
+        # list as permanently already-assigned). Without this, an actor
+        # interrupted here - e.g. by "survival_override" - stayed in
+        # assigned_workers forever, even once free again, so they'd never
+        # be re-evaluated for real work again.
+        #
+        # Deliberately NOT extending the component-claim release above to
+        # every reason: for a temporary interruption like
+        # "survival_override" the claim is meant to persist for a grace
+        # window so the same actor can resume their own progress instead
+        # of losing it to whoever else picks the blueprint up next (see
+        # tests/test_construction_foundation.py's
+        # test_interrupted_component_claim_expires_and_allows_resume) -
+        # this fix only closes the assigned_workers bookkeeping leak, it
+        # doesn't touch that expiry/resume behavior.
+        if blueprint is not None and self.actor_id in getattr(blueprint, "assigned_workers", []):
+            blueprint.assigned_workers.remove(self.actor_id)
+
         return ActionResult(
             success=False,
             intent=self._original_intent(),

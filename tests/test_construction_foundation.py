@@ -325,6 +325,106 @@ class TestConstructionFoundation(unittest.TestCase):
         trace_types = [entry["trace_type"] for entry in self.world.interaction_trace_log]
         self.assertIn("component_claim_expired", trace_types)
 
+    def test_interrupted_builder_is_removed_from_assigned_workers(self):
+        """Regression test for the stale-claim bug found via _debug_test.py:
+        blueprint.assigned_workers is a coarser, separate tracking list from
+        the component-level claim above (see World._assign_construction_task_to_npc,
+        which appends here just for being "sent toward" a blueprint - and,
+        since an earlier fix, has an early-return fast path that treats
+        anyone still in this list as permanently already-assigned). Before
+        this fix, BuildInteraction.cancel() only ever released the
+        fine-grained component claim (and only for a few reasons that never
+        included "survival_override") - it never touched assigned_workers
+        at all, for any reason. That meant an interrupted builder stayed in
+        assigned_workers forever, even long after their own component claim
+        had expired and someone else had taken over the work, and even
+        after their own survival need was resolved and they were free to
+        do real work again - the fast path would just keep sending them
+        back to "constructing_site" for a blueprint they weren't actually
+        assigned to anymore."""
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        component = blueprint.components[0]
+        component.required_work = 30
+        for item_key, qty in component.required_materials.items():
+            for _ in range(qty):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        first_builder = NPC(8, 8, name="Interrupted Builder")
+        first_builder.economic.profession = "Builder"
+        second_builder = NPC(8, 8, name="Resuming Builder")
+        second_builder.economic.profession = "Builder"
+        self.world.village_npcs.extend([first_builder, second_builder])
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(first_builder))
+        self.assertTrue(self.world._handle_npc_construction_task(first_builder))
+
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(self.world)
+
+        self.assertIn(first_builder.id, blueprint.assigned_workers)
+
+        cancel_result = self.world.interaction_resolver.cancel_actor_interaction(
+            first_builder.id, self.world, "survival_override"
+        )
+        self.assertIsNotNone(cancel_result)
+
+        # The bug: this used to still be True after cancellation.
+        self.assertNotIn(first_builder.id, blueprint.assigned_workers)
+        # The component claim itself is untouched by a survival_override
+        # cancel - that grace-period/resume behavior is intentional and
+        # covered separately by test_interrupted_component_claim_expires_and_allows_resume.
+        self.assertEqual(component.claimed_by_actor_id, first_builder.id)
+
+        # second_builder can be freshly assigned (sent toward the blueprint)
+        # without inheriting a stale double-entry alongside first_builder.
+        self.assertTrue(self.world._assign_construction_task_to_npc(second_builder))
+        self.assertEqual(set(blueprint.assigned_workers), {second_builder.id})
+        # But can't actually start building yet - first_builder's component
+        # claim is still active (unchanged from before this fix).
+        self.assertFalse(self.world._handle_npc_construction_task(second_builder))
+
+    def test_interrupted_builder_is_not_stuck_reporting_as_already_assigned(self):
+        """Follow-up consequence of the same bug: _assign_construction_task_to_npc
+        has an early-return fast path (added separately, to stop re-scanning
+        every blueprint each tick for an already-assigned worker) that
+        treats presence in ANY buildable blueprint's assigned_workers as
+        "already working this, don't re-evaluate" - it just sets
+        current_task = "constructing_site" and returns True without
+        checking distance, materials, or anything else. Before this fix,
+        an interrupted builder's stale assigned_workers entry meant that
+        fast path kept firing for them forever, even long after they were
+        genuinely free again. This asserts the exact condition that fast
+        path checks (npc.id in some buildable blueprint's assigned_workers)
+        is false once the interruption has been cancelled."""
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        component = blueprint.components[0]
+        component.required_work = 30
+        for item_key, qty in component.required_materials.items():
+            for _ in range(qty):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Interrupted Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(self.world)
+
+        self.world.interaction_resolver.cancel_actor_interaction(builder.id, self.world, "survival_override")
+        builder.schedule.current_task = "idle"  # simulate the survival system moving them on to eat/drink
+
+        for candidate_blueprint in self.world._get_buildable_blueprints():
+            self.assertNotIn(
+                builder.id,
+                candidate_blueprint.assigned_workers,
+                "interrupted builder should not still be reported as assigned to any blueprint",
+            )
+
     def test_completed_construction_integrates_real_building(self):
         blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
         blueprint.required_work = 20

@@ -63,6 +63,21 @@ from config import (
     LLM_BACKEND, ENABLE_LLM_CONNECTION, GOOGLE_API_KEY
 )
 
+# --- Daily-cadence tick offsets ---
+# How far into each day (in ticks, relative to DAY_LENGTH_TICKS) a given
+# once-per-day system fires, via `self.game_time % DAY_LENGTH_TICKS ==
+# <offset>`. Named instead of left as a bare literal so the relationship
+# to DAY_LENGTH_TICKS is explicit and doesn't silently break/miss its
+# window if DAY_LENGTH_TICKS is ever changed (e.g. an offset larger than a
+# shortened day length would simply never fire again).
+# DAILY_GOVERNANCE_TICK_OFFSET: staggers _run_daily_governance (elections,
+# tax collection, civic salaries) to a bit into the day rather than tick 0,
+# so it doesn't all land on the exact same tick as other day-boundary
+# systems (e.g. _update_abstract_simulation's population lifecycle/food
+# decay, gated on `% DAY_LENGTH_TICKS == 0`). The specific value (360) is
+# otherwise arbitrary - preserved as-is from the prior unnamed literal.
+DAILY_GOVERNANCE_TICK_OFFSET = 360
+
 # --- Village-level food supply decay ---
 # Judgment call (see World._decay_village_food_supply): 3%/day, applied to
 # every item tagged "food" in village.supply. Deliberately NOT derived from
@@ -1922,7 +1937,7 @@ class World:
         current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
         if self.politics.last_governance_day >= current_day:
             return
-        if self.game_time % DAY_LENGTH_TICKS != 360:
+        if self.game_time % DAY_LENGTH_TICKS != DAILY_GOVERNANCE_TICK_OFFSET:
             return
 
         self.evaluate_elections()

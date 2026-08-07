@@ -369,6 +369,8 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
     current_day = world.game_time // DAY_LENGTH_TICKS
     if run_npc_grudge_suspicion_policy(world, npc, current_day):
         return
+    if run_npc_grudge_escalation_policy(world, npc, current_day):
+        return
     if run_npc_social_reaction_policy(world, npc):
         return
 
@@ -734,6 +736,118 @@ def run_npc_grudge_suspicion_policy(world, npc, current_day: int) -> bool:
     npc.schedule.current_path = path
     npc.schedule.current_destination_coords = (dest_x, dest_y)
     return True
+
+
+# --- Grudge escalation (NPC-on-NPC) ---
+# run_npc_grudge_suspicion_policy above only ever acts on a grudge held
+# against the PLAYER (avoidance / reporting to the sheriff). Grudges held
+# against other NPCs (e.g. from unpaid wages, witnessed crimes, or fear
+# reactions to known history facts - see World.add_grudge's callers)
+# previously just sat there passively affecting distrust/stance checks -
+# they never actually did anything. This adds a real, deliberately rare
+# escalation path for the worst, longest-held NPC-on-NPC grudges: spreading
+# targeted negative gossip, or in rarer/more severe cases, a small act of
+# sabotage (a bit of stolen/ruined money). Conservative by design - a high
+# severity+age bar, low per-check odds, and at most one action per NPC per
+# scheduling check - this should read as occasional, memorable friction
+# between villagers, not constant NPC-vs-NPC warfare.
+GRUDGE_ESCALATION_SEVERITY_THRESHOLD = 70   # matches the existing player-grudge "report to sheriff" bar
+GRUDGE_ESCALATION_MIN_AGE_DAYS = 5          # a grudge needs to have simmered a while, not fire on day one
+GRUDGE_ESCALATION_CHANCE_PER_CHECK = 0.03   # rare - most eligible grudges never escalate on any given check
+GRUDGE_SABOTAGE_SEVERITY_THRESHOLD = 90     # only the very worst grudges risk sabotage rather than gossip
+GRUDGE_SABOTAGE_CHANCE_MULTIPLIER = 0.25    # sabotage is rarer still than gossip, even once eligible
+GRUDGE_SABOTAGE_MAX_MONEY_STOLEN = 15
+
+
+def run_npc_grudge_escalation_policy(world, npc, current_day: int) -> bool:
+    """Apply rare, severe NPC-on-NPC grudge escalation (targeted gossip or,
+    more rarely, sabotage). Player-directed grudges are intentionally
+    skipped here - those are already handled by
+    run_npc_grudge_suspicion_policy just above, and mixing the two policies
+    on the same grudge would risk conflicting/duplicate reactions."""
+    grudges = getattr(getattr(npc, "social", None), "grudges", None)
+    if not grudges:
+        return False
+
+    player = getattr(world, "player", None)
+    player_id = getattr(player, "id", None)
+    protected_tasks = {"going_to_report_crime", "attacking_player", "combat_action_flee_from_player", "jailed"}
+    if npc.schedule.current_task in protected_tasks:
+        return False
+
+    for target_id, grudge in list(grudges.items()):
+        if target_id == player_id:
+            continue  # player-directed grudges: run_npc_grudge_suspicion_policy's job
+        if getattr(grudge, "severity", 0) < GRUDGE_ESCALATION_SEVERITY_THRESHOLD:
+            continue
+        if (current_day - getattr(grudge, "created_day", current_day)) < GRUDGE_ESCALATION_MIN_AGE_DAYS:
+            continue
+
+        target = world.get_entity_by_id(target_id)
+        if target is None or target is player:
+            continue
+        if getattr(getattr(target, "physical", None), "is_dead", False):
+            continue
+        if not hasattr(target, "economic") or not hasattr(target, "knowledge"):
+            continue  # not a real NPC-shaped entity
+
+        if random.random() >= GRUDGE_ESCALATION_CHANCE_PER_CHECK:
+            continue
+
+        if (
+            grudge.severity >= GRUDGE_SABOTAGE_SEVERITY_THRESHOLD
+            and random.random() < GRUDGE_SABOTAGE_CHANCE_MULTIPLIER
+        ):
+            _escalate_grudge_via_sabotage(world, npc, target)
+        else:
+            _escalate_grudge_via_gossip(world, npc, target)
+        return True
+
+    return False
+
+
+def _escalate_grudge_via_gossip(world, npc, target) -> None:
+    """The grudge-holder starts spreading unflattering rumors about the
+    target - seeded as a memory in the gossiper's own knowledge, then left
+    to propagate through the existing gossip-sharing machinery
+    (KnowledgeComponent.choose_memories_to_share / ambient_info.py's
+    sharing gate) exactly like any other memory, rather than building a
+    separate propagation path just for this."""
+    memory = world.create_memory_event(
+        event_type="malicious_gossip",
+        subject_id=target.id,
+        target_id=npc.id,
+        importance_score=25,
+        headline=f"{world.get_entity_display_name(npc)} has been spreading unkind rumors about {world.get_entity_display_name(target)}.",
+    )
+    world.record_memory_event(npc, memory)
+    world.add_message_to_chat_log(
+        f"{world.get_entity_display_name(npc)} has been spreading unkind rumors about {world.get_entity_display_name(target)}."
+    )
+
+
+def _escalate_grudge_via_sabotage(world, npc, target) -> None:
+    """The rarer, more severe escalation: a small, capped act of material
+    sabotage (petty theft/damage) rather than just talk. The target learns
+    who was responsible immediately (no separate detection/witness model
+    for this first pass) so it can feed back into their own opinion of the
+    saboteur via the usual reputation machinery."""
+    stolen = min(GRUDGE_SABOTAGE_MAX_MONEY_STOLEN, max(0, getattr(target.economic, "money", 0)))
+    if stolen > 0:
+        target.economic.money -= stolen
+        npc.economic.money += stolen
+
+    memory = world.create_memory_event(
+        event_type="petty_sabotage",
+        subject_id=npc.id,
+        target_id=target.id,
+        importance_score=35,
+        headline=f"{world.get_entity_display_name(target)}'s belongings were tampered with - {world.get_entity_display_name(npc)} is responsible.",
+    )
+    world.record_memory_event(target, memory)
+    world.add_message_to_chat_log(
+        f"{world.get_entity_display_name(target)}'s things have been tampered with..."
+    )
 
 
 def run_npc_traveling_merchant_policy(world, npc) -> None:

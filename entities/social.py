@@ -632,6 +632,16 @@ class KnowledgeComponent:
         "lowered_taxes": 12,
         "issued_bounty": -15,
         "issued_arrest_warrant": -10,
+        # Grudge escalation (simulation/systems/scheduling.py's
+        # run_npc_grudge_escalation_policy): a rare, severe/long-held
+        # NPC-on-NPC grudge can now actually escalate into targeted gossip
+        # or petty sabotage instead of just sitting there as a passive
+        # distrust modifier. Both are deliberately milder than
+        # crime_witnessed (-25) - unproven rumor/petty spite, not an actual
+        # witnessed crime - with sabotage worse than plain gossip since it's
+        # a real material act, not just talk.
+        "malicious_gossip": -8,
+        "petty_sabotage": -15,
     }
 
     def record_event(self, event: MemoryEvent) -> bool:

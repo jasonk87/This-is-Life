@@ -9100,8 +9100,30 @@ class World:
             return
 
         player_weapon_name = "Fists"
+        weapon_dice_str = self.player.combat.base_attack_damage_dice
+        weapon_damage_bonus = 0
         if self.player.has_item("axe_stone"):
             player_weapon_name = ITEM_DEFINITIONS["axe_stone"]["name"]
+            weapon_props = ITEM_DEFINITIONS["axe_stone"].get("properties", {})
+            weapon_dice_str = weapon_props.get("damage_dice", weapon_dice_str)
+            weapon_damage_bonus = weapon_props.get("damage_bonus", 0)
+
+        # Sanity ceiling for the LLM-adjudicated damage_dealt below (see
+        # bug-hunt audit item 2): unlike every other combat path, the
+        # player's own attack has no dice roll of its own to naturally bound
+        # damage - it just trusts whatever number the LLM returns. Compute
+        # the same kind of max-possible-damage a dice-based hit against this
+        # weapon could ever produce (all dice at max face + bonus, doubled -
+        # matching the x2 crit multiplier npc_attempt_attack_player applies
+        # on a natural 20), and clamp to that, so a single bad/unusually
+        # generous LLM response can't one-shot an NPC with an arbitrary
+        # number.
+        try:
+            max_dice_count, max_die_faces = map(int, weapon_dice_str.lower().split('d'))
+            max_dice_damage = max(0, max_dice_count) * max(0, max_die_faces)
+        except (ValueError, AttributeError):
+            max_dice_damage = 3  # matches CombatStats.base_attack_damage_dice's "1d3" default
+        max_possible_player_damage = max(1, max_dice_damage + weapon_damage_bonus) * 2
 
         player_melee_skill = getattr(self.player, 'melee_skill', 5)
 
@@ -9135,7 +9157,7 @@ class World:
         try:
             response_json = json.loads(response_str)
             hit = response_json.get("hit", False)
-            damage_dealt = int(response_json.get("damage_dealt", 0))
+            damage_dealt = max(0, min(int(response_json.get("damage_dealt", 0)), max_possible_player_damage))
             narrative = response_json.get("narrative_feedback", "The confrontation is tense.")
 
             self.add_message_to_chat_log(narrative)

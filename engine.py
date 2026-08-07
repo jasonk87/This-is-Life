@@ -10763,6 +10763,12 @@ class World:
             event=crime_record,
         )
         create_public_event_seed_from_record(self, crime_record)
+
+        if victim_id is not None:
+            victim = self.get_entity_by_id(victim_id)
+            if victim is not None:
+                self._apply_crime_victimization_trait_drift(victim)
+
         return crime_record
 
     def _accrue_crime_bounty(self, criminal, crime_kind: str) -> None:
@@ -10878,6 +10884,13 @@ class World:
         npc.task_target_entity_id = None
         self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} is thrown in jail!")
 
+        # Preserved for World._apply_jail_release_trait_drift, which needs
+        # to know how severe whatever got this NPC arrested was, once
+        # they're actually released (by which point economic.bounty below
+        # has long since been zeroed and any later crimes may have
+        # overwritten it).
+        npc.schedule.jail_intake_bounty = npc.economic.bounty
+
         npc.economic.bounty = 0
         self._vacate_offices_held_by(npc)
 
@@ -10892,6 +10905,90 @@ class World:
         if cell_coords:
             self._update_entity_position(npc, cell_coords[0], cell_coords[1])
         self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has served their time and is released from jail.")
+        self._apply_jail_release_trait_drift(npc)
+
+    # --- Personality drift (item 3) ---
+    # "Character shapes the outcome" principle throughout: rather than one
+    # fixed direction per life event, each hook below branches on the NPC's
+    # EXISTING traits (via NPC.has_trait, which also sees prior drift) so an
+    # already-hardened character and an otherwise-neutral one can plausibly
+    # come out of the same event differently. All of these just call
+    # NPC.record_trait_pressure, which only actually changes anything once
+    # the SAME trait has been pushed by enough qualifying events (gradual,
+    # never a single-event flip) - see entities/base.py for the mechanism.
+    JAIL_LOW_SEVERITY_BOUNTY_CEILING = 40  # roughly theft-tier (30) and below; assault (50)/murder (100) are "high"
+
+    def _apply_jail_release_trait_drift(self, npc: NPC) -> None:
+        """
+        Jail release: an NPC already leaning anti-authority (chaotic,
+        criminal, or aggressive) hardens further toward chaotic - jail
+        doesn't reform someone who was already trending that way, if
+        anything it confirms their worldview. A more neutral-or-lawful
+        character's outcome instead depends on how severe whatever got them
+        arrested was (economic.bounty at the moment of arrest, captured in
+        _serve_npc_jail_time): a minor, low-bounty offense (roughly
+        theft-tier) reads as a genuine wake-up call - lawful. A serious
+        offense (assault/murder-tier, or enough accumulated minor crimes to
+        add up to it) is traumatic/hardening even for someone who wasn't
+        already anti-authority-leaning going in - chaotic.
+        """
+        if npc.has_trait("chaotic") or npc.has_trait("criminal") or npc.has_trait("aggressive"):
+            npc.record_trait_pressure("chaotic")
+            return
+
+        intake_bounty = getattr(npc.schedule, "jail_intake_bounty", 0)
+        if intake_bounty <= self.JAIL_LOW_SEVERITY_BOUNTY_CEILING:
+            npc.record_trait_pressure("lawful")
+        else:
+            npc.record_trait_pressure("chaotic")
+
+    def _apply_illness_recovery_trait_drift(self, npc) -> None:
+        """
+        Recovering from a real (debilitating-tier, not just feverish)
+        illness. An already greedy/merchant-leaning NPC's self-preservation
+        instinct sharpens further - greedy. A brave/aggressive NPC forced
+        into vulnerability and bed rest comes out more reflective/careful -
+        studious, a genuine change of pace rather than doubling down. A
+        lazy NPC gets an actual wake-up call from the scare - lawful
+        (starts taking life more seriously). Anyone without one of those
+        specific leanings defaults to the same self-preservation/hoarding
+        instinct (greedy) as the most universally plausible reaction to
+        surviving a health scare.
+        """
+        if not hasattr(npc, "has_trait") or not hasattr(npc, "record_trait_pressure"):
+            return  # not an NPC-shaped entity (e.g. the player)
+        if npc.has_trait("greedy") or npc.has_trait("merchant"):
+            npc.record_trait_pressure("greedy")
+        elif npc.has_trait("brave") or npc.has_trait("aggressive"):
+            npc.record_trait_pressure("studious")
+        elif npc.has_trait("lazy"):
+            npc.record_trait_pressure("lawful")
+        else:
+            npc.record_trait_pressure("greedy")
+
+    def _apply_crime_victimization_trait_drift(self, victim) -> None:
+        """
+        Being the recorded victim of a crime (see record_crime_event).
+        Already-lawful victims double down, seeking even more order/justice
+        after being wronged. Victims already leaning chaotic/criminal (who
+        don't trust the system to make it right) or already
+        brave/aggressive (already inclined to handle things themselves)
+        both harden toward aggressive - taking matters into their own
+        hands, not toward the system. Anyone without one of those leanings
+        defaults to lawful, the most universally plausible reaction
+        (wanting justice/protection) for someone without a strong prior
+        lean either way.
+        """
+        if not hasattr(victim, "has_trait") or not hasattr(victim, "record_trait_pressure"):
+            return  # not an NPC-shaped entity (e.g. the player)
+        if victim.has_trait("lawful"):
+            victim.record_trait_pressure("lawful")
+        elif victim.has_trait("chaotic") or victim.has_trait("criminal"):
+            victim.record_trait_pressure("aggressive")
+        elif victim.has_trait("brave") or victim.has_trait("aggressive"):
+            victim.record_trait_pressure("aggressive")
+        else:
+            victim.record_trait_pressure("lawful")
 
     def record_migration_event(
         self,
@@ -15299,19 +15396,20 @@ class World:
         """Calculates a suitability score for an NPC and a potential job building."""
         score = random.randint(0, 20) # Base randomness
 
-        # Personality fit
+        # Personality fit. has_trait() also picks up drift-activated traits
+        # (see NPC.has_trait/record_trait_pressure), not just the base
+        # LLM-generated personality string.
         b_type = job_building.building_type
-        personality = npc.social.personality.lower()
 
-        if "brave" in personality or "aggressive" in personality:
+        if npc.has_trait("brave") or npc.has_trait("aggressive"):
             if b_type in ["sheriff_office", "jail"]: score += 20
             elif b_type in ["mine", "lumber_mill"]: score += 10
-        elif "smart" in personality or "studious" in personality:
+        elif npc.has_trait("smart") or npc.has_trait("studious"):
             if b_type in ["library", "capital_hall"]: score += 20
             elif b_type in ["general_store"]: score += 10
-        elif "greedy" in personality or "merchant" in personality:
+        elif npc.has_trait("greedy") or npc.has_trait("merchant"):
             if b_type in ["general_store", "tavern"]: score += 20
-        elif "nature" in personality or "outdoors" in personality:
+        elif npc.has_trait("nature") or npc.has_trait("outdoors"):
             if b_type in ["farm", "fishing_hut", "lumber_mill"]: score += 20
 
         # Physical Stats fit (implied by combat stats)

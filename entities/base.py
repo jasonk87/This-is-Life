@@ -16,6 +16,18 @@ from config import DAY_LENGTH_TICKS, DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADI
 # lucky timing window, short enough that a villager who got hurt by illness
 # or a stray hit doesn't stay a permanent enemy.
 NPC_HOSTILITY_GRACE_TICKS = DAY_LENGTH_TICKS // 4
+
+# Personality drift (see NPC.has_trait/record_trait_pressure): how many
+# qualifying life events of the SAME kind a trait needs before it actually
+# activates (becomes visible to has_trait() checks) - gradual onset, not a
+# flip from a single event - and how many drifted traits an NPC can ever
+# accumulate, so a rough life doesn't overload them with every trait at
+# once. Once activated, a trait is permanent (no decay) and sticky (never
+# displaced by a later trait reaching threshold once the cap is full) -
+# personality is meant to be a slower-moving characteristic than reputation
+# or grudges, which are explicitly designed to fade.
+TRAIT_DRIFT_ACTIVATION_THRESHOLD = 3
+TRAIT_DRIFT_MAX_ACTIVE_TRAITS = 3
 from data.dawnlike import ANIMAL_SPRITES, get_human_sprite
 from data.items import ITEM_DEFINITIONS
 from entities.anatomy import Anatomy
@@ -194,6 +206,14 @@ class SocialState:
     fame: int = 0
     infamy: int = 0
     title: str = ""
+    # Personality drift (see NPC.has_trait/record_trait_pressure below):
+    # trait_pressure counts qualifying life events per candidate trait word;
+    # activated_traits is the ordered, sticky (never displaced), capped list
+    # of traits that have actually crossed the activation threshold and are
+    # therefore live for has_trait() checks. `personality` itself (the
+    # LLM-generated base string) is never rewritten by drift.
+    trait_pressure: dict[str, int] = field(default_factory=dict)
+    activated_traits: list[str] = field(default_factory=list)
 
 @dataclass
 class EconomicState:
@@ -252,6 +272,11 @@ class Schedule:
     is_jailed: bool = False
     jail_cell_coords: tuple[int, int] | None = None
     jail_time_remaining: int = 0
+    # Bounty at the moment of arrest, captured by World._serve_npc_jail_time
+    # right before it zeroes economic.bounty - preserved so
+    # World._apply_jail_release_trait_drift can gauge how severe whatever
+    # got this NPC jailed actually was, once released.
+    jail_intake_bounty: int = 0
 
 @dataclass
 class Equipment:
@@ -609,6 +634,52 @@ class NPC:
         relationship_distrust = max(0, 50 - relationship_score)
         grudge_distrust = self.get_grudge_severity_towards(target_id)
         return max(relationship_distrust, grudge_distrust)
+
+    def has_trait(self, trait_word: str) -> bool:
+        """
+        True if trait_word describes this NPC, either because it appears in
+        their base (LLM-generated) personality string - the existing
+        substring check every utility-AI/job-suitability gate already used
+        - or because it's a drift-activated trait (see
+        record_trait_pressure). The base string is never rewritten by
+        drift; this just widens what "having" a trait means to include
+        traits earned through life events.
+        """
+        base_personality = (self.social.personality or "").lower()
+        if trait_word in base_personality:
+            return True
+        return trait_word in self.social.activated_traits
+
+    def record_trait_pressure(
+        self,
+        trait_word: str,
+        *,
+        threshold: int = TRAIT_DRIFT_ACTIVATION_THRESHOLD,
+        cap: int = TRAIT_DRIFT_MAX_ACTIVE_TRAITS,
+    ) -> bool:
+        """
+        Register one qualifying life event pushing this NPC toward
+        trait_word. Purely additive/gradual: nothing happens until the same
+        trait_word has accumulated `threshold` events, and once
+        `cap` traits are active, further pressure on a NEW trait_word keeps
+        being counted but never activates (existing active traits are never
+        displaced - no flip-flopping). Returns True if this call caused a
+        brand-new activation (mainly useful for tests/logging).
+        """
+        if not trait_word:
+            return False
+        pressure = self.social.trait_pressure.get(trait_word, 0) + 1
+        self.social.trait_pressure[trait_word] = pressure
+
+        if trait_word in self.social.activated_traits:
+            return False
+        if pressure < threshold:
+            return False
+        if len(self.social.activated_traits) >= cap:
+            return False
+
+        self.social.activated_traits.append(trait_word)
+        return True
 
     def set_local_opinion(self, target_id: int, score: float, *, current_day: int, evidence_count: int) -> None:
         self.social.local_opinions[target_id] = LocalOpinionRecord(

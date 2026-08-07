@@ -185,7 +185,14 @@ def _passes_relationship_persona_activity_gate(speaker, listener, fact, topic, w
     personality = str(getattr(getattr(speaker, "social", None), "personality", "") or "").lower()
     if personality in {"friendly", "generous", "gregarious", "curious"}:
         chance += 0.12
-    if personality in {"reserved", "shy", "secretive"}:
+    # "withdrawn" is a drift-only trait (see NPC.record_trait_pressure /
+    # World._apply_bereavement_trait_drift) - it never appears in the base
+    # LLM-generated personality string, only in activated_traits, so it's
+    # checked separately rather than folded into the exact-match check
+    # above (which is intentionally left as-is to avoid changing existing
+    # base-personality behavior here).
+    speaker_activated_traits = set(getattr(getattr(speaker, "social", None), "activated_traits", None) or ())
+    if personality in {"reserved", "shy", "secretive"} or "withdrawn" in speaker_activated_traits:
         chance -= 0.12
 
     confidence = max(0.0, min(1.0, float(getattr(fact, "confidence", 0.0))))

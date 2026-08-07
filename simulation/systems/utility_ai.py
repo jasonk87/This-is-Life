@@ -49,9 +49,16 @@ def evaluate_needs_utility(world, npc) -> bool:
 
     # We are hungry. Evaluate options based on Utility (Score = Base Utility + Personality Modifiers)
     options = {}
+    # trait() checks both the base (LLM-generated) personality string and
+    # any drift-activated traits (see NPC.has_trait / record_trait_pressure
+    # in entities/base.py) - falls back to a plain substring check against
+    # the raw personality string for non-NPC-shaped test doubles that don't
+    # have has_trait.
     personality = ""
     if hasattr(npc, "social") and hasattr(npc.social, "personality"):
         personality = getattr(npc.social, "personality", "").lower()
+    npc_has_trait = getattr(npc, "has_trait", None)
+    trait = (lambda w: npc_has_trait(w)) if callable(npc_has_trait) else (lambda w: w in personality)
 
     # Option A: Buy Food
     # Base utility depends on having money. Household financial support
@@ -65,23 +72,23 @@ def evaluate_needs_utility(world, npc) -> bool:
         available_money = get_household_money(npc) if callable(get_household_money) else npc.economic.money
         if available_money > 0:
             score = 50 + (available_money // 10)
-            if "greedy" in personality: score -= 20 # Greedy people don't like spending money
-            if "lawful" in personality: score += 20
+            if trait("greedy"): score -= 20 # Greedy people don't like spending money
+            if trait("lawful"): score += 20
             options["buy_food"] = score
 
     # Option B: Forage
     # Base utility is safe but takes time
     score = 40
-    if "lazy" in personality: score -= 30
-    if "lawful" in personality: score += 10
+    if trait("lazy"): score -= 30
+    if trait("lawful"): score += 10
     options["forage"] = score
 
     # Option C: Steal Food
     # Base utility is high (fast) but risky
     score = 30
-    if "greedy" in personality: score += 40
-    if "lawful" in personality: score -= 80 # Very unlikely for lawful
-    if "chaotic" in personality or "criminal" in personality: score += 50
+    if trait("greedy"): score += 40
+    if trait("lawful"): score -= 80 # Very unlikely for lawful
+    if trait("chaotic") or trait("criminal"): score += 50
     options["steal_food"] = score
 
     # Choose best option
@@ -121,16 +128,18 @@ def _evaluate_wealth_utility(world, npc) -> bool:
         personality = ""
         if hasattr(npc, "social") and hasattr(npc.social, "personality"):
             personality = getattr(npc.social, "personality", "").lower()
+        npc_has_trait = getattr(npc, "has_trait", None)
+        trait = (lambda w: npc_has_trait(w)) if callable(npc_has_trait) else (lambda w: w in personality)
 
         score = 50
-        if "lazy" in personality: score -= 30
-        if "lawful" in personality: score += 20
+        if trait("lazy"): score -= 30
+        if trait("lawful"): score += 20
         options["seek_job"] = score
 
         score = 40
-        if "greedy" in personality: score += 20
-        if "chaotic" in personality: score += 30
-        if "lawful" in personality: score -= 50
+        if trait("greedy"): score += 20
+        if trait("chaotic"): score += 30
+        if trait("lawful"): score -= 50
         options["beg_or_steal"] = score
 
         best = max(options, key=options.get)

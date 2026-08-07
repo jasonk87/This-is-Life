@@ -171,6 +171,9 @@ def update_npc_medical_state(world, npc) -> None:
                 if SICK_STATUS_EFFECT in patient.physical.status_effects:
                     recover_from_sickness(patient)
                     treated.append(("sickness", "herbal_remedy"))
+                    drift = getattr(world, "_apply_illness_recovery_trait_drift", None)
+                    if callable(drift):
+                        drift(patient)
 
                 if patient.economic.money >= 10:
                     patient.economic.money -= 10

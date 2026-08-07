@@ -283,6 +283,18 @@ def _store_history_reaction(world, npc, fact, reaction: dict, *, is_escalation: 
                         current_day=current_day,
                         decay_days=8,
                     )
+        elif reaction["reaction_type"] == "grief":
+            # Personality drift (item 3): scoped specifically to losing a
+            # genuine family member (spouse/partner/parent/child/sibling -
+            # see _family_ties_include), not the broader "close relation"
+            # eligibility _is_close_relation also allows for a very close
+            # friend (relationship >= 70). A cherished friendship dying is
+            # already handled above via the opinion_modifiers/relationship
+            # hit; this additional character-shaping effect is reserved for
+            # actual family loss, matching Jason's brief.
+            family_ties = getattr(getattr(npc, "social", None), "family_ties", None) or {}
+            if _family_ties_include(family_ties, target_id):
+                _apply_bereavement_trait_drift(npc)
         elif reaction["reaction_type"] == "respect":
             social.relationships[target_id] = min(
                 100,
@@ -342,6 +354,32 @@ def _family_ties_include(value, entity_id: int) -> bool:
     if isinstance(value, (list, tuple, set)):
         return any(_family_ties_include(child, entity_id) for child in value)
     return False
+
+
+def _apply_bereavement_trait_drift(npc) -> None:
+    """
+    Personality drift (item 3) on losing a spouse/close family member.
+    "Character shapes the outcome": an already aggressive/chaotic NPC's
+    grief comes out as anger/volatility - aggressive, doubling down on
+    their existing emotional-expression style rather than diverging from
+    it. An already lawful/studious (orderly, reflective) NPC instead turns
+    inward - withdrawn. An already greedy/merchant-leaning NPC's loss
+    sharpens a protective instinct over whatever/whoever remains - greedy.
+    Anyone without one of those leanings defaults to withdrawn, grief's
+    most universally plausible baseline effect (reduced sociability - see
+    ambient_info.py's chattiness gate) for someone without a strong prior
+    lean either way.
+    """
+    if not hasattr(npc, "has_trait") or not hasattr(npc, "record_trait_pressure"):
+        return  # not an NPC-shaped entity (e.g. the player)
+    if npc.has_trait("aggressive") or npc.has_trait("chaotic"):
+        npc.record_trait_pressure("aggressive")
+    elif npc.has_trait("lawful") or npc.has_trait("studious"):
+        npc.record_trait_pressure("withdrawn")
+    elif npc.has_trait("greedy") or npc.has_trait("merchant"):
+        npc.record_trait_pressure("greedy")
+    else:
+        npc.record_trait_pressure("withdrawn")
 
 
 def _first_other_entity_id(npc, entity_ids) -> int | None:

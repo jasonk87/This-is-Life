@@ -13645,7 +13645,7 @@ class World:
         llm_response = self._call_llm_for_worldgen(prompt)
         try:
             npc_data = json.loads(llm_response)
-        except:
+        except (json.JSONDecodeError, TypeError):
             npc_data = {
                 "name": fallback_name,
                 "dialogue": ["Hello, dear."],

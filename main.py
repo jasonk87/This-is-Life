@@ -660,7 +660,7 @@ def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handl
                 mod = getattr(event, 'mod', 0)
                 # KMOD_LSHIFT is 1, KMOD_RSHIFT is 2. Fallbacks for either.
                 shifted = bool(mod & 3)
-            except:
+            except (TypeError, AttributeError):
                 shifted = False
             
             if shifted:

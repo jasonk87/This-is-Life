@@ -1752,7 +1752,7 @@ class World:
         """
         knowledge = getattr(voter, "knowledge", None)
         if knowledge is not None and hasattr(knowledge, "get_reputation_towards"):
-            score = float(knowledge.get_reputation_towards(candidate))
+            score = float(knowledge.get_reputation_towards(candidate, current_tick=self.game_time))
         else:
             score = 0.0
 
@@ -2132,7 +2132,7 @@ class World:
     def get_social_attitude_label(self, npc: NPC | None) -> tuple[str, int]:
         if npc is None:
             return "Unknown", 0
-        score = npc.knowledge.get_reputation_towards(self.player)
+        score = npc.knowledge.get_reputation_towards(self.player, current_tick=self.game_time)
         if score >= 80:
             return "Devoted", score
         if score >= 25:
@@ -2322,7 +2322,7 @@ class World:
             self.add_message_to_chat_log(f"{npc.name} is already married.")
             return False
 
-        reputation_score = npc.knowledge.get_reputation_towards(self.player)
+        reputation_score = npc.knowledge.get_reputation_towards(self.player, current_tick=self.game_time)
         if reputation_score < 80:
             self.add_message_to_chat_log(f"{npc.name} gently refuses your proposal.")
             return False
@@ -9522,7 +9522,7 @@ class World:
             return
 
         merchant_npc = self.trade_ui_npc_target
-        merchant_reputation = merchant_npc.knowledge.get_reputation_towards(self.player)
+        merchant_reputation = merchant_npc.knowledge.get_reputation_towards(self.player, current_tick=self.game_time)
         merchant_distrust = merchant_npc.get_distrust_towards(self.player)
         merchant_local_opinion = self.refresh_local_incident_opinion(merchant_npc, self.player.id)
         merchant_stance = self.evaluate_social_reaction_stance(merchant_npc, self.player).stance
@@ -14561,7 +14561,7 @@ class World:
                 fov_map = self.npc_fov_maps[npc.id]
                 # Check if the player is visible to the NPC
                 if 0 <= self.player.x < WORLD_WIDTH and 0 <= self.player.y < WORLD_HEIGHT and fov_map[self.player.y, self.player.x]:
-                    player_reputation = npc.knowledge.get_reputation_towards(self.player)
+                    player_reputation = npc.knowledge.get_reputation_towards(self.player, current_tick=self.game_time)
 
                     # Reaction to notorious crimes remembered about the player.
                     if player_reputation <= -50:
@@ -17215,7 +17215,7 @@ class World:
             # Add clamping to prevent extreme prices
             price_modifier = max(0.2, min(5.0, demand / supply))
 
-        memory_reputation = merchant.knowledge.get_reputation_towards(self.player) if merchant is not None else 0
+        memory_reputation = merchant.knowledge.get_reputation_towards(self.player, current_tick=self.game_time) if merchant is not None else 0
         if memory_reputation <= -40:
             price_modifier *= 1.5
         elif memory_reputation >= 10:

@@ -1461,6 +1461,77 @@ class World:
         building.player_owned = owner is self.player
         return True
 
+    def _get_spouse(self, npc):
+        """Return npc's living partner/spouse entity (NPC or the player), or
+        None. Shared helper for household financial support - see
+        _get_household_available_money / _draw_household_support below."""
+        if npc is None:
+            return None
+        family_ties = getattr(getattr(npc, "social", None), "family_ties", None) or {}
+        spouse_id = family_ties.get("partner_id") or family_ties.get("spouse_id")
+        if spouse_id is None:
+            return None
+        spouse = self.get_entity_by_id(spouse_id)
+        if spouse is None or spouse.id == npc.id:
+            return None
+        if getattr(getattr(spouse, "physical", None), "is_dead", False):
+            return None
+        return spouse
+
+    def _get_household_available_money(self, npc) -> int:
+        """
+        Household financial unity (design judgment call, see
+        _draw_household_support for the reasoning): married partners were
+        previously fully economically independent while both were alive -
+        money only ever connected them at death, via inheritance. This is
+        the "can we actually afford this" side of informal spousal support:
+        an NPC's effective spending power for VIABILITY checks (deciding
+        whether to buy food vs. forage/steal, whether to feel "poor" enough
+        to seek work or resort to crime) is their own money plus whatever a
+        living spouse/partner has. This does NOT move any money by itself -
+        it's a read-only estimate for utility-AI decisions. Actual purchases
+        still only draw the exact amount needed via _draw_household_support.
+        """
+        own_money = getattr(getattr(npc, "economic", None), "money", 0) or 0
+        spouse = self._get_spouse(npc)
+        if spouse is None:
+            return own_money
+        spouse_money = getattr(getattr(spouse, "economic", None), "money", 0) or 0
+        return own_money + spouse_money
+
+    def _draw_household_support(self, npc, amount: int) -> bool:
+        """
+        Cover a shortfall of `amount` for npc by drawing on a living
+        spouse's money, if they have enough to fully cover it. Deliberately
+        an informal SUPPORT model rather than full pooling (judgment call,
+        flagged for review): money stays individually owned and tracked
+        (npc.economic.money / spouse.economic.money are unaffected by this
+        for anyone who ISN'T married, and death/inheritance logic - see
+        _transfer_building_inheritance - is completely unchanged), and each
+        call only ever moves the exact amount needed for the purchase
+        already in progress - never more, never speculatively. This mirrors
+        "a wealthy spouse's household doesn't let the other starve" without
+        the much larger blast radius of merging every money in/out point in
+        the codebase (wages, trades, taxes, crafting sales, etc.) into a
+        shared household wallet.
+
+        Only covers the FULL shortfall or nothing (no partial support) -
+        avoids leaving a purchase half-paid-for by two different sources
+        needing separate rollback handling if the second contributor can't
+        cover the rest either.
+        """
+        if amount <= 0:
+            return True
+        spouse = self._get_spouse(npc)
+        if spouse is None:
+            return False
+        spouse_economic = getattr(spouse, "economic", None)
+        if spouse_economic is None or getattr(spouse_economic, "money", 0) < amount:
+            return False
+        spouse_economic.money -= amount
+        npc.economic.money += amount
+        return True
+
     def _get_living_family_heirs(self, npc: NPC | None) -> list[NPC]:
         """Return living close-family heirs in dynasty priority order."""
         if npc is None:
@@ -7098,7 +7169,13 @@ class World:
 
         price = self.quote_item_reference_price(best_item_reference, village=village)
         if npc.economic.money < price:
-            return False
+            # Household financial support: before giving up on this
+            # purchase, see if a living spouse can cover the shortfall
+            # (see _draw_household_support). Falls through to the old
+            # "can't afford it" failure if there's no spouse or they can't
+            # cover the full gap.
+            if not self._draw_household_support(npc, price - npc.economic.money):
+                return False
 
         return self.execute_trade(
             buyer=npc,

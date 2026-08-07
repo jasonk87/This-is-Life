@@ -54,12 +54,20 @@ def evaluate_needs_utility(world, npc) -> bool:
         personality = getattr(npc.social, "personality", "").lower()
 
     # Option A: Buy Food
-    # Base utility depends on having money
-    if hasattr(npc, "economic") and hasattr(npc.economic, "money") and npc.economic.money > 0:
-        score = 50 + (npc.economic.money // 10)
-        if "greedy" in personality: score -= 20 # Greedy people don't like spending money
-        if "lawful" in personality: score += 20
-        options["buy_food"] = score
+    # Base utility depends on having money. Household financial support
+    # (see World._get_household_available_money): a spouse's money counts
+    # as available spending power here too, so an NPC married to someone
+    # wealthy doesn't feel forced into foraging/theft just because their
+    # own personal wallet happens to be empty - matches the actual
+    # purchase-time support in World._npc_buy_or_collect_food.
+    get_household_money = getattr(world, "_get_household_available_money", None)
+    if hasattr(npc, "economic") and hasattr(npc.economic, "money"):
+        available_money = get_household_money(npc) if callable(get_household_money) else npc.economic.money
+        if available_money > 0:
+            score = 50 + (available_money // 10)
+            if "greedy" in personality: score -= 20 # Greedy people don't like spending money
+            if "lawful" in personality: score += 20
+            options["buy_food"] = score
 
     # Option B: Forage
     # Base utility is safe but takes time
@@ -100,7 +108,14 @@ def _evaluate_wealth_utility(world, npc) -> bool:
     if not hasattr(npc, "economic") or not hasattr(npc.economic, "money") or not hasattr(npc.economic, "profession"):
         return False
 
-    if npc.economic.money < 5 and npc.economic.profession.lower() in ["unemployed", "beggar"]:
+    # Household financial support: a household's combined money is what
+    # actually determines whether an NPC is "poor" here, not just their own
+    # pocket - an unemployed NPC married to someone wealthy shouldn't be
+    # nudged toward begging/stealing (see World._get_household_available_money).
+    get_household_money = getattr(world, "_get_household_available_money", None)
+    effective_money = get_household_money(npc) if callable(get_household_money) else npc.economic.money
+
+    if effective_money < 5 and npc.economic.profession.lower() in ["unemployed", "beggar"]:
         # We are poor. Evaluate finding a job vs begging/stealing.
         options = {}
         personality = ""
@@ -131,7 +146,15 @@ def _evaluate_wealth_utility(world, npc) -> bool:
 def _execute_buy_food(world, npc):
     """Attempt to buy food from the target building."""
     village = world._get_village_for_npc(npc)
-    if village and npc.economic.money >= 5: # Assuming base cost of food
+    # Household financial support: the "should I even try" gate uses
+    # combined household money (matching the buy_food option's scoring in
+    # evaluate_needs_utility above), so this needs to actually be able to
+    # draw on that money at purchase time too - otherwise an NPC could
+    # "decide" to buy food because their spouse is wealthy, then fail here
+    # anyway because only their own wallet was ever checked.
+    get_household_money = getattr(world, "_get_household_available_money", None)
+    available_money = get_household_money(npc) if callable(get_household_money) else npc.economic.money
+    if village and available_money >= 5: # Assuming base cost of food
         target_building = None
         for b in village.buildings:
             if world._get_building_global_center_coords(b.id) == (npc.x, npc.y):
@@ -143,7 +166,11 @@ def _execute_buy_food(world, npc):
             for item in food_items:
                 if item in target_building.building_inventory and target_building.building_inventory[item] > 0:
                     price = world.get_dynamic_price(item, village)
-                    if npc.economic.money >= price:
+                    can_afford = npc.economic.money >= price
+                    if not can_afford:
+                        draw_support = getattr(world, "_draw_household_support", None)
+                        can_afford = callable(draw_support) and draw_support(npc, price - npc.economic.money)
+                    if can_afford:
                         target_building.building_inventory[item] -= 1
                         if target_building.building_inventory[item] == 0:
                             del target_building.building_inventory[item]

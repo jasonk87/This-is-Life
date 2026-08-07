@@ -323,6 +323,14 @@ class Equipment:
     body: EquipmentSlot = field(default_factory=EquipmentSlot)
     head: EquipmentSlot = field(default_factory=EquipmentSlot)
     equipped_armor: dict[str, str | None] = field(default_factory=lambda: {"head": None, "body": None, "hands": None, "feet": None})
+    # Per-slot remaining durability for the player's equipped_armor items.
+    # NPC armor durability lives on the ItemReference instances tracked via
+    # equipment.body/equipment.head + degrade_equipped_item; the player's
+    # equipped_armor is just an item_key string per slot with no such
+    # per-instance tracking, so durability is tracked here instead, seeded
+    # from the item's max_durability property the first time it's hit. See
+    # Player._degrade_equipped_armor_slot.
+    equipped_armor_durability: dict[str, int] = field(default_factory=dict)
     equipped_light_item_key: str | None = None
     light_source_active_until_tick: int = -1
     current_personal_light_radius: int = 0

@@ -608,6 +608,17 @@ class Player:
         """
         effective_damage = max(0, amount - self.combat.defense_bonus)
 
+        # Wear down whatever armor actually blocked the hit, mirroring
+        # NPC.take_damage's degrade_equipped_item("body"/"head", ...) calls -
+        # player armor never degraded at all before this fix, unlike NPC
+        # armor. See _degrade_equipped_armor_slot for why this needs its own
+        # durability tracking rather than reusing NPC's ItemReference path.
+        blocked_damage = max(0, amount - effective_damage)
+        if blocked_damage > 0:
+            for slot in list(self.equipment.equipped_armor.keys()):
+                if self._get_equipped_armor_defense_bonus(slot) > 0:
+                    self._degrade_equipped_armor_slot(slot, amount=1, world=world)
+
         remaining_damage = effective_damage
         if remaining_damage > 0:
             import random
@@ -672,6 +683,11 @@ class Player:
             item_key = self.equipment.equipped_armor[slot]
             item_def = ITEM_DEFINITIONS.get(item_key)
             self.equipment.equipped_armor[slot] = None
+            # Clear any leftover durability tracked for whatever was in this
+            # slot, so equipping a different item into it later reseeds
+            # fresh from that new item's own max_durability instead of
+            # silently inheriting the old item's wear.
+            self.equipment.equipped_armor_durability.pop(slot, None)
             self.world_ref.add_message_to_chat_log(f"You unequip the {item_def['name']}.")
             self.recalculate_stats()
 
@@ -685,6 +701,48 @@ class Player:
                 if item_def and "properties" in item_def:
                     self.physical.clothing_insulation += item_def["properties"].get("insulation", 0.0)
                     self.combat.defense_bonus += item_def["properties"].get("defense_bonus", 0)
+
+    def _get_equipped_armor_defense_bonus(self, slot: str) -> int:
+        item_key = self.equipment.equipped_armor.get(slot)
+        if not item_key:
+            return 0
+        item_def = ITEM_DEFINITIONS.get(item_key, {})
+        return item_def.get("properties", {}).get("defense_bonus", 0)
+
+    def _degrade_equipped_armor_slot(self, slot: str, amount: int = 1, world=None):
+        """Wears down the armor piece equipped in `slot`, unequipping and
+        breaking it once durability hits 0 - the player-side counterpart to
+        NPC.degrade_equipped_item.
+
+        Player armor isn't tracked via ItemReference the way NPC equipment
+        is (equipped_armor is just an item_key string per slot, with no
+        per-instance durability at all before this fix), so durability is
+        tracked separately in equipment.equipped_armor_durability, seeded
+        from the item's max_durability property the first time this slot
+        takes a hit. Items with no max_durability property (e.g. fur_cloak,
+        hooded_cowl) never degrade, mirroring ItemReference.degrade()'s
+        no-op-when-durability-is-None behavior for the equivalent NPC case.
+        """
+        item_key = self.equipment.equipped_armor.get(slot)
+        if not item_key:
+            return
+        item_def = ITEM_DEFINITIONS.get(item_key, {})
+        max_durability = item_def.get("properties", {}).get("max_durability")
+        if max_durability is None:
+            return
+
+        current = self.equipment.equipped_armor_durability.get(slot, max_durability)
+        current = max(0, current - max(0, int(amount)))
+        self.equipment.equipped_armor_durability[slot] = current
+
+        if current <= 0:
+            self.equipment.equipped_armor[slot] = None
+            self.equipment.equipped_armor_durability.pop(slot, None)
+            self.recalculate_stats()
+            world_ref = world if world else getattr(self, 'world_ref', None)
+            if world_ref:
+                item_name = item_def.get("name", item_key.replace("_", " ").title())
+                world_ref.add_message_to_chat_log(f"Your {item_name} broke!")
 
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None, item_reference: ItemReference | None = None):
         if item_reference is not None:

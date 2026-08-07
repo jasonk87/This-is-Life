@@ -6,6 +6,45 @@ from __future__ import annotations
 import random
 from simulation.systems.task_types import TaskType
 
+# Household wealth's effect on the steal-vs-legitimate-option decision was
+# previously all-or-nothing: World._get_household_available_money already
+# gates *entry* into the poverty branch below (a spouse's money can keep an
+# NPC out of it entirely), but once an NPC was actually in that branch -
+# either because they're unmarried, or because household money had already
+# run out - a spouse's wealth stopped mattering at all to the steal_food /
+# beg_or_steal SCORE itself, even though it still silently kept covering
+# emergency food purchases at execution time (World._draw_household_support).
+# That let already crime-prone personalities (greedy/chaotic/lazy) ignore a
+# spouse's ongoing means entirely once the gate had been crossed once.
+#
+# Fix (judgment call, flagged): a living spouse who still has SOME money -
+# even if not enough to fully clear the current gate - is treated as an
+# ongoing deterrent that nudges the steal/beg score down, scaled to how much
+# they actually have and capped well below what a maximally crime-prone
+# personality's own trait bonuses can add (+70 for greedy+chaotic combined
+# across the two call sites below), so a genuinely crime-prone NPC with a
+# genuinely wealthy spouse becomes less likely to steal but isn't guaranteed
+# to stop - the crime system isn't neutered outright by marriage.
+HOUSEHOLD_THEFT_DETERRENT_CAP = 25
+HOUSEHOLD_THEFT_DETERRENT_DIVISOR = 20  # e.g. a 500-money spouse -> capped 25; a 100-money spouse -> 5
+
+
+def _household_theft_deterrent(world, npc) -> int:
+    """How much a living spouse's own money should count against the
+    appeal of stealing/begging for this npc, right now. Read-only - moves
+    no money, just a scoring nudge alongside the personality trait
+    modifiers already applied to steal_food/beg_or_steal."""
+    get_spouse = getattr(world, "_get_spouse", None)
+    if not callable(get_spouse):
+        return 0
+    spouse = get_spouse(npc)
+    if spouse is None:
+        return 0
+    spouse_money = getattr(getattr(spouse, "economic", None), "money", 0) or 0
+    if spouse_money <= 0:
+        return 0
+    return min(HOUSEHOLD_THEFT_DETERRENT_CAP, spouse_money // HOUSEHOLD_THEFT_DETERRENT_DIVISOR)
+
 def evaluate_needs_utility(world, npc) -> bool:
     """
     Evaluate physiological needs and return True if a need-driven task was assigned,
@@ -89,6 +128,7 @@ def evaluate_needs_utility(world, npc) -> bool:
     if trait("greedy"): score += 40
     if trait("lawful"): score -= 80 # Very unlikely for lawful
     if trait("chaotic") or trait("criminal"): score += 50
+    score -= _household_theft_deterrent(world, npc)  # see module docstring above
     options["steal_food"] = score
 
     # Choose best option
@@ -140,6 +180,17 @@ def _evaluate_wealth_utility(world, npc) -> bool:
         if trait("greedy"): score += 20
         if trait("chaotic"): score += 30
         if trait("lawful"): score -= 50
+        # NOTE: deliberately NOT applying _household_theft_deterrent here.
+        # This branch only runs when effective_money (own + spouse's money)
+        # is already < 5, so spouse.money is necessarily < 5 too whenever
+        # we get here - min(25, spouse_money // 20) would always evaluate to
+        # 0. Household wealth already gets its strongest possible say for
+        # THIS decision at the entry gate above (a spouse with real money
+        # keeps the NPC out of this branch entirely, matching
+        # World._get_household_available_money's already-correct pooling);
+        # a second deterrent term inside the branch would be unreachable
+        # dead code, the same class of bug just fixed in
+        # World._apply_jail_release_trait_drift's JAIL_LOW_SEVERITY_BOUNTY_CEILING.
         options["beg_or_steal"] = score
 
         best = max(options, key=options.get)

@@ -355,5 +355,159 @@ class TestUtilityAIHouseholdViability(unittest.TestCase):
         self.assertTrue(triggered)
 
 
+class TestHouseholdTheftDeterrent(unittest.TestCase):
+    """_household_theft_deterrent: the new scoring nudge that makes a
+    spouse's ongoing (not just shortfall-covering) money lower the appeal of
+    stealing, closing the gap where an already crime-prone NPC's
+    steal_food/beg_or_steal score never factored in household wealth at all
+    once inside the personality-modifier scoring."""
+
+    def setUp(self):
+        engine.ENABLE_OLLAMA_CONNECTION = False
+        engine.ENABLE_LLM_CONNECTION = False
+        self.world = World(seed=306)
+
+    def _npc(self, name="NPC"):
+        return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
+
+    def _marry(self, a, b):
+        a.social.family_ties["partner_id"] = b.id
+        b.social.family_ties["partner_id"] = a.id
+        self.world.village_npcs.extend([a, b])
+
+    def test_no_spouse_means_no_deterrent(self):
+        from simulation.systems.utility_ai import _household_theft_deterrent
+
+        npc = self._npc()
+        self.assertEqual(_household_theft_deterrent(self.world, npc), 0)
+
+    def test_broke_spouse_means_no_deterrent(self):
+        from simulation.systems.utility_ai import _household_theft_deterrent
+
+        npc = self._npc("A")
+        spouse = self._npc("B")
+        self._marry(npc, spouse)
+        spouse.economic.money = 0
+
+        self.assertEqual(_household_theft_deterrent(self.world, npc), 0)
+
+    def test_deterrent_scales_with_spouse_money(self):
+        from simulation.systems.utility_ai import _household_theft_deterrent
+
+        npc = self._npc("A")
+        spouse = self._npc("B")
+        self._marry(npc, spouse)
+
+        spouse.economic.money = 100
+        self.assertEqual(_household_theft_deterrent(self.world, npc), 5)  # 100 // 20
+
+        spouse.economic.money = 300
+        self.assertEqual(_household_theft_deterrent(self.world, npc), 15)  # 300 // 20
+
+    def test_deterrent_is_capped_so_a_very_wealthy_spouse_does_not_zero_out_crime(self):
+        from simulation.systems.utility_ai import _household_theft_deterrent, HOUSEHOLD_THEFT_DETERRENT_CAP
+
+        npc = self._npc("A")
+        spouse = self._npc("B")
+        self._marry(npc, spouse)
+        spouse.economic.money = 100_000
+
+        self.assertEqual(_household_theft_deterrent(self.world, npc), HOUSEHOLD_THEFT_DETERRENT_CAP)
+
+
+class TestHouseholdWealthDeterrentFlipsHungerDecision(unittest.TestCase):
+    """Integration: evaluate_needs_utility's steal_food option previously had
+    no household-wealth term at all, only personality modifiers - a
+    greedy+chaotic NPC married to a wealthy spouse could still "choose" to
+    steal even though buy_food was a perfectly viable, available option,
+    because steal_food's inflated personality bonus (+40 greedy +50 chaotic)
+    could outscore buy_food's base score. The deterrent should now pull that
+    back down enough for buy_food to win in a realistic wealthy-household
+    case, without changing anything for an NPC with no such spouse."""
+
+    def setUp(self):
+        engine.ENABLE_OLLAMA_CONNECTION = False
+        engine.ENABLE_LLM_CONNECTION = False
+        self.world = World(seed=307)
+
+    def _npc(self, name="NPC", personality="villager"):
+        return NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)
+
+    def _marry(self, a, b):
+        a.social.family_ties["partner_id"] = b.id
+        b.social.family_ties["partner_id"] = a.id
+        self.world.village_npcs.extend([a, b])
+
+    def test_chaotic_npc_with_moderately_wealthy_spouse_now_chooses_buy_food(self):
+        """At household money=220 the numbers land right at the tipping
+        point: steal_food's fixed +50 chaotic bonus (80 total) would have
+        beaten buy_food's money-scaled score (72) before this fix. The new
+        deterrent (min(25, 220 // 20) = 11) pulls steal down to 69, letting
+        buy_food win - a real decision flip caused by household wealth, not
+        just a smaller score gap that never changed the outcome."""
+        from unittest.mock import patch
+        import simulation.systems.utility_ai as utility_ai
+
+        npc = self._npc("A", personality="chaotic drifter")
+        spouse = self._npc("B")
+        self._marry(npc, spouse)
+        npc.economic.money = 0
+        spouse.economic.money = 220
+        npc.physical.hunger = npc.physical.max_hunger
+
+        with patch.object(utility_ai, "_set_buy_food_goal") as mock_buy, \
+             patch.object(utility_ai, "_set_steal_goal") as mock_steal:
+            utility_ai.evaluate_needs_utility(self.world, npc)
+
+        mock_buy.assert_called_once()
+        mock_steal.assert_not_called()
+
+    def test_same_chaotic_npc_without_a_spouse_still_steals(self):
+        """Control: confirms the flip above is really due to the spousal
+        deterrent, not some other change - an identical NPC with no
+        household money at all still chooses to steal (steal_food's 80
+        beats buy_food, which isn't even offered as an option with 0
+        money)."""
+        from unittest.mock import patch
+        import simulation.systems.utility_ai as utility_ai
+
+        npc = self._npc("A", personality="chaotic drifter")
+        npc.economic.money = 0
+        npc.physical.hunger = npc.physical.max_hunger
+
+        with patch.object(utility_ai, "_set_buy_food_goal") as mock_buy, \
+             patch.object(utility_ai, "_set_steal_goal") as mock_steal:
+            utility_ai.evaluate_needs_utility(self.world, npc)
+
+        mock_buy.assert_not_called()
+        mock_steal.assert_called_once()
+
+    def test_maximally_crime_prone_npc_still_steals_despite_a_modest_deterrent(self):
+        """The deterrent is capped (see HOUSEHOLD_THEFT_DETERRENT_CAP,
+        confirmed directly in TestHouseholdTheftDeterrent) so it nudges
+        rather than neuters: a greedy+chaotic NPC's combined +90 trait bonus
+        (and buy_food's own -20 greedy penalty) should still comfortably win
+        out over legitimate options against a modestly-supportive spouse -
+        marriage alone shouldn't make a genuinely crime-prone personality
+        stop stealing. (A spouse wealthy enough to make buy_food's own
+        money-scaled score dominate on its own isn't a useful case here -
+        that's buy_food's existing household-money term doing its job, not
+        the deterrent; see the capped-value unit test above for that.)"""
+        from unittest.mock import patch
+        import simulation.systems.utility_ai as utility_ai
+
+        npc = self._npc("A", personality="greedy and chaotic drifter")
+        spouse = self._npc("B")
+        self._marry(npc, spouse)
+        npc.economic.money = 0
+        spouse.economic.money = 50
+        npc.physical.hunger = npc.physical.max_hunger
+
+        with patch.object(utility_ai, "_set_steal_goal") as mock_steal:
+            utility_ai.evaluate_needs_utility(self.world, npc)
+
+        mock_steal.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

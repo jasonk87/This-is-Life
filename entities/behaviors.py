@@ -54,6 +54,16 @@ class StarvationBehavior:
         if entity.combat.hp > 0:
             return False
 
+        # Bug-hunt audit item 3b: this path used to call handle_npc_death
+        # without ever setting physical.is_dead, unlike every other death
+        # path (NPC.take_damage sets it the instant hp<=0 in combat; the
+        # predator-kills-prey and elder-death call sites set it explicitly
+        # right before calling handle_npc_death too). The entity still got
+        # removed from village_npcs/npcs and got a corpse placed, but any
+        # stale reference to it elsewhere (a memory event, a relationship
+        # dict, a lingering quest target) would see is_dead=False forever
+        # and misreport it as alive.
+        entity.physical.is_dead = True
         world.log_event("entity_death", f"A {entity.name} died of starvation.", entity.id, location=(entity.x, entity.y))
         world.handle_npc_death(entity)
         return True

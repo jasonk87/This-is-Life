@@ -1743,7 +1743,9 @@ class World:
 
         voter_profession = normalize_profession(getattr(getattr(voter, "economic", None), "profession", ""))
         candidate_profession = normalize_profession(getattr(getattr(candidate, "economic", None), "profession", ""))
-        if voter_profession != "Unemployed" and PROFESSION_TRACKS.get(voter_profession) == PROFESSION_TRACKS.get(candidate_profession):
+        voter_track = PROFESSION_TRACKS.get(voter_profession)
+        candidate_track = PROFESSION_TRACKS.get(candidate_profession)
+        if voter_profession != "Unemployed" and voter_track is not None and candidate_track is not None and voter_track == candidate_track:
             score += VOTER_PROFESSION_AFFINITY_BONUS
 
         candidate_id = getattr(candidate, "id", None)
@@ -11442,6 +11444,16 @@ class World:
 
     def _reserve_workshop_for_actor(self, workshop: WorkshopRuntimeState, actor_id: int | None) -> bool:
         now = int(getattr(self, "game_time", 0) or 0)
+
+        # --- Stale active_interaction_id recovery ---
+        active_id = workshop.active_interaction_id
+        if active_id is not None:
+            active_interactions = getattr(self.interaction_resolver, "active_interactions", {})
+            if active_id in active_interactions:
+                return False  # A real interaction is still running.
+            # Stale workshop reference: the resolver no longer owns it.
+            workshop.active_interaction_id = None
+
         if actor_id is None:
             self._warn_simulation_validation("workshop_reservation_missing_actor", (workshop.workshop_id, "none"), "Workshop reservation requires a valid actor id.", metadata={"workshop_id": workshop.workshop_id}, cooldown_ticks=180)
             self._record_decision_explanation(explanation_type="actor_skipped", decision="reservation_rejected", primary_reason="missing_actor_id_for_workshop_reservation", source_entity_id=workshop.workshop_id)
@@ -12651,6 +12663,9 @@ class World:
         result = self.interaction_resolver.resolve(intent, self)
         if not result.success:
             self._mark_production_task_blocked(task, "workshop_interaction_start_failed", now, warning_type="workshop_deadlock")
+            return
+        # Clobber guard: never overwrite an existing active interaction ID.
+        if workshop.active_interaction_id is not None:
             return
         workshop.active_interaction_id = result.started_interaction_id
         task.status = "waiting_for_work"

@@ -74,6 +74,24 @@ class TestScoreCandidateForVoter(unittest.TestCase):
 
         self.assertEqual(score, 0.0)
 
+    def test_unmapped_different_professions_do_not_receive_affinity_bonus(self):
+        """Bard voter should NOT get affinity toward a Tailor candidate
+        just because both profession track lookups return None (None != None fix)."""
+        voter = self._npc("Voter")
+        candidate = self._npc("Candidate")
+        voter.economic.profession = "Bard"
+        candidate.economic.profession = "Tailor"
+        # Neither profession exists in PROFESSION_TRACKS, so both get None.
+        # Without the fix the None == None comparison would incorrectly award
+        # VOTER_PROFESSION_AFFINITY_BONUS here. With the fix they get 0.
+        score = self.world._score_candidate_for_voter(voter, candidate, "Mayor")
+        # Jitter is mocked to 0.0; no reputation, relationship, or shared track
+        # should contribute. The only possible contribution is the broken
+        # None==None path, so we assert exactly 0.
+        self.assertEqual(score, 0.0,
+                         "Bard/Tailor with unmapped profession tracks should "
+                         "not receive a phantom affinity bonus (None==None guard)")
+
     def test_employer_amplifies_the_relationship_term(self):
         voter = self._npc("Voter")
         boss = self._npc("Boss")

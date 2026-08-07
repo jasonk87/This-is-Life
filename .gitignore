@@ -1,6 +1,17 @@
 __pycache__/
+*.pyc
 llm_config.py
 saves/
 venv/
 DawnLike/
 DawnLike_0.zip
+.pytest_cache/
+.ruff_cache/
+.vscode/
+*.egg-info/
+dist/
+build/
+.orion/
+artifacts/
+_debug_test*.py
+*.jar.log

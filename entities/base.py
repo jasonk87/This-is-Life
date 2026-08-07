@@ -273,10 +273,24 @@ class Schedule:
     jail_cell_coords: tuple[int, int] | None = None
     jail_time_remaining: int = 0
     # Bounty at the moment of arrest, captured by World._serve_npc_jail_time
-    # right before it zeroes economic.bounty - preserved so
-    # World._apply_jail_release_trait_drift can gauge how severe whatever
-    # got this NPC jailed actually was, once released.
+    # right before it zeroes economic.bounty. Kept for display/back-compat,
+    # but NOT the primary severity signal for trait drift anymore - see
+    # crime_kinds_since_last_jailing below. (Arrest only ever fires once
+    # bounty >= NPC_ARREST_BOUNTY_THRESHOLD, so this value is always >= that
+    # threshold by construction - it can't distinguish "one bad crime" from
+    # "many small ones", which is why severity is now tracked by crime kind
+    # instead.)
     jail_intake_bounty: int = 0
+    # Crime kinds ("theft"/"assault"/"murder") accrued by this NPC since
+    # their last jailing (or since creation, if never jailed), appended to
+    # by World._accrue_crime_bounty. World._serve_npc_jail_time snapshots
+    # this into jail_intake_crime_kinds and clears it at arrest time, so
+    # World._apply_jail_release_trait_drift can judge severity by what kind
+    # of crime(s) actually got this NPC arrested, not just the accumulated
+    # bounty total (which is always >= NPC_ARREST_BOUNTY_THRESHOLD regardless
+    # of severity).
+    crime_kinds_since_last_jailing: list = field(default_factory=list)
+    jail_intake_crime_kinds: list = field(default_factory=list)
 
 @dataclass
 class Equipment:

@@ -169,6 +169,119 @@ class TestJailReleaseTraitDrift(unittest.TestCase):
         self.assertEqual(npc.social.trait_pressure.get("chaotic", 0), 1)
 
 
+class TestJailReleaseSeverityByCrimeKind(unittest.TestCase):
+    """Regression coverage for the fixed severity signal: arrest only ever
+    fires once economic.bounty >= NPC_ARREST_BOUNTY_THRESHOLD (100), so the
+    old jail_intake_bounty <= 40 check could never be true - every real
+    arrest hardened the NPC regardless of what they'd actually done. Severity
+    is now judged by the crime KINDS accrued since the last jailing
+    (jail_intake_crime_kinds), driven through the real _accrue_crime_bounty
+    path rather than by setting jail_intake_bounty directly."""
+
+    def setUp(self):
+        engine.ENABLE_OLLAMA_CONNECTION = False
+        engine.ENABLE_LLM_CONNECTION = False
+        self.world = World(seed=509)
+        self.world._change_map_tile = mock.MagicMock()
+        self.world._update_entity_position = mock.MagicMock(
+            side_effect=lambda e, x, y: (setattr(e, "x", x), setattr(e, "y", y))
+        )
+        sheriff_office = engine.Building(0, 0, 5, 5, building_type="sheriff_office", category="civic")
+        self.world.buildings_by_id[sheriff_office.id] = sheriff_office
+
+    def _npc(self, name="NPC", personality="villager"):
+        npc = NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)
+        self.world.village_npcs.append(npc)
+        return npc
+
+    def test_theft_only_spree_is_low_severity_even_though_bounty_exceeds_arrest_threshold(self):
+        """The bug: a neutral NPC caught stealing four times (4 x 30 = 120,
+        crossing the 100 arrest threshold) used to always harden, because
+        120 > the old unreachable 40-bounty ceiling. It's genuinely
+        theft-only, so it should now be reachable as a low-severity, reform
+        eligible offense."""
+        npc = self._npc(personality="villager")
+        for _ in range(4):
+            self.world._accrue_crime_bounty(npc, "theft")
+        self.assertGreaterEqual(npc.economic.bounty, engine.NPC_ARREST_BOUNTY_THRESHOLD)
+
+        self.world._serve_npc_jail_time(npc)
+        self.assertEqual(npc.schedule.jail_intake_crime_kinds, ["theft", "theft", "theft", "theft"])
+
+        self.world._release_npc_from_jail(npc)
+
+        self.assertEqual(npc.social.trait_pressure.get("lawful", 0), 1)
+        self.assertEqual(npc.social.trait_pressure.get("chaotic", 0), 0)
+
+    def test_single_assault_among_thefts_is_high_severity(self):
+        """One real assault mixed into an otherwise-minor rap sheet still
+        reads as traumatic/hardening, matching the original design intent."""
+        npc = self._npc(personality="villager")
+        self.world._accrue_crime_bounty(npc, "theft")
+        self.world._accrue_crime_bounty(npc, "theft")
+        self.world._accrue_crime_bounty(npc, "assault")
+        self.assertGreaterEqual(npc.economic.bounty, engine.NPC_ARREST_BOUNTY_THRESHOLD)
+
+        self.world._serve_npc_jail_time(npc)
+        self.assertEqual(npc.schedule.jail_intake_crime_kinds, ["theft", "theft", "assault"])
+
+        self.world._release_npc_from_jail(npc)
+
+        self.assertEqual(npc.social.trait_pressure.get("chaotic", 0), 1)
+        self.assertEqual(npc.social.trait_pressure.get("lawful", 0), 0)
+
+    def test_single_murder_is_high_severity(self):
+        npc = self._npc(personality="villager")
+        self.world._accrue_crime_bounty(npc, "murder")
+
+        self.world._serve_npc_jail_time(npc)
+        self.world._release_npc_from_jail(npc)
+
+        self.assertEqual(npc.social.trait_pressure.get("chaotic", 0), 1)
+
+    def test_crime_kinds_reset_after_each_jailing_so_a_second_theft_spree_can_also_reform(self):
+        """A second, unrelated theft-only spree after release should be
+        judged on its own merits, not lumped in with (or blocked by) the
+        first jailing's history."""
+        npc = self._npc(personality="villager")
+        for _ in range(4):
+            self.world._accrue_crime_bounty(npc, "theft")
+        self.world._serve_npc_jail_time(npc)
+        self.world._release_npc_from_jail(npc)
+        self.assertEqual(npc.schedule.crime_kinds_since_last_jailing, [])
+
+        for _ in range(4):
+            self.world._accrue_crime_bounty(npc, "theft")
+        self.world._serve_npc_jail_time(npc)
+        self.assertEqual(npc.schedule.jail_intake_crime_kinds, ["theft", "theft", "theft", "theft"])
+
+    def test_already_chaotic_npc_hardens_regardless_of_theft_only_severity(self):
+        """Character still takes priority over severity even under the
+        fixed, reachable severity signal."""
+        npc = self._npc(personality="chaotic drifter")
+        for _ in range(4):
+            self.world._accrue_crime_bounty(npc, "theft")
+
+        self.world._serve_npc_jail_time(npc)
+        self.world._release_npc_from_jail(npc)
+
+        self.assertEqual(npc.social.trait_pressure.get("chaotic", 0), 1)
+        self.assertEqual(npc.social.trait_pressure.get("lawful", 0), 0)
+
+    def test_fallback_to_bounty_heuristic_when_crime_kinds_history_is_unavailable(self):
+        """Back-compat: a caller that sets jail_intake_bounty directly
+        (bypassing _accrue_crime_bounty entirely, as the older unit tests
+        above do) still gets a sensible answer from the old bounty-ceiling
+        heuristic rather than crashing or silently always hardening."""
+        npc = self._npc(personality="villager")
+        npc.schedule.jail_intake_bounty = 30
+        npc.schedule.jail_intake_crime_kinds = []
+
+        self.world._apply_jail_release_trait_drift(npc)
+
+        self.assertEqual(npc.social.trait_pressure.get("lawful", 0), 1)
+
+
 class TestIllnessRecoveryTraitDrift(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False

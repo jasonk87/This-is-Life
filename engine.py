@@ -10786,6 +10786,9 @@ class World:
         if not amount or economic is None:
             return
         economic.bounty = getattr(economic, "bounty", 0) + amount
+        schedule = getattr(criminal, "schedule", None)
+        if schedule is not None and hasattr(schedule, "crime_kinds_since_last_jailing"):
+            schedule.crime_kinds_since_last_jailing.append(crime_kind)
         if isinstance(criminal, Player):
             self.add_message_to_chat_log(
                 f"Your bounty has increased by {amount} for {crime_kind}. Total bounty: {economic.bounty}."
@@ -10888,8 +10891,15 @@ class World:
         # to know how severe whatever got this NPC arrested was, once
         # they're actually released (by which point economic.bounty below
         # has long since been zeroed and any later crimes may have
-        # overwritten it).
+        # overwritten it). jail_intake_bounty is kept for display/back-compat
+        # but is always >= NPC_ARREST_BOUNTY_THRESHOLD by construction (that's
+        # the arrest condition itself), so it can't tell a single serious
+        # crime apart from several small ones - jail_intake_crime_kinds is
+        # the real severity signal, snapshotting exactly which crime kinds
+        # accrued since this NPC was last jailed (or created).
         npc.schedule.jail_intake_bounty = npc.economic.bounty
+        npc.schedule.jail_intake_crime_kinds = list(npc.schedule.crime_kinds_since_last_jailing)
+        npc.schedule.crime_kinds_since_last_jailing = []
 
         npc.economic.bounty = 0
         self._vacate_offices_held_by(npc)
@@ -10916,7 +10926,21 @@ class World:
     # NPC.record_trait_pressure, which only actually changes anything once
     # the SAME trait has been pushed by enough qualifying events (gradual,
     # never a single-event flip) - see entities/base.py for the mechanism.
+    # NOTE (fixed - see engine investigation report): this used to gate
+    # reform on jail_intake_bounty <= 40, but arrest only ever fires once
+    # bounty >= NPC_ARREST_BOUNTY_THRESHOLD (100), so that comparison could
+    # never be true - every release took the hardening branch regardless of
+    # actual severity. Severity is now judged by the actual crime KINDS that
+    # accrued since the NPC's last jailing (jail_intake_crime_kinds, set in
+    # _serve_npc_jail_time), so a spree of several thefts still reads as
+    # low-severity, and a single assault/murder reads as high-severity, no
+    # matter what the accumulated bounty number happens to be. This constant
+    # is kept only as a fallback for callers that set jail_intake_bounty
+    # directly without going through the real crime-kind accrual path (e.g.
+    # existing unit tests, or any future jailing path that bypasses
+    # _accrue_crime_bounty).
     JAIL_LOW_SEVERITY_BOUNTY_CEILING = 40  # roughly theft-tier (30) and below; assault (50)/murder (100) are "high"
+    JAIL_HIGH_SEVERITY_CRIME_KINDS = frozenset({"assault", "murder"})
 
     def _apply_jail_release_trait_drift(self, npc: NPC) -> None:
         """
@@ -10925,22 +10949,31 @@ class World:
         doesn't reform someone who was already trending that way, if
         anything it confirms their worldview. A more neutral-or-lawful
         character's outcome instead depends on how severe whatever got them
-        arrested was (economic.bounty at the moment of arrest, captured in
-        _serve_npc_jail_time): a minor, low-bounty offense (roughly
-        theft-tier) reads as a genuine wake-up call - lawful. A serious
-        offense (assault/murder-tier, or enough accumulated minor crimes to
-        add up to it) is traumatic/hardening even for someone who wasn't
-        already anti-authority-leaning going in - chaotic.
+        arrested actually was, judged by crime KIND (jail_intake_crime_kinds,
+        captured in _serve_npc_jail_time): if every crime that accrued since
+        their last jailing was theft-tier, even several of them, that reads
+        as a genuine wake-up call - lawful. If an assault or murder is among
+        them, that's traumatic/hardening even for someone who wasn't already
+        anti-authority-leaning going in - chaotic.
         """
         if npc.has_trait("chaotic") or npc.has_trait("criminal") or npc.has_trait("aggressive"):
             npc.record_trait_pressure("chaotic")
             return
 
-        intake_bounty = getattr(npc.schedule, "jail_intake_bounty", 0)
-        if intake_bounty <= self.JAIL_LOW_SEVERITY_BOUNTY_CEILING:
-            npc.record_trait_pressure("lawful")
+        crime_kinds = getattr(npc.schedule, "jail_intake_crime_kinds", None)
+        if crime_kinds:
+            is_high_severity = any(kind in self.JAIL_HIGH_SEVERITY_CRIME_KINDS for kind in crime_kinds)
         else:
+            # Fallback: no crime-kind history available (e.g. jail_intake_bounty
+            # was set directly, bypassing _accrue_crime_bounty). Best-effort
+            # guess from the raw bounty number, same as the old behavior.
+            intake_bounty = getattr(npc.schedule, "jail_intake_bounty", 0)
+            is_high_severity = intake_bounty > self.JAIL_LOW_SEVERITY_BOUNTY_CEILING
+
+        if is_high_severity:
             npc.record_trait_pressure("chaotic")
+        else:
+            npc.record_trait_pressure("lawful")
 
     def _apply_illness_recovery_trait_drift(self, npc) -> None:
         """

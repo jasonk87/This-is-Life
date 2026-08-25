@@ -2,3 +2,4 @@ tcod
 requests
 numpy
 google-genai
+pygame

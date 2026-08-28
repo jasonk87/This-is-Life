@@ -39,6 +39,17 @@ class MockWorld:
     def _start_npc_socialization(self, npc):
         return None
 
+    def _is_crowd_drawing_event_active(self):
+        """No festival running by default.
+
+        scheduling.update_npc_daily_goal_policy consults this in its
+        leisure-hours branch; the real World derives it from
+        active_scheduled_events. These tests are about anchor selection,
+        not festivals, so the neutral answer is "no crowd-drawing event" -
+        tests that want the festival path can patch this per-case.
+        """
+        return False
+
 class TestArchitectureAnchors(unittest.TestCase):
     def setUp(self):
         self.world = MockWorld()

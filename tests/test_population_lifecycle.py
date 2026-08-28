@@ -198,23 +198,35 @@ class TestPopulationLifecycle(unittest.TestCase):
         # Pick any village within the abstract-simulation distance and give
         # it a resident tied to one of its real buildings via home_building_id,
         # exactly as `_get_village_for_npc` expects.
+        # Take any generated village and move the *player* next to it,
+        # rather than hoping the generator happened to place one near the
+        # player's spawn. Village placement depends on terrain, so that
+        # hope was seed- and environment-dependent: it held while the tcod
+        # compat shim's noise stub made every map uniformly flat, and broke
+        # as soon as real tcod produced real terrain. What this test
+        # actually needs is only that the village is inside
+        # ABSTRACT_SIMULATION_DISTANCE_CHUNKS of the player.
         near_village = None
         for y in range(self.world.chunk_height):
             for x in range(self.world.chunk_width):
                 chunk = self.world.chunks[y][x]
                 if not chunk.village or not chunk.village.buildings:
                     continue
-                dist = max(abs(x - player_chunk_x), abs(y - player_chunk_y))
-                if dist <= config.ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
-                    near_village = chunk.village
-                    break
+                near_village = chunk.village
+                self.world.player.x = x * config.CHUNK_SIZE + config.CHUNK_SIZE // 2
+                self.world.player.y = y * config.CHUNK_SIZE + config.CHUNK_SIZE // 2
+                break
             if near_village is not None:
                 break
 
-        self.assertIsNotNone(
-            near_village,
-            "test setup requires at least one village within "
-            "ABSTRACT_SIMULATION_DISTANCE_CHUNKS of the player's starting position",
+        self.assertIsNotNone(near_village, "test setup requires at least one generated village")
+
+        player_chunk_x = self.world.player.x // config.CHUNK_SIZE
+        player_chunk_y = self.world.player.y // config.CHUNK_SIZE
+        village_chunk_x, village_chunk_y = near_village.chunk_coords
+        self.assertLessEqual(
+            max(abs(village_chunk_x - player_chunk_x), abs(village_chunk_y - player_chunk_y)),
+            config.ABSTRACT_SIMULATION_DISTANCE_CHUNKS,
         )
 
         home = near_village.buildings[0]

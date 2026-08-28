@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import random
 
 from data.items import ITEM_DEFINITIONS
+from entities.pickle_compat import dataclass_setstate
 
 _MISSING = object()
 QUALITY_VALUE_MODIFIERS = {
@@ -19,6 +20,23 @@ QUALITY_UTILITY_MODIFIERS = {
     "Fine": 1.15,
     "Masterwork": 1.35,
 }
+
+# Repair mechanic constants (finite-use repair: each repair permanently
+# shaves a bit off the item's true max_durability ceiling, rather than
+# being a free undo of degrade() forever - see ItemReference.repair()).
+REPAIR_WEAR_PER_REPAIR_FRACTION = 0.10
+REPAIR_DURABILITY_FLOOR_FRACTION = 0.20
+
+# Repair economics for the player-facing Blacksmith interaction (see
+# World.player_attempt_repair_gear in engine.py). A fully-broken item
+# (100% missing durability) costs at most half its own value in money to
+# fully restore, plus a small amount of a generic repair material -
+# deliberately always iron_ingot regardless of the item's actual
+# material (a common game simplification: "the smith always wants iron
+# and coin," not a fully materials-accurate system).
+REPAIR_MONEY_COST_FRACTION_OF_VALUE = 0.5
+REPAIR_MATERIAL_KEY = "iron_ingot"
+REPAIR_MATERIAL_MAX_QTY = 3
 
 
 def normalize_item_quality(quality: str | None) -> str:
@@ -68,12 +86,25 @@ class ItemReference:
     age_in_ticks: int = 0
     written_text: str = ""
     title: str | None = None
+    # Cumulative permanent reduction to max_durability from past repairs -
+    # see repair(). 0 means "never repaired" / undamaged-ceiling.
+    repair_wear: int = 0
 
     def __post_init__(self) -> None:
         self.quality = normalize_item_quality(self.quality)
         max_durability = self.max_durability
         if self.current_durability is None and max_durability is not None:
             self.current_durability = max_durability
+
+    def __setstate__(self, state):
+        # ItemReference was flagged as an explicit, documented scoping
+        # exclusion in the earlier save/load migration pass (fix 1) -
+        # unpickling bypasses __init__ entirely, so old saves predating a
+        # newly-added field (like repair_wear, added alongside the repair
+        # mechanic) would otherwise crash the first time something reads
+        # it. Closing that gap now since this change is exactly the kind
+        # of new-field addition that would have hit it.
+        dataclass_setstate(self, state)
 
     @property
     def definition(self) -> dict:
@@ -104,11 +135,25 @@ class ItemReference:
         return self.definition.get("color")
 
     @property
-    def max_durability(self) -> int | None:
+    def true_base_max_durability(self) -> int | None:
+        """max_durability with quality applied but BEFORE repair_wear -
+        i.e. what this item's ceiling would be if it had never been
+        repaired. Used as the reference point for both the per-repair wear
+        amount and the repair floor, so repeated repairs erode toward a
+        fixed floor rather than the floor itself drifting as repair_wear
+        accumulates."""
         base_max_durability = self.definition.get("properties", {}).get("max_durability")
         if base_max_durability is None:
             return None
         return max(1, int(round(base_max_durability * self.quality_multiplier)))
+
+    @property
+    def max_durability(self) -> int | None:
+        true_base = self.true_base_max_durability
+        if true_base is None:
+            return None
+        floor = max(1, int(round(true_base * REPAIR_DURABILITY_FLOOR_FRACTION)))
+        return max(floor, true_base - self.repair_wear)
 
     @property
     def value(self) -> int:
@@ -173,6 +218,43 @@ class ItemReference:
             return False
         self.current_durability = max(0, self.current_durability - max(0, int(amount)))
         return self.current_durability <= 0
+
+    def repair(self) -> dict:
+        """Restores current_durability to max_durability and permanently
+        wears the item's ceiling down a bit (finite-use repair, per
+        Jason's design decision: repair should cost the item something
+        real, not just undo degrade() forever for a fee).
+
+        Each call adds REPAIR_WEAR_PER_REPAIR_FRACTION * true_base_max_durability
+        to repair_wear - a flat amount per repair regardless of how damaged
+        the item was, since it's the act of reworking the material that
+        fatigues it, not how much durability happened to be restored.
+        max_durability's own floor (REPAIR_DURABILITY_FLOOR_FRACTION of
+        true_base_max_durability) means repeated repairs approach a fixed
+        floor rather than ever reaching zero/unrepairable.
+
+        Returns a result dict mirroring degrade_equipped_item's shape:
+        {"repaired": bool, "new_max_durability": int|None,
+        "at_repair_limit": bool} - at_repair_limit is True once this item's
+        ceiling is already at (or would already be at) the floor, so
+        callers can tell the player "this is as good as repair can make it
+        anymore" instead of implying infinite future repairs are useful.
+        """
+        true_base = self.true_base_max_durability
+        if true_base is None or self.current_durability is None:
+            return {"repaired": False, "new_max_durability": None, "at_repair_limit": False}
+
+        floor = max(1, int(round(true_base * REPAIR_DURABILITY_FLOOR_FRACTION)))
+        wear_increment = max(1, int(round(true_base * REPAIR_WEAR_PER_REPAIR_FRACTION)))
+        self.repair_wear = min(true_base - floor, self.repair_wear + wear_increment)
+
+        new_ceiling = self.max_durability
+        self.current_durability = new_ceiling
+        return {
+            "repaired": True,
+            "new_max_durability": new_ceiling,
+            "at_repair_limit": new_ceiling is not None and new_ceiling <= floor,
+        }
 
     def update_tick(self) -> str:
         """Advance this item by one tick and apply any spoilage transformation."""

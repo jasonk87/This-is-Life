@@ -922,7 +922,28 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
     is_leisure_time = work_end_tick <= current_time_in_day < sleep_start_tick
 
     if work_start_tick <= current_time_in_day < work_end_tick:
-        if npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
+        if npc.economic.profession == "Child":
+            # Ideation-audit item 4: children used to run the exact same
+            # idle/wander loop as a jobless adult during work hours, since
+            # "Child" falls into build_job_behavior's IdleBehavior bucket
+            # (entities/human_behaviors.py) with no distinct behavior of
+            # its own. Per Jason's design decision: follow a trackable
+            # parent during work hours (reusing the family_ties data
+            # already set at birth), re-checked by distance each tick
+            # rather than a timer, so the child naturally trails behind as
+            # the parent moves through their own workday. A child with no
+            # trackable parent (deceased/migrated/pre-dates family_ties)
+            # just falls through to this function's later logic (going
+            # home, idling) instead of getting stuck.
+            parent = world._find_trackable_parent(npc)
+            if parent is not None:
+                distance_to_parent = abs(npc.x - parent.x) + abs(npc.y - parent.y)
+                if distance_to_parent > 3:
+                    dest_x, dest_y = world._find_best_adjacent_tile(parent.x, parent.y, npc)
+                    if dest_x is not None:
+                        new_task_label = "following_parent"
+                        destination_coords = (dest_x, dest_y)
+        elif npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
             dest_coords_temp = world._get_building_global_center_coords(npc.schedule.work_building_id)
             if dest_coords_temp:
                 work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
@@ -954,7 +975,49 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                             destination_coords = dest_coords
                             npc.leisure_timer = random.randint(50, 100)
 
-    elif is_leisure_time and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", TaskType.GOING_HOME, "visiting_friend", "gathering_social", "socializing_at_focal_point"]:
+    elif is_leisure_time and npc.economic.profession == "Child" and npc.schedule.current_task not in ["at_leisure", "playing_at_town_square", "following_parent", TaskType.GOING_HOME]:
+        # Ideation-audit item 4, leisure half: town-square play during
+        # leisure hours. Mirrors the existing tavern-going idiom directly
+        # below (leisure_timer countdown, then a per-tick chance to head
+        # to a shared social hub) rather than any of the adult
+        # tavern/courting/social branches, none of which fit a child NPC
+        # thematically. No dedicated "playing" activity system exists (or
+        # is being built here) - the child simply occupies the town
+        # square, which is enough for it to read as present and social
+        # rather than invisible/idle during leisure hours.
+        if npc.leisure_timer > 0:
+            npc.leisure_timer -= 1
+        elif random.random() < 0.1:
+            village = world._get_village_for_npc(npc)
+            if village and "town_square_center" in village.interaction_points:
+                new_task_label = "playing_at_town_square"
+                destination_coords = village.interaction_points["town_square_center"][0]
+                npc.leisure_timer = random.randint(50, 100)
+    elif (
+        is_leisure_time
+        and npc.economic.profession != "Child"
+        and world._is_crowd_drawing_event_active()
+        and npc.schedule.current_task not in ["at_leisure", "attending_festival", "going_to_tavern", "socializing", TaskType.GOING_HOME, "visiting_friend", "gathering_social", "socializing_at_focal_point"]
+    ):
+        # Ideation-audit item 6: while a 'draws_crowd' scheduled event (e.g.
+        # Harvest Festival) is active, adults get an elevated per-tick
+        # chance of heading to the town square instead of the ordinary
+        # tavern/courting/social leisure branches below - a bigger draw
+        # than the everyday 0.05 tavern chance, since a festival is
+        # supposed to read as a village-wide event, not a background one.
+        if npc.leisure_timer > 0:
+            npc.leisure_timer -= 1
+        elif random.random() < 0.25:
+            village = world._get_village_for_npc(npc)
+            if village and "town_square_center" in village.interaction_points:
+                new_task_label = "attending_festival"
+                destination_coords = village.interaction_points["town_square_center"][0]
+                npc.leisure_timer = random.randint(30, 60)
+    elif (
+        is_leisure_time
+        and npc.economic.profession != "Child"
+        and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", TaskType.GOING_HOME, "visiting_friend", "gathering_social", "socializing_at_focal_point"]
+    ):
         if npc.leisure_timer > 0:
             npc.leisure_timer -= 1
         elif random.random() < 0.05:

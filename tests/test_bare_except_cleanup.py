@@ -66,22 +66,16 @@ class TestDialogueInputShiftModFallback(unittest.TestCase):
     crashing, and that normal shifted/unshifted typing is unaffected."""
 
     def setUp(self):
-        # The sandbox's tcod compat shim doesn't define every real SDL
-        # KeySym constant (e.g. SPACE) - handle_dialogue_input's elif chain
-        # checks tcod.event.KeySym.SPACE before reaching the fallback
-        # branch these tests exercise, so a missing constant here would
-        # crash the test regardless of the sym value used. Patch it in for
-        # the duration of this test class only, restoring afterward.
-        self._keysym_had_space = hasattr(main.tcod.event.KeySym, "SPACE")
-        self._original_space = getattr(main.tcod.event.KeySym, "SPACE", None)
-        main.tcod.event.KeySym.SPACE = 32
-        self.addCleanup(self._restore_space)
-
-    def _restore_space(self):
-        if self._keysym_had_space:
-            main.tcod.event.KeySym.SPACE = self._original_space
-        else:
-            del main.tcod.event.KeySym.SPACE
+        # handle_dialogue_input's elif chain checks tcod.event.KeySym.SPACE
+        # before reaching the fallback branch these tests exercise, so the
+        # constant has to exist. Real tcod defines it - as an enum member,
+        # which cannot be reassigned - while the headless compat shim in
+        # tcod_compat does not. Patch it in only when it's genuinely
+        # missing; unconditionally assigning raises AttributeError
+        # ("cannot reassign member 'SPACE'") once real tcod is installed.
+        if not hasattr(main.tcod.event.KeySym, "SPACE"):
+            main.tcod.event.KeySym.SPACE = 32
+            self.addCleanup(delattr, main.tcod.event.KeySym, "SPACE")
 
     def _dialogue_world(self):
         return SimpleNamespace(

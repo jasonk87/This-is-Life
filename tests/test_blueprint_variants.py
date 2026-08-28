@@ -6,7 +6,10 @@ from simulation.systems.architecture import BuildingArchetype, BlueprintVariant
 
 class TestBlueprintVariants(unittest.TestCase):
     def setUp(self):
-        self.world = World()
+        # Seeded so the generated world doesn't vary with ambient global
+        # random state, which shifts with test ordering and even with which
+        # modules pytest imported during collection.
+        self.world = World(seed=4101)
         self.world.chunk_width = 1
         self.world.chunk_height = 1
         self.world._generate_chunk_detail(self.world.chunks[0][0], 0, 0)

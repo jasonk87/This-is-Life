@@ -292,6 +292,111 @@ EQUIPMENT_OVERLAY_SPRITES: dict[str, tuple[int, float, float, int]] = {
 }
 
 
+# Appearance overlay sprite definitions (hair, facial hair) - the
+# appearance-driven counterpart to EQUIPMENT_OVERLAY_SPRITES above.
+#
+# NOTE: both tables below are intentionally empty. The DawnLike sheet in
+# use here (assets/dawnlike_combined.png) is a library of complete,
+# pre-baked character sprites (see HUMAN_SPRITES above) - it does not
+# contain any separable hair or facial-hair tiles to stamp as an overlay.
+# This was confirmed by visually surveying every populated tile in the
+# sheet's character block (rows 0-42, where HUMAN_SPRITES/
+# PROFESSION_SPRITES live) plus its GUI icon block (rows 256-271) and item
+# block (rows 96-106) - none contain isolated hair/beard art. See the
+# visual-overhaul options report for real asset-pack candidates that do
+# ship layered hair/beard art (e.g. Shad.din's "Top-Down Shortcut:
+# Characters" pack has 60+ hairstyles and 20+ facial-hair styles as
+# separate sprites, though its commercial license needs confirming; the
+# Universal LPC Spritesheet is another option but in a different,
+# side-view art style).
+#
+# Once suitable tile art is sourced, populate these the same way
+# ITEM_SPRITES/EQUIPMENT_OVERLAY_SPRITES are populated above - e.g.
+# HAIR_SPRITES["short"] = dawnlike(col, row) - and _get_appearance_overlays
+# below will start drawing them immediately with no other code changes:
+# the entity data model (Appearance, in entities/base.py), the
+# compositing/z-order logic, and the console_renderer.py wiring are all
+# already in place and tested against this exact "not catalogued yet"
+# empty-dict state.
+HAIR_SPRITES: dict[str, int] = {}
+BEARD_SPRITES: dict[str, int] = {}
+
+# Anchor/z-order for appearance overlays, in the same (anchor_x, anchor_y,
+# z_order) shape EQUIPMENT_OVERLAY_SPRITES' tuples use. z_order=0 puts
+# hair/facial hair in the same paint tier as body armor/clothing (i.e.
+# "attached to the body"), strictly below headwear's z=1 - though in
+# practice hair is additionally suppressed outright whenever a head-slot
+# item is equipped (see _get_appearance_overlays' JUDGMENT CALL note
+# below), rather than relying on z-order paint-over alone.
+#
+# Chosen so hair and beard land in DIFFERENT quadrant cells at zoom 2/3/4
+# (see _draw_overlay_stamp in console_renderer.py: an anchor fraction
+# snaps to one whole zoom-grid cell, e.g. only a 4x4 grid of possible
+# positions at zoom=4 - it is not free sub-tile pixel placement), verified
+# by hand against every EQUIPMENT_OVERLAY_SPRITES anchor above so a beard
+# doesn't silently get painted over by body armor at the same z_order.
+# Full collision-freedom isn't achievable at this resolution though - e.g.
+# hair and body-armor anchors still land in the same zoom=3 cell, same as
+# some existing equipment-to-equipment anchor pairs already do at zoom=2.
+# That coarseness is an inherent property of quadrant-snapped anchors at
+# low zoom, not something introduced here; worth re-tuning once real hair/
+# beard art makes the collisions visible rather than theoretical.
+HAIR_OVERLAY_ANCHOR: tuple[float, float, int] = (0.30, 0.05, 0)
+BEARD_OVERLAY_ANCHOR: tuple[float, float, int] = (0.55, 0.15, 0)
+
+
+def _get_appearance_overlays(entity) -> list[tuple[int, float, float, int]]:
+    """
+    Mirrors _get_equipment_overlays: returns (codepoint, anchor_x, anchor_y,
+    z_order) tuples for the entity's hairstyle and facial hair, drawn
+    through the exact same zoomed-cell-stamping pipeline in
+    console_renderer.py. Returns [] whenever the entity has no
+    `appearance` component, or its hairstyle/facial_hair value (however
+    plausible) isn't catalogued in HAIR_SPRITES/BEARD_SPRITES - which, as
+    of this writing, is every value, since both tables are empty (see the
+    NOTE above them). This is a deliberate no-op today, not a bug: the
+    function, the data model, and the renderer wiring are all ready to go
+    the moment real tile art is added.
+
+    JUDGMENT CALL: a hat/helmet/hood in the head equipment slot suppresses
+    hair entirely (a hood covers hair) rather than relying on z-order
+    paint-over, which could leave a sliver of hair visible around a
+    helmet's edges depending on anchor offsets. Facial hair is NOT
+    suppressed by headwear (most headwear catalogued here - berets, caps,
+    crowns - doesn't cover the lower face). Both of these are reasonable
+    defaults, not confirmed product decisions - worth revisiting once
+    there's real hair/beard art to look at.
+    """
+    overlays: list[tuple[int, float, float, int]] = []
+    appearance = getattr(entity, "appearance", None)
+    if appearance is None:
+        return overlays
+
+    equipment = getattr(entity, "equipment", None)
+    head_slot_occupied = False
+    if equipment is not None:
+        head_slot_occupied = bool(getattr(getattr(equipment, "head", None), "item_key", None)) or bool(
+            (getattr(equipment, "equipped_armor", None) or {}).get("head")
+        )
+
+    hairstyle = getattr(appearance, "hairstyle", "none") or "none"
+    if hairstyle != "none" and not head_slot_occupied:
+        codepoint = HAIR_SPRITES.get(hairstyle)
+        if codepoint is not None:
+            ax, ay, az = HAIR_OVERLAY_ANCHOR
+            overlays.append((codepoint, ax, ay, az))
+
+    facial_hair = getattr(appearance, "facial_hair", "none") or "none"
+    if facial_hair != "none":
+        codepoint = BEARD_SPRITES.get(facial_hair)
+        if codepoint is not None:
+            ax, ay, az = BEARD_OVERLAY_ANCHOR
+            overlays.append((codepoint, ax, ay, az))
+
+    overlays.sort(key=lambda entry: entry[3])
+    return overlays
+
+
 def get_human_sprite(
     gender: str | None = None,
     profession: str | None = None,

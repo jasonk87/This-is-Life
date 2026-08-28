@@ -26,6 +26,18 @@ def test_mobile_conversation_follow():
 
     from simulation.systems.scheduling import run_npc_mobile_conversation_policy
 
+    # Generate the terrain between the pair BEFORE freezing the RNG. World
+    # chunks are generated lazily on first tile access, so without this the
+    # first access happens inside the patch below - and a chunk generated
+    # while random.random() is pinned to 0.0 comes out abnormally cluttered,
+    # because every "if random.random() < density" obstacle check fires
+    # (measured: 186/256 passable tiles instead of 248/256). That can leave
+    # no walkable route between A and B, so the policy correctly finds no
+    # path and returns False, and the test fails for a reason that has
+    # nothing to do with conversation behaviour. calculate_path warms
+    # exactly the region the policy will path over.
+    world.calculate_path(a.x, a.y, b.x, b.y)
+
     # Mock random.random() to always return 0.0, so keep_up_chance always passes.
     # This avoids seed-ordering issues from World(seed=42) consuming random state.
     with patch("random.random", return_value=0.0):

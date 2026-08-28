@@ -5,6 +5,7 @@ from simulation.activity import advance_activity, start_activity
 from simulation.systems.task_types import TaskType
 
 from data.professions import get_profession_data, get_sub_task_data
+from simulation.careers import get_age_work_performance_ceiling
 
 
 def _warn(world, warning_type: str, key, message: str, *, actor=None, metadata: dict | None = None) -> None:
@@ -209,7 +210,8 @@ def update_npc_work_sub_tasks(world, npc) -> bool:
                         )
 
             if npc.sub_task_timer <= 0:
-                npc.economic.work_performance = min(100, npc.economic.work_performance + 5)
+                performance_ceiling = get_age_work_performance_ceiling(getattr(npc, "age", None))
+                npc.economic.work_performance = min(performance_ceiling, npc.economic.work_performance + 5)
                 if hasattr(getattr(npc, "skills", None), "gain_experience"):
                     npc.skills.gain_experience("labor", 3)
         return True

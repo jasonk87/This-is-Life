@@ -22,7 +22,9 @@ class TestTemperatureSystem(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World()
+        # Seeded so the generated world doesn't vary with ambient global
+        # random state (see the note in tests/test_interactions.py).
+        self.world = World(seed=4103)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -154,7 +156,9 @@ class TestAgriculturalSystem(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World()
+        # Seeded so the generated world doesn't vary with ambient global
+        # random state (see the note in tests/test_interactions.py).
+        self.world = World(seed=4103)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -753,7 +757,11 @@ class TestFearSystem(unittest.TestCase):
         alarm_spot = (center_x, center_y)
 
         village = Village()
-        village.interaction_points["town_square_center"] = alarm_spot
+        # interaction_points values are lists of coordinates (matching the
+        # "well"/"noticeboard" generation in _generate_village_structure);
+        # readers take [0]. alarm_spot itself stays a bare tuple below for
+        # positioning the guards relative to it.
+        village.interaction_points["town_square_center"] = [alarm_spot]
         chunk_x, chunk_y = center_x // CHUNK_SIZE, center_y // CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].village = village
 

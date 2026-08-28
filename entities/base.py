@@ -331,6 +331,12 @@ class Equipment:
     # from the item's max_durability property the first time it's hit. See
     # Player._degrade_equipped_armor_slot.
     equipped_armor_durability: dict[str, int] = field(default_factory=dict)
+    # Per-slot repair-worn max_durability ceiling for player equipped_armor,
+    # the finite-use-repair counterpart to equipped_armor_durability. Absent
+    # entry means "never repaired" - the item's own true max_durability
+    # (from ITEM_DEFINITIONS) still applies. See
+    # Player._repair_equipped_armor_slot.
+    equipped_armor_max_durability: dict[str, int] = field(default_factory=dict)
     equipped_light_item_key: str | None = None
     light_source_active_until_tick: int = -1
     current_personal_light_radius: int = 0
@@ -342,6 +348,110 @@ class Equipment:
 
     def __setstate__(self, state):
         dataclass_setstate(self, state)
+
+# Recognized values for Appearance fields. Kept as plain module-level tuples
+# (not an enum) to match how HUMAN_SPRITES/PROFESSION_SPRITES etc. in
+# data/dawnlike.py key off plain strings - roll_appearance below and any
+# future UI (a barber/mirror screen, character creation) can import these
+# instead of hand-copying the value lists.
+HAIRSTYLES = ("none", "short", "long", "braided", "curly", "bald")
+HAIR_COLORS = ("black", "brown", "blonde", "red", "gray", "white")
+FACIAL_HAIR_STYLES = ("none", "stubble", "mustache", "short_beard", "full_beard")
+SKIN_TONES = ("pale", "light", "medium", "tan", "dark")
+
+
+@dataclass
+class Appearance:
+    """Stores an entity's static physical-appearance traits - hairstyle,
+    hair color, facial hair, skin tone - as opposed to Equipment, which
+    stores what they're currently wearing/wielding. Rolled once at
+    NPC/Player creation by roll_appearance() below and otherwise left
+    mutable for future features (aging into gray hair, a barber/grooming
+    mechanic, etc.).
+
+    IMPORTANT - current status: the DawnLike tile sheet this game renders
+    with (assets/dawnlike_combined.png) does not contain separable hair or
+    facial-hair sprite tiles to stamp as an overlay - it's a library of
+    complete, pre-baked character sprites (see HUMAN_SPRITES in
+    data/dawnlike.py), not a layered paperdoll system. Confirmed by
+    visually surveying the sheet's character block and its GUI/item
+    sections. data/dawnlike.py's HAIR_SPRITES/BEARD_SPRITES tables are
+    therefore empty today, so setting hairstyle/facial_hair on an entity
+    has NO visible effect yet - see _get_appearance_overlays in
+    data/dawnlike.py, which already does the compositing work and will pick
+    these values up automatically once suitable tile art is sourced and
+    catalogued (no further code changes needed at that point). skin_tone is
+    tracked for the same forward-looking reason and isn't wired to any
+    sprite/palette logic yet either.
+    """
+    hairstyle: str = "none"
+    hair_color: str = "brown"
+    facial_hair: str = "none"
+    skin_tone: str = "medium"
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
+
+def roll_appearance(gender: str | None = None, age: int | None = None) -> "Appearance":
+    """Randomly roll a plausible Appearance for a new NPC or Player.
+
+    Judgment calls (flagged rather than silently baked in):
+      - Facial hair is rolled far more often for adult males than anyone
+        else. It's not impossible for other entities (a small base rate
+        applies to everyone) since facial hair in reality isn't strictly
+        binary by gender, but the bulk of the probability mass is on adult
+        males, matching the "villager with a beard" mental model this
+        feature was requested for. Reasonable people could weight this
+        differently.
+      - Children (age < 18) never roll facial hair, and get "bald" rolled
+        far less often than adults.
+      - "none" is always the single most likely outcome for both hairstyle
+        and facial_hair, so most NPCs are visually unremarkable - only a
+        minority end up bearded/distinctively-haired, per the "not
+        everyone bearded" requirement.
+    """
+    is_adult = age is None or age >= 18
+    is_male = gender == "male"
+
+    if is_adult:
+        hairstyle = random.choices(
+            ["none", "short", "long", "braided", "curly", "bald"],
+            weights=[30, 25, 15, 10, 10, 10],
+        )[0]
+    else:
+        hairstyle = random.choices(
+            ["none", "short", "long", "braided", "curly", "bald"],
+            weights=[30, 30, 15, 15, 8, 2],
+        )[0]
+
+    hair_color = random.choices(
+        ["black", "brown", "blonde", "red", "gray", "white"],
+        weights=[30, 30, 15, 10, 10, 5],
+    )[0]
+
+    if not is_adult:
+        facial_hair = "none"
+    elif is_male:
+        facial_hair = random.choices(
+            ["none", "stubble", "mustache", "short_beard", "full_beard"],
+            weights=[55, 15, 10, 10, 10],
+        )[0]
+    else:
+        facial_hair = random.choices(
+            ["none", "stubble", "mustache", "short_beard", "full_beard"],
+            weights=[97, 1, 1, 1, 0],
+        )[0]
+
+    skin_tone = random.choice(["pale", "light", "medium", "tan", "dark"])
+
+    return Appearance(
+        hairstyle=hairstyle,
+        hair_color=hair_color,
+        facial_hair=facial_hair,
+        skin_tone=skin_tone,
+    )
+
 
 Knowledge = KnowledgeComponent
 
@@ -383,6 +493,7 @@ class NPC:
         self.combat, self.physical, self.social = CombatStats(), PhysicalState(), SocialState()
         self.economic, self.schedule = EconomicState(), Schedule()
         self.equipment, self.knowledge = Equipment(), Knowledge()
+        self.appearance = roll_appearance(self.gender, self.age)
         self.career = CareerState()
         self.skills = SkillTracker()
         self.aspiration = AspirationComponent(aspiration_type=random.choice(list(AspirationType)))
@@ -511,6 +622,12 @@ class NPC:
         if not hasattr(self, "economic"): self.economic = EconomicState()
         if not hasattr(self, "schedule"): self.schedule = Schedule()
         if not hasattr(self, "equipment"): self.equipment = Equipment()
+        # Older saves predate the Appearance component entirely - backfill
+        # with a fresh random roll rather than the all-"none" dataclass
+        # default, so a save/load cycle doesn't visibly flatten every
+        # pre-existing NPC's rolled hairstyle/facial hair back to nothing
+        # once appearance overlays actually have art to draw.
+        if not hasattr(self, "appearance"): self.appearance = roll_appearance(getattr(self, "gender", None), getattr(self, "age", None))
         if not hasattr(self, "knowledge"): self.knowledge = Knowledge()
         if not hasattr(self, "career"): self.career = CareerState()
         if not hasattr(self, "skills"): self.skills = SkillTracker()

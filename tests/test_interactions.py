@@ -41,7 +41,14 @@ class TestWorldInteractionActions(unittest.TestCase):
             "combat_behavior": "defensive",
             "base_attack_name": "fists"
         })
-        self.world = World()
+        # Seeded, like the rest of the suite's World() construction. An
+        # unseeded World draws from the ambient global random state, which
+        # depends on everything that ran - and even on everything pytest
+        # merely *imported* during collection - before this test. That made
+        # the social-reaction tests below pass when this file was run alone
+        # and fail in a full-suite run, with the culprit appearing to move
+        # between runs.
+        self.world = World(seed=20250808)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()

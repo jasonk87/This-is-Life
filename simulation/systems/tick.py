@@ -231,6 +231,7 @@ def run_world_tick(world) -> None:
     world.game_time += 1
     cleanup_ambient_speech(world)
     world._update_season()
+    world._run_scheduled_events()
     world._update_weather()
     world._update_light_level_and_fov()
     world._update_player_fov()

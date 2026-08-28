@@ -163,7 +163,9 @@ class TestBuyFoodUsesHouseholdSupport(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World()
+        # Seeded so the generated world doesn't vary with ambient global
+        # random state (see the note in tests/test_interactions.py).
+        self.world = World(seed=4102)
 
     def test_broke_npc_can_still_buy_food_via_a_wealthy_spouse(self):
         from unittest.mock import patch

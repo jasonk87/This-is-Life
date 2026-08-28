@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
 import json
@@ -1321,8 +1321,10 @@ class TestConsoleRendererEntities(unittest.TestCase):
         console = FakeConsole()
         console_renderer._draw_mini_health_bar(console, 0, 0, 5, 10, 10)
 
+        fill_color, _track_color = console_renderer.theme.METER_ENTITY_HP
         self.assertEqual(len(console.print_calls), 1)
-        self.assertEqual(console.print_calls[0]["string"], "#####")
+        self.assertEqual(console.print_calls[0]["string"], console_renderer.theme.BAR_CELL * 5)
+        self.assertEqual(console.print_calls[0]["fg"], fill_color)
 
     def test_mini_health_bar_empties_fully_at_zero_health(self):
         class FakeConsole:
@@ -1335,8 +1337,10 @@ class TestConsoleRendererEntities(unittest.TestCase):
         console = FakeConsole()
         console_renderer._draw_mini_health_bar(console, 0, 0, 5, 0, 10)
 
+        _fill_color, track_color = console_renderer.theme.METER_ENTITY_HP
         self.assertEqual(len(console.print_calls), 1)
-        self.assertEqual(console.print_calls[0]["string"], "-----")
+        self.assertEqual(console.print_calls[0]["string"], console_renderer.theme.BAR_CELL * 5)
+        self.assertEqual(console.print_calls[0]["fg"], track_color)
 
     def test_mini_health_bar_shows_at_least_one_filled_cell_when_barely_alive(self):
         class FakeConsole:
@@ -1349,8 +1353,9 @@ class TestConsoleRendererEntities(unittest.TestCase):
         console = FakeConsole()
         console_renderer._draw_mini_health_bar(console, 0, 0, 5, 1, 100)
 
-        fill_calls = [c for c in console.print_calls if "#" in c["string"]]
-        self.assertEqual(fill_calls[0]["string"], "#")
+        fill_color, _track_color = console_renderer.theme.METER_ENTITY_HP
+        fill_calls = [c for c in console.print_calls if c["fg"] == fill_color]
+        self.assertEqual(fill_calls[0]["string"], console_renderer.theme.BAR_CELL)
 
     def test_mini_health_bar_splits_proportionally_for_partial_health(self):
         class FakeConsole:
@@ -1363,11 +1368,13 @@ class TestConsoleRendererEntities(unittest.TestCase):
         console = FakeConsole()
         console_renderer._draw_mini_health_bar(console, 2, 3, 5, 5, 10)
 
-        calls_by_string_prefix = {c["string"][0]: c for c in console.print_calls}
-        self.assertEqual(calls_by_string_prefix["#"]["string"], "##")
-        self.assertEqual(calls_by_string_prefix["#"]["x"], 2)
-        self.assertEqual(calls_by_string_prefix["-"]["string"], "---")
-        self.assertEqual(calls_by_string_prefix["-"]["x"], 4)
+        bar_cell = console_renderer.theme.BAR_CELL
+        fill_color, track_color = console_renderer.theme.METER_ENTITY_HP
+        calls_by_color = {c["fg"]: c for c in console.print_calls}
+        self.assertEqual(calls_by_color[fill_color]["string"], bar_cell * 2)
+        self.assertEqual(calls_by_color[fill_color]["x"], 2)
+        self.assertEqual(calls_by_color[track_color]["string"], bar_cell * 3)
+        self.assertEqual(calls_by_color[track_color]["x"], 4)
 
     def _make_combat_npc(self, x, y, *, hostile=False, hp=8, max_hp=10, dead=False):
         return SimpleNamespace(
@@ -1486,7 +1493,7 @@ class TestConsoleRendererEntities(unittest.TestCase):
             console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=focus)
             console_renderer._draw_entity_markers(console, world, 0, 0, focus=focus)
 
-        bar_calls = [c for c in console.print_calls if c["string"][0] in "#-"]
+        bar_calls = [c for c in console.print_calls if c["string"][0] == console_renderer.theme.BAR_CELL]
         marker_calls = [c for c in console.print_calls if c["string"] == "!"]
         self.assertEqual(len(marker_calls), 1)
         self.assertTrue(bar_calls)
@@ -1584,7 +1591,6 @@ class TestConsoleRendererEntities(unittest.TestCase):
              patch("rendering.console_renderer._draw_entity_markers", side_effect=lambda *args: order.append("entity_markers")), \
              patch("rendering.console_renderer._draw_world_markers", side_effect=lambda *args: order.append("world_markers")), \
              patch("rendering.console_renderer.draw_status_panel"), \
-             patch("rendering.console_renderer.draw_cursor_info"), \
              patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
              patch("rendering.console_renderer._draw_focus_badge"), \
              patch("rendering.console_renderer.draw_weather_overlay"), \
@@ -1648,7 +1654,6 @@ class TestConsoleRendererEntities(unittest.TestCase):
              patch("rendering.console_renderer._draw_entity_markers"), \
              patch("rendering.console_renderer._draw_world_markers"), \
              patch("rendering.console_renderer.draw_status_panel"), \
-             patch("rendering.console_renderer.draw_cursor_info"), \
              patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
              patch("rendering.console_renderer._draw_focus_badge"), \
              patch("rendering.console_renderer.draw_weather_overlay"), \
@@ -1726,7 +1731,6 @@ class TestConsoleRendererEntities(unittest.TestCase):
              patch("rendering.console_renderer._draw_entity_markers"), \
              patch("rendering.console_renderer._draw_world_markers"), \
              patch("rendering.console_renderer.draw_status_panel"), \
-             patch("rendering.console_renderer.draw_cursor_info"), \
              patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
              patch("rendering.console_renderer._draw_focus_badge"), \
              patch("rendering.console_renderer.draw_weather_overlay"), \
@@ -2352,6 +2356,7 @@ class TestMenuItemIcons(unittest.TestCase):
     def test_draw_trade_menu_draws_icon_next_to_item_row(self):
         console = self.FakeConsole()
         world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(money=100)),
             trade_ui_npc_target=SimpleNamespace(name="Merchant Sam"),
             trade_ui_player_selling=False,
             trade_ui_merchant_inventory_snapshot=[("rusty_sword", 1, 25)],
@@ -2372,6 +2377,7 @@ class TestMenuItemIcons(unittest.TestCase):
         npc_inventory = Inventory()
         npc_inventory.add_item("rusty_sword", 1, quality="Fine")
         world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(money=100)),
             trade_ui_npc_target=SimpleNamespace(
                 name="Merchant Sam",
                 economic=SimpleNamespace(npc_inventory=npc_inventory),

@@ -3,9 +3,11 @@ This module contains the main game loop and handles player input.
 """
 import argparse
 import math
-from tcod_compat import tcod, libtcodpy
+from types import SimpleNamespace
+from tcod_compat import tcod, libtcodpy, TCOD_AVAILABLE
 import os
 import sys
+import time
 from engine import World
 from config import (
     SCREEN_WIDTH_TILES,
@@ -22,9 +24,13 @@ from config import (
 )
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
+from rendering import console_renderer
+from rendering import title_art
+from rendering import ui_theme as theme
+from rendering import widgets
 from rendering.console_renderer import draw
 from rendering.sprite_atlas import register_zoomed_dawnlike_tiles
-from save_manager import save_game, load_game
+from save_manager import save_game, load_game, load_save_metadata
 from ui_requests import apply_ui_requests
 
 TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
@@ -188,6 +194,126 @@ def _get_actionable_entities(world: World, entities: list[dict]) -> list[tuple[d
     return actionable_entities
 
 
+def _menu_mouse_binding(world):
+    """Describe the currently open menu's clickable list, if it has one.
+
+    Returns (region_key, select_fn, confirm_handler). `select_fn(index)`
+    moves that menu's selection - which field that is depends on the menu
+    and, for the menus with sub-modes, on which mode is showing.
+    `confirm_handler` is the menu's existing keyboard handler, replayed
+    with a synthetic Enter so a click confirms through exactly the same
+    code path the keyboard does, rather than a parallel copy of it.
+    """
+    state = getattr(world, "game_state", None)
+
+    if getattr(world, "interaction_context", {}).get("active"):
+        def select(index):
+            world.interaction_context["selected_action_index"] = index
+        return "INTERACTION_MENU", select, handle_interaction_input
+
+    if state == "CRAFTING_MENU":
+        def select(index):
+            world.crafting_menu_context["selected_recipe_index"] = index
+        return "CRAFTING_MENU", select, handle_crafting_input
+
+    if state == "BUILDING_MENU":
+        def select(index):
+            world.building_menu_context["selected_recipe_index"] = index
+        return "BUILDING_MENU", select, handle_building_input
+
+    if state == "QUEST_MENU":
+        def select(index):
+            world.quest_menu_context["selected_quest_index"] = index
+        # The quest log has nothing to confirm - clicking just previews.
+        return "QUEST_MENU", select, None
+
+    if state == "NOTICEBOARD_MENU":
+        if world.noticeboard_menu_context.get("mode") == "post_job":
+            def select(index):
+                world.noticeboard_menu_context["selected_role_index"] = index
+            return "NOTICEBOARD_ROLES", select, handle_noticeboard_menu_input
+
+        def select(index):
+            world.noticeboard_menu_context["selected_task_index"] = index
+        return "NOTICEBOARD_MENU", select, handle_noticeboard_menu_input
+
+    if state == "COMPANY_LEDGER_MENU":
+        def select(index):
+            world.company_ledger_menu_context["selected_action_index"] = index
+        return "COMPANY_LEDGER_MENU", select, handle_company_ledger_menu_input
+
+    if state == "SOCIAL_MENU":
+        if world.social_menu_context.get("mode", "root") == "root":
+            def select(index):
+                world.social_menu_context["selected_action_index"] = index
+        else:
+            def select(index):
+                world.social_menu_context["selected_option_index"] = index
+        return "SOCIAL_MENU", select, handle_social_menu_input
+
+    if state == "GOVERNANCE_MENU":
+        if world.governance_menu_context.get("mode", "root") == "root":
+            def select(index):
+                world.governance_menu_context["selected_action_index"] = index
+        else:
+            def select(index):
+                world.governance_menu_context["selected_target_index"] = index
+        return "GOVERNANCE_MENU", select, handle_governance_menu_input
+
+    if state == "TRADE_MENU":
+        def select(index):
+            if world.trade_ui_player_selling:
+                world.trade_ui_player_item_index = index
+            else:
+                world.trade_ui_merchant_item_index = index
+        return "TRADE_MENU", select, handle_trade_menu_input
+
+    return None
+
+
+def handle_menu_mouse_click(event, world, context) -> bool:
+    """Route a click inside an open menu to that menu's list.
+
+    A left click selects the row under the cursor and confirms it; a right
+    click selects without confirming, so the player can inspect a recipe's
+    requirements without committing to building it. Returns True if the
+    click was consumed by a menu.
+    """
+    binding = _menu_mouse_binding(world)
+    if binding is None:
+        return False
+
+    region_key, select, confirm_handler = binding
+    record = (getattr(world, "menu_hit_regions", None) or {}).get(region_key)
+    if record is None:
+        return False
+
+    index = record.index_at(getattr(world, "mouse_x", None), getattr(world, "mouse_y", None))
+    if index is None:
+        return False
+
+    select(index)
+    if event.button == tcod.event.MouseButton.LEFT and confirm_handler is not None:
+        confirm_event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
+        if confirm_handler is handle_interaction_input:
+            return bool(confirm_handler(confirm_event, world, context))
+        confirm_handler(confirm_event, world)
+    return True
+
+
+def _scroll_message_log(world, lines):
+    """Scroll the message log back (positive) or forward (negative).
+
+    Offset 0 means "pinned to the newest message", which is also where new
+    messages push the view back to, so scrolling back to read something and
+    then walking on doesn't leave the player stuck in the past.
+    """
+    entries = getattr(world, "chat_log_entries", None) or []
+    max_scroll = max(0, len(entries) - console_renderer.LOG_VISIBLE_LINES)
+    current = int(getattr(world, "chat_log_scroll", 0))
+    world.chat_log_scroll = max(0, min(max_scroll, current + int(lines)))
+
+
 def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
     """Handles input when the player is in the 'PLAYING' state. Returns True if turn taken."""
     move_keys = {
@@ -232,12 +358,16 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
             world.add_message_to_chat_log("There's no one nearby to talk to.")
     elif event.sym in (tcod.event.KeySym.QUESTION, tcod.event.KeySym.SLASH):
         world.game_state = "HELP_MENU"
+    elif event.sym == getattr(tcod.event.KeySym, "PAGEUP", "PAGEUP"):
+        _scroll_message_log(world, +console_renderer.LOG_VISIBLE_LINES)
+    elif event.sym == getattr(tcod.event.KeySym, "PAGEDOWN", "PAGEDOWN"):
+        _scroll_message_log(world, -console_renderer.LOG_VISIBLE_LINES)
     elif event.sym == tcod.event.KeySym.F3:
         world.show_autonomy_overlay = not getattr(world, "show_autonomy_overlay", False)
     elif event.sym == tcod.event.KeySym.ESCAPE:
         # Show in-game menu or save prompt
         save_game(world)
-        world.add_message_to_chat_log("Game Saved.")
+        world.add_message_to_chat_log("Game Saved.", category="system")
 
 def handle_crafting_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'CRAFTING_MENU' state."""
@@ -478,6 +608,7 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Fish": lambda: world.player_attempt_fish(target_x, target_y),
         "Harvest": lambda: world.player_attempt_harvest(target_x, target_y),
         "Trade": lambda: start_trade(world, entity_data),
+        "Repair": lambda: world.player_attempt_repair_gear(entity_data),
         "Pick up": lambda: pick_up_item(world, entity_data, target_x, target_y),
         "Sit": lambda: world.player_attempt_sit(target_x, target_y),
         "Sleep": lambda: world.player_attempt_sleep(target_x, target_y),
@@ -501,7 +632,7 @@ def execute_interaction(world: World, context_handler) -> bool:
     if selected_action in action_map:
         action_map[selected_action]()
 
-    if selected_action in ["Talk", "Trade", "Read", "Offer Mercenary Services", "Read Notices", "Company Ledger", "Govern", "Post Job"]:
+    if selected_action in ["Talk", "Trade", "Read", "Offer Mercenary Services", "Repair", "Read Notices", "Company Ledger", "Govern", "Post Job"]:
         ctx["active"] = False
 
     apply_ui_requests(world, context_handler)
@@ -739,18 +870,78 @@ def main():
     args = parser.parse_args()
 
     if args.headless:
+        if not TCOD_AVAILABLE:
+            print(
+                "Warning: tcod is not installed, so this headless run uses the\n"
+                "         compatibility shim. Its noise stub returns a constant,\n"
+                "         which produces flat, featureless terrain. Install tcod\n"
+                "         (pip install tcod) for a representative simulation."
+            )
         world = World()
         run_headless(world, args.ticks)
         return
 
+    if not require_render_backend():
+        return 1
+
     tileset = load_custom_tileset()
     if not tileset:
-        return
+        return 1
 
-    console = tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="F")
+    console = create_console()
 
     # Main Menu State
     main_menu_loop(console, tileset)
+
+
+def require_render_backend() -> bool:
+    """Verify a real tcod is present before we try to open a window.
+
+    Without it, tcod_compat substitutes a shim whose Console discards every
+    draw call and whose event queue is permanently empty. The game does not
+    fail in any obvious way: it runs, shows nothing, and spins at full speed
+    forever. Previously the only clue was a stray warning from the tileset
+    loader ("'object' object has no attribute 'set_tile'"), which reads like
+    a cosmetic problem with the sprite sheet rather than "there is no
+    renderer". Say so plainly and stop.
+    """
+    if TCOD_AVAILABLE:
+        return True
+    print(
+        "Error: tcod is not installed, so there is no renderer available.\n"
+        "\n"
+        "  This is a required dependency for playing the game - without it\n"
+        "  the window cannot be created and nothing would be drawn.\n"
+        "\n"
+        "  Install it with:\n"
+        "      pip install tcod\n"
+        "\n"
+        "  (Simulation-only runs still work without it: use --headless.)",
+        file=sys.stderr,
+    )
+    return False
+
+def create_console():
+    """Build the root console the whole renderer draws into.
+
+    The `order` argument matters more than it looks. On a tcod Console it
+    selects the *indexing convention* of the `fg`/`bg` buffers: "C" exposes
+    them as (height, width, 3) indexed [y, x], while "F" exposes them as
+    (width, height, 3) indexed [x, y].
+
+    Every buffer access in rendering/console_renderer.py is written [y, x]
+    (entity background sampling, the focus badge, the lighting pass), so
+    this must stay "C". It was previously "F", which silently made
+    `console.bg[y, x]` mean `console.bg[x, y]`: reads in screen columns
+    past the console's height landed out of bounds and crashed the game as
+    soon as anything was drawn in the right-hand third of the map.
+
+    Note this is NOT the same flag as numpy's `order` in engine.py's
+    `np.full((WORLD_HEIGHT, WORLD_WIDTH), order="F")` - there it only picks
+    a memory layout and the array is still shaped (H, W) and indexed [y, x].
+    """
+    return tcod.console.Console(SCREEN_WIDTH_TILES, SCREEN_HEIGHT_TILES, order="C")
+
 
 def load_custom_tileset():
     """Loads the base ASCII font and appends DawnLike tiles mapped to Unicode PUA."""
@@ -788,6 +979,67 @@ def load_custom_tileset():
 
     return tileset
 
+MENU_TAGLINE = "A life simulated, one tick at a time."
+
+
+def _draw_menu_backdrop(console):
+    """Wash the empty screen with a faint vignette.
+
+    Flat black behind a title reads as "nothing loaded yet"; a gradient
+    reads as a deliberate screen. This only touches the background buffer,
+    so it costs nothing in glyphs and sits behind everything drawn after.
+    """
+    if not hasattr(console, "bg"):
+        return
+    height = min(console.height, console.bg.shape[0])
+    width = min(console.width, console.bg.shape[1])
+    for y in range(height):
+        # Darkest at the top, lifting slightly toward the bottom.
+        depth = y / max(1, height - 1)
+        row_color = (
+            int(6 + 10 * depth),
+            int(8 + 12 * depth),
+            int(16 + 18 * depth),
+        )
+        for x in range(width):
+            console.bg[y, x] = row_color
+
+
+def draw_main_menu(console, options, selected_index):
+    """Draw the title screen: backdrop, block-letter title, framed options."""
+    _draw_menu_backdrop(console)
+
+    center_x = console.width // 2
+    title_y = max(2, console.height // 4 - title_art.GLYPH_HEIGHT // 2)
+    title_art.draw(
+        console, center_x, title_y, "THIS IS LIFE",
+        fg=theme.HEADING, shadow_fg=(60, 42, 16),
+    )
+
+    tagline_y = title_y + title_art.GLYPH_HEIGHT + 2
+    console.print(center_x, tagline_y, MENU_TAGLINE, alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED)
+
+    panel_width = 30
+    panel_height = len(options) * 2 + 3
+    panel_x = center_x - (panel_width // 2)
+    panel_y = tagline_y + 3
+    widgets.panel(console, panel_x, panel_y, panel_width, panel_height, focused=True)
+
+    for index, option in enumerate(options):
+        selected = index == selected_index
+        color = theme.SELECTION if selected else theme.TEXT_DIM
+        row_y = panel_y + 2 + index * 2
+        if selected:
+            console.print(panel_x + 3, row_y, theme.SELECT_CURSOR, fg=color)
+        console.print(center_x, row_y, option, alignment=libtcodpy.CENTER, fg=color)
+
+    console.print(
+        center_x, console.height - 3,
+        "Up/Down to choose    Enter to confirm",
+        alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED,
+    )
+
+
 def main_menu_loop(console, tileset):
     """Displays the main menu and handles selection."""
     with tcod.context.new(
@@ -804,15 +1056,7 @@ def main_menu_loop(console, tileset):
 
         while True:
             console.clear()
-
-            # Draw Menu
-            title = "THIS IS LIFE"
-            console.print(console.width // 2, console.height // 3, title, alignment=libtcodpy.CENTER, fg=(255, 255, 0))
-
-            for i, option in enumerate(options):
-                color = (255, 255, 255) if i == selected_index else (100, 100, 100)
-                console.print(console.width // 2, console.height // 2 + i * 2, option, alignment=libtcodpy.CENTER, fg=color)
-
+            draw_main_menu(console, options, selected_index)
             context.present(console)
 
             for event in tcod.event.wait():
@@ -836,6 +1080,65 @@ def main_menu_loop(console, tileset):
                         elif options[selected_index] == "Exit":
                             raise SystemExit()
 
+def _describe_save(filename):
+    """Two display lines for a save: who and when, plus where and how long ago.
+
+    Falls back to the bare filename for saves written before summaries
+    existed, so an old save is still listed and loadable.
+    """
+    metadata = load_save_metadata(filename)
+    if not metadata:
+        return filename, "no summary available"
+
+    name = metadata.get("player_name") or "Unknown"
+    clock = console_renderer._format_world_clock(metadata.get("game_time", 0))
+    season = metadata.get("season") or ""
+    weather = str(metadata.get("weather") or "").replace("_", " ").title()
+
+    saved_at = metadata.get("saved_at")
+    when = ""
+    if saved_at:
+        when = time.strftime("saved %Y-%m-%d %H:%M", time.localtime(saved_at))
+
+    detail = "  ".join(part for part in (clock, f"{season} / {weather}".strip(" /"), when) if part)
+    return name, detail
+
+
+def draw_load_menu(console, saves, selected_index):
+    """Draw the save list as cards showing character, day and save time."""
+    _draw_menu_backdrop(console)
+    center_x = console.width // 2
+
+    console.print(center_x, 4, "LOAD GAME", alignment=libtcodpy.CENTER, fg=theme.HEADING)
+
+    panel_width = 56
+    panel_height = min(console.height - 12, len(saves) * 3 + 3)
+    panel_x = center_x - (panel_width // 2)
+    panel_y = 7
+    widgets.panel(console, panel_x, panel_y, panel_width, panel_height, focused=True)
+
+    visible_rows = max(1, (panel_height - 3) // 3)
+    scroll = widgets.clamp_scroll(selected_index, 0, visible_rows)
+    for row in range(visible_rows):
+        index = scroll + row
+        if index >= len(saves):
+            break
+        selected = index == selected_index
+        title, detail = _describe_save(saves[index])
+        row_y = panel_y + 2 + row * 3
+        color = theme.SELECTION if selected else theme.TEXT
+        if selected:
+            console.print(panel_x + 2, row_y, theme.SELECT_CURSOR, fg=color)
+        console.print(panel_x + 4, row_y, title[: panel_width - 6], fg=color)
+        console.print(panel_x + 4, row_y + 1, detail[: panel_width - 6], fg=theme.TEXT_MUTED)
+
+    console.print(
+        center_x, console.height - 4,
+        "Up/Down to choose    Enter to load    Esc to cancel",
+        alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED,
+    )
+
+
 def load_game_menu(console, context):
     """Displays available save files."""
     if not os.path.exists("saves"):
@@ -848,14 +1151,7 @@ def load_game_menu(console, context):
     selected_index = 0
     while True:
         console.clear()
-        console.print(console.width // 2, 5, "LOAD GAME", alignment=libtcodpy.CENTER)
-
-        for i, save in enumerate(saves):
-            color = (255, 255, 255) if i == selected_index else (100, 100, 100)
-            console.print(console.width // 2, 10 + i, save, alignment=libtcodpy.CENTER, fg=color)
-
-        console.print(console.width // 2, console.height - 5, "Press ESC to cancel", alignment=libtcodpy.CENTER)
-
+        draw_load_menu(console, saves, selected_index)
         context.present(console)
 
         for event in tcod.event.wait():
@@ -872,7 +1168,6 @@ def load_game_menu(console, context):
 
 def start_game(context, console, world_state=None, player_first_name: str | None = None):
     """Starts the actual gameplay loop."""
-    import time
     if world_state:
         world = world_state
         # Check if the player in the loaded world is dead
@@ -925,7 +1220,7 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         world.update_animations(dt)
 
         if world.game_state == "PLAYER_DEAD":
-            render_game_over(console, context)
+            render_game_over(console, context, world)
             break # Break to return to main menu
 
         if world.game_state != menu_fade_state:
@@ -961,12 +1256,38 @@ def run_headless(world, num_ticks):
             print(f"  ...tick {i}/{num_ticks}")
     print("Headless mode run complete.")
 
-def render_game_over(console, context):
+def draw_game_over(console, world=None):
+    """Draw the death screen, including a short epitaph when we have a world.
+
+    The old screen was the words "GAME OVER" in a box. A run that ended is
+    worth a line about whose run it was and how far it got.
+    """
+    _draw_menu_backdrop(console)
+    center_x = console.width // 2
+
+    title_y = max(2, console.height // 3 - title_art.GLYPH_HEIGHT)
+    title_art.draw(console, center_x, title_y, "LIFE", fg=theme.DANGER, shadow_fg=(48, 16, 16))
+
+    y = title_y + title_art.GLYPH_HEIGHT + 2
+    console.print(center_x, y, "has ended.", alignment=libtcodpy.CENTER, fg=theme.TEXT_DIM)
+
+    if world is not None:
+        player = getattr(world, "player", None)
+        name = str(getattr(player, "name", "") or "Unknown")
+        clock = console_renderer._format_world_clock(getattr(world, "game_time", 0))
+        console.print(center_x, y + 2, name, alignment=libtcodpy.CENTER, fg=theme.HEADING)
+        console.print(center_x, y + 3, clock, alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED)
+
+    console.print(
+        center_x, console.height - 4, "Press any key to return to the menu",
+        alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED,
+    )
+
+
+def render_game_over(console, context, world=None):
     """Renders the game over screen."""
     console.clear()
-    console.print_box(x=console.width // 2 - 10, y=console.height // 2 - 2,
-                      width=20, height=4, string="GAME OVER", alignment=libtcodpy.CENTER)
-    console.print(console.width // 2, console.height // 2 + 3, "Press any key...", alignment=libtcodpy.CENTER)
+    draw_game_over(console, world)
     context.present(console)
     # Simple wait loop for game over
     while True:
@@ -991,21 +1312,26 @@ def handle_events(world, context) -> bool:
                 world.zoom_index += 1
             elif wheel_delta < 0 and world.zoom_index > 0:
                 world.zoom_index -= 1
-        if isinstance(event, tcod.event.MouseButtonDown) and world.game_state == "PLAYING":
-            camera_x, camera_y = _get_camera_origin(world)
-            mouse_world_x, mouse_world_y = _screen_to_world_position(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
+        if isinstance(event, tcod.event.MouseButtonDown):
+            # A click inside an open menu belongs to that menu. Anything
+            # else falls through to the world view underneath.
+            if handle_menu_mouse_click(event, world, context):
+                turn_taken = True
+            elif world.game_state == "PLAYING":
+                camera_x, camera_y = _get_camera_origin(world)
+                mouse_world_x, mouse_world_y = _screen_to_world_position(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
 
-            if event.button == tcod.event.MouseButton.RIGHT:
-                world.player.state.current_path = [] # Stop moving if interaction menu opens
-                open_interaction_menu(world, mouse_world_x, mouse_world_y)
-            elif event.button == tcod.event.MouseButton.LEFT and world.game_state == "PLAYING":
-                 # Calculate path for left click movement
-                 path = world.calculate_path(world.player.x, world.player.y, mouse_world_x, mouse_world_y)
-                 if path:
-                     # The path includes start position, so pop it if it's where we are
-                     if path and path[0] == (world.player.x, world.player.y):
-                         path.pop(0)
-                     world.player.state.current_path = path
+                if event.button == tcod.event.MouseButton.RIGHT:
+                    world.player.state.current_path = [] # Stop moving if interaction menu opens
+                    open_interaction_menu(world, mouse_world_x, mouse_world_y)
+                elif event.button == tcod.event.MouseButton.LEFT:
+                    # Calculate path for left click movement
+                    path = world.calculate_path(world.player.x, world.player.y, mouse_world_x, mouse_world_y)
+                    if path:
+                        # The path includes start position, so pop it if it's where we are
+                        if path and path[0] == (world.player.x, world.player.y):
+                            path.pop(0)
+                        world.player.state.current_path = path
 
         if isinstance(event, tcod.event.TextInput) and world.chat_ui_active:
             world.chat_ui_input_line += event.text
@@ -1049,4 +1375,7 @@ def handle_events(world, context) -> bool:
     return turn_taken
 
 if __name__ == "__main__":
-    main()
+    # main() returns a non-zero code when it cannot start (e.g. no
+    # renderer), so surface that as the process exit status rather than
+    # exiting 0 after printing an error.
+    sys.exit(main() or 0)

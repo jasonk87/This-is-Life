@@ -4,20 +4,25 @@ from tcod_compat import tcod
 import textwrap
 import itertools
 import math
+from typing import NamedTuple
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, MAP_WIDTH, MAP_HEIGHT, STATUS_PANEL_WIDTH,
-    MINIMAP_WIDTH, MINIMAP_HEIGHT, MINIMAP_X, MINIMAP_Y,
-    COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING, COLOR_CURSOR_INFO_TEXT,
+    COLOR_PLAYER_STATUS_WET, COLOR_PLAYER_STATUS_FREEZING,
     WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE, DAY_LENGTH_TICKS
 )
 from data.tiles import TILE_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
 from data.environment import WEATHER_DEFINITIONS
-from data.dawnlike import get_entity_sprite, _get_equipment_overlays, ITEM_SPRITES
+from data.dawnlike import get_entity_sprite, _get_equipment_overlays, _get_appearance_overlays, ITEM_SPRITES
 from entities.animal import Animal
 from engine import Player
 from rendering.sprite_atlas import ZOOMED_DAWNLIKE_LEVELS, zoomed_sprite_codepoint
+from rendering import lighting
+from rendering import ui_theme as theme
+from rendering import widgets
+from runtime_compat import np
+from presentation import message_log
 from presentation.ambient_speech import (
     format_ambient_speech_for_player,
     visible_ambient_speech_lines,
@@ -493,19 +498,16 @@ def _draw_item_icon(console, x, y, item_key, *, fg=(255, 255, 255)):
     return True
 
 
-QUALITY_ORDER = ("Poor", "Normal", "Fine", "Masterwork")
-QUALITY_TEXT_COLORS = {
-    "Poor": (150, 150, 150),
-    "Normal": (255, 255, 255),
-    "Fine": (110, 220, 130),
-    "Masterwork": (255, 195, 60),
-}
+# Re-exported from ui_theme so the palette has a single definition; both
+# names are kept because callers (and tests) already reference them here.
+QUALITY_ORDER = theme.QUALITY_ORDER
+QUALITY_TEXT_COLORS = theme.QUALITY_COLORS
 
 
 def _quality_text_color(quality):
     """Return the display color for an item's quality tier, defaulting to
     the Normal-tier color for unrecognized or missing values."""
-    return QUALITY_TEXT_COLORS.get(quality, QUALITY_TEXT_COLORS["Normal"])
+    return theme.quality_color(quality)
 
 
 def _get_trade_row_item_reference(world, item_key, *, selling):
@@ -573,9 +575,13 @@ def _draw_entities(console, world, camera_x, camera_y):
             if rect is not None and _draw_zoomed_sprite(console, world, rect, sprite, fg=sprite_fg):
                 zoomed = True
 
-            # Stamp equipment overlays on top of the base sprite
+            # Stamp appearance (hair/facial hair) and equipment overlays on
+            # top of the base sprite, merged into one z-ordered pass so
+            # draw order stays correct across both categories (e.g. a
+            # z=1 headwear item painting after a z=0 body-armor item).
             if not getattr(getattr(entity, "physical", None), "is_dead", False):
-                overlays = _get_equipment_overlays(entity)
+                overlays = _get_appearance_overlays(entity) + _get_equipment_overlays(entity)
+                overlays.sort(key=lambda entry: entry[3])
                 if overlays and rect is not None:
                     overlay_fg = (210, 210, 220)
                     for overlay_codepoint, ax, ay, _az in overlays:
@@ -829,23 +835,11 @@ def _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, panel_y, pa
         y += 1
     return y
 
-def _draw_meter(console, x, y, width, label, value, maximum, fill_color, empty_color):
-    maximum = max(1, maximum)
-    safe_width = max(10, width - len(label) - len(f"{value}/{maximum}") - 4)
-    filled_width = int(safe_width * max(0.0, min(1.0, value / maximum)))
-    meter = "#" * filled_width + "-" * (safe_width - filled_width)
-    console.print(x=x, y=y, string=f"{label} {meter}", fg=(210, 210, 210))
-    if filled_width > 0:
-        console.print(x=x + len(label) + 1, y=y, string="#" * filled_width, fg=fill_color)
-    if filled_width < safe_width:
-        console.print(x=x + len(label) + 1 + filled_width, y=y, string="-" * (safe_width - filled_width), fg=empty_color)
-    console.print(x=x + width - len(f"{value}/{maximum}"), y=y, string=f"{value}/{maximum}", fg=(255, 255, 255))
-
-def _draw_mini_health_bar(console, x, y, width, value, maximum, fill_color=(255, 90, 90), empty_color=(70, 25, 25)):
+def _draw_mini_health_bar(console, x, y, width, value, maximum, colors=theme.METER_ENTITY_HP):
     """Draw a compact, label-less HP bar for overhead display above an
     entity in the world view.
 
-    Unlike _draw_meter (used in the status panel, where there's room for a
+    Unlike widgets.meter (used in the status panel, where there's room for a
     text label and a numeric "value/max" readout), this is stamped directly
     above a tile-sized sprite, so it's just a row of filled/empty cells.
     """
@@ -855,10 +849,14 @@ def _draw_mini_health_bar(console, x, y, width, value, maximum, fill_color=(255,
     if value > 0:
         filled_width = max(1, filled_width)  # any remaining HP shows at least a sliver
     filled_width = min(width, filled_width)
+    fill_color, track_color = colors
     if filled_width > 0:
-        console.print(x=x, y=y, string="#" * filled_width, fg=fill_color)
+        console.print(x=x, y=y, string=theme.BAR_CELL * filled_width, fg=fill_color)
     if filled_width < width:
-        console.print(x=x + filled_width, y=y, string="-" * (width - filled_width), fg=empty_color)
+        console.print(
+            x=x + filled_width, y=y,
+            string=theme.BAR_CELL * (width - filled_width), fg=track_color,
+        )
 
 
 def _pulse(world, speed=14.0, low=0.55, high=1.0, phase=0.0):
@@ -934,17 +932,55 @@ def _get_focus_target(world, camera_x, camera_y):
 
     return focus
 
-def _get_log_color(message):
-    lowered = message.lower()
-    if "quest" in lowered or "objective" in lowered:
-        return (255, 215, 120)
-    if any(word in lowered for word in ["attack", "damage", "hostile", "threat", "freezing", "burning"]):
-        return (255, 140, 140)
-    if any(word in lowered for word in ["hello", "says", "trade", "talk"]):
-        return (170, 210, 255)
-    if any(word in lowered for word in ["gain", "equip", "craft", "harvest", "picked up"]):
-        return (180, 235, 180)
-    return (225, 225, 225)
+LOG_PANEL_HEIGHT = 6
+LOG_VISIBLE_LINES = LOG_PANEL_HEIGHT - 2
+
+
+def _get_log_entries(world):
+    """The log's display model, tolerating worlds that only have the plain
+    string list (older saves, and the minimal fakes used in tests)."""
+    entries = getattr(world, "chat_log_entries", None)
+    if entries:
+        return entries
+    return message_log.entries_from_plain_log(getattr(world, "chat_log", []) or [])
+
+
+def _draw_log_panel(console, world):
+    """Draw the message log docked along the bottom of the world view.
+
+    Older lines are dimmed by age rather than being all one brightness, so
+    the eye lands on what just happened; the player can scroll back through
+    the history with PageUp/PageDown.
+    """
+    y = SCREEN_HEIGHT - LOG_PANEL_HEIGHT
+    _draw_chatter_panel(console, world, y)
+
+    entries = _get_log_entries(world)
+    scroll = max(0, min(int(getattr(world, "chat_log_scroll", 0)),
+                        max(0, len(entries) - LOG_VISIBLE_LINES)))
+
+    title = "Log" if scroll == 0 else f"Log (-{scroll})"
+    widgets.panel(console, 0, y, MAP_WIDTH, LOG_PANEL_HEIGHT, title=title, bg=theme.LOG_BG)
+
+    end = len(entries) - scroll
+    visible = entries[max(0, end - LOG_VISIBLE_LINES):end]
+    current_tick = getattr(world, "game_time", 0)
+    for index, entry in enumerate(visible):
+        color = _dim_color(
+            theme.log_color(entry.category),
+            message_log.fade_ratio(entry, current_tick),
+        )
+        console.print(
+            x=1, y=y + 1 + index,
+            string=entry.display_text()[:MAP_WIDTH - 2],
+            fg=color,
+        )
+
+    if scroll > 0:
+        console.print(x=MAP_WIDTH - 2, y=y + 1, string=theme.ARROW_UP, fg=theme.TEXT_MUTED)
+    if scroll < max(0, len(entries) - LOG_VISIBLE_LINES):
+        console.print(x=MAP_WIDTH - 2, y=y + LOG_PANEL_HEIGHT - 2,
+                      string=theme.ARROW_DOWN, fg=theme.TEXT_MUTED)
 
 def _draw_focus_badge(console, world, focus, camera_x, camera_y):
     if focus["x"] is None or focus["y"] is None:
@@ -1105,14 +1141,12 @@ def _draw_chatter_panel(console, world, panel_y):
         y += 1
     return y
 
-def _light_radius_for_world(world):
-    return max(3, int(getattr(world, "current_fov_radius", 15)))
-
-
-# Subtle per-channel color wash applied on top of the existing brightness
-# dimming in _apply_lighting_and_depth, keyed by world.current_light_level_name:
-# a cool/blue cast at night, a warm/orange cast at dawn and dusk. DAY and any
-# unrecognized light level name are left neutral (no tint).
+# Per-channel color wash for the time of day, keyed by
+# world.current_light_level_name: a cool/blue cast at night, a warm/orange
+# cast at dawn and dusk. DAY and any unrecognized light level name are left
+# neutral. _apply_lighting_and_depth blends this toward a nearby fire's own
+# color where one is lighting the cell, so firelight overrides the ambient
+# wash rather than being tinted by it.
 LIGHT_LEVEL_TINTS = {
     "DAWN": (1.12, 1.0, 0.88),
     "DUSK": (1.15, 0.95, 0.85),
@@ -1134,43 +1168,154 @@ def _tint_for_light_level(color, light_level_name):
     return _clamp_color((color[0] * r_mult, color[1] * g_mult, color[2] * b_mult))
 
 
+def _view_coordinate_arrays(world, camera_x, camera_y, console_width, console_height):
+    """World coordinate of every console column and row, as two arrays.
+
+    At zoom > 1 several console cells map to the same world tile, which is
+    exactly what the integer division reproduces - the same mapping
+    `_screen_to_world` does one cell at a time.
+    """
+    zoom = _get_zoom_factor(world)
+    columns = camera_x + (np.arange(console_width) // zoom).astype(np.int32)
+    rows = camera_y + (np.arange(console_height) // zoom).astype(np.int32)
+    return columns, rows
+
+
+def _view_masks(world, columns, rows):
+    """Visibility and sight-blocking masks for the view, shaped (H, W).
+
+    Both come from one pass at *tile* resolution rather than console-cell
+    resolution: at zoom 3 the same world tile covers a 3x3 block of cells,
+    so querying per cell asks the world the same question nine times. The
+    small per-tile results are then expanded back out to cell resolution
+    with an index lookup, which is the part that vectorizes.
+
+    Visibility still goes through `is_visible` so this shares one definition
+    with the rest of the renderer instead of reaching into the FOV map
+    directly and quietly diverging from it.
+    """
+    unique_x = np.unique(columns)
+    unique_y = np.unique(rows)
+    tile_visible = np.zeros((len(unique_y), len(unique_x)), dtype=bool)
+    tile_blocking = np.zeros_like(tile_visible)
+
+    get_tile_at = getattr(world, "get_tile_at", None)
+    for row_index, world_y in enumerate(unique_y):
+        if not (0 <= world_y < WORLD_HEIGHT):
+            continue
+        for col_index, world_x in enumerate(unique_x):
+            if not (0 <= world_x < WORLD_WIDTH):
+                continue
+            if not is_visible(world, int(world_x), int(world_y)):
+                continue
+            tile_visible[row_index, col_index] = True
+            if get_tile_at is None:
+                continue
+            tile = get_tile_at(int(world_x), int(world_y))
+            if tile is not None and getattr(tile, "blocks_fov", False):
+                tile_blocking[row_index, col_index] = True
+
+    col_lookup = np.searchsorted(unique_x, columns)
+    row_lookup = np.searchsorted(unique_y, rows)
+    expand = np.ix_(row_lookup, col_lookup)
+    return tile_visible[expand], tile_blocking[expand]
+
+
+def _light_level_tint_array(light_level_name):
+    multipliers = LIGHT_LEVEL_TINTS.get(light_level_name)
+    if multipliers is None:
+        return np.ones(3, dtype=np.float32)
+    return np.asarray(multipliers, dtype=np.float32)
+
+
 def _apply_lighting_and_depth(console, world, camera_x, camera_y):
-    light_radius = _light_radius_for_world(world)
+    """Shade the world view by ambient light, local light sources and depth.
+
+    Runs as whole-array numpy operations over the map area rather than a
+    per-cell Python loop, which is what makes room for the light-source
+    pass without costing frame time.
+    """
     light_level_name = getattr(world, "current_light_level_name", "DAY")
+    ambient = lighting.ambient_for_light_level(light_level_name)
+
     console_height = min(MAP_HEIGHT, getattr(console, "height", MAP_HEIGHT), console.bg.shape[0], console.fg.shape[0])
     console_width = min(MAP_WIDTH, getattr(console, "width", MAP_WIDTH), console.bg.shape[1], console.fg.shape[1])
+    if console_height <= 0 or console_width <= 0:
+        return
 
-    for y in range(console_height):
-        _, map_y = _screen_to_world(world, camera_x, camera_y, 0, y)
-        if not (0 <= map_y < WORLD_HEIGHT):
-            continue
-        for x in range(console_width):
-            map_x, map_y = _screen_to_world(world, camera_x, camera_y, x, y)
-            if not (0 <= map_x < WORLD_WIDTH):
-                continue
-            if not is_visible(world, map_x, map_y):
-                continue
+    columns, rows = _view_coordinate_arrays(world, camera_x, camera_y, console_width, console_height)
+    visible, blocking = _view_masks(world, columns, rows)
+    if not visible.any():
+        return
 
-            tile = world.get_tile_at(map_x, map_y)
-            if tile is None:
-                continue
+    # --- Local light sources -------------------------------------------
+    strength = np.zeros((console_height, console_width), dtype=np.float32)
+    warm = np.zeros_like(strength)
+    warm_tint = np.zeros((console_height, console_width, 3), dtype=np.float32)
+    if ambient < 1.0:
+        padding = lighting.MAX_LIGHT_RADIUS
+        view_bounds = (
+            int(columns[0]) - padding, int(rows[0]) - padding,
+            int(columns[-1]) + padding, int(rows[-1]) + padding,
+        )
+        sources = lighting.collect_light_sources(world, view_bounds)
+        get_tile_at = getattr(world, "get_tile_at", None)
+        if get_tile_at is not None:
+            tile_bounds = (int(columns[0]), int(rows[0]), int(columns[-1]), int(rows[-1]))
+            sources += lighting.collect_tile_light_sources(world, tile_bounds, get_tile_at=get_tile_at)
+        strength, warm, warm_tint = lighting.build_light_map(sources, columns, rows, ambient)
 
-            dist = max(abs(world.player.x - map_x), abs(world.player.y - map_y))
-            falloff = max(0.28, 1.0 - max(0, dist - 1) / max(4, light_radius + 2))
-            edge_falloff = 0.92 - (0.12 * max(x / max(1, MAP_WIDTH - 1), y / max(1, MAP_HEIGHT - 1)))
-            light_strength = max(0.2, min(1.0, falloff * edge_falloff))
-            dimmed_fg = _dim_color(tuple(console.fg[y, x]), 0.65 + (0.45 * light_strength))
-            dimmed_bg = _dim_color(tuple(console.bg[y, x]), 0.55 + (0.5 * light_strength))
-            console.fg[y, x] = _tint_for_light_level(dimmed_fg, light_level_name)
-            console.bg[y, x] = _tint_for_light_level(dimmed_bg, light_level_name)
+    # --- Depth cue ------------------------------------------------------
+    # A gentle vignette toward the bottom-right keeps the view from reading
+    # as a flat sheet; it was in the original per-cell code as edge_falloff.
+    edge_x = np.arange(console_width, dtype=np.float32) / max(1, MAP_WIDTH - 1)
+    edge_y = np.arange(console_height, dtype=np.float32) / max(1, MAP_HEIGHT - 1)
+    edge = 0.92 - (0.12 * np.maximum(edge_x[np.newaxis, :], edge_y[:, np.newaxis]))
 
-            if getattr(tile, "blocks_fov", False):
-                for shadow_dx, shadow_dy in ((1, 0), (0, 1), (1, 1)):
-                    sx = x + shadow_dx
-                    sy = y + shadow_dy
-                    if 0 <= sx < console_width and 0 <= sy < console_height:
-                        shadowed_bg = _dim_color(tuple(console.bg[sy, sx]), 0.75)
-                        console.bg[sy, sx] = _tint_for_light_level(shadowed_bg, light_level_name)
+    light = np.clip((ambient + (1.0 - ambient) * strength) * edge, 0.12, 1.0)
+
+    fg_scale = 0.55 + (0.45 * light)
+    bg_scale = 0.45 + (0.55 * light)
+
+    level_tint = _light_level_tint_array(light_level_name)
+    # Where a warm source dominates, blend the cool night wash toward that
+    # source's color - this is what makes firelight read as fire rather
+    # than as "slightly less dark".
+    blend = np.clip(warm, 0.0, 1.0)[..., np.newaxis]
+    warm_normalized = np.where(
+        warm[..., np.newaxis] > 0,
+        warm_tint / 255.0 * 1.35,
+        1.0,
+    ).astype(np.float32)
+    tint = (level_tint[np.newaxis, np.newaxis, :] * (1.0 - blend)) + (warm_normalized * blend)
+
+    fg = console.fg[:console_height, :console_width].astype(np.float32)
+    bg = console.bg[:console_height, :console_width].astype(np.float32)
+    lit_fg = np.clip(fg * fg_scale[..., np.newaxis] * tint, 0, 255)
+    lit_bg = np.clip(bg * bg_scale[..., np.newaxis] * tint, 0, 255)
+
+    mask = visible[..., np.newaxis]
+    console.fg[:console_height, :console_width] = np.where(mask, lit_fg, fg).astype(console.fg.dtype)
+    console.bg[:console_height, :console_width] = np.where(mask, lit_bg, bg).astype(console.bg.dtype)
+
+    # --- Contact shadows -------------------------------------------------
+    # Shift the blocking mask one cell down/right/diagonal and darken what
+    # lands under it, the vectorized form of the original triple-offset loop.
+    blocking = blocking & visible
+    if blocking.any():
+        shadow = np.zeros_like(blocking)
+        shadow[:, 1:] |= blocking[:, :-1]
+        shadow[1:, :] |= blocking[:-1, :]
+        shadow[1:, 1:] |= blocking[:-1, :-1]
+        shadow &= visible
+        shadow &= ~blocking
+        if shadow.any():
+            shadowed = console.bg[:console_height, :console_width].astype(np.float32) * 0.75
+            console.bg[:console_height, :console_width] = np.where(
+                shadow[..., np.newaxis],
+                np.clip(shadowed, 0, 255),
+                console.bg[:console_height, :console_width],
+            ).astype(console.bg.dtype)
 
 def _entity_shows_health_bar(entity, focused_entity):
     """True if _draw_entity_health_bars would draw a bar for this entity
@@ -1329,205 +1474,228 @@ def _draw_world_markers(console, world, camera_x, camera_y):
                 console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
                 marked += 1
 
+STATUS_LEGEND_ROWS = 6
+
+
+class _PanelCursor:
+    """Top-down write cursor for the status column, with a hard bottom stop.
+
+    The panel's sections vary in height - status effects, nearby entities
+    and quest objectives all grow with world state - while the legend is
+    pinned to the bottom of the column. The previous code advanced a bare
+    `y += 1` with no idea how much room was left, so a frame with several
+    alerts and a full quest simply drew straight through the legend.
+
+    This makes the remaining budget explicit: a section asks whether it has
+    room for the rows it needs, and is skipped whole rather than drawn on
+    top of something else.
+    """
+
+    def __init__(self, console, x, y, width, limit):
+        self.console = console
+        self.x = x
+        self.y = y
+        self.width = width
+        self.limit = limit
+
+    @property
+    def remaining(self):
+        return max(0, self.limit - self.y)
+
+    def fits(self, rows=1):
+        return self.remaining >= rows
+
+    def blank(self, rows=1):
+        self.y = min(self.limit, self.y + rows)
+
+    def heading(self, text):
+        if not self.fits():
+            return False
+        self.y = widgets.heading(self.console, self.x, self.y, text)
+        return True
+
+    def line(self, text, *, color=None, indent=0):
+        if not self.fits():
+            return False
+        self.y = widgets.text_line(
+            self.console, self.x + indent, self.y, text,
+            color=color, width=self.width - indent,
+        )
+        return True
+
+    def meter(self, label, value, maximum, colors):
+        if not self.fits():
+            return False
+        self.y = widgets.meter(self.console, self.x, self.y, self.width, label, value, maximum, colors)
+        return True
+
+
+def _hunger_meter_colors(ratio):
+    """Hunger climbs toward max, so a *high* ratio is the dangerous end."""
+    if ratio > 0.8:
+        return theme.METER_HUNGER_CRIT
+    if ratio > 0.5:
+        return theme.METER_HUNGER_WARN
+    return theme.METER_HUNGER_OK
+
+
+def _thirst_meter_colors(ratio):
+    if ratio > 0.8:
+        return theme.METER_THIRST_CRIT
+    if ratio > 0.5:
+        return theme.METER_THIRST_WARN
+    return theme.METER_THIRST_OK
+
+
+def _status_effect_color(effect):
+    if effect == "Wet":
+        return COLOR_PLAYER_STATUS_WET
+    if effect == "Freezing":
+        return COLOR_PLAYER_STATUS_FREEZING
+    if effect == "Overheating":
+        return (255, 100, 0)
+    return theme.TEXT
+
+
+def _draw_status_legend(console, panel_x, panel_width):
+    """Draw the glyph legend pinned to the bottom of the status column."""
+    y = SCREEN_HEIGHT - 1 - STATUS_LEGEND_ROWS - 1
+    widgets.heading(console, panel_x + 1, y, "Legend")
+    rows = [
+        ("@ You", (255, 245, 140)),
+        ("! hostile  ? quest", theme.INFO),
+        ("$ trader   * loot", theme.SUCCESS),
+        ("Pulse = focus", theme.TEXT_DIM),
+        ("E/T act  + civic", theme.TEXT_DIM),
+    ]
+    for offset, (text, color) in enumerate(rows, start=1):
+        console.print(x=panel_x + 2, y=y + offset, string=text[: panel_width - 3], fg=color)
+    return y
+
+
+def _draw_status_quest_section(cursor, world):
+    """Draw the tracked-quest block. Returns False if there was no room."""
+    active_quests = list(world.player.knowledge.active_quests.values())
+    if not active_quests:
+        if not cursor.fits(2):
+            return False
+        cursor.heading("Active Quest")
+        cursor.line("Explore and talk", color=theme.TEXT_MUTED, indent=1)
+        return True
+
+    quest = active_quests[0]
+    title_lines = textwrap.wrap(str(quest['title']), width=cursor.width)
+    # heading + title + objective + optional "more" line
+    needed = 1 + len(title_lines) + 1 + (1 if len(active_quests) > 1 else 0)
+    if not cursor.fits(needed):
+        return False
+
+    cursor.heading("Active Quest")
+    for line in title_lines:
+        cursor.line(line, color=theme.INFO)
+
+    if quest["type"] == "fetch":
+        item_key = quest["item_to_fetch_key"]
+        required = quest["item_fetch_count"]
+        # inventory is an Inventory (item_key -> total count), so a plain
+        # get() already gives the aggregate quantity.
+        current = world.player.economic.inventory.get(item_key, 0)
+        item_name = ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)
+        cursor.line(
+            f"Fetch {item_name}: {current}/{required}",
+            color=theme.SUCCESS if current >= required else theme.TEXT_DIM,
+            indent=1,
+        )
+    elif quest["type"] == "kill":
+        required = quest.get("target_count", 1)
+        current = quest.get("progress", 0)
+        cursor.line(
+            f"Targets Defeated: {current}/{required}",
+            color=theme.SUCCESS if current >= required else theme.TEXT_DIM,
+            indent=1,
+        )
+
+    if len(active_quests) > 1:
+        cursor.line(f"+ {len(active_quests) - 1} more (Q)", color=theme.TEXT_MUTED)
+    return True
+
+
 def draw_status_panel(console, world, camera_x, camera_y):
     """Draws the status panel on the right side of the screen."""
     panel_x = MAP_WIDTH
     panel_width = STATUS_PANEL_WIDTH
     focus = _get_focus_target(world, camera_x, camera_y)
-    console.draw_frame(
-        x=panel_x, y=0, width=panel_width, height=SCREEN_HEIGHT,
-        title="Field Guide", clear=True, fg=(255, 255, 255), bg=(8, 10, 16)
+    widgets.panel(
+        console, panel_x, 0, panel_width, SCREEN_HEIGHT,
+        title="Field Guide", bg=theme.PANEL_BG_DEEP,
     )
 
-    y = 2
-    time_str = _format_world_clock(world.game_time)
-    season = world.seasons[world.current_season_index]
-    weather = world.weather.replace("_", " ").title()
+    legend_top = _draw_status_legend(console, panel_x, panel_width)
+    cursor = _PanelCursor(console, panel_x + 1, 2, panel_width - 3, legend_top - 1)
+
     standing_on, focus_target = _get_focus_summary(world)
-    bar_width = panel_width - 3
-    panel_inner = panel_width - 2
+    cursor.heading("Scene")
+    cursor.line(_format_world_clock(world.game_time), color=theme.TEXT_DIM)
+    cursor.line(
+        f"{world.seasons[world.current_season_index]} / {world.weather.replace('_', ' ').title()}",
+        color=theme.INFO,
+    )
+    cursor.line(f"Standing: {standing_on}", color=theme.SUCCESS)
+    cursor.line(f"Focus: {focus['label'] or focus_target}", color=theme.WARNING)
 
-    console.print(x=panel_x + 1, y=y, string="Scene", fg=(255, 215, 120))
-    y += 1
-    console.print(x=panel_x + 1, y=y, string=time_str, fg=(220, 220, 220))
-    y += 1
-    console.print(x=panel_x + 1, y=y, string=f"{season} / {weather}", fg=(140, 170, 255))
-    y += 1
-    console.print(x=panel_x + 1, y=y, string=f"Standing: {standing_on}"[:panel_inner], fg=(180, 220, 180))
-    y += 1
-    if focus["label"]:
-        focus_line = f"Focus: {focus['label']}"
-    else:
-        focus_line = f"Focus: {focus_target}"
-    console.print(x=panel_x + 1, y=y, string=focus_line[:panel_inner], fg=(255, 210, 150))
-    y += 1
-    hover_y = _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, y, panel_width)
-    if hover_y > y:
-        y = hover_y + 1
-    else:
-        y += 1
+    hover_y = _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, cursor.y, panel_width)
+    cursor.y = (hover_y + 1) if hover_y > cursor.y else (cursor.y + 1)
 
-    y = _draw_minimap_panel(console, world, panel_x, y, panel_width, 12) + 1
+    if cursor.fits(13):
+        cursor.y = _draw_minimap_panel(console, world, panel_x, cursor.y, panel_width, 12) + 1
 
-    if getattr(world, "show_autonomy_overlay", False):
-        console.print(x=panel_x + 1, y=y, string="Autonomy Audit", fg=(255, 100, 255))
-        y += 1
+    if getattr(world, "show_autonomy_overlay", False) and cursor.fits(5):
         counters = getattr(world, "autonomy_counters", {})
-        console.print(x=panel_x + 2, y=y, string=f"Vis/Act: {counters.get('visible', 0)}/{counters.get('active', 0)}"[:panel_inner], fg=(200, 200, 200))
-        y += 1
-        console.print(x=panel_x + 2, y=y, string=f"Path/Mov: {counters.get('with_path', 0)}/{counters.get('moved', 0)}"[:panel_inner], fg=(200, 200, 200))
-        y += 1
-        console.print(x=panel_x + 2, y=y, string=f"Idle/Wrk: {counters.get('idle', 0)}/{counters.get('at_work_home', 0)}"[:panel_inner], fg=(200, 200, 200))
-        y += 1
-        console.print(x=panel_x + 2, y=y, string=f"Wait/Fail: {counters.get('in_timed_activity', 0)}/{counters.get('blocked_path_failed', 0)}"[:panel_inner], fg=(200, 200, 200))
-        y += 1
+        cursor.heading("Autonomy Audit")
+        cursor.line(f"Vis/Act: {counters.get('visible', 0)}/{counters.get('active', 0)}", indent=1, color=theme.TEXT_DIM)
+        cursor.line(f"Path/Mov: {counters.get('with_path', 0)}/{counters.get('moved', 0)}", indent=1, color=theme.TEXT_DIM)
+        cursor.line(f"Idle/Wrk: {counters.get('idle', 0)}/{counters.get('at_work_home', 0)}", indent=1, color=theme.TEXT_DIM)
+        cursor.line(f"Wait/Fail: {counters.get('in_timed_activity', 0)}/{counters.get('blocked_path_failed', 0)}", indent=1, color=theme.TEXT_DIM)
 
-    console.print(x=panel_x + 1, y=y, string="Vitals", fg=(255, 215, 120))
-    y += 1
-    _draw_meter(console, panel_x + 1, y, bar_width, "HP", world.player.combat.hp, world.player.combat.max_hp, (255, 90, 90), (90, 35, 35))
-    y += 1
+    physical = world.player.physical
+    if cursor.fits(4):
+        cursor.heading("Vitals")
+        cursor.meter("HP", world.player.combat.hp, world.player.combat.max_hp, theme.METER_HP)
+        hunger_ratio = min(1.0, physical.hunger / max(1, physical.max_hunger))
+        cursor.meter("HU", int(physical.hunger), int(physical.max_hunger), _hunger_meter_colors(hunger_ratio))
+        thirst_ratio = min(1.0, physical.thirst / max(1, physical.max_thirst))
+        cursor.meter("TH", int(physical.thirst), int(physical.max_thirst), _thirst_meter_colors(thirst_ratio))
+        cursor.blank()
 
-    hunger_pct = min(1.0, world.player.physical.hunger / max(1, world.player.physical.max_hunger))
-    hunger_color = (0, 255, 0)
-    if hunger_pct > 0.5:
-        hunger_color = (255, 255, 0)
-    if hunger_pct > 0.8:
-        hunger_color = (255, 0, 0)
-    _draw_meter(
-        console, panel_x + 1, y, bar_width, "HU",
-        int(world.player.physical.hunger), int(world.player.physical.max_hunger),
-        hunger_color, (72, 72, 20)
-    )
-    y += 1
+    if physical.status_effects and cursor.fits(1 + len(physical.status_effects)):
+        cursor.heading("Alerts")
+        for effect in physical.status_effects:
+            cursor.line(f"! {effect}", color=_status_effect_color(effect), indent=1)
+        cursor.blank()
 
-    thirst_pct = min(1.0, world.player.physical.thirst / max(1, world.player.physical.max_thirst))
-    thirst_color = (0, 255, 255)
-    if thirst_pct > 0.5:
-        thirst_color = (0, 150, 255)
-    if thirst_pct > 0.8:
-        thirst_color = (0, 0, 255)
-    _draw_meter(
-        console, panel_x + 1, y, bar_width, "TH",
-        int(world.player.physical.thirst), int(world.player.physical.max_thirst),
-        thirst_color, (18, 28, 72)
-    )
-    y += 2
+    if _draw_status_quest_section(cursor, world):
+        cursor.blank()
 
-    if world.player.physical.status_effects:
-        console.print(x=panel_x + 1, y=y, string="Alerts", fg=(255, 215, 120))
-        y += 1
-        for effect in world.player.physical.status_effects:
-            color = (255, 255, 255)
-            if effect == "Wet":
-                color = COLOR_PLAYER_STATUS_WET
-            elif effect == "Freezing":
-                color = COLOR_PLAYER_STATUS_FREEZING
-            elif effect == "Overheating":
-                color = (255, 100, 0)
-            console.print(x=panel_x + 2, y=y, string=f"! {effect}"[:panel_width - 3], fg=color)
-            y += 1
-        y += 1
-
-    active_quests = list(world.player.knowledge.active_quests.values())
-    if active_quests:
-        console.print(x=panel_x + 1, y=y, string="[Active Quest]", fg=(255, 215, 0))
-        y += 1
-        quest = active_quests[0]
-        title_lines = textwrap.wrap(f"{quest['title']}", width=panel_width - 2)
-        for line in title_lines:
-            console.print(x=panel_x + 1, y=y, string=line, fg=(200, 240, 255))
-            y += 1
-
-        if quest["type"] == "fetch":
-            item_key = quest["item_to_fetch_key"]
-            req = quest["item_fetch_count"]
-            # world.player.economic.inventory is an Inventory (dict of
-            # item_key -> total count), so a plain get() already gives the
-            # aggregate quantity - no need to iterate instances here.
-            curr = world.player.economic.inventory.get(item_key, 0)
-
-            color = (0, 255, 0) if curr >= req else (220, 220, 220)
-            console.print(x=panel_x + 2, y=y, string=f"Fetch {ITEM_DEFINITIONS.get(item_key, {}).get('name', item_key)}: {curr}/{req}", fg=color)
-            y += 1
-        elif quest["type"] == "kill":
-            req = quest.get("target_count", 1)
-            curr = quest.get("progress", 0)
-            color = (0, 255, 0) if curr >= req else (220, 220, 220)
-            console.print(x=panel_x + 2, y=y, string=f"Targets Defeated: {curr}/{req}", fg=color)
-            y += 1
-
-        if len(active_quests) > 1:
-            console.print(x=panel_x + 1, y=y, string=f"+ {len(active_quests)-1} more (Q)", fg=(100, 100, 100))
-            y += 1
-    else:
-        console.print(x=panel_x + 1, y=y, string="[Active Quest]", fg=(255, 215, 0))
-        y += 1
-        console.print(x=panel_x + 2, y=y, string="Explore and talk", fg=(160, 160, 160))
-        y += 2
-
-    console.print(x=panel_x + 1, y=y, string="Nearby", fg=(255, 215, 120))
-    y += 1
     nearby_entities = _get_visible_nearby_entities(world, limit=4)
-    if not nearby_entities:
-        console.print(x=panel_x + 2, y=y, string="None visible", fg=(120, 120, 120))
-        y += 1
-    else:
-        for distance, entity in nearby_entities:
-            label = "Animal" if isinstance(entity, Animal) else "NPC"
-            entity_name = world.get_entity_display_name(entity, include_relationship=True)
-            console.print(x=panel_x + 2, y=y, string=f"{distance}t {label}: {entity_name}"[:panel_width - 3], fg=(200, 200, 200))
-            y += 1
+    if cursor.fits(2):
+        cursor.heading("Nearby")
+        if not nearby_entities:
+            cursor.line("None visible", color=theme.TEXT_MUTED, indent=1)
+        else:
+            for distance, entity in nearby_entities:
+                label = "Animal" if isinstance(entity, Animal) else "NPC"
+                entity_name = world.get_entity_display_name(entity, include_relationship=True)
+                cursor.line(f"{distance}t {label}: {entity_name}", color=theme.TEXT_DIM, indent=1)
+        cursor.blank()
 
-    y += 1
-    console.print(x=panel_x + 1, y=y, string="Reputation", fg=(255, 215, 120))
-    y += 1
-    shown_rep = False
-    for faction, rep in world.player.social.reputation.items():
-        if rep != 0:
-            shown_rep = True
-            console.print(x=panel_x + 2, y=y, string=f"{faction[:3].upper()}: {rep}"[:panel_width - 3], fg=(200, 200, 200))
-            y += 1
-    if not shown_rep:
-        console.print(x=panel_x + 2, y=y, string="Neutral", fg=(120, 120, 120))
-        y += 1
-
-    controls_y = SCREEN_HEIGHT - 8
-    console.print(x=panel_x + 1, y=controls_y, string="Legend", fg=(255, 215, 120))
-    console.print(x=panel_x + 2, y=controls_y + 1, string="@ You", fg=(255, 245, 140))
-    console.print(x=panel_x + 2, y=controls_y + 2, string="! hostile  ? quest", fg=(170, 200, 255))
-    console.print(x=panel_x + 2, y=controls_y + 3, string="$ trader   * loot", fg=(170, 220, 170))
-    console.print(x=panel_x + 2, y=controls_y + 4, string="Pulse = focus", fg=(220, 220, 220))
-    console.print(x=panel_x + 2, y=controls_y + 5, string="E/T act  + civic", fg=(220, 220, 220))
-
-def draw_minimap(console, world):
-    """Draws a minimap in the corner of the screen."""
-    # Draw frame for the minimap
-    console.draw_frame(x=MINIMAP_X, y=MINIMAP_Y, width=MINIMAP_WIDTH, height=MINIMAP_HEIGHT,
-                       title="World Map", clear=True, fg=(255, 255, 255), bg=(0, 0, 0))
-
-    world_map = world.get_world_map_data() # This method needs to exist in World
-
-    for y in range(MINIMAP_HEIGHT - 2):
-        for x in range(MINIMAP_WIDTH - 2):
-            map_x = int((x / (MINIMAP_WIDTH - 2)) * world.chunk_width)
-            map_y = int((y / (MINIMAP_HEIGHT - 2)) * world.chunk_height)
-
-            if 0 <= map_y < world.chunk_height and 0 <= map_x < world.chunk_width:
-                tile_info = world_map[map_y][map_x]
-                char, color, bg_color = tile_info['char'], tile_info['color'], tile_info['bg_color']
-
-                console.print(x=MINIMAP_X + 1 + x, y=MINIMAP_Y + 1 + y, string=char, fg=color, bg=bg_color)
-
-    # Draw player position on minimap
-    player_map_x = int((world.player.x / world.width) * (MINIMAP_WIDTH - 2))
-    player_map_y = int((world.player.y / world.height) * (MINIMAP_HEIGHT - 2))
-    console.print(x=MINIMAP_X + 1 + player_map_x, y=MINIMAP_Y + 1 + player_map_y,
-                  string="@", fg=(255, 0, 0))
-
-
-def draw_cursor_info(console, world, camera_x, camera_y):
-    """Legacy no-op kept for compatibility; hover inspect now lives in the status panel."""
-    return
+    reputations = [(faction, rep) for faction, rep in world.player.social.reputation.items() if rep != 0]
+    if cursor.fits(2):
+        cursor.heading("Reputation")
+        if not reputations:
+            cursor.line("Neutral", color=theme.TEXT_MUTED, indent=1)
+        else:
+            for faction, rep in reputations:
+                cursor.line(f"{faction[:3].upper()}: {rep}", color=theme.TEXT_DIM, indent=1)
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
@@ -1760,12 +1928,7 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
     draw_weather_overlay(console, world, camera_x, camera_y)
 
     # Draw chat log at the bottom
-    y = SCREEN_HEIGHT - 6
-    _draw_chatter_panel(console, world, y)
-    console.draw_frame(x=0, y=y, width=MAP_WIDTH, height=6, title="Log",
-                       clear=True, fg=(255, 255, 255), bg=(6, 8, 12))
-    for i, message in enumerate(world.chat_log[-4:]):
-        console.print(x=1, y=y + 1 + i, string=message[:MAP_WIDTH - 2], fg=_get_log_color(message))
+    _draw_log_panel(console, world)
 
 def draw_weather_overlay(console, world, camera_x, camera_y):
     """Draws a simple screen overlay based on the current weather."""
@@ -1803,17 +1966,72 @@ def draw_weather_overlay(console, world, camera_x, camera_y):
                     rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
                     _draw_zoomed_glyph(console, rect, char, fg=color)
 
+class MenuHitRegion(NamedTuple):
+    """Where a menu drew its selectable rows, and what was in them.
+
+    Mouse handling needs to turn a click position back into a list index,
+    and several menus size themselves from their content (the crafting menu
+    is as tall as it has recipes, up to a cap). Rather than recompute that
+    layout in the input handler - a second copy that would silently drift
+    from this one - each menu publishes what it actually drew, and
+    main._menu_mouse_binding looks it up by game_state.
+    """
+
+    region: object
+    scroll_offset: int
+    total: int
+
+    def index_at(self, mouse_x, mouse_y):
+        return self.region.index_at(mouse_x, mouse_y, self.scroll_offset, self.total)
+
+
+def _register_hit_region(world, key, region, *, scroll_offset=0, total=0):
+    """Publish a menu's drawn row area for mouse hit-testing."""
+    regions = getattr(world, "menu_hit_regions", None)
+    if not isinstance(regions, dict):
+        regions = {}
+        try:
+            world.menu_hit_regions = regions
+        except AttributeError:
+            return None
+    record = MenuHitRegion(region=region, scroll_offset=int(scroll_offset), total=int(total))
+    regions[key] = record
+    return record
+
+
+def _prepare_list(world, key, region, *, total, selected_index=0, scroll_offset=0):
+    """Settle a list's scroll position, publish its hit region, and find the
+    hovered row.
+
+    Doing all three together is what keeps them consistent: the hover
+    highlight, the click hit-test and the rows actually drawn all have to
+    agree on the same scroll offset, and list_view clamps it internally.
+    Clamping here first (idempotently) means every caller passes the same
+    settled value to all three.
+    """
+    if selected_index is not None:
+        scroll_offset = widgets.clamp_scroll(selected_index, scroll_offset, region.height)
+    scroll_offset = max(0, min(int(scroll_offset), max(0, int(total) - region.height)))
+    _register_hit_region(world, key, region, scroll_offset=scroll_offset, total=total)
+    hovered = region.index_at(
+        getattr(world, "mouse_x", None),
+        getattr(world, "mouse_y", None),
+        scroll_offset,
+        total,
+    )
+    return scroll_offset, hovered
+
+
 def draw_interaction_menu(console, world):
     """Draws the context-sensitive interaction menu."""
     ctx = world.interaction_context
     x, y = world.mouse_x, world.mouse_y
 
+    actions = ctx["available_actions"]
     # Find longest action to determine menu width
-    longest_action = 0
-    if ctx["available_actions"]:
-        longest_action = max(len(action) for action in ctx["available_actions"])
-    width = max(15, longest_action + 4)
-    height = len(ctx["available_actions"]) + 2
+    longest_action = max((len(action) for action in actions), default=0)
+    width = max(15, longest_action + 5)
+    height = len(actions) + 2
 
     # Adjust position to keep menu on screen
     if x + width > MAP_WIDTH:
@@ -1821,326 +2039,393 @@ def draw_interaction_menu(console, world):
     if y + height > MAP_HEIGHT:
         y = MAP_HEIGHT - height
 
-    console.draw_frame(x=x, y=y, width=width, height=height,
-                       title=f"Interact: {ctx['target_entities'][ctx['selected_entity_index']]['name']}",
-                       clear=True, fg=(255, 255, 255), bg=(50, 50, 50))
+    target_name = ctx['target_entities'][ctx['selected_entity_index']]['name']
+    widgets.panel(
+        console, x, y, width, height,
+        title=f"Interact: {target_name}", focused=True, bg=theme.PANEL_BG_RAISED,
+    )
 
-    for i, action in enumerate(ctx["available_actions"]):
-        text_color = (255, 255, 255)
-        if i == ctx["selected_action_index"]:
-            text_color = (0, 255, 255) # Highlight selected action
-        console.print(x=x + 1, y=y + 1 + i, string=action, fg=text_color)
+    region = widgets.ListRegion(x=x + 1, y=y + 1, width=width - 2, height=len(actions))
+    _, hovered = _prepare_list(world, "INTERACTION_MENU", region, total=len(actions),
+                               selected_index=ctx["selected_action_index"])
+    widgets.list_view(
+        console,
+        region,
+        [widgets.Row(text=action) for action in actions],
+        selected_index=ctx["selected_action_index"],
+        hovered_index=hovered,
+        show_scrollbar=False,
+    )
+
+def _draw_recipe_detail_panel(console, x, y, width, height, title, *, requirement_label, requirements, footer=None):
+    """Draw the side panel listing what a recipe needs.
+
+    Shared by the crafting and construction menus, which differ only in
+    where their ingredient list comes from and what the heading calls it.
+    Each requirement is (name, quantity, satisfied).
+    """
+    widgets.panel(console, x, y, width, height, title=title)
+    detail_y = y + theme.PAD_TOP
+    detail_y = widgets.heading(console, x + theme.PAD_X, detail_y, requirement_label)
+    for name, quantity, satisfied in requirements:
+        detail_y = widgets.text_line(
+            console, x + theme.PAD_X + 1, detail_y,
+            f"- {name}: {quantity}",
+            color=theme.TEXT if satisfied else theme.DANGER,
+            width=width - theme.PAD_X - 3,
+        )
+    if footer is not None:
+        footer_text, satisfied = footer
+        detail_y += 1
+        widgets.text_line(
+            console, x + theme.PAD_X, detail_y, footer_text,
+            color=theme.TEXT if satisfied else theme.DANGER,
+            width=width - (theme.PAD_X * 2),
+        )
+    return detail_y
+
 
 def draw_crafting_menu(console, world):
     """Draws the crafting menu UI."""
-    menu_width = 50
-    x = (MAP_WIDTH - menu_width) // 2
     all_recipes = world.crafting_menu_context.get("all_recipes", [])
     num_recipes = len(all_recipes)
-    menu_height = min(30, num_recipes + 4) # Limit height
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    geometry = widgets.centered_menu(50, min(30, max(6, num_recipes + 4)))
+    widgets.panel(console, *geometry, title="Crafting", focused=True)
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Crafting", clear=True)
+    region = geometry.list_region(top_offset=0, bottom_margin=2)
+    scroll_offset, hovered = _prepare_list(
+        world, "CRAFTING_MENU", region, total=num_recipes,
+        selected_index=world.crafting_menu_context.get("selected_recipe_index", 0),
+        scroll_offset=world.crafting_menu_context.get("scroll_offset", 0),
+    )
 
     if not all_recipes:
-        console.print_box(x=x+1, y=y+1, width=menu_width-2, height=menu_height-2,
-                          string="No recipes available.", fg=(128, 128, 128))
+        widgets.empty_state(console, region, "No recipes available.")
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Esc", "close")])
         return
 
     selected_index = world.crafting_menu_context.get("selected_recipe_index", 0)
-    scroll_offset = world.crafting_menu_context.get("scroll_offset", 0)
-    display_height = menu_height - 2
+    rows = []
+    for recipe_key in all_recipes:
+        item_def = TILE_DEFINITIONS.get(recipe_key, {})
+        rows.append(widgets.Row(
+            text=item_def.get("name", recipe_key),
+            enabled=world.player_can_craft(recipe_key),
+            icon_key=recipe_key,
+        ))
 
-    # Adjust scroll offset if selection is out of view
-    if selected_index < scroll_offset:
-        scroll_offset = selected_index
-    elif selected_index >= scroll_offset + display_height:
-        scroll_offset = selected_index - display_height + 1
-    world.crafting_menu_context["scroll_offset"] = scroll_offset
-
-    # Display recipes
-    for i in range(display_height):
-        list_index = scroll_offset + i
-        if list_index < num_recipes:
-            recipe_key = all_recipes[list_index]
-            item_def = TILE_DEFINITIONS.get(recipe_key, {}) # Using TILE_DEFINITIONS, assuming item defs are there.
-            item_name = item_def.get("name", recipe_key)
-            can_craft = world.player_can_craft(recipe_key)
-            color = (255, 255, 255) if can_craft else (128, 128, 128)
-            if list_index == selected_index:
-                color = (0, 255, 255)
-            row_y = y + 1 + i
-            icon_drawn = _draw_item_icon(console, x + 2, row_y, recipe_key)
-            text_x = x + 4 if icon_drawn else x + 2
-            console.print(x=text_x, y=row_y, string=item_name, fg=color)
+    world.crafting_menu_context["scroll_offset"] = widgets.list_view(
+        console,
+        region,
+        rows,
+        selected_index=selected_index,
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+        icon_drawer=_draw_item_icon,
+    )
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Up/Down", "select"), ("Enter", "craft"), ("Esc", "close")])
 
     # Display selected recipe details
     if 0 <= selected_index < num_recipes:
-        details_x = x + menu_width
-        details_width = 40
-        details_height = 20
-        console.draw_frame(x=details_x, y=y, width=details_width, height=details_height, title="Recipe Details", clear=True)
-
         selected_key = all_recipes[selected_index]
         item_def = TILE_DEFINITIONS.get(selected_key, {})
         recipe = item_def.get("crafting_recipe", {})
 
-        detail_y = y + 2
-        console.print(x=details_x + 2, y=detail_y, string=f"Requires:", fg=(255, 255, 0))
-        detail_y += 1
+        requirements = []
         for res_key, qty in recipe.items():
             res_def = TILE_DEFINITIONS.get(res_key, {})
-            res_name = res_def.get("name", res_key)
-            has_enough = world.player.has_item(res_key, qty)
-            color = (255, 255, 255) if has_enough else (255, 0, 0)
-            console.print(x=details_x + 3, y=detail_y, string=f"- {res_name}: {qty}", fg=color)
-            detail_y += 1
+            requirements.append((
+                res_def.get("name", res_key),
+                qty,
+                world.player.has_item(res_key, qty),
+            ))
 
         req_station = item_def.get("required_workstation")
+        footer = None
         if req_station:
-            detail_y += 1
-            is_near = world._is_player_near_workstation(req_station)
-            color = (255, 255, 255) if is_near else (255, 0, 0)
-            console.print(x=details_x + 2, y=detail_y, string=f"Needs: {req_station}", fg=color)
+            footer = (f"Needs: {req_station}", world._is_player_near_workstation(req_station))
+
+        _draw_recipe_detail_panel(
+            console, geometry.x + geometry.width, geometry.y, 40, 20,
+            "Recipe Details", requirement_label="Requires:",
+            requirements=requirements, footer=footer,
+        )
+
+def _construction_material_name(material_key):
+    """Display name for a build material, which may be defined as an item or
+    as a placeable tile depending on the material."""
+    item_def = ITEM_DEFINITIONS.get(material_key)
+    tile_def = TILE_DEFINITIONS.get(material_key)
+    return (
+        (item_def or {}).get("name")
+        or (tile_def or {}).get("name")
+        or material_key.replace("_", " ").title()
+    )
+
 
 def draw_building_menu(console, world):
     """Draws the building menu UI."""
-    menu_width = 50
-    x = (MAP_WIDTH - menu_width) // 2
     all_recipes = world.building_menu_context.get("all_recipes", [])
     num_recipes = len(all_recipes)
-    menu_height = min(30, num_recipes + 4)
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    geometry = widgets.centered_menu(50, min(30, max(6, num_recipes + 4)))
+    widgets.panel(console, *geometry, title="Construction", focused=True)
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Construction", clear=True)
+    region = geometry.list_region(top_offset=0, bottom_margin=2)
+    scroll_offset, hovered = _prepare_list(
+        world, "BUILDING_MENU", region, total=num_recipes,
+        selected_index=world.building_menu_context.get("selected_recipe_index", 0),
+        scroll_offset=world.building_menu_context.get("scroll_offset", 0),
+    )
 
     if not all_recipes:
-        console.print_box(x=x+1, y=y+1, width=menu_width-2, height=menu_height-2,
-                          string="No construction options.", fg=(128, 128, 128))
+        widgets.empty_state(console, region, "No construction options.")
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Esc", "close")])
         return
 
     selected_index = world.building_menu_context.get("selected_recipe_index", 0)
-    scroll_offset = world.building_menu_context.get("scroll_offset", 0)
-    display_height = menu_height - 2
+    rows = []
+    for recipe_key in all_recipes:
+        recipe = CONSTRUCTION_RECIPES.get(recipe_key, {})
+        can_build = all(
+            world.player.has_item(mat_key, mat_qty)
+            for mat_key, mat_qty in recipe.get("materials", {}).items()
+        )
+        rows.append(widgets.Row(text=recipe.get("name", recipe_key), enabled=can_build))
 
-    if selected_index < scroll_offset:
-        scroll_offset = selected_index
-    elif selected_index >= scroll_offset + display_height:
-        scroll_offset = selected_index - display_height + 1
-    world.building_menu_context["scroll_offset"] = scroll_offset
-
-    for i in range(display_height):
-        list_index = scroll_offset + i
-        if list_index < num_recipes:
-            recipe_key = all_recipes[list_index]
-            recipe = CONSTRUCTION_RECIPES.get(recipe_key, {})
-            name = recipe.get("name", recipe_key)
-
-            # Check if player has materials
-            can_build = True
-            for mat_key, mat_qty in recipe.get("materials", {}).items():
-                if not world.player.has_item(mat_key, mat_qty):
-                    can_build = False
-                    break
-
-            color = (255, 255, 255) if can_build else (128, 128, 128)
-            if list_index == selected_index:
-                color = (0, 255, 255)
-            console.print(x=x + 2, y=y + 1 + i, string=name, fg=color)
+    world.building_menu_context["scroll_offset"] = widgets.list_view(
+        console,
+        region,
+        rows,
+        selected_index=selected_index,
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+    )
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Up/Down", "select"), ("Enter", "build"), ("Esc", "close")])
 
     # Display details
     if 0 <= selected_index < num_recipes:
-        details_x = x + menu_width
+        recipe = CONSTRUCTION_RECIPES.get(all_recipes[selected_index], {})
+        details_x = geometry.x + geometry.width
         details_width = 40
-        details_height = 20
-        console.draw_frame(x=details_x, y=y, width=details_width, height=details_height, title="Build Details", clear=True)
-
-        selected_key = all_recipes[selected_index]
-        recipe = CONSTRUCTION_RECIPES.get(selected_key, {})
-
-        detail_y = y + 2
-        console.print(x=details_x + 2, y=detail_y, string=f"Materials:", fg=(255, 255, 0))
-        detail_y += 1
-        for mat_key, mat_qty in recipe.get("materials", {}).items():
-            item_def = ITEM_DEFINITIONS.get(mat_key)
-            tile_def = TILE_DEFINITIONS.get(mat_key)
-            mat_name = (
-                (item_def or {}).get("name")
-                or (tile_def or {}).get("name")
-                or mat_key.replace("_", " ").title()
-            )
-            has_enough = world.player.has_item(mat_key, mat_qty)
-            color = (255, 255, 255) if has_enough else (255, 0, 0)
-            console.print(x=details_x + 3, y=detail_y, string=f"- {mat_name}: {mat_qty}", fg=color)
-            detail_y += 1
+        requirements = [
+            (_construction_material_name(mat_key), mat_qty, world.player.has_item(mat_key, mat_qty))
+            for mat_key, mat_qty in recipe.get("materials", {}).items()
+        ]
+        detail_y = _draw_recipe_detail_panel(
+            console, details_x, geometry.y, details_width, 20,
+            "Build Details", requirement_label="Materials:", requirements=requirements,
+        )
 
         description = recipe.get("description", "")
         if description:
-            detail_y += 1
-            console.print_box(x=details_x + 2, y=detail_y, width=details_width-4, height=5, string=description, fg=(200, 200, 200))
+            console.print_box(
+                x=details_x + theme.PAD_X, y=detail_y + 1,
+                width=details_width - (theme.PAD_X * 2), height=5,
+                string=description, fg=theme.TEXT_DIM,
+            )
+
+def _noticeboard_row(world, notice_id):
+    """Build the display row for one noticeboard entry.
+
+    Returns None for notices whose backing task/blueprint has since been
+    resolved or removed, so stale ids are skipped rather than drawn blank.
+    """
+    if notice_id.startswith("job:"):
+        job_task = world.town_board.get_employment_task(notice_id.split(":", 1)[1])
+        if job_task is None:
+            return None
+        building = world.buildings_by_id.get(job_task.target_building_id)
+        building_name = str(getattr(building, "building_type", "Unknown")).replace("_", " ")
+        return widgets.Row(
+            text=f"JOB: {job_task.profession_role} @ {building_name} - {job_task.daily_wage}/day",
+            color=theme.INFO,
+        )
+    if notice_id.startswith("need:"):
+        need_id = notice_id.split(":", 1)[1]
+        need = next((n for n in getattr(world.town_board, "economic_needs", []) if n.id == need_id), None)
+        if need is None:
+            return None
+        return widgets.Row(text=f"NEED: {need.description}", color=theme.DANGER)
+
+    task = world.town_board.get_task(notice_id.split(":", 1)[1] if ":" in notice_id else notice_id)
+    if task is None:
+        return None
+    blueprint = world.blueprints_by_id.get(task.blueprint_id)
+    if blueprint is None:
+        return None
+    claimed = task.assigned_entity_id == world.player.id
+    status = "Claimed" if claimed else "Open"
+    return widgets.Row(
+        text=(
+            f"HAUL: {task.item_key.replace('_', ' ')} -> "
+            f"{blueprint.target_build.replace('_', ' ')} "
+            f"@ ({task.destination_x},{task.destination_y}) [{status}]"
+        ),
+        color=theme.HEADING if claimed else theme.TEXT,
+    )
+
+
+def _draw_noticeboard_post_job(console, world, geometry):
+    """Draw the 'post a job listing' sub-screen of the noticeboard."""
+    ctx = world.noticeboard_menu_context
+    building = world._get_job_posting_building()
+    role_options = world._get_job_posting_role_options(building)
+    selected_role_index = ctx.get("selected_role_index", 0)
+    selected_role = role_options[selected_role_index] if role_options else "No valid roles"
+    building_name = str(getattr(building, "building_type", "Unassigned")).replace("_", " ").title()
+
+    y = geometry.inner_y
+    y = widgets.heading(console, geometry.inner_x, y, "Post Job Listing")
+    y += 1
+    y = widgets.field(console, geometry.inner_x, y, "Business", building_name, width=geometry.inner_width)
+    y = widgets.field(console, geometry.inner_x, y, "Role", selected_role,
+                      width=geometry.inner_width, value_color=theme.SELECTION)
+    y = widgets.field(console, geometry.inner_x, y, "Daily Wage", f"{world.get_job_posting_wage()} coins",
+                      width=geometry.inner_width)
+    y += 1
+
+    y = widgets.heading(console, geometry.inner_x, y, "Available Roles:")
+    region = widgets.ListRegion(
+        x=geometry.inner_x + 2, y=y,
+        width=geometry.inner_width - 2,
+        height=max(0, geometry.hint_row - y),
+    )
+    _, hovered = _prepare_list(world, "NOTICEBOARD_ROLES", region,
+                               total=len(role_options), selected_index=selected_role_index)
+    widgets.list_view(
+        console, region,
+        [widgets.Row(text=role) for role in role_options],
+        selected_index=selected_role_index,
+        hovered_index=hovered,
+        show_cursor=False,
+    )
+    widgets.hint_bar(
+        console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+        [("Up/Down", "role"), ("Left/Right", "wage"), ("Tab", "building"),
+         ("Enter", "post"), ("Esc", "cancel")],
+    )
+
 
 def draw_noticeboard_menu(console, world):
     """Draw the TownBoard hauling notices and player-claimed tasks."""
-    menu_width = 66
-    menu_height = 20
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Noticeboard", clear=True)
+    geometry = widgets.centered_menu(66, 20)
+    widgets.panel(console, *geometry, title="Noticeboard", focused=True)
 
     if world.noticeboard_menu_context.get("mode") == "post_job":
-        building = world._get_job_posting_building()
-        role_options = world._get_job_posting_role_options(building)
-        selected_role_index = world.noticeboard_menu_context.get("selected_role_index", 0)
-        selected_role = role_options[selected_role_index] if role_options else "No valid roles"
-        wage = world.get_job_posting_wage()
-        building_name = str(getattr(building, "building_type", "Unassigned")).replace("_", " ").title()
-
-        console.print(x=x + 2, y=y + 2, string="Post Job Listing", fg=(255, 255, 0))
-        console.print(x=x + 2, y=y + 4, string=f"Business: {building_name}"[: menu_width - 4], fg=(255, 255, 255))
-        console.print(x=x + 2, y=y + 5, string=f"Role: {selected_role}"[: menu_width - 4], fg=(0, 255, 255))
-        console.print(x=x + 2, y=y + 6, string=f"Daily Wage: {wage} coins"[: menu_width - 4], fg=(255, 255, 255))
-        console.print(
-            x=x + 2,
-            y=y + 8,
-            string="Up/Down role  Left/Right wage  Tab building  Enter post  Esc cancel"[: menu_width - 4],
-            fg=(180, 180, 180),
-        )
-
-        current_y = y + 10
-        console.print(x=x + 2, y=current_y, string="Available Roles:", fg=(255, 255, 0))
-        for index, role in enumerate(role_options[: menu_height - 13]):
-            color = (0, 255, 255) if index == selected_role_index else (255, 255, 255)
-            console.print(x=x + 4, y=current_y + 1 + index, string=role[: menu_width - 8], fg=color)
+        _draw_noticeboard_post_job(console, world, geometry)
         return
 
     task_ids = world.noticeboard_menu_context.get("task_ids", [])
-    selected_index = world.noticeboard_menu_context.get("selected_task_index", 0)
+    region = geometry.list_region(top_offset=0, bottom_margin=2)
+    scroll_offset, hovered = _prepare_list(
+        world, "NOTICEBOARD_MENU", region, total=len(task_ids),
+        selected_index=world.noticeboard_menu_context.get("selected_task_index", 0),
+        scroll_offset=world.noticeboard_menu_context.get("scroll_offset", 0),
+    )
+
     if not task_ids:
-        console.print_box(x=x + 2, y=y + 2, width=menu_width - 4, height=menu_height - 6, string="No active notices.", fg=(180, 180, 180))
-        console.print(x=x + 2, y=y + menu_height - 2, string="P = Post Job", fg=(180, 180, 180))
+        widgets.empty_state(console, region, "No active notices.")
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("P", "post job"), ("Esc", "close")])
         return
 
-    display_height = menu_height - 4
-    scroll_offset = world.noticeboard_menu_context.get("scroll_offset", 0)
-    if selected_index < scroll_offset:
-        scroll_offset = selected_index
-    elif selected_index >= scroll_offset + display_height:
-        scroll_offset = selected_index - display_height + 1
-    world.noticeboard_menu_context["scroll_offset"] = scroll_offset
+    # Rows are built for every notice (not just the visible window) so that
+    # a notice whose task vanished doesn't shift the selection index.
+    rows = [_noticeboard_row(world, notice_id) or widgets.Row(text="", enabled=False) for notice_id in task_ids]
 
-    for i in range(display_height):
-        list_index = scroll_offset + i
-        if list_index >= len(task_ids):
-            break
-        notice_id = task_ids[list_index]
-        if notice_id.startswith("job:"):
-            job_task = world.town_board.get_employment_task(notice_id.split(":", 1)[1])
-            if job_task is None:
-                continue
-            building = world.buildings_by_id.get(job_task.target_building_id)
-            building_name = str(getattr(building, "building_type", "Unknown")).replace("_", " ")
-            line = f"JOB: {job_task.profession_role} @ {building_name} - {job_task.daily_wage}/day"
-            color = (0, 255, 255) if list_index == selected_index else (144, 220, 255)
-        elif notice_id.startswith("need:"):
-            need_id = notice_id.split(":", 1)[1]
-            need = next((n for n in getattr(world.town_board, "economic_needs", []) if n.id == need_id), None)
-            if need is None:
-                continue
-            line = f"NEED: {need.description}"
-            color = (0, 255, 255) if list_index == selected_index else (255, 100, 100)
-        else:
-            task = world.town_board.get_task(notice_id.split(":", 1)[1] if ":" in notice_id else notice_id)
-            if task is None:
-                continue
-            blueprint = world.blueprints_by_id.get(task.blueprint_id)
-            if blueprint is None:
-                continue
-            status = "Claimed" if task.assigned_entity_id == world.player.id else "Open"
-            line = f"HAUL: {task.item_key.replace('_', ' ')} -> {blueprint.target_build.replace('_', ' ')} @ ({task.destination_x},{task.destination_y}) [{status}]"
-            color = (0, 255, 255) if list_index == selected_index else ((255, 255, 255) if status == "Open" else (255, 215, 0))
-        console.print(x=x + 2, y=y + 2 + i, string=line[:menu_width - 4], fg=color)
-    console.print(x=x + 2, y=y + menu_height - 2, string="Enter = claim haul notice   P = Post Job"[: menu_width - 4], fg=(180, 180, 180))
+    world.noticeboard_menu_context["scroll_offset"] = widgets.list_view(
+        console, region, rows,
+        selected_index=world.noticeboard_menu_context.get("selected_task_index", 0),
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+        show_cursor=False,
+    )
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Enter", "claim"), ("P", "post job"), ("Esc", "close")])
 
 def draw_company_ledger_menu(console, world):
     """Draw the ledger for a player-owned building."""
-    menu_width = 74
-    menu_height = 22
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Company Ledger", clear=True)
+    geometry = widgets.centered_menu(74, 22)
+    widgets.panel(console, *geometry, title="Company Ledger", focused=True)
 
     building = world.get_company_ledger_building()
     if building is None:
         console.print_box(
-            x=x + 2,
-            y=y + 2,
-            width=menu_width - 4,
-            height=menu_height - 4,
+            x=geometry.inner_x, y=geometry.inner_y,
+            width=geometry.inner_width, height=geometry.height - 4,
             string="No owned property is currently linked to this ledger.",
-            fg=(180, 180, 180),
+            fg=theme.TEXT_MUTED,
         )
         return
 
     building_name = str(getattr(building, "building_type", "business")).replace("_", " ").title()
-    building_cash = world._get_trade_money_balance(building)
-    player_cash = world._get_trade_money_balance(world.player)
     selected_action_index = world.company_ledger_menu_context.get("selected_action_index", 0)
     amount_options = world.company_ledger_menu_context.get("amount_options", [1, 10, 50, 100])
     amount = world.get_company_ledger_amount()
 
-    console.print(x=x + 2, y=y + 2, string=f"Property: {building_name}", fg=(255, 255, 0))
-    console.print(x=x + 2, y=y + 3, string=f"Company Cash: {building_cash} coins", fg=(255, 255, 255))
-    console.print(x=x + 2, y=y + 4, string=f"Your Wallet: {player_cash} coins", fg=(255, 255, 255))
-    console.print(
-        x=x + 2,
-        y=y + 5,
-        string=f"Transfer Amount: {amount}  (Left/Right to adjust)",
-        fg=(180, 180, 180),
-    )
+    y = geometry.inner_y
+    y = widgets.field(console, geometry.inner_x, y, "Property", building_name,
+                      width=geometry.inner_width, value_color=theme.HEADING)
+    y = widgets.field(console, geometry.inner_x, y, "Company Cash",
+                      f"{world._get_trade_money_balance(building)} coins", width=geometry.inner_width)
+    y = widgets.field(console, geometry.inner_x, y, "Your Wallet",
+                      f"{world._get_trade_money_balance(world.player)} coins", width=geometry.inner_width)
+    y = widgets.field(console, geometry.inner_x, y, "Transfer Amount", str(amount),
+                      width=geometry.inner_width, value_color=theme.SELECTION)
+    y += 1
 
-    action_labels = ["Deposit Funds", "Withdraw Funds"]
-    for index, label in enumerate(action_labels):
-        color = (0, 255, 255) if index == selected_action_index else (255, 255, 255)
-        console.print(x=x + 2, y=y + 7 + index, string=label, fg=color)
+    action_region = widgets.ListRegion(x=geometry.inner_x, y=y, width=geometry.inner_width, height=2)
+    _, hovered = _prepare_list(world, "COMPANY_LEDGER_MENU", action_region,
+                               total=2, selected_index=selected_action_index)
+    widgets.list_view(
+        console, action_region,
+        [widgets.Row(text="Deposit Funds"), widgets.Row(text="Withdraw Funds")],
+        selected_index=selected_action_index,
+        hovered_index=hovered,
+        show_scrollbar=False,
+    )
+    y += 3
 
     amount_label = " / ".join(
         f"[{option}]" if option == amount else str(option)
         for option in amount_options
     )
-    console.print(x=x + 2, y=y + 10, string=f"Quick Amounts: {amount_label}"[: menu_width - 4], fg=(160, 160, 160))
-    console.print(x=x + 2, y=y + 12, string="Stock:", fg=(255, 255, 0))
+    y = widgets.text_line(console, geometry.inner_x, y, f"Quick Amounts: {amount_label}",
+                          color=theme.TEXT_MUTED, width=geometry.inner_width)
+    y += 1
+    y = widgets.heading(console, geometry.inner_x, y, "Stock:")
 
     stock = world.get_company_ledger_stock_snapshot(building)
     if not stock:
-        console.print(x=x + 4, y=y + 13, string="No stock on hand.", fg=(180, 180, 180))
+        widgets.text_line(console, geometry.inner_x + 2, y, "No stock on hand.", color=theme.TEXT_MUTED)
     else:
-        max_rows = menu_height - 15
-        for row_index, (item_key, quantity) in enumerate(stock[:max_rows]):
+        max_rows = max(0, geometry.hint_row - y)
+        for item_key, quantity in stock[:max_rows]:
             item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key.replace("_", " ").title())
-            console.print(
-                x=x + 4,
-                y=y + 13 + row_index,
-                string=f"- {item_name}: {quantity}"[: menu_width - 8],
-                fg=(255, 255, 255),
-            )
+            y = widgets.text_line(console, geometry.inner_x + 2, y, f"- {item_name}: {quantity}",
+                                  width=geometry.inner_width - 2)
+
+    widgets.hint_bar(
+        console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+        [("Up/Down", "action"), ("Left/Right", "amount"), ("Enter", "confirm"), ("Esc", "close")],
+    )
 
 def draw_social_menu(console, world):
     """Draw the player social interaction menu for the selected NPC."""
-    menu_width = 74
-    menu_height = 24
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Social", clear=True)
+    geometry = widgets.centered_menu(74, 24)
+    widgets.panel(console, *geometry, title="Social", focused=True)
 
     npc = world.get_social_menu_target()
     if npc is None:
         console.print_box(
-            x=x + 2,
-            y=y + 2,
-            width=menu_width - 4,
-            height=menu_height - 4,
+            x=geometry.inner_x, y=geometry.inner_y,
+            width=geometry.inner_width, height=geometry.height - 4,
             string="No social target is available.",
-            fg=(180, 180, 180),
+            fg=theme.TEXT_MUTED,
         )
         return
 
@@ -2148,174 +2433,213 @@ def draw_social_menu(console, world):
     profession = getattr(getattr(npc, "economic", None), "profession", "Unemployed") or "Unemployed"
     mode = world.social_menu_context.get("mode", "root")
 
-    portrait_x = x + menu_width - 2 - PORTRAIT_ZOOM
-    portrait_y = y + 2
-    _draw_entity_portrait(console, portrait_x, portrait_y, npc)
+    _draw_entity_portrait(
+        console,
+        geometry.x + geometry.width - 2 - PORTRAIT_ZOOM,
+        geometry.inner_y,
+        npc,
+    )
 
-    console.print(x=x + 2, y=y + 2, string=f"Name: {npc.name}", fg=(255, 255, 0))
-    console.print(x=x + 2, y=y + 3, string=f"Job: {profession}", fg=(220, 220, 220))
-    console.print(x=x + 2, y=y + 4, string=f"Attitude: {attitude_label} ({attitude_score:+d})", fg=(200, 255, 255))
+    y = geometry.inner_y
+    y = widgets.field(console, geometry.inner_x, y, "Name", npc.name,
+                      width=geometry.inner_width, value_color=theme.HEADING)
+    y = widgets.field(console, geometry.inner_x, y, "Job", profession, width=geometry.inner_width)
+    y = widgets.field(console, geometry.inner_x, y, "Attitude",
+                      f"{attitude_label} ({attitude_score:+d})",
+                      width=geometry.inner_width, value_color=theme.SOCIAL)
+    y += 1
 
     if mode == "root":
-        console.print(x=x + 2, y=y + 6, string="Choose how you want to approach them:", fg=(180, 180, 180))
-        for index, label in enumerate(world.get_social_menu_actions()):
-            color = (0, 255, 255) if index == world.social_menu_context.get("selected_action_index", 0) else (255, 255, 255)
-            console.print(x=x + 4, y=y + 8 + index, string=label, fg=color)
-        console.print(
-            x=x + 2,
-            y=y + menu_height - 2,
-            string="Up/Down = select   Enter = confirm   Esc = close",
-            fg=(150, 150, 150),
+        y = widgets.text_line(console, geometry.inner_x, y,
+                              "Choose how you want to approach them:", color=theme.TEXT_MUTED)
+        y += 1
+        actions = world.get_social_menu_actions()
+        region = widgets.ListRegion(x=geometry.inner_x + 2, y=y,
+                                    width=geometry.inner_width - 2,
+                                    height=max(0, geometry.hint_row - y))
+        _, hovered = _prepare_list(
+            world, "SOCIAL_MENU", region, total=len(actions),
+            selected_index=world.social_menu_context.get("selected_action_index", 0),
         )
+        widgets.list_view(
+            console, region,
+            [widgets.Row(text=label) for label in actions],
+            selected_index=world.social_menu_context.get("selected_action_index", 0),
+            hovered_index=hovered,
+        )
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Up/Down", "select"), ("Enter", "confirm"), ("Esc", "close")])
         return
 
     if mode == "gift":
         options = world.get_social_gift_options()
-        title = f"Give Gift   Wallet: {world.player.economic.money} coins"
+        subtitle = f"Give Gift   Wallet: {world.player.economic.money} coins"
     else:
         options = world.get_player_gossip_options()
-        title = "Share Gossip"
-    console.print(x=x + 2, y=y + 6, string=title[: menu_width - 4], fg=(180, 180, 180))
+        subtitle = "Share Gossip"
+    y = widgets.text_line(console, geometry.inner_x, y, subtitle,
+                          color=theme.TEXT_MUTED, width=geometry.inner_width)
+    y += 1
+
+    region = widgets.ListRegion(x=geometry.inner_x, y=y, width=geometry.inner_width,
+                                height=max(0, geometry.hint_row - y))
+    selected_option = max(0, min(len(options) - 1, world.social_menu_context.get("selected_option_index", 0)))
+    scroll_offset, hovered = _prepare_list(
+        world, "SOCIAL_MENU", region, total=len(options),
+        selected_index=selected_option,
+        scroll_offset=world.social_menu_context.get("scroll_offset", 0),
+    )
 
     if not options:
-        empty_text = "You have nothing available to gift." if mode == "gift" else "You do not know any memories worth sharing."
+        empty_text = (
+            "You have nothing available to gift." if mode == "gift"
+            else "You do not know any memories worth sharing."
+        )
         console.print_box(
-            x=x + 2,
-            y=y + 8,
-            width=menu_width - 4,
-            height=menu_height - 12,
-            string=empty_text,
-            fg=(180, 180, 180),
+            x=region.x, y=region.y, width=region.width, height=max(1, region.height),
+            string=empty_text, fg=theme.TEXT_MUTED,
         )
-        console.print(
-            x=x + 2,
-            y=y + menu_height - 2,
-            string="Esc = back",
-            fg=(150, 150, 150),
-        )
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Esc", "back")])
         return
 
-    selected_index = max(0, min(len(options) - 1, world.social_menu_context.get("selected_option_index", 0)))
-    display_height = menu_height - 10
-    scroll_offset = world.social_menu_context.get("scroll_offset", 0)
-    if selected_index < scroll_offset:
-        scroll_offset = selected_index
-    elif selected_index >= scroll_offset + display_height:
-        scroll_offset = selected_index - display_height + 1
-    world.social_menu_context["scroll_offset"] = scroll_offset
-
-    for row in range(display_height):
-        list_index = scroll_offset + row
-        if list_index >= len(options):
-            break
-        option = options[list_index]
+    rows = []
+    for option in options:
         if mode == "gift":
-            line = f"{option['label']}  (value {option.get('value', 0)})"
+            rows.append(widgets.Row(text=f"{option['label']}  (value {option.get('value', 0)})"))
         else:
             headline = option.headline or option.event_type.replace("_", " ").title()
-            line = f"{headline}  [{option.importance_score}]"
-        color = (0, 255, 255) if list_index == selected_index else (255, 255, 255)
-        console.print(x=x + 2, y=y + 8 + row, string=line[: menu_width - 4], fg=color)
+            rows.append(widgets.Row(text=f"{headline}  [{option.importance_score}]"))
 
-    console.print(
-        x=x + 2,
-        y=y + menu_height - 2,
-        string="Up/Down = select   Enter = confirm   Esc = back",
-        fg=(150, 150, 150),
+    world.social_menu_context["scroll_offset"] = widgets.list_view(
+        console, region, rows,
+        selected_index=selected_option,
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+        show_cursor=False,
     )
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Up/Down", "select"), ("Enter", "confirm"), ("Esc", "back")])
 
 def draw_governance_menu(console, world):
     """Draw the Town Hall governance menu."""
-    menu_width = 78
-    menu_height = 25
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Governance", clear=True)
+    geometry = widgets.centered_menu(78, 25)
+    widgets.panel(console, *geometry, title="Governance", focused=True)
 
     town_hall = world.get_town_hall_building()
     treasury = world._get_trade_money_balance(town_hall) if town_hall is not None else 0
     tax_rate = int(float(getattr(world.politics, "tax_rate", 0.10)) * 100)
-    console.print(x=x + 2, y=y + 2, string=f"Treasury: {treasury} coins", fg=(255, 255, 0))
-    console.print(x=x + 2, y=y + 3, string=f"Tax Rate: {tax_rate}%", fg=(220, 220, 220))
-    console.print(x=x + 2, y=y + 4, string=f"Mayor: {world.get_office_holder_name('Mayor')}", fg=(200, 255, 255))
-    console.print(x=x + 2, y=y + 5, string=f"Captain: {world.get_office_holder_name('Captain of the Guard')}", fg=(200, 255, 255))
+
+    y = geometry.inner_y
+    y = widgets.field(console, geometry.inner_x, y, "Treasury", f"{treasury} coins",
+                      width=geometry.inner_width, value_color=theme.HEADING)
+    y = widgets.field(console, geometry.inner_x, y, "Tax Rate", f"{tax_rate}%", width=geometry.inner_width)
+    y = widgets.field(console, geometry.inner_x, y, "Mayor", world.get_office_holder_name('Mayor'),
+                      width=geometry.inner_width, value_color=theme.INFO)
+    y = widgets.field(console, geometry.inner_x, y, "Captain",
+                      world.get_office_holder_name('Captain of the Guard'),
+                      width=geometry.inner_width, value_color=theme.INFO)
+    y += 1
 
     ctx = world.governance_menu_context
     mode = ctx.get("mode", "root")
     if mode == "root":
         actions = world.get_governance_actions()
-        for index, label in enumerate(actions):
-            color = (0, 255, 255) if index == ctx.get("selected_action_index", 0) else (255, 255, 255)
-            console.print(x=x + 4, y=y + 8 + index, string=label, fg=color)
-        console.print(
-            x=x + 2,
-            y=y + menu_height - 2,
-            string="Up/Down = select   Left/Right = adjust taxes   Enter = confirm   Esc = close",
-            fg=(150, 150, 150),
+        region = widgets.ListRegion(x=geometry.inner_x + 2, y=y + 1,
+                                    width=geometry.inner_width - 2,
+                                    height=max(0, geometry.hint_row - y - 1))
+        _, hovered = _prepare_list(world, "GOVERNANCE_MENU", region, total=len(actions),
+                                   selected_index=ctx.get("selected_action_index", 0))
+        widgets.list_view(
+            console, region,
+            [widgets.Row(text=label) for label in actions],
+            selected_index=ctx.get("selected_action_index", 0),
+            hovered_index=hovered,
+        )
+        widgets.hint_bar(
+            console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+            [("Up/Down", "select"), ("Left/Right", "taxes"), ("Enter", "confirm"), ("Esc", "close")],
         )
         return
 
     targets = world.get_governance_targets()
     pending_action = ctx.get("pending_action", "Issue Order")
-    console.print(x=x + 2, y=y + 8, string=f"{pending_action}: choose a target", fg=(180, 180, 180))
-    if not targets:
-        console.print(x=x + 4, y=y + 10, string="No valid targets.", fg=(180, 180, 180))
-        return
+    y += 1
+    y = widgets.text_line(console, geometry.inner_x, y,
+                          f"{pending_action}: choose a target", color=theme.TEXT_MUTED)
+    y += 1
 
-    selected_index = max(0, min(len(targets) - 1, ctx.get("selected_target_index", 0)))
-    display_height = menu_height - 12
-    scroll_offset = ctx.get("scroll_offset", 0)
-    if selected_index < scroll_offset:
-        scroll_offset = selected_index
-    elif selected_index >= scroll_offset + display_height:
-        scroll_offset = selected_index - display_height + 1
-    ctx["scroll_offset"] = scroll_offset
-
-    for row in range(display_height):
-        list_index = scroll_offset + row
-        if list_index >= len(targets):
-            break
-        target = targets[list_index]
-        profession = getattr(getattr(target, "economic", None), "profession", "Citizen") or "Citizen"
-        line = f"{target.name} (ID {target.id}) - {profession}"
-        color = (0, 255, 255) if list_index == selected_index else (255, 255, 255)
-        console.print(x=x + 2, y=y + 10 + row, string=line[: menu_width - 4], fg=color)
-
-    console.print(
-        x=x + 2,
-        y=y + menu_height - 2,
-        string="Up/Down = select   Enter = issue order   Esc = back",
-        fg=(150, 150, 150),
+    region = widgets.ListRegion(x=geometry.inner_x, y=y, width=geometry.inner_width,
+                                height=max(0, geometry.hint_row - y))
+    selected_target = max(0, min(len(targets) - 1, ctx.get("selected_target_index", 0)))
+    scroll_offset, hovered = _prepare_list(
+        world, "GOVERNANCE_MENU", region, total=len(targets),
+        selected_index=selected_target, scroll_offset=ctx.get("scroll_offset", 0),
     )
 
-def draw_info_menu(console, world):
-    """Draws the player information menu (stats and inventory)."""
-    menu_width = 60
-    x = (MAP_WIDTH - menu_width) // 2
-    menu_height = 40
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    if not targets:
+        widgets.empty_state(console, region, "No valid targets.")
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Esc", "back")])
+        return
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Character Information", clear=True)
+    rows = []
+    for target in targets:
+        profession = getattr(getattr(target, "economic", None), "profession", "Citizen") or "Citizen"
+        rows.append(widgets.Row(text=f"{target.name} (ID {target.id}) - {profession}"))
 
-    # Stats section
-    stat_y = y + 2
-    console.print(x=x + 2, y=stat_y, string=f"Fame: {world.player.social.fame}", fg=(255, 255, 0))
-    stat_y += 1
-    console.print(x=x + 2, y=stat_y, string=f"Infamy: {world.player.social.infamy}", fg=(255, 0, 0))
-    stat_y += 1
+    ctx["scroll_offset"] = widgets.list_view(
+        console, region, rows,
+        selected_index=selected_target,
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+        show_cursor=False,
+    )
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Up/Down", "select"), ("Enter", "issue order"), ("Esc", "back")])
 
-    title = world.player.social.title
-    if not title:
-        # Fallback to career title or profession
-        title = world.player.career.display_title()
-        if not title:
-            prof = str(getattr(world.player.economic, "profession", "Unemployed")).strip()
-            if prof and prof.lower() not in {"unemployed", "creature"}:
-                title = prof
-
+def _player_display_title(player):
+    """The player's social title, falling back to their career title and then
+    to a meaningful profession name."""
+    title = player.social.title
     if title:
-        console.print(x=x + 2, y=stat_y, string=f"Title: {title}", fg=(0, 255, 255))
-        stat_y += 1
+        return title
+    title = player.career.display_title()
+    if title:
+        return title
+    profession = str(getattr(player.economic, "profession", "Unemployed")).strip()
+    if profession and profession.lower() not in {"unemployed", "creature"}:
+        return profession
+    return ""
+
+
+def _equipped_item_name(item_key):
+    """Display name for an equipped item key, which may be defined as a tile
+    or as an item."""
+    if not item_key:
+        return "None"
+    item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
+    return item_def.get("name", item_key)
+
+
+def draw_info_menu(console, world):
+    """Draws the player information menu (stats and equipment)."""
+    geometry = widgets.centered_menu(60, 40)
+    widgets.panel(console, *geometry, title="Character Information", focused=True)
+
+    inner_x = geometry.inner_x
+    inner_width = geometry.inner_width
+    y = geometry.inner_y
+
+    y = widgets.field(console, inner_x, y, "Fame", world.player.social.fame,
+                      width=inner_width, value_color=theme.HEADING)
+    y = widgets.field(console, inner_x, y, "Infamy", world.player.social.infamy,
+                      width=inner_width, value_color=theme.DANGER)
+
+    title = _player_display_title(world.player)
+    if title:
+        y = widgets.field(console, inner_x, y, "Title", title,
+                          width=inner_width, value_color=theme.SELECTION)
 
     if world.player.economic.job_building_id:
         village = None
@@ -2327,62 +2651,57 @@ def draw_info_menu(console, world):
         wage = world._get_employment_daily_wage(world.player.economic.profession, village=village)
         if world.player.economic.work_performance > 80:
             wage += int(wage * 0.2)
-        console.print(x=x + 2, y=stat_y, string=f"Expected Wage: {wage} coins/day", fg=(0, 255, 0))
-        stat_y += 1
+        y = widgets.field(console, inner_x, y, "Expected Wage", f"{wage} coins/day",
+                          width=inner_width, value_color=theme.SUCCESS)
 
-    stat_y += 1
+    y += 1
+    y = widgets.rule(console, inner_x, y, inner_width)
+    y = widgets.heading(console, inner_x, y, "Equipment")
 
-    # Equipment section
-    stat_y += 1
-    console.print(x=x + 2, y=stat_y, string="Equipment:", fg=(255, 255, 0))
-    stat_y += 1
-
-    # Show active light source
-    light_str = "None"
-    if world.player.equipment.equipped_light_item_key:
-        light_def = TILE_DEFINITIONS.get(world.player.equipment.equipped_light_item_key) or ITEM_DEFINITIONS.get(world.player.equipment.equipped_light_item_key, {})
-        light_str = light_def.get("name", world.player.equipment.equipped_light_item_key)
-    console.print(x=x + 3, y=stat_y, string=f"- Light Source: {light_str}")
-    stat_y += 1
-
-    # Show armor slots
+    y = widgets.text_line(
+        console, inner_x + 1, y,
+        f"- Light Source: {_equipped_item_name(world.player.equipment.equipped_light_item_key)}",
+        width=inner_width - 1,
+    )
     for slot in ["head", "body", "hands", "feet"]:
-        item_key = world.player.equipment.equipped_armor.get(slot)
-        item_str = "None"
-        if item_key:
-            item_def = TILE_DEFINITIONS.get(item_key) or ITEM_DEFINITIONS.get(item_key, {})
-            item_str = item_def.get("name", item_key)
-        console.print(x=x + 3, y=stat_y, string=f"- {slot.capitalize()}: {item_str}")
-        stat_y += 1
+        item_name = _equipped_item_name(world.player.equipment.equipped_armor.get(slot))
+        y = widgets.text_line(
+            console, inner_x + 1, y, f"- {slot.capitalize()}: {item_name}",
+            color=theme.TEXT if item_name != "None" else theme.TEXT_MUTED,
+            width=inner_width - 1,
+        )
 
-    stat_y += 1
+    y += 1
+    y = widgets.text_line(console, inner_x, y, "Inventory now has its own menu - press U.",
+                          color=theme.TEXT_MUTED, width=inner_width)
 
-    # Display note to use dedicated inventory menu
-    inv_y = stat_y
-    console.print(x=x + 2, y=inv_y, string=f"Inventory has been moved to its own menu. Press 'U' to view.", fg=(180, 180, 180))
-
-    inv_y += 3
-    console.print(x=x + 2, y=inv_y, string="Active Quests:", fg=(255, 255, 0))
-    inv_y += 1
+    y += 2
+    y = widgets.rule(console, inner_x, y, inner_width)
+    y = widgets.heading(console, inner_x, y, "Active Quests")
     if not world.player.knowledge.active_quests:
-        console.print(x=x + 3, y=inv_y, string="- None", fg=(128, 128, 128))
+        y = widgets.text_line(console, inner_x + 1, y, "- None", color=theme.TEXT_MUTED)
     else:
-        for quest_id, quest_data in world.player.knowledge.active_quests.items():
-            console.print(x=x + 3, y=inv_y, string=f"- {quest_data['title']}")
-            inv_y += 1
+        for quest_data in world.player.knowledge.active_quests.values():
+            y = widgets.text_line(console, inner_x + 1, y, f"- {quest_data['title']}", width=inner_width - 1)
 
-    inv_y += 2
-    console.print(x=x + 2, y=inv_y, string="Faction Status:", fg=(255, 255, 0))
-    inv_y += 1
+    y += 1
+    y = widgets.rule(console, inner_x, y, inner_width)
+    y = widgets.heading(console, inner_x, y, "Faction Status")
     wars_found = False
-    for v in world.villages:
-        if v.at_war_with:
+    for village in world.villages:
+        if village.at_war_with:
             wars_found = True
-            for enemy_id in v.at_war_with:
-                console.print(x=x + 3, y=inv_y, string=f"- Village {v.id[:4]} is at WAR with Village {enemy_id[:4]}", fg=(255, 100, 100))
-                inv_y += 1
+            for enemy_id in village.at_war_with:
+                y = widgets.text_line(
+                    console, inner_x + 1, y,
+                    f"- Village {village.id[:4]} is at WAR with Village {enemy_id[:4]}",
+                    color=theme.DANGER, width=inner_width - 1,
+                )
     if not wars_found:
-        console.print(x=x + 3, y=inv_y, string="- The realm is at peace.", fg=(150, 200, 150))
+        widgets.text_line(console, inner_x + 1, y, "- The realm is at peace.", color=theme.SUCCESS)
+
+    widgets.hint_bar(console, inner_x, geometry.hint_row, inner_width,
+                     [("U", "inventory"), ("Q", "quests"), ("Esc", "close")])
 
 def draw_inventory_menu(console, world):
     """Draws the dedicated scrollable inventory menu, grouping items by category."""
@@ -2391,9 +2710,10 @@ def draw_inventory_menu(console, world):
     x = (MAP_WIDTH - menu_width) // 2
     y = (SCREEN_HEIGHT - menu_height) // 2
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Inventory", clear=True)
+    widgets.panel(console, x, y, menu_width, menu_height, title="Inventory", focused=True)
 
-    console.print(x=x + 2, y=y + menu_height - 2, string="Up/Down to scroll | ESC to close", fg=(150, 150, 150))
+    widgets.hint_bar(console, x + theme.PAD_X, y + menu_height - 2, menu_width - (theme.PAD_X * 2),
+                     [("Up/Down", "scroll"), ("Esc", "close")])
 
     # Aggregate and categorize inventory
     categories = {
@@ -2442,314 +2762,319 @@ def draw_inventory_menu(console, world):
         else:
             categories["Miscellaneous"].append(entry)
 
-    # Build the flattened list of (text, item_key, quality) lines to draw.
-    # item_key/quality are None for headers/blank/money lines, which have no
-    # icon and use the default text color; the icon itself provides the
-    # visual indent for item lines, so no leading spaces needed.
-    lines = []
-    lines.append((f"Money: {world.player.economic.money} coins", None, None))
-    lines.append(("", None, None))
-
+    # Flatten into display rows. Category headers and the money line carry
+    # their own color and no icon; item rows take the color of their quality
+    # tier and are indented by the icon itself.
+    rows = [
+        widgets.Row(text=f"Money: {world.player.economic.money} coins", color=theme.SUCCESS),
+        widgets.Row(text=""),
+    ]
     for cat_name, items in categories.items():
-        if items:
-            lines.append((f"--- {cat_name} ---", None, None))
-            for item_text, item_key, quality in items:
-                lines.append((item_text, item_key, quality))
-            lines.append(("", None, None))
+        if not items:
+            continue
+        rows.append(widgets.Row(text=f"--- {cat_name} ---", color=theme.HEADING))
+        for item_text, item_key, quality in items:
+            rows.append(widgets.Row(
+                text=item_text,
+                color=_quality_text_color(quality),
+                icon_key=item_key,
+            ))
+        rows.append(widgets.Row(text=""))
 
-    if not lines:
-        lines.append(("Your inventory is empty.", None, None))
+    region = widgets.ListRegion(
+        x=x + theme.PAD_X,
+        y=y + theme.PAD_TOP,
+        width=menu_width - (theme.PAD_X * 2),
+        height=menu_height - 4,
+    )
+    _register_hit_region(
+        world, "INVENTORY_MENU", region,
+        scroll_offset=world.interaction_context.get("inventory_scroll_offset", 0),
+        total=len(rows),
+    )
 
-    # Implement scrolling
-    max_lines_to_display = menu_height - 4
+    if len(rows) <= 2:
+        widgets.empty_state(console, region, "Your inventory is empty.")
+        return
 
-    if "inventory_scroll_offset" not in world.interaction_context:
-        world.interaction_context["inventory_scroll_offset"] = 0
+    world.interaction_context["inventory_scroll_offset"] = widgets.list_view(
+        console,
+        region,
+        rows,
+        selected_index=None,
+        scroll_offset=world.interaction_context.get("inventory_scroll_offset", 0),
+        icon_drawer=_draw_item_icon,
+        show_cursor=False,
+    )
 
-    scroll_offset = world.interaction_context["inventory_scroll_offset"]
 
-    # Bound check
-    max_scroll = max(0, len(lines) - max_lines_to_display)
-    if scroll_offset > max_scroll:
-        scroll_offset = max_scroll
-        world.interaction_context["inventory_scroll_offset"] = scroll_offset
-    elif scroll_offset < 0:
-        scroll_offset = 0
-        world.interaction_context["inventory_scroll_offset"] = scroll_offset
-
-    for i in range(max_lines_to_display):
-        list_index = scroll_offset + i
-        if list_index < len(lines):
-            line_text, item_key, quality = lines[list_index]
-            fg_color = (255, 255, 255)
-            if line_text.startswith("--- "):
-                fg_color = (255, 215, 0)
-            elif line_text.startswith("Money:"):
-                fg_color = (150, 255, 150)
-            elif quality is not None:
-                fg_color = _quality_text_color(quality)
-            row_y = y + 2 + i
-            icon_drawn = item_key is not None and _draw_item_icon(console, x + 2, row_y, item_key)
-            text_x = x + 4 if icon_drawn else x + 2
-            max_text_width = (menu_width - 6) if icon_drawn else (menu_width - 4)
-            console.print(x=text_x, y=row_y, string=line_text[:max_text_width], fg=fg_color)
-
-    # Draw scrollbar if needed
-    if len(lines) > max_lines_to_display:
-        scrollbar_y = y + 2 + int((scroll_offset / max_scroll) * (max_lines_to_display - 1))
-        console.print(x=x + menu_width - 1, y=scrollbar_y, string="█", fg=(100, 100, 100))
+TRADE_NAME_WIDTH = 26
 
 
 def draw_trade_menu(console, world):
     """Draws the trade menu UI."""
-    menu_width = 60
-    menu_height = 24
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Trade", clear=True)
+    geometry = widgets.centered_menu(60, 24)
+    widgets.panel(console, *geometry, title="Trade", focused=True)
 
     target_name = world.trade_ui_npc_target.name if world.trade_ui_npc_target else "Trader"
     mode = "Selling to" if world.trade_ui_player_selling else "Buying from"
-    console.print(x=x + 2, y=y + 2, string=f"{mode} {target_name}", fg=(255, 255, 0))
-    console.print(x=x + 2, y=y + 3, string="TAB switch view | ENTER trade | ESC close", fg=(180, 180, 180))
 
-    items = world.trade_ui_player_inventory_snapshot if world.trade_ui_player_selling else world.trade_ui_merchant_inventory_snapshot
-    selected_index = world.trade_ui_player_item_index if world.trade_ui_player_selling else world.trade_ui_merchant_item_index
+    y = geometry.inner_y
+    y = widgets.text_line(console, geometry.inner_x, y, f"{mode} {target_name}",
+                          color=theme.HEADING, width=geometry.inner_width)
+    y = widgets.field(console, geometry.inner_x, y, "Your Purse",
+                      f"{world.player.economic.money} coins", width=geometry.inner_width)
+    y += 1
+
+    selling = world.trade_ui_player_selling
+    items = (
+        world.trade_ui_player_inventory_snapshot if selling
+        else world.trade_ui_merchant_inventory_snapshot
+    )
+    selected_index = (
+        world.trade_ui_player_item_index if selling
+        else world.trade_ui_merchant_item_index
+    )
+
+    region = widgets.ListRegion(x=geometry.inner_x, y=y, width=geometry.inner_width,
+                                height=max(0, geometry.hint_row - y - 1))
+    scroll_offset, hovered = _prepare_list(
+        world, "TRADE_MENU", region, total=len(items), selected_index=selected_index,
+        scroll_offset=selected_index,
+    )
 
     if not items:
-        console.print(x=x + 2, y=y + 5, string="No items available.", fg=(150, 150, 150))
+        widgets.empty_state(console, region, "No items available.")
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Tab", "switch"), ("Esc", "close")])
         return
 
-    visible_height = menu_height - 7
-    scroll_offset = max(0, min(selected_index, max(0, len(items) - visible_height)))
-    for row in range(visible_height):
-        item_index = scroll_offset + row
-        if item_index >= len(items):
-            break
-
-        item_key, quantity, price = items[item_index]
-        item_ref = _get_trade_row_item_reference(world, item_key, selling=world.trade_ui_player_selling)
+    rows = []
+    for item_key, quantity, price in items:
+        item_ref = _get_trade_row_item_reference(world, item_key, selling=selling)
         if item_ref is not None:
             item_name = item_ref.name
-        else:
-            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
-        if item_index == selected_index:
-            color = (0, 255, 255)
-        elif item_ref is not None:
             color = _quality_text_color(item_ref.quality)
         else:
-            color = (255, 255, 255)
-        row_y = y + 5 + row
-        icon_drawn = _draw_item_icon(console, x + 2, row_y, item_key)
-        text_x = x + 4 if icon_drawn else x + 2
-        name_width = 26 if icon_drawn else 28
-        console.print(
-            x=text_x,
-            y=row_y,
-            string=f"{item_name[:name_width]:{name_width}} x{quantity:<3} {price:>4}g",
-            fg=color,
-        )
+            item_name = ITEM_DEFINITIONS.get(item_key, {}).get("name", item_key)
+            color = theme.TEXT
+        rows.append(widgets.Row(
+            text=f"{item_name[:TRADE_NAME_WIDTH]:{TRADE_NAME_WIDTH}} x{quantity:<3} {price:>4}g",
+            color=color,
+            icon_key=item_key,
+        ))
+
+    widgets.list_view(
+        console, region, rows,
+        selected_index=selected_index,
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+        icon_drawer=_draw_item_icon,
+        show_cursor=False,
+    )
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Tab", "switch"), ("Enter", "trade"), ("Esc", "close")])
 
 
 def draw_knowledge_menu(console, world):
     """Draws the player's knowledge menu (known books, etc.)."""
-    menu_width = 60
-    menu_height = 30
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    geometry = widgets.centered_menu(60, 30)
+    widgets.panel(console, *geometry, title="Knowledge", focused=True)
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Knowledge", clear=True)
+    y = widgets.heading(console, geometry.inner_x, geometry.inner_y, "Books Read")
 
-    line = y + 2
-    console.print(x=x + 2, y=line, string="Books Read:", fg=(255, 255, 0))
-    line += 1
+    titles = []
+    for book_id in sorted(list(world.player.knowledge.known_books)):
+        book = next((b for b in world.books if b.id == book_id), None)
+        if book:
+            titles.append(book.title)
 
-    if not world.player.knowledge.known_books:
-        console.print(x=x + 3, y=line, string="- None", fg=(128, 128, 128))
+    if not titles:
+        widgets.text_line(console, geometry.inner_x + 1, y, "- None", color=theme.TEXT_MUTED)
     else:
-        for book_id in sorted(list(world.player.knowledge.known_books)):
-            book = next((b for b in world.books if b.id == book_id), None)
-            if book:
-                console.print(x=x + 3, y=line, string=f"- {book.title}")
-                line += 1
+        region = widgets.ListRegion(x=geometry.inner_x + 1, y=y,
+                                    width=geometry.inner_width - 1,
+                                    height=max(0, geometry.hint_row - y))
+        widgets.list_view(
+            console, region,
+            [widgets.Row(text=f"- {title}") for title in titles],
+            selected_index=None,
+            show_cursor=False,
+        )
+
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Esc", "close")])
 
 def draw_dialogue_menu(console, world):
     """Draws the interactive Dialogue UI."""
-    width = 60
-    height = 20
-    from config import MAP_WIDTH, SCREEN_HEIGHT
-    x = max(0, (MAP_WIDTH - width) // 2)
-    y = max(0, (SCREEN_HEIGHT - height) // 2)
-    
-    npc_name = world.get_entity_display_name(world.chat_ui_target_npc, include_relationship=True) if getattr(world, 'chat_ui_target_npc', None) else "Unknown"
-    title = f" Conversation with {npc_name} "
-    
-    console.draw_frame(x=x, y=y, width=width, height=height, title=title, clear=True, fg=(255, 255, 255), bg=(12, 14, 20))
-
-    import textwrap
+    geometry = widgets.centered_menu(60, 20)
 
     target_npc = getattr(world, 'chat_ui_target_npc', None)
+    npc_name = world.get_entity_display_name(target_npc, include_relationship=True) if target_npc else "Unknown"
+    widgets.panel(console, *geometry, title=f" Conversation with {npc_name} ", focused=True)
+
     raw_target_name = getattr(target_npc, 'name', None)
     display_target_name = world.get_entity_display_name(target_npc) if target_npc else None
 
-    portrait_top = y + 1
     header_rows = 0
     if target_npc is not None:
-        _draw_entity_portrait(console, x + 2, portrait_top, target_npc)
+        portrait_top = geometry.y + 1
+        _draw_entity_portrait(console, geometry.inner_x, portrait_top, target_npc)
         console.print(
-            x=x + 2 + PORTRAIT_ZOOM + 1,
+            x=geometry.inner_x + PORTRAIT_ZOOM + 1,
             y=portrait_top + (PORTRAIT_ZOOM // 2),
-            string=(display_target_name or npc_name)[: width - 4 - PORTRAIT_ZOOM - 1],
-            fg=(255, 255, 0),
+            string=(display_target_name or npc_name)[: geometry.inner_width - PORTRAIT_ZOOM - 1],
+            fg=theme.HEADING,
         )
         header_rows = PORTRAIT_ZOOM + 1
 
-    history_start_y = y + 2 + header_rows
-    max_history_lines = max(1, height - 4 - header_rows)
+    history_start_y = geometry.inner_y + header_rows
+    max_history_lines = max(1, geometry.height - 4 - header_rows)
     wrapped_lines = []
 
     for speaker, text in getattr(world, 'chat_ui_history', []):
         if raw_target_name and speaker == raw_target_name:
             speaker = display_target_name
-        color = (200, 240, 255) if speaker == "Player" else (255, 215, 120)
-        prefix = f"{speaker}: "
-        lines = textwrap.wrap(prefix + text, width=width - 4)
+        color = theme.INFO if speaker == "Player" else theme.HEADING
+        lines = textwrap.wrap(f"{speaker}: {text}", width=geometry.inner_width)
         for line in lines:
             wrapped_lines.append((line, color))
 
-    start_idx = max(0, len(wrapped_lines) - max_history_lines)
-    display_lines = wrapped_lines[start_idx:]
-
+    # Show the tail of the conversation; older lines scroll off the top.
     cur_y = history_start_y
-    for line_text, color in display_lines:
-        console.print(x=x + 2, y=cur_y, string=line_text, fg=color)
+    for line_text, color in wrapped_lines[max(0, len(wrapped_lines) - max_history_lines):]:
+        console.print(x=geometry.inner_x, y=cur_y, string=line_text, fg=color)
         cur_y += 1
-        
-    input_y = y + height - 2
-    console.print(x=x + 2, y=input_y, string="> " + getattr(world, 'chat_ui_input_line', '') + "_", fg=(255, 255, 255))
+
+    console.print(
+        x=geometry.inner_x, y=geometry.y + geometry.height - 2,
+        string="> " + getattr(world, 'chat_ui_input_line', '') + "_",
+        fg=theme.TEXT,
+    )
+
+def _quest_objective_line(quest, world):
+    """The objective row for a quest, as (text, satisfied), or None if the
+    quest type has no tracked counter."""
+    if quest["type"] == "fetch":
+        item_name = quest["item_to_fetch_key"].replace("_", " ").title()
+        required = quest["item_fetch_count"]
+        # inventory is an Inventory (item_key -> total count), so get()
+        # already gives the aggregate quantity.
+        current = world.player.economic.inventory.get(quest["item_to_fetch_key"], 0)
+        return f"- Fetch {item_name}: {current}/{required}", current >= required
+    if quest["type"] == "kill":
+        required = quest.get("target_count", 1)
+        current = quest.get("progress", 0)
+        return f"- Defeat targets: {current}/{required}", current >= required
+    return None
+
 
 def draw_quest_menu(console, world):
     """Draws the quest log menu."""
-    menu_width = 70
-    menu_height = 40
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    geometry = widgets.centered_menu(70, 40)
+    widgets.panel(console, *geometry, title="Quest Log", focused=True)
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Quest Log", clear=True)
-
-    # List width
     list_width = 25
-    details_x = x + list_width + 1
+    details_x = geometry.x + list_width + 1
+    details_width = geometry.width - list_width - 3
 
-    # Draw separator line
-    console.draw_rect(x=x+list_width, y=y+1, width=1, height=menu_height-2, ch=ord('|'), fg=(100, 100, 100))
+    # Vertical separator between the quest list and the detail pane.
+    for row in range(1, geometry.height - 1):
+        console.print(x=geometry.x + list_width, y=geometry.y + row,
+                      string="│", fg=theme.FRAME)
 
     active_quests = list(world.player.knowledge.active_quests.values())
     num_quests = len(active_quests)
 
+    region = widgets.ListRegion(x=geometry.inner_x, y=geometry.inner_y,
+                                width=list_width - theme.PAD_X,
+                                height=geometry.height - 4)
+    scroll_offset, hovered = _prepare_list(
+        world, "QUEST_MENU", region, total=num_quests,
+        selected_index=world.quest_menu_context.get("selected_quest_index", 0),
+        scroll_offset=world.quest_menu_context.get("scroll_offset", 0),
+    )
+
     if not active_quests:
-        console.print(x=x + 2, y=y + 2, string="No active quests.", fg=(150, 150, 150))
+        widgets.empty_state(console, region, "No active quests.")
+        widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                         [("Esc", "close")])
         return
 
     ctx = world.quest_menu_context
-    selected_index = ctx.get("selected_quest_index", 0)
-    scroll_offset = ctx.get("scroll_offset", 0)
-    list_height = menu_height - 4
-
-    # Scrolling logic
-    if selected_index < 0: selected_index = 0
-    if selected_index >= num_quests: selected_index = num_quests - 1
+    selected_index = max(0, min(num_quests - 1, ctx.get("selected_quest_index", 0)))
     ctx["selected_quest_index"] = selected_index
 
-    if selected_index < scroll_offset:
-        scroll_offset = selected_index
-    elif selected_index >= scroll_offset + list_height:
-        scroll_offset = selected_index - list_height + 1
-    ctx["scroll_offset"] = scroll_offset
+    rows = []
+    for quest in active_quests:
+        title = quest["title"]
+        if len(title) > region.width - 2:
+            title = title[: region.width - 5] + "..."
+        rows.append(widgets.Row(text=title))
 
-    # Draw List
-    for i in range(list_height):
-        idx = scroll_offset + i
-        if idx < num_quests:
-            quest = active_quests[idx]
-            title = quest["title"]
-            if len(title) > list_width - 3:
-                title = title[:list_width - 6] + "..."
-
-            color = (255, 255, 255)
-            if idx == selected_index:
-                color = (0, 255, 255)
-                console.print(x=x + 1, y=y + 2 + i, string=">", fg=color)
-
-            console.print(x=x + 3, y=y + 2 + i, string=title, fg=color)
+    ctx["scroll_offset"] = widgets.list_view(
+        console, region, rows,
+        selected_index=selected_index,
+        scroll_offset=scroll_offset,
+        hovered_index=hovered,
+        show_scrollbar=False,
+    )
 
     # Draw Details
-    if 0 <= selected_index < num_quests:
-        selected_quest = active_quests[selected_index]
+    selected_quest = active_quests[selected_index]
+    detail_y = geometry.inner_y
+    console.print_box(x=details_x + 1, y=detail_y, width=details_width, height=2,
+                      string=selected_quest["title"], fg=theme.HEADING)
+    detail_y += 2
 
-        detail_y = y + 2
-        # Title
-        console.print_box(x=details_x + 1, y=detail_y, width=menu_width - list_width - 3, height=2, string=selected_quest["title"], fg=(255, 255, 0))
-        detail_y += 2
+    desc = selected_quest["description"]
+    desc_height = console.get_height_rect(x=details_x + 1, y=detail_y, width=details_width,
+                                          height=10, string=desc)
+    console.print_box(x=details_x + 1, y=detail_y, width=details_width, height=desc_height,
+                      string=desc, fg=theme.TEXT_DIM)
+    detail_y += desc_height + 1
 
-        # Description
-        desc = selected_quest["description"]
-        desc_height = console.get_height_rect(x=details_x + 1, y=detail_y, width=menu_width - list_width - 3, height=10, string=desc)
-        console.print_box(x=details_x + 1, y=detail_y, width=menu_width - list_width - 3, height=desc_height, string=desc)
-        detail_y += desc_height + 1
+    detail_y = widgets.heading(console, details_x + 1, detail_y, "Objectives")
+    objective = _quest_objective_line(selected_quest, world)
+    if objective is not None:
+        text, satisfied = objective
+        widgets.text_line(console, details_x + 2, detail_y, text,
+                          color=theme.SUCCESS if satisfied else theme.TEXT,
+                          width=details_width - 1)
 
-        # Objectives
-        console.print(x=details_x + 1, y=detail_y, string="Objectives:", fg=(200, 200, 200))
-        detail_y += 1
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Up/Down", "select"), ("Esc", "close")])
 
-        if selected_quest["type"] == "fetch":
-            item_name = selected_quest["item_to_fetch_key"].replace("_", " ").title()
-            count = selected_quest["item_fetch_count"]
 
-            # Check player inventory for progress display. inventory is an
-            # Inventory (dict of item_key -> total count), so get() already
-            # gives the aggregate quantity - no need to iterate instances.
-            current_count = world.player.economic.inventory.get(selected_quest["item_to_fetch_key"], 0)
+HELP_CONTROLS = [
+    ("Move", "Arrows / Left Click"),
+    ("Interact", "E / Right Click"),
+    ("Wait", "."),
+    ("Talk", "T"),
+    ("Character Info", "I"),
+    ("Inventory", "U"),
+    ("Crafting", "C"),
+    ("Building", "B"),
+    ("Quest Log", "Q"),
+    ("Zoom", "Mouse Wheel"),
+    ("Help", "?"),
+    ("Save & Menu", "Esc"),
+]
 
-            progress_str = f"- Fetch {item_name}: {current_count}/{count}"
-            color = (0, 255, 0) if current_count >= count else (255, 255, 255)
-            console.print(x=details_x + 2, y=detail_y, string=progress_str, fg=color)
-
-        elif selected_quest["type"] == "kill":
-            target_count = selected_quest.get("target_count", 1)
-            progress = selected_quest.get("progress", 0)
-            progress_str = f"- Defeat targets: {progress}/{target_count}"
-            color = (0, 255, 0) if progress >= target_count else (255, 255, 255)
-            console.print(x=details_x + 2, y=detail_y, string=progress_str, fg=color)
 
 def draw_help_menu(console):
     """Draws the help menu with controls."""
-    menu_width = 50
-    menu_height = 30
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    geometry = widgets.centered_menu(50, 30)
+    widgets.panel(console, *geometry, title="Help / Controls", focused=True)
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title="Help / Controls", clear=True)
+    y = geometry.inner_y + 1
+    for action, key in HELP_CONTROLS:
+        console.print(x=geometry.inner_x + 2, y=y, string=f"{action:<16}", fg=theme.TEXT_DIM)
+        console.print(x=geometry.inner_x + 18, y=y, string=key, fg=theme.HEADING)
+        y += 2
 
-    controls = [
-        ("Movement", "Arrows / Left Click"),
-        ("Interact", "E / Right Click"),
-        ("Wait", "."),
-        ("Talk", "T"),
-        ("Character Info", "I"),
-        ("Crafting", "C"),
-        ("Building", "B"),
-        ("Quests", "Q (Planned)"),
-        ("Help", "?"),
-        ("Save & Menu", "ESC"),
-    ]
-
-    y_offset = y + 3
-    for action, key in controls:
-        console.print(x=x + 4, y=y_offset, string=f"{action:<20} : {key}")
-        y_offset += 2
-
-    console.print(x=x + menu_width // 2, y=y + menu_height - 3, string="Press ESC to close", alignment=tcod.CENTER)
+    widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
+                     [("Esc", "close")])
 
 
 def draw_book_reading_ui(console, world):
@@ -2763,44 +3088,28 @@ def draw_book_reading_ui(console, world):
     if not book:
         return
 
-    menu_width = 80
-    menu_height = 50
-    x = (MAP_WIDTH - menu_width) // 2
-    y = (SCREEN_HEIGHT - menu_height) // 2
+    geometry = widgets.centered_menu(80, 50)
+    widgets.panel(console, *geometry, title=f"Reading: {book.title}", focused=True)
 
-    console.draw_frame(x=x, y=y, width=menu_width, height=menu_height, title=f"Reading: {book.title}", clear=True)
-
-    # Content preparation
-    header = f"by {book.author_name} ({book.year_written})\n\n"
-    full_text = header + book.content
-
-    # Text wrapping
-    text_width = menu_width - 4
+    # Byline, then the body text, wrapped to the page width. Blank source
+    # lines are preserved so paragraph breaks survive wrapping.
+    full_text = f"by {book.author_name} ({book.year_written})\n\n" + book.content
     wrapped_lines = []
     for line in full_text.splitlines():
         if line:
-            wrapped_lines.extend(textwrap.wrap(line, width=text_width))
+            wrapped_lines.extend(textwrap.wrap(line, width=geometry.inner_width))
         else:
-            wrapped_lines.append("") # Preserve empty lines
+            wrapped_lines.append("")
 
-    # Scrolling
-    scroll_offset = ctx.get("scroll_offset", 0)
-    display_height = menu_height - 4
-
-    # Bound scrolling (simple method)
-    max_scroll = max(0, len(wrapped_lines) - display_height)
-    if scroll_offset > max_scroll:
-        scroll_offset = max_scroll
-        ctx["scroll_offset"] = scroll_offset # Update context to clamp it
-
-    visible_lines = wrapped_lines[scroll_offset : scroll_offset + display_height]
-
-    for i, line in enumerate(visible_lines):
-        console.print(x=x + 2, y=y + 2 + i, string=line)
-
-    # Scrollbar indicator (optional but helpful)
-    if len(wrapped_lines) > display_height:
-        pct = scroll_offset / max_scroll
-        bar_y = int(y + 2 + (display_height * pct))
-        if bar_y >= y + menu_height - 1: bar_y = y + menu_height - 2
-        console.print(x=x + menu_width - 1, y=bar_y, string="█", fg=(100, 100, 100))
+    region = widgets.ListRegion(
+        x=geometry.inner_x, y=geometry.inner_y,
+        width=geometry.inner_width, height=geometry.height - 4,
+    )
+    ctx["scroll_offset"] = widgets.list_view(
+        console, region,
+        [widgets.Row(text=line, color=theme.TEXT_DIM if index == 0 else theme.TEXT)
+         for index, line in enumerate(wrapped_lines)],
+        selected_index=None,
+        scroll_offset=ctx.get("scroll_offset", 0),
+        show_cursor=False,
+    )

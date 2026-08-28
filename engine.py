@@ -28,9 +28,19 @@ from entities.base import (
     PhysicalState,
     Schedule,
     SocialState,
+    roll_appearance,
 ) # Added DireWolf
 from entities.animal import Animal
-from entities.items import Inventory, ItemReference, roll_crafted_item_quality
+from entities.items import (
+    Inventory,
+    ItemReference,
+    roll_crafted_item_quality,
+    REPAIR_WEAR_PER_REPAIR_FRACTION,
+    REPAIR_DURABILITY_FLOOR_FRACTION,
+    REPAIR_MONEY_COST_FRACTION_OF_VALUE,
+    REPAIR_MATERIAL_KEY,
+    REPAIR_MATERIAL_MAX_QTY,
+)
 from entities.social import AspirationType, KnowledgeComponent, MemoryEvent, TravelComponent
 from data.animals import ANIMAL_DEFINITIONS
 from entities.tree import Tree, OakTree, AppleTree, PearTree # Tree classes seem partially defined/used.
@@ -104,6 +114,47 @@ VILLAGE_SUPPLY_DAILY_SPOILAGE_RATE = 0.03
 # straddle the timeout.
 NPC_HOSTILITY_DECAY_SAFE_RADIUS = 20
 
+# --- Scheduled world events (festivals, etc.) ---
+# Ideation-audit item 6. Reusable dispatcher (see World._run_scheduled_events)
+# checked once per day alongside _update_season/_run_daily_governance. This
+# list is the only thing a future event needs to extend - the dispatcher
+# itself has no event-specific logic anywhere in it. Harvest Festival is the
+# first (and, for now, only) entry, per Jason's decision to build the
+# reusable dispatcher rather than a one-off.
+#
+# Fields:
+#   key                 - stable identifier, used as the active_scheduled_events dict key
+#   name                - display name for chat log messages
+#   season              - one of World.seasons; the event triggers at the
+#                         start of this season each year
+#   start_day_of_season - day-within-season (0-indexed) the event begins on
+#   duration_days       - how many days the event runs before ending
+#   demand_boost_items  - item keys that get a temporary village.demand bump
+#                         while the event is active (see get_dynamic_price)
+#   demand_boost_amount - how much demand is added per item, and removed
+#                         again symmetrically when the event ends
+#   status_effect       - a physical.status_effects string applied to every
+#                         living resident of a village for the duration
+#   draws_crowd         - if True, NPCs get an elevated chance of heading to
+#                         their village's town square during leisure hours
+#                         while the event is active (see scheduling.py)
+#   start_message / end_message - posted to the chat log on start/end
+SCHEDULED_EVENT_DEFINITIONS = [
+    {
+        "key": "harvest_festival",
+        "name": "Harvest Festival",
+        "season": "Autumn",
+        "start_day_of_season": 0,
+        "duration_days": 4,
+        "demand_boost_items": ["bread", "wheat", "apple"],
+        "demand_boost_amount": 8,
+        "status_effect": "Festive",
+        "draws_crowd": True,
+        "start_message": "The Harvest Festival has begun! Villages are alive with music, feasting, and full market stalls.",
+        "end_message": "The Harvest Festival has come to an end for another year.",
+    },
+]
+
 # --- Individual voter agency (elections) ---
 # Judgment calls (see World._score_candidate_for_voter / evaluate_elections).
 # Replaces the old single pre-summed fame/infamy/reputation formula with
@@ -161,6 +212,7 @@ from ui_requests import (
     open_dialogue_request,
     open_trade_request,
 )
+from presentation import message_log
 from presentation.text_formatter import WorldTextFormatter
 from presentation.ambient_speech import (
     add_ambient_speech,
@@ -534,6 +586,14 @@ class Player:
         self.social = SocialState()
         self.economic = EconomicState()
         self.equipment = Equipment()
+        # Player has no gender/age attributes at all today (get_human_sprite
+        # short-circuits on is_player=True without needing either) - passing
+        # gender=None to roll_appearance is a judgment call, not a
+        # statement that the player is agender by default; it just means
+        # the player rolls appearance the same low-facial-hair-probability
+        # way as any NPC of unspecified gender, until/unless the game gets
+        # an actual character-creation screen that lets the player choose.
+        self.appearance = roll_appearance(gender=None, age=None)
         self.knowledge = KnowledgeComponent()
         self.state = PlayerState()
         self.schedule = Schedule()
@@ -560,7 +620,7 @@ class Player:
         result = self.skills.gain_experience(skill_name, amount, default_level=default_level)
         if result.get("leveled_up") and hasattr(self, "world_ref") and self.world_ref:
             pretty_name = skill_name.replace("_", " ").title()
-            self.world_ref.add_message_to_chat_log(f"Your {pretty_name} skill rises to {result['new_level']}.")
+            self.world_ref.add_message_to_chat_log(f"Your {pretty_name} skill rises to {result['new_level']}.", category="gain")
         return result
 
     def get_relationship_to(self, viewer) -> str | None:
@@ -646,7 +706,7 @@ class Player:
                 if "broken_leg" not in self.physical.status_effects:
                     self.physical.status_effects.append("broken_leg")
                     if world:
-                        world.add_message_to_chat_log("Your leg is broken!")
+                        world.add_message_to_chat_log("Your leg is broken!", category="combat")
 
         world_ref = world if world else getattr(self, 'world_ref', None)
 
@@ -675,7 +735,7 @@ class Player:
             self.unequip_armor(slot)
 
         self.equipment.equipped_armor[slot] = item_key
-        self.world_ref.add_message_to_chat_log(f"You equip the {item_def['name']}.")
+        self.world_ref.add_message_to_chat_log(f"You equip the {item_def['name']}.", category="gain")
         self.recalculate_stats()
 
     def unequip_armor(self, slot: str):
@@ -683,12 +743,19 @@ class Player:
             item_key = self.equipment.equipped_armor[slot]
             item_def = ITEM_DEFINITIONS.get(item_key)
             self.equipment.equipped_armor[slot] = None
-            # Clear any leftover durability tracked for whatever was in this
-            # slot, so equipping a different item into it later reseeds
-            # fresh from that new item's own max_durability instead of
-            # silently inheriting the old item's wear.
+            # Clear any leftover durability/repair-wear tracked for whatever
+            # was in this slot, so equipping a different item into it later
+            # reseeds fresh from that new item's own max_durability instead
+            # of silently inheriting the old item's wear. Safe to always
+            # clear here (rather than only on breakage) because
+            # unequip_armor's only caller today is equip_armor swapping in
+            # a genuinely different item - there's no standalone "take off
+            # armor and do nothing" player action that would otherwise lose
+            # a still-equipped item's repair history for free. If one gets
+            # added later, this would need to key off item identity instead.
             self.equipment.equipped_armor_durability.pop(slot, None)
-            self.world_ref.add_message_to_chat_log(f"You unequip the {item_def['name']}.")
+            self.equipment.equipped_armor_max_durability.pop(slot, None)
+            self.world_ref.add_message_to_chat_log(f"You unequip the {item_def['name']}.", category="gain")
             self.recalculate_stats()
 
     def recalculate_stats(self):
@@ -709,6 +776,21 @@ class Player:
         item_def = ITEM_DEFINITIONS.get(item_key, {})
         return item_def.get("properties", {}).get("defense_bonus", 0)
 
+    def _get_equipped_armor_max_durability(self, slot: str) -> int | None:
+        """Returns the current repair-adjusted durability ceiling for
+        whatever's equipped in `slot` - the item's own raw max_durability
+        property if it's never been repaired, or the (lower)
+        repair-worn ceiling from equipment.equipped_armor_max_durability
+        if it has. See _repair_equipped_armor_slot."""
+        item_key = self.equipment.equipped_armor.get(slot)
+        if not item_key:
+            return None
+        item_def = ITEM_DEFINITIONS.get(item_key, {})
+        true_base_max = item_def.get("properties", {}).get("max_durability")
+        if true_base_max is None:
+            return None
+        return self.equipment.equipped_armor_max_durability.get(slot, true_base_max)
+
     def _degrade_equipped_armor_slot(self, slot: str, amount: int = 1, world=None):
         """Wears down the armor piece equipped in `slot`, unequipping and
         breaking it once durability hits 0 - the player-side counterpart to
@@ -718,16 +800,18 @@ class Player:
         is (equipped_armor is just an item_key string per slot, with no
         per-instance durability at all before this fix), so durability is
         tracked separately in equipment.equipped_armor_durability, seeded
-        from the item's max_durability property the first time this slot
-        takes a hit. Items with no max_durability property (e.g. fur_cloak,
-        hooded_cowl) never degrade, mirroring ItemReference.degrade()'s
+        from the item's (possibly repair-worn) max_durability ceiling the
+        first time this slot takes a hit. Items with no max_durability
+        property never degrade, mirroring ItemReference.degrade()'s
         no-op-when-durability-is-None behavior for the equivalent NPC case.
+        (Every wearable in data/items.py currently defines one, so that
+        branch is about materials and oddities rather than armour.)
         """
         item_key = self.equipment.equipped_armor.get(slot)
         if not item_key:
             return
         item_def = ITEM_DEFINITIONS.get(item_key, {})
-        max_durability = item_def.get("properties", {}).get("max_durability")
+        max_durability = self._get_equipped_armor_max_durability(slot)
         if max_durability is None:
             return
 
@@ -738,11 +822,45 @@ class Player:
         if current <= 0:
             self.equipment.equipped_armor[slot] = None
             self.equipment.equipped_armor_durability.pop(slot, None)
+            self.equipment.equipped_armor_max_durability.pop(slot, None)
             self.recalculate_stats()
             world_ref = world if world else getattr(self, 'world_ref', None)
             if world_ref:
                 item_name = item_def.get("name", item_key.replace("_", " ").title())
-                world_ref.add_message_to_chat_log(f"Your {item_name} broke!")
+                world_ref.add_message_to_chat_log(f"Your {item_name} broke!", category="combat")
+
+    def _repair_equipped_armor_slot(self, slot: str) -> dict:
+        """Player-side counterpart to ItemReference.repair() for
+        equipped_armor, which (like its durability tracking) isn't
+        ItemReference-backed - see _degrade_equipped_armor_slot's
+        docstring for why player armor needs its own parallel tracking
+        instead of reusing the NPC/ItemReference repair path. Same
+        finite-use design: restores current durability to the ceiling, and
+        permanently lowers that ceiling by a flat fraction of the item's
+        true (never-repaired) max_durability, floored so it never reaches
+        zero/unrepairable.
+        """
+        item_key = self.equipment.equipped_armor.get(slot)
+        if not item_key:
+            return {"repaired": False, "new_max_durability": None, "at_repair_limit": False}
+        item_def = ITEM_DEFINITIONS.get(item_key, {})
+        true_base_max = item_def.get("properties", {}).get("max_durability")
+        if true_base_max is None:
+            return {"repaired": False, "new_max_durability": None, "at_repair_limit": False}
+
+        floor = max(1, round(true_base_max * REPAIR_DURABILITY_FLOOR_FRACTION))
+        wear_increment = max(1, round(true_base_max * REPAIR_WEAR_PER_REPAIR_FRACTION))
+        current_ceiling = self.equipment.equipped_armor_max_durability.get(slot, true_base_max)
+        new_ceiling = max(floor, current_ceiling - wear_increment)
+
+        self.equipment.equipped_armor_max_durability[slot] = new_ceiling
+        self.equipment.equipped_armor_durability[slot] = new_ceiling
+
+        return {
+            "repaired": True,
+            "new_max_durability": new_ceiling,
+            "at_repair_limit": new_ceiling <= floor,
+        }
 
     def add_item(self, item_key_to_add: str, quantity: int = 1, initial_durability: int | None = None, item_reference: ItemReference | None = None):
         if item_reference is not None:
@@ -803,7 +921,7 @@ class Player:
             # self.social.reputation[rep_type] = max(REP_MIN_VALUE, min(self.social.reputation[rep_type], REP_MAX_VALUE))
             # print(f"Player reputation updated: {rep_type} changed by {amount} to {self.social.reputation[rep_type]}") # For now, print to console
             if hasattr(self, 'world_ref') and self.world_ref: # Access world_ref if it exists
-                self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.social.reputation[rep_type]})")
+                self.world_ref.add_message_to_chat_log(f"Reputation: {rep_type} {amount:+} (Total: {self.social.reputation[rep_type]})", category="social")
         else:
             # # print(f"Warning: Tried to adjust unknown reputation type '{rep_type}'")
             if hasattr(self, 'world_ref') and self.world_ref:
@@ -851,7 +969,15 @@ class World:
     def __init__(self, seed=None, player_first_name: str | None = None):
         if seed is not None:
             random.seed(seed)
+        # Retained so terrain generation can derive its own per-chunk RNG
+        # rather than drawing from the module-level `random` - see
+        # _chunk_rng. When no seed is given we draw one now, so a world is
+        # still internally consistent even though it isn't reproducible
+        # across runs.
+        self.world_seed = seed if seed is not None else random.getrandbits(63)
         self.chat_log = [] # Stores chat messages
+        self.chat_log_entries = [] # Same messages, tagged for display (see message_log)
+        self.chat_log_scroll = 0 # How many lines back the player has scrolled the log
         self.chunk_width = WORLD_WIDTH // CHUNK_SIZE
         self.chunk_height = WORLD_HEIGHT // CHUNK_SIZE
 
@@ -900,6 +1026,13 @@ class World:
         self.seasons: list[str] = ["Spring", "Summer", "Autumn", "Winter"]
         self.current_season_index: int = 0
         self.current_day: int = 0
+
+        # Ideation-audit item 6: reusable scheduled-event (festival) dispatcher.
+        # active_scheduled_events maps event key -> {"end_day": int, "name": str}
+        # for whatever SCHEDULED_EVENT_DEFINITIONS entries are currently
+        # running. See _run_scheduled_events.
+        self.active_scheduled_events: dict[str, dict] = {}
+        self.scheduled_events_last_checked_day: int = -1
         self.ambient_temperature: float = 20.0 # Default starting temp
         self.cold_threshold: float = 8.0
         self.severe_cold_threshold: float = 0.0
@@ -1123,6 +1256,14 @@ class World:
         self._background_llm_tasks = {}
         self._gossip_llm_service = AsyncLLMGossipService()
         self.chunk_manager = ChunkManager(CHUNK_SIZE, self.chunk_width, self.chunk_height)
+        self.world_seed = getattr(self, "world_seed", 0)
+        # Saves written before the log carried categories only have the
+        # plain string list, so rebuild the display model from it.
+        if not getattr(self, "chat_log_entries", None):
+            self.chat_log_entries = message_log.entries_from_plain_log(
+                getattr(self, "chat_log", []), tick=getattr(self, "game_time", 0)
+            )
+        self.chat_log_scroll = getattr(self, "chat_log_scroll", 0)
         self.last_abstract_simulation_hour = getattr(self, "last_abstract_simulation_hour", -1)
         self.last_macro_daily_day = getattr(self, "last_macro_daily_day", -1)
         self.stockpiles_by_id = getattr(self, "stockpiles_by_id", {})
@@ -1153,6 +1294,8 @@ class World:
         self.sheltered_rest_bonus = float(getattr(self, "sheltered_rest_bonus", 0.04))
         self.survival_override_switch_cooldown_ticks = int(getattr(self, "survival_override_switch_cooldown_ticks", 15) or 15)
         self.food_reservations_by_id = getattr(self, "food_reservations_by_id", {})
+        self.active_scheduled_events = getattr(self, "active_scheduled_events", {})
+        self.scheduled_events_last_checked_day = getattr(self, "scheduled_events_last_checked_day", -1)
         self._pathfinding_tile_cost_cache = {}
         if getattr(self, "player", None) is not None:
             self.player.world_ref = self
@@ -2782,6 +2925,108 @@ class World:
             season_name = self.seasons[self.current_season_index]
             self.add_message_to_chat_log(self.text.season_changed(season_name))
 
+    def _run_scheduled_events(self) -> None:
+        """Reusable scheduled-event (festival) dispatcher - ideation-audit
+        item 6. Checked once per day, gated the same way as
+        _run_daily_governance (a last-checked-day marker rather than a tick
+        offset, since unlike governance this doesn't need to land on a
+        specific tick within the day). SCHEDULED_EVENT_DEFINITIONS is the
+        only thing a future event needs to extend - this method has no
+        event-specific logic of its own."""
+        current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
+        if self.scheduled_events_last_checked_day >= current_day:
+            return
+        self.scheduled_events_last_checked_day = current_day
+
+        # End any events whose window has closed before considering new starts,
+        # so a definition with duration_days == the gap to its next occurrence
+        # (not possible with the current single entry, but kept correct for
+        # future ones) doesn't stay "active" for a spurious extra day.
+        for key in list(self.active_scheduled_events.keys()):
+            if current_day >= self.active_scheduled_events[key]["end_day"]:
+                self._end_scheduled_event(key)
+
+        days_into_season = current_day % DAYS_PER_SEASON
+        current_season_name = self.seasons[self.current_season_index]
+
+        for definition in SCHEDULED_EVENT_DEFINITIONS:
+            key = definition["key"]
+            if key in self.active_scheduled_events:
+                continue
+            if current_season_name != definition["season"]:
+                continue
+            if days_into_season != definition["start_day_of_season"]:
+                continue
+            self._start_scheduled_event(definition, current_day)
+
+    def _start_scheduled_event(self, definition: dict, current_day: int) -> None:
+        """Applies a SCHEDULED_EVENT_DEFINITIONS entry's start effects:
+        village demand boost (feeds get_dynamic_price), a status_effects tag
+        on every living resident (and the player) for the UI to surface, and
+        a chat log announcement."""
+        key = definition["key"]
+        self.active_scheduled_events[key] = {
+            "end_day": current_day + definition["duration_days"],
+            "name": definition["name"],
+        }
+
+        boost_amount = definition.get("demand_boost_amount", 0)
+        for item_key in definition.get("demand_boost_items", []):
+            for village in self.villages:
+                village.demand[item_key] = village.demand.get(item_key, 0) + boost_amount
+
+        status_effect = definition.get("status_effect")
+        if status_effect:
+            for entity in [self.player, *self.all_npcs]:
+                physical = getattr(entity, "physical", None)
+                if physical is not None and not getattr(physical, "is_dead", False):
+                    if status_effect not in physical.status_effects:
+                        physical.status_effects.append(status_effect)
+
+        start_message = definition.get("start_message")
+        if start_message:
+            self.add_message_to_chat_log(start_message)
+
+    def _end_scheduled_event(self, key: str) -> None:
+        """Reverses _start_scheduled_event's effects for one event key. Safe
+        to call on a key that isn't actually active (no-op)."""
+        state = self.active_scheduled_events.pop(key, None)
+        if state is None:
+            return
+        definition = next((d for d in SCHEDULED_EVENT_DEFINITIONS if d["key"] == key), None)
+        if definition is None:
+            return
+
+        boost_amount = definition.get("demand_boost_amount", 0)
+        for item_key in definition.get("demand_boost_items", []):
+            for village in self.villages:
+                if item_key in village.demand:
+                    village.demand[item_key] = max(0, village.demand[item_key] - boost_amount)
+                    if village.demand[item_key] <= 0:
+                        del village.demand[item_key]
+
+        status_effect = definition.get("status_effect")
+        if status_effect:
+            for entity in [self.player, *self.all_npcs]:
+                physical = getattr(entity, "physical", None)
+                if physical is not None and status_effect in physical.status_effects:
+                    physical.status_effects.remove(status_effect)
+
+        end_message = definition.get("end_message")
+        if end_message:
+            self.add_message_to_chat_log(end_message)
+
+    def _is_crowd_drawing_event_active(self) -> bool:
+        """Used by scheduling.py's leisure-hours logic to give NPCs an
+        elevated chance of heading to their village's town square while a
+        'draws_crowd' scheduled event (e.g. Harvest Festival) is active."""
+        if not self.active_scheduled_events:
+            return False
+        return any(
+            definition["key"] in self.active_scheduled_events and definition.get("draws_crowd")
+            for definition in SCHEDULED_EVENT_DEFINITIONS
+        )
+
     def _check_for_shelter(self, x: int, y: int, max_dist: int = 10) -> bool:
         """
         Checks if a position is sheltered by casting rays in 8 directions.
@@ -4188,7 +4433,10 @@ class World:
                         elif npc.schedule.current_task != "alerting_guards":
                             npc.schedule.current_task = "alerting_guards"
                             npc_village = self._get_village_for_npc(npc)
-                            alarm_spot = npc_village.interaction_points.get("town_square_center") if npc_village else None
+                            # interaction_points values are lists of coords, so
+                            # take the first rather than indexing the list as
+                            # if it were an (x, y) pair.
+                            alarm_spot = self._get_village_anchor_coords(npc_village) if npc_village else None
                             if alarm_spot:
                                 dest_x, dest_y = self._find_best_adjacent_tile(alarm_spot[0], alarm_spot[1], npc)
                                 if dest_x is not None:
@@ -5647,7 +5895,7 @@ class World:
                 location=(npc.x, npc.y)
              )
              
-             self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.combat.hp}/{player.combat.max_hp})")
+             self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} hits you with {weapon_name} for {actual_damage} damage! (HP: {player.combat.hp}/{player.combat.max_hp})", category="combat")
 
              if player.combat.hp <= 0:
                 self.add_message_to_chat_log("You have been defeated!")
@@ -5715,7 +5963,7 @@ class World:
         can_player_see = self.player_fov_map[attacker.x, attacker.y] or self.player_fov_map[target.x, target.y]
 
         if can_player_see:
-            self.add_message_to_chat_log(self.text.entity_attacks(attacker, target, damage))
+            self.add_message_to_chat_log(self.text.entity_attacks(attacker, target, damage), category="combat")
 
         self.log_event(
             event_type="combat_attack",
@@ -5737,7 +5985,7 @@ class World:
 
         if was_killed:
             if can_player_see:
-                self.add_message_to_chat_log(f"{self.get_entity_display_name(target)} has been killed by {self.get_entity_display_name(attacker)}!")
+                self.add_message_to_chat_log(f"{self.get_entity_display_name(target)} has been killed by {self.get_entity_display_name(attacker)}!", category="combat")
             self.handle_npc_death(target, killer_id=attacker.id)
             if self._is_predator(attacker):
                 attacker.physical.hunger = 0
@@ -7539,6 +7787,8 @@ class World:
                 actions.extend(["Talk", "Attack"])
                 if entity_has_capability(entity_data, "trade"):
                     actions.append("Trade")
+                if entity_has_capability(entity_data, "repair"):
+                    actions.append("Repair")
 
                 # Check if this NPC is an official in a warring village
                 village = self._get_village_for_npc(entity_data)
@@ -8485,6 +8735,131 @@ class World:
             location=(x, y)
         )
 
+    def _describe_repairable_player_items(self) -> list[dict]:
+        """Enumerates the player's damaged, repairable gear across both
+        durability representations in this codebase: equipped armor slots
+        (tracked via equipment.equipped_armor_durability/
+        equipped_armor_max_durability, since Player armor isn't
+        ItemReference-backed - see Player._degrade_equipped_armor_slot's
+        docstring) and inventory ItemReferences with their own
+        current_durability/max_durability (weapons/tools). Each entry
+        carries enough info for cost calculation and execution without the
+        caller needing to know which representation it is.
+        """
+        candidates: list[dict] = []
+
+        for slot, item_key in self.player.equipment.equipped_armor.items():
+            if not item_key:
+                continue
+            max_durability = self.player._get_equipped_armor_max_durability(slot)
+            if max_durability is None or max_durability <= 0:
+                continue
+            current = self.player.equipment.equipped_armor_durability.get(slot, max_durability)
+            if current >= max_durability:
+                continue
+            item_def = ITEM_DEFINITIONS.get(item_key, {})
+            candidates.append({
+                "kind": "armor_slot",
+                "slot": slot,
+                "item_key": item_key,
+                "display_name": item_def.get("name", item_key.replace("_", " ").title()),
+                "missing_fraction": max(0.0, min(1.0, 1 - (current / max_durability))),
+                "value": item_def.get("value", 0),
+            })
+
+        for item_key in list(self.player.economic.inventory.keys()):
+            if item_key in ("item_references", "money"):
+                continue
+            item_ref = self.player.get_item_reference(item_key)
+            if item_ref is None or item_ref.current_durability is None:
+                continue
+            max_durability = item_ref.max_durability
+            if max_durability is None or max_durability <= 0 or item_ref.current_durability >= max_durability:
+                continue
+            candidates.append({
+                "kind": "item_reference",
+                "item_key": item_key,
+                "item_reference": item_ref,
+                "display_name": item_ref.name,
+                "missing_fraction": max(0.0, min(1.0, 1 - (item_ref.current_durability / max_durability))),
+                "value": item_ref.value,
+            })
+
+        return candidates
+
+    def _calculate_repair_cost(self, candidate: dict) -> dict:
+        """Repair cost scales with how damaged the item is: a fully-broken
+        item (missing_fraction=1.0) costs at most
+        REPAIR_MONEY_COST_FRACTION_OF_VALUE of its own value in money, plus
+        up to REPAIR_MATERIAL_MAX_QTY of REPAIR_MATERIAL_KEY. A barely-worn
+        item costs proportionally less of both. See entities/items.py for
+        the constants and the reasoning behind using one generic repair
+        material regardless of the item's actual material."""
+        missing_fraction = max(0.0, min(1.0, candidate.get("missing_fraction", 0.0)))
+        money_cost = max(1, round(candidate.get("value", 0) * missing_fraction * REPAIR_MONEY_COST_FRACTION_OF_VALUE))
+        material_qty = max(1, round(missing_fraction * REPAIR_MATERIAL_MAX_QTY))
+        return {"money": money_cost, "material_key": REPAIR_MATERIAL_KEY, "material_qty": material_qty}
+
+    def player_attempt_repair_gear(self, npc: NPC):
+        """Repairs the single most-damaged piece of the player's own gear
+        at a Blacksmith (or any NPC with the "repair" profession
+        capability - see simulation/careers.py's PROFESSION_CAPABILITIES),
+        for a cost in money + REPAIR_MATERIAL_KEY scaled to how damaged it
+        is. Finite-use per Jason's design decision: each repair also
+        permanently lowers that item's max_durability ceiling a bit (see
+        ItemReference.repair() / Player._repair_equipped_armor_slot)
+        rather than being a free, unlimited undo of degrade().
+
+        Deliberately repairs one item per call (the single most-damaged
+        candidate) rather than opening a multi-item selection menu -
+        mirrors this codebase's existing single-purpose NPC-interaction
+        pattern (player_attempt_feed_animal, player_attempt_ride_animal)
+        rather than introducing a new selectable-list UI subsystem the way
+        Trade has. A player with several damaged items can just invoke
+        Repair again for the next one. Flagged as a scoping choice - a
+        proper per-item picker would need real UI work beyond this pass.
+        """
+        npc_display_name = self.get_entity_display_name(npc)
+        if not entity_has_capability(npc, "repair"):
+            self.add_message_to_chat_log(f"{npc_display_name} doesn't know how to repair gear.")
+            return
+
+        candidates = self._describe_repairable_player_items()
+        if not candidates:
+            self.add_message_to_chat_log("You have nothing that needs repairing.")
+            return
+
+        candidate = max(candidates, key=lambda c: c["missing_fraction"])
+        cost = self._calculate_repair_cost(candidate)
+
+        if self.player.economic.money < cost["money"]:
+            self.add_message_to_chat_log(
+                f"{npc_display_name} says repairing your {candidate['display_name']} would cost {cost['money']} coins - you don't have enough."
+            )
+            return
+        if not self.player.has_item(cost["material_key"], cost["material_qty"]):
+            material_name = ITEM_DEFINITIONS.get(cost["material_key"], {}).get("name", cost["material_key"])
+            self.add_message_to_chat_log(
+                f"{npc_display_name} says repairing your {candidate['display_name']} needs {cost['material_qty']}x {material_name} - you don't have enough."
+            )
+            return
+
+        self.player.economic.money -= cost["money"]
+        self.player.remove_item(cost["material_key"], cost["material_qty"])
+
+        if candidate["kind"] == "armor_slot":
+            result = self.player._repair_equipped_armor_slot(candidate["slot"])
+        else:
+            result = candidate["item_reference"].repair()
+
+        if result.get("at_repair_limit"):
+            self.add_message_to_chat_log(
+                f"{npc_display_name} repairs your {candidate['display_name']} as best they can - "
+                f"it's showing its age and won't hold up like it used to."
+            )
+        else:
+            self.add_message_to_chat_log(f"{npc_display_name} repairs your {candidate['display_name']}.")
+
     def player_attempt_mercenary_contract(self, npc: NPC):
         """Handles the player attempting to offer mercenary services to a warring village."""
         npc_display_name = self.get_entity_display_name(npc)
@@ -8520,7 +8895,7 @@ class World:
             "reward_money": 100,
             "giver_id": npc.id
         }
-        self.add_message_to_chat_log(f"Quest accepted: Mercenary: Defend the Village.")
+        self.add_message_to_chat_log(f"Quest accepted: Mercenary: Defend the Village.", category="quest")
 
     def player_attempt_chop_tree(self, tree_x: int, tree_y: int):
         """Handles the player's attempt to chop a tree at the given world coordinates."""
@@ -8732,7 +9107,7 @@ class World:
                             broke = axe_ref.degrade(1)
                             if broke:
                                 self.player.remove_item(axe_item_key, 1)
-                                self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!")
+                                self.add_message_to_chat_log(f"Your {axe_def['name']} broke during use!", category="combat")
                                 if "broken_tool_handle" in ITEM_DEFINITIONS:
                                     self.player.add_item("broken_tool_handle", 1)
                                     self.add_message_to_chat_log("You salvaged a broken tool handle.")
@@ -8760,11 +9135,32 @@ class World:
         else:
             self.add_message_to_chat_log("You can't plant a sapling there.")
 
-    def add_message_to_chat_log(self, message: str):
+    def add_message_to_chat_log(self, message: str, category: str | None = None):
+        """Record a message for the player's log.
+
+        `chat_log` stays a plain list of strings - it is the raw history and
+        a lot of code (and tests) reads it that way. `chat_log_entries` is
+        the display model the renderer draws from: same messages, but each
+        tagged with a category, the tick it happened on, and a repeat count.
+        Pass `category` when the caller knows it (see message_log for the
+        vocabulary); otherwise it's inferred once, here, instead of being
+        re-guessed from the text on every frame.
+        """
         self.chat_log.append(message)
         # Keep chat log to a reasonable size
         if len(self.chat_log) > 100:
             self.chat_log.pop(0)
+
+        entries = getattr(self, "chat_log_entries", None)
+        if entries is None:
+            entries = []
+            self.chat_log_entries = entries
+        message_log.append_message(
+            entries, message, category=category, tick=getattr(self, "game_time", 0)
+        )
+        # Snap the view back to the newest line, so a player who scrolled
+        # back to read something isn't left stranded in the past.
+        self.chat_log_scroll = 0
 
     def player_attempt_sit(self, target_x: int, target_y: int):
         """Handles the player's attempt to sit on an object."""
@@ -9274,7 +9670,7 @@ class World:
                 if target_npc.is_dead:
                     self.handle_npc_death(target_npc, killer_id=self.player.id)
             elif hit and damage_dealt <= 0: # A hit that does no damage
-                self.add_message_to_chat_log(f"Your attack hits but glances off {target_name} harmlessly!")
+                self.add_message_to_chat_log(f"Your attack hits but glances off {target_name} harmlessly!", category="combat")
 
             if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
                  target_npc.combat.is_hostile_to_player = True
@@ -9431,7 +9827,7 @@ class World:
                 if quest_data.get("type") == "kill" and "target_faction_id" in quest_data:
                     if getattr(dead_npc, "faction_id", getattr(dead_npc, "enemy_faction_id", None)) == quest_data["target_faction_id"]:
                         quest_data["progress"] += 1
-                        self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})")
+                        self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})", category="quest")
 
         if not isinstance(dead_npc, Animal):
             self._fail_quests_orphaned_by_death(dead_npc)
@@ -9656,7 +10052,7 @@ class World:
 
             if pick_broken:
                 self.player.remove_item("lockpick", 1)
-                self.add_message_to_chat_log("Your lockpick broke!")
+                self.add_message_to_chat_log("Your lockpick broke!", category="combat")
                 if not self.player.has_item("lockpick"):
                     self.add_message_to_chat_log("That was your last lockpick.")
 
@@ -9810,6 +10206,30 @@ class World:
             if item_def:
                 price = self.get_dynamic_price(item_key, merchant_village, merchant=merchant_npc)
                 self.trade_ui_merchant_inventory_snapshot.append((item_key, quantity, price))
+
+        # Surface village-level supply/demand conditions to the player -
+        # prices already genuinely vary village-to-village via
+        # get_dynamic_price, but nothing ever told the player that. Uses
+        # the same raw demand/supply modifier get_dynamic_price computes,
+        # deliberately excluding its merchant-reputation multiplier since
+        # that reflects this specific merchant's opinion of the player, not
+        # the village's actual economic conditions. Only speaks up when
+        # conditions are notably one-sided, so an ordinary trade session
+        # doesn't get a message every time.
+        if merchant_village and merchant_inventory_source:
+            village_price_modifiers = []
+            for item_key in merchant_inventory_source:
+                if item_key == "money":
+                    continue
+                supply = merchant_village.supply.get(item_key, 1)
+                demand = merchant_village.demand.get(item_key, 1)
+                village_price_modifiers.append(max(0.2, min(5.0, demand / supply)))
+            if village_price_modifiers:
+                avg_price_modifier = sum(village_price_modifiers) / len(village_price_modifiers)
+                if avg_price_modifier >= 1.5:
+                    self.add_message_to_chat_log("Goods are scarce in this village - prices are running high.")
+                elif avg_price_modifier <= 0.6:
+                    self.add_message_to_chat_log("This village has surplus stock - prices are unusually low.")
 
         # Sort by name for consistent display
         self.trade_ui_player_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
@@ -10324,7 +10744,7 @@ class World:
             if quest_def:
                 offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
                 self.chat_ui_history.append((npc_display_name, offer_dialogue))
-                self.add_message_to_chat_log(f"Quest Offered: {quest_def['title']}")
+                self.add_message_to_chat_log(f"Quest Offered: {quest_def['title']}", category="quest")
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
@@ -13806,8 +14226,36 @@ class World:
         elif chunk.ruin:
             self._generate_ruin_layout(chunk, chunk_x, chunk_y) # Renders directly to tiles
 
+    def _chunk_rng(self, chunk_x: int, chunk_y: int, purpose: str) -> random.Random:
+        """A generator-independent RNG for one chunk and one purpose.
+
+        Terrain generation used to draw from the module-level `random`,
+        which caused two distinct problems.
+
+        First, it made generated terrain depend on how much randomness had
+        already been consumed, so a chunk came out differently depending on
+        when the player (or a test) happened to first look at it. Deriving
+        the stream from the world seed and the chunk's own coordinates makes
+        a chunk's contents a pure function of where it is - visit order no
+        longer matters.
+
+        Second, it left generation at the mercy of anything that swapped the
+        module-level RNG out. A test doing patch("random.random",
+        return_value=0.0) - a normal way to pin a probabilistic branch -
+        would silently make every "if random.random() < density" obstacle
+        check fire, producing terrain packed with trees (measured: 186 of
+        256 tiles passable instead of 248) and no walkable routes.
+
+        Seeded from a string because random.Random hashes str seeds with
+        sha512; a tuple seed would go through hash(), which is randomized
+        per process and so would not be stable across runs or saves. This
+        matches the idiom already used in world_generation.get_poi_at.
+        """
+        return random.Random(f"{self.world_seed}:{int(chunk_x)}:{int(chunk_y)}:{purpose}")
+
     def _render_biome_details(self, chunk, chunk_x, chunk_y):
         """Renders terrain decorations for a chunk without spawning entities."""
+        rng = self._chunk_rng(chunk_x, chunk_y, "biome_details")
         tiles = chunk.tiles
         chunk.allow_wildlife_population = True
 
@@ -13815,8 +14263,8 @@ class World:
             for y_local in range(CHUNK_SIZE):
                 for x_local in range(CHUNK_SIZE):
                     if tiles[y_local][x_local].name == "Plains":
-                        if random.random() < 0.03:
-                            tree_type_roll = random.random()
+                        if rng.random() < 0.03:
+                            tree_type_roll = rng.random()
                             tree_x_world = chunk_x * CHUNK_SIZE + x_local
                             tree_y_world = chunk_y * CHUNK_SIZE + y_local
                             # Avoid overwriting buildings or roads (checked by name/passable later but buildings aren't drawn yet)
@@ -13829,19 +14277,19 @@ class World:
                                 tiles[y_local][x_local] = PearTree(tree_x_world, tree_y_world)
                             if 0 <= tree_y_world < WORLD_HEIGHT and 0 <= tree_x_world < WORLD_WIDTH:
                                 self.transparency_map[tree_y_world, tree_x_world] = False
-                        elif random.random() < 0.01:
+                        elif rng.random() < 0.01:
                             sapling_def = TILE_DEFINITIONS["sapling"]
                             tiles[y_local][x_local] = Tile(sapling_def["char"], sapling_def["color"], sapling_def["passable"], sapling_def["name"], properties=sapling_def.get("properties", {}).copy())
-                        elif random.random() < 0.15:
+                        elif rng.random() < 0.15:
                             tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["tall_grass"]["char"], TILE_DEFINITIONS["tall_grass"]["color"], TILE_DEFINITIONS["tall_grass"]["passable"], TILE_DEFINITIONS["tall_grass"]["name"], TILE_DEFINITIONS["tall_grass"].get("properties", {}))
-                        elif random.random() < 0.01:
+                        elif rng.random() < 0.01:
                             tiles[y_local][x_local] = Tile(TILE_DEFINITIONS["flower"]["char"], TILE_DEFINITIONS["flower"]["color"], TILE_DEFINITIONS["flower"]["passable"], TILE_DEFINITIONS["flower"]["name"], TILE_DEFINITIONS["flower"].get("properties", {}))
 
                         # Add Dens if missing (fallback logic for existing generation)
                         # (This section was already added in previous step, ensuring it remains)
 
                         # Den Placement Logic
-                        if random.random() < 0.002: # Chance to spawn a den per tile (low chance)
+                        if rng.random() < 0.002: # Chance to spawn a den per tile (low chance)
                             # Determine suitable den for this biome
                             potential_dens = []
                             for den_key, item_def in DECORATION_ITEM_DEFINITIONS.items():
@@ -13852,7 +14300,7 @@ class World:
                                         potential_dens.append(den_key)
 
                             if potential_dens:
-                                den_key = random.choice(potential_dens)
+                                den_key = rng.choice(potential_dens)
                                 den_def = DECORATION_ITEM_DEFINITIONS[den_key]
                                 world_x = chunk_x * CHUNK_SIZE + x_local
                                 world_y = chunk_y * CHUNK_SIZE + y_local
@@ -13905,7 +14353,8 @@ class World:
                 world_y = chunk_y * CHUNK_SIZE + y_local
                 if self._is_wildlife_spawn_tile_suitable(species_key, chunk, world_x, world_y):
                     candidates.append((world_x, world_y))
-        random.shuffle(candidates)
+        # Per-species stream so one species' placement doesn't shift another's.
+        self._chunk_rng(chunk_x, chunk_y, f"wildlife_tiles:{species_key}").shuffle(candidates)
         return candidates[:limit]
 
     def _manifest_wildlife_entity(self, species_key: str, x: int, y: int, region_id: str, population_id: str) -> Animal | None:
@@ -13963,7 +14412,8 @@ class World:
             if not spawn_tiles:
                 continue
             group_min, group_max = species_def.get("group_size", (1, 1))
-            spawn_count = min(available_slots, random.randint(int(group_min), int(group_max)), len(spawn_tiles))
+            group_rng = self._chunk_rng(chunk_x, chunk_y, f"wildlife_group:{species_key}")
+            spawn_count = min(available_slots, group_rng.randint(int(group_min), int(group_max)), len(spawn_tiles))
             for spawn_x, spawn_y in spawn_tiles[:spawn_count]:
                 animal = self._manifest_wildlife_entity(species_key, spawn_x, spawn_y, region.id, f"{region.id}:{species_key}")
                 if animal is None:
@@ -14010,6 +14460,22 @@ class World:
         noticeboard_x = chunk_global_start_x + min(CHUNK_SIZE - 2, road_x + 1)
         noticeboard_y = chunk_global_start_y + road_y
         chunk.village.interaction_points["noticeboard"] = [(noticeboard_x, noticeboard_y)]
+
+        # The crossroads is the village's social centre, so register it as
+        # the town square. Twenty-odd places across engine.py and
+        # simulation/systems/scheduling.py read "town_square_center" -
+        # children playing during leisure hours, festival crowds, guards
+        # rallying to an alarm, raiding parties choosing where to muster
+        # and strike, travelling parties picking a destination - but until
+        # now nothing ever wrote it, so every one of those behaviours was
+        # silently dead in a generated world. Sits one tile west of the
+        # well along the main road rather than on the well itself, so the
+        # anchor is a walkable road tile that NPCs can actually path onto.
+        # Stored as a list of coordinates to match "well"/"noticeboard";
+        # readers take [0] (see _get_village_anchor_coords).
+        town_square_x = chunk_global_start_x + max(1, road_x - 1)
+        town_square_y = chunk_global_start_y + road_y
+        chunk.village.interaction_points["town_square_center"] = [(town_square_x, town_square_y)]
 
         # Helper to determine placement bias
         def _get_building_placement_bias(building_type: str, category: str, wealth_tier: str) -> str:
@@ -14590,6 +15056,34 @@ class World:
                     return building
         return None
 
+    def _get_weather_movement_cost_multiplier(self) -> float:
+        """Returns the movement-cost multiplier for the current weather.
+
+        data/environment.py's WEATHER_DEFINITIONS declares a per-weather
+        "slows_movement" flag (True for snow) that was never actually read
+        anywhere - confirmed by a full-repo grep before this fix. Wired in
+        here, applied to the player's per-step movement_cost, which is
+        already the codebase's real "how many game ticks does this step
+        take" mechanism (simulation/systems/tick.py's
+        advance_player_auto_movement adds action_cost-1 straight onto
+        world.game_time; main.py's manual-move handler consumes the same
+        return value the same way).
+
+        Deliberately player-only for now: NPC movement (the "Unified
+        Path-Based Movement" block) uses a different, integer
+        moves-per-tick "speed" value instead of a tick-cost value, and most
+        NPCs default to speed=1 - multiplying that by a <1.0 slowdown
+        factor would floor to 0 and freeze them in place outright rather
+        than actually slowing them, which is a materially different (and
+        much riskier) change than this fix is meant to be. Extending this
+        to NPCs would need its own accumulator/skip-chance design, not a
+        one-line multiply.
+        """
+        weather_def = WEATHER_DEFINITIONS.get(self.weather, {})
+        if weather_def.get("slows_movement"):
+            return 1.5
+        return 1.0
+
     def handle_player_movement(self, dx, dy) -> int:
         if self.player.state.is_jailed:
             self.add_message_to_chat_log("You are in jail and cannot move freely.")
@@ -14608,7 +15102,8 @@ class World:
                     self._update_entity_position(riding_animal, new_x, new_y)
                     self._update_entity_position(self.player, new_x, new_y)
                     self._update_player_fov()
-                    return int(destination_tile.properties.get("movement_cost", 1))
+                    base_cost = destination_tile.properties.get("movement_cost", 1)
+                    return max(1, int(round(base_cost * self._get_weather_movement_cost_multiplier())))
                 else:
                     return 0 # No movement if blocked
             else:
@@ -14630,7 +15125,8 @@ class World:
             if hasattr(self, "visual_effects") and random.random() < 0.6:
                 self.visual_effects.append(ParticleBurstEffect(origin_x, origin_y, kind="dust", count=2, duration=0.25))
 
-            movement_cost = int(destination_tile.properties.get("movement_cost", 1))
+            base_movement_cost = destination_tile.properties.get("movement_cost", 1)
+            movement_cost = max(1, int(round(base_movement_cost * self._get_weather_movement_cost_multiplier())))
 
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)
@@ -15003,6 +15499,26 @@ class World:
         for npc in self.all_npcs:
             if npc.id == entity_id:
                 return npc
+        return None
+
+    def _find_trackable_parent(self, child_npc: NPC) -> NPC | None:
+        """Returns a living, currently-locatable parent for a Child-
+        profession NPC, or None if neither parent can be found (deceased,
+        migrated away, or the child predates family_ties tracking). Used
+        by the follow-parent work-hours behavior - see
+        update_npc_daily_goal_policy in simulation/systems/scheduling.py.
+        Deliberately tolerant of missing/dead parents: children with no
+        trackable parent just fall through to whatever this function's
+        later logic would otherwise apply (going home, idling), rather
+        than getting stuck."""
+        family_ties = getattr(getattr(child_npc, "social", None), "family_ties", {}) or {}
+        for parent_key in ("mother_id", "father_id"):
+            parent_id = family_ties.get(parent_key)
+            if parent_id is None:
+                continue
+            parent = self.get_entity_by_id(parent_id)
+            if parent is not None and not getattr(getattr(parent, "physical", None), "is_dead", True):
+                return parent
         return None
 
     def is_identity_obscured(self, entity) -> bool:
@@ -16003,8 +16519,9 @@ class World:
                         # Place them at town square or random edge
                         spawn_x = x_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
                         spawn_y = y_chunk * CHUNK_SIZE + CHUNK_SIZE // 2
-                        if "town_square_center" in village.interaction_points:
-                            spawn_x, spawn_y = village.interaction_points["town_square_center"]
+                        anchor = self._get_village_anchor_coords(village)
+                        if anchor:
+                            spawn_x, spawn_y = anchor
 
                         # Create a dummy chunk object to reuse population logic or just manually create
                         # Reusing _populate_village_npcs is hard because it does a batch.
@@ -16054,23 +16571,54 @@ class World:
         return True
 
 
+    def _describe_village_direction_from_player(self, chunk_coords: tuple[int, int] | None) -> str:
+        """Returns a short, player-facing phrase describing where a village
+        chunk sits relative to the player's CURRENT position (recomputed
+        fresh on every call, never cached, so it stays accurate as the
+        player travels). Villages have no name field anywhere in this
+        codebase (only chunk_coords and LLM-generated flavor lore), so this
+        is how distant-village diplomacy/war/raid events get described to
+        the player without inventing a whole naming system.
+
+        Returns "nearby" whenever the village falls within
+        ABSTRACT_SIMULATION_DISTANCE_CHUNKS of the player's current chunk -
+        the same threshold _update_abstract_simulation already uses to
+        decide whether a village is "near" (actively simulated) or "far"
+        (abstracted), so "nearby" here means the same thing it means
+        everywhere else in the simulation.
+        """
+        if not chunk_coords:
+            return "somewhere in the region"
+
+        player_chunk_x = self.player.x // CHUNK_SIZE
+        player_chunk_y = self.player.y // CHUNK_SIZE
+        dx = chunk_coords[0] - player_chunk_x
+        dy = chunk_coords[1] - player_chunk_y
+
+        if abs(dx) <= ABSTRACT_SIMULATION_DISTANCE_CHUNKS and abs(dy) <= ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
+            return "nearby"
+
+        # atan2 with -dy since chunk_y increases southward (screen/grid
+        # convention) but a standard math angle expects "up" to be positive.
+        angle = math.degrees(math.atan2(-dy, dx)) % 360
+        directions = ["east", "northeast", "north", "northwest", "west", "southwest", "south", "southeast"]
+        direction = directions[round(angle / 45) % 8]
+        return f"to the {direction}"
+
     def _spawn_raiding_party(self, source_village, target_village):
         """Spawns a raiding party from source_village to attack target_village."""
         if not source_village or not target_village: return
 
-        # Pick a spawn location near the edge of the source village chunk
-        # For simplicity, spawn at town square of source
-        spawn_x, spawn_y = 0, 0
-        if "town_square_center" in source_village.interaction_points:
-            spawn_x, spawn_y = source_village.interaction_points["town_square_center"][0]
-        else:
+        # Muster at the source village's town square and strike at the
+        # target's. _get_village_anchor_coords falls back to the village's
+        # first building when a settlement has no town square, so a village
+        # that predates town-square generation (or an old save) still
+        # raids instead of silently doing nothing.
+        spawn_coords = self._get_village_anchor_coords(source_village)
+        target_coords = self._get_village_anchor_coords(target_village)
+        if spawn_coords is None or target_coords is None:
             return
-
-        target_coords = None
-        if "town_square_center" in target_village.interaction_points:
-            target_coords = target_village.interaction_points["town_square_center"][0]
-        else:
-            return
+        spawn_x, spawn_y = spawn_coords
 
         party_size = random.randint(2, 4)
         for i in range(party_size):
@@ -16111,7 +16659,21 @@ class World:
             self.npcs.append(raider) # Spawn as world npcs, not village_npcs
             self._mark_entity_positions_dirty()
 
-        self.add_message_to_chat_log(f"A raiding party was spotted leaving for a rival settlement!")
+        # Surface this to the player - previously a single generic message
+        # fired unconditionally for every raid anywhere in the world, with
+        # no indication of where or whether it mattered to the player. Now
+        # it names a direction for both villages and gets noticeably more
+        # urgent when the target is the village near the player, since
+        # target_village.chunk_coords can be near the player even though
+        # source_village is always distant (this whole diplomacy/raiding
+        # block only runs for source villages beyond
+        # ABSTRACT_SIMULATION_DISTANCE_CHUNKS - see _update_abstract_simulation).
+        target_direction = self._describe_village_direction_from_player(target_village.chunk_coords)
+        if target_direction == "nearby":
+            self.add_message_to_chat_log("A raiding party has been spotted marching toward a village nearby - trouble may be close at hand!")
+        else:
+            source_direction = self._describe_village_direction_from_player(source_village.chunk_coords)
+            self.add_message_to_chat_log(f"A raiding party was spotted leaving a village {source_direction}, marching toward a village {target_direction}.")
 
     def _spawn_migrant(self, village: Village, x: int, y: int):
 
@@ -17027,7 +17589,7 @@ class World:
                                         event_type="trade_deal",
                                         description=f"A caravan from this village sold {trade_qty} {item_key} to a neighboring settlement.",
                                         subject_id=-1, # System event
-                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                        location=self._get_village_anchor_coords(village) or (0, 0)
                                     )
                                     # Record local event for history
                                     village.local_events.append(self.global_events[-1])
@@ -17053,9 +17615,18 @@ class World:
                                         event_type="war_declared",
                                         description=f"Tensions boiled over and this village has declared war on a neighbor.",
                                         subject_id=-1,
-                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                        location=self._get_village_anchor_coords(village) or (0, 0)
                                     )
                                     village.local_events.append(self.global_events[-1])
+                                    # log_event only reaches the player if they happen to be
+                                    # physically witnessing the town square at this exact
+                                    # moment - never true here, since this whole block only
+                                    # runs for villages beyond ABSTRACT_SIMULATION_DISTANCE_CHUNKS
+                                    # from the player. Surface it directly instead.
+                                    self.add_message_to_chat_log(
+                                        f"War has broken out between a village {self._describe_village_direction_from_player(village.chunk_coords)} "
+                                        f"and a village {self._describe_village_direction_from_player(other_village.chunk_coords)}!"
+                                    )
 
 
                             # Make peace if at war but relationships recover (unlikely without intervention but possible)
@@ -17067,9 +17638,13 @@ class World:
                                     event_type="peace_declared",
                                     description=f"A peace treaty was signed with a rival settlement.",
                                     subject_id=-1,
-                                    location=village.interaction_points.get("town_square_center", (0,0))
+                                    location=self._get_village_anchor_coords(village) or (0, 0)
                                 )
                                 village.local_events.append(self.global_events[-1])
+                                self.add_message_to_chat_log(
+                                    f"A peace treaty has been signed between a village {self._describe_village_direction_from_player(village.chunk_coords)} "
+                                    f"and a village {self._describe_village_direction_from_player(other_village.chunk_coords)}."
+                                )
 
                             # Dispatch raiding parties if still at war
                             if other_village.id in village.at_war_with:
@@ -17079,7 +17654,7 @@ class World:
                                         event_type="raiding_party_dispatched",
                                         description=f"A raiding party was sent to attack a rival village.",
                                         subject_id=-1,
-                                        location=village.interaction_points.get("town_square_center", (0,0))
+                                        location=self._get_village_anchor_coords(village) or (0, 0)
                                     )
                                     village.local_events.append(self.global_events[-1])
 

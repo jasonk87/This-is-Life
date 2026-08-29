@@ -290,8 +290,9 @@ class PredatorBehavior:
                             entity.schedule.current_destination_coords = (prey.x, prey.y)
                 return True
 
-            corpse_x, corpse_y = world._find_nearest_corpse(entity) if hasattr(world, "_find_nearest_corpse") else (None, None)
-            if corpse_x is not None:
+            corpse_coords = world._find_nearest_corpse(entity) if hasattr(world, "_find_nearest_corpse") else None
+            if corpse_coords and isinstance(corpse_coords, (tuple, list)) and corpse_coords[0] is not None:
+                corpse_x, corpse_y = corpse_coords
                 entity.schedule.current_task = "eating_corpse"
                 entity.schedule.current_destination_coords = (corpse_x, corpse_y)
                 path = world.calculate_path(entity.x, entity.y, corpse_x, corpse_y)

@@ -1192,6 +1192,11 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 npc.schedule.current_task = TaskType.IDLE
         else:
             path = world.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
+            if not path and hasattr(world, "_find_best_adjacent_tile"):
+                adj = world._find_best_adjacent_tile(destination_coords[0], destination_coords[1], npc)
+                if adj and adj != (None, None):
+                    destination_coords = adj
+                    path = world.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
             if path:
                 npc.schedule.current_path = path
                 npc.schedule.current_destination_coords = destination_coords

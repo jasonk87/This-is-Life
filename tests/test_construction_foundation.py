@@ -13,6 +13,8 @@ class TestConstructionFoundation(unittest.TestCase):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
         self.world = World(seed=123)
+        self.world.village_npcs.clear()
+        self.world.npcs.clear()
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(12, 12)]}
         self.world.chunks[0][0].village = self.village

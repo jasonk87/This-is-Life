@@ -1784,6 +1784,27 @@ def _draw_active_game_state_menu(console, world):
     if world.game_state == "HELP_MENU":
         draw_help_menu(console)
 
+    if world.game_state == "LOOK_MODE":
+        draw_look_mode_ui(console, world)
+
+
+def draw_look_mode_ui(console, world):
+    """Draw the Look Mode cursor highlight and sensory inspection banner."""
+    cursor_x = getattr(world, "look_cursor_x", getattr(world.player, "x", 0))
+    cursor_y = getattr(world, "look_cursor_y", getattr(world.player, "y", 0))
+
+    summary = world.get_sensory_summary(cursor_x, cursor_y) if hasattr(world, "get_sensory_summary") else ""
+    banner_text = f" [LOOK MODE] ({cursor_x}, {cursor_y}) {summary}  [Arrows: Move | Enter/E: Deep Examine | Esc: Exit] "
+    console.print_box(
+        0,
+        max(0, console.height - 2),
+        console.width,
+        1,
+        banner_text[:console.width - 2],
+        fg=(255, 255, 120),
+        bg=(30, 30, 60),
+    )
+
 
 def _draw_active_game_state_menu_with_fade(console, world, fade_ratio):
     """Draw the active game_state menu (if any), fading it in from the

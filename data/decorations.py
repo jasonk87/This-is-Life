@@ -96,9 +96,30 @@ DECORATION_ITEM_DEFINITIONS = {
         "color": COLORS["dark_orange"],
         "passable": False,
         "blocks_fov": False,
-        "item_type_tags": ["interactable", "furniture", "workstation"],
+        "item_type_tags": ["interactable", "furniture", "workstation", "heat_source"],
         "properties": {
-            "workstation_type": "forge"
+            "workstation_type": "forge",
+            "heat_source": True,
+            "is_lit": True,
+            "heat_source_radius": 5,
+            "heat_intensity": 30.0
+        }
+    },
+    "fireplace": {
+        "name": "Fireplace",
+        "description": "A stone fireplace radiating gentle warmth.",
+        "char": WORLD_DECORATION_SPRITES["fireplace"],
+        "color": COLORS["flame"],
+        "passable": False,
+        "blocks_fov": False,
+        "item_type_tags": ["interactable", "furniture", "light_source_active", "heat_source"],
+        "properties": {
+            "heat_source": True,
+            "is_lit": True,
+            "light_radius": 4,
+            "heat_source_radius": 5,
+            "heat_intensity": 25.0,
+            "workstation_type": "fire"
         }
     },
     "anvil": {

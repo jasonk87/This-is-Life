@@ -453,6 +453,29 @@ PROFESSIONS = {
             }
         ],
         "default_sub_task_sequence": ["write_book", "write_biography"]
+    },
+    "Outlaw": {
+        "display_name": "Outlaw",
+        "wage": 0,
+        "description": "Lives off the land in wilderness encampments outside town jurisdiction.",
+        "work_building_categories": [],
+        "sub_tasks": [
+            {
+                "id": "forage_wilderness",
+                "display_name": "Foraging",
+                "duration_ticks": 100,
+                "target_zone_tag": "wilderness",
+                "action_verb": "foraging",
+            },
+            {
+                "id": "tend_campfire",
+                "display_name": "Tending Campfire",
+                "duration_ticks": 80,
+                "target_zone_tag": "campfire",
+                "action_verb": "tending fire",
+            }
+        ],
+        "default_sub_task_sequence": ["forage_wilderness", "tend_campfire"]
     }
 }
 

@@ -314,6 +314,97 @@ def _scroll_message_log(world, lines):
     world.chat_log_scroll = max(0, min(max_scroll, current + int(lines)))
 
 
+def execute_smart_interaction(world: World, context_handler) -> bool:
+    """Performs the most natural in-world action for the player's facing position."""
+    target_x, target_y = _get_player_facing_position(world)
+    if not hasattr(world, "get_tile_at"):
+        open_interaction_menu(world, target_x, target_y)
+        return False
+    tile = world.get_tile_at(target_x, target_y)
+    if not tile:
+        open_interaction_menu(world, target_x, target_y)
+        return False
+
+    # 1. Door Toggle
+    if getattr(tile, "properties", {}).get("is_door"):
+        world.player_attempt_toggle_door(target_x, target_y)
+        return True
+
+    # 2. Workstations
+    ws_type = getattr(tile, "properties", {}).get("workstation_type", "")
+    if ws_type == "grinding_stone" or "Mill" in getattr(tile, "name", "") or "Grinding" in getattr(tile, "name", ""):
+        world.player_attempt_mill_flour(target_x, target_y)
+        return True
+    elif ws_type in ["oven", "fire"] or "Oven" in getattr(tile, "name", ""):
+        if world.player.has_item("flour"):
+            world.player_attempt_bake_bread(target_x, target_y)
+            return True
+        elif ws_type == "fire":
+            world.player_attempt_cook(target_x, target_y)
+            return True
+
+    # 3. Crops & Soil
+    if tile.name == "Wheat" or getattr(tile, "properties", {}).get("is_harvestable"):
+        world.player_attempt_harvest(target_x, target_y)
+        return True
+    elif tile.name == "Tilled Soil" and (world.player.has_item("wheat_seeds") or world.player.has_item("herb_generic")):
+        world.player_attempt_plant_seeds(target_x, target_y)
+        return True
+    elif tile.name == "Plains" and (world.player.has_item("stone_hoe") or world.player.has_item("knife_stone")):
+        world.player_attempt_till_soil(target_x, target_y)
+        return True
+
+    # 4. Containers
+    if getattr(tile, "properties", {}).get("is_container") or "Chest" in getattr(tile, "name", ""):
+        world.player_attempt_loot_chest(target_x, target_y)
+        return True
+
+    # 5. Nearby NPC
+    occupants = [npc for npc in world.all_npcs if npc.x == target_x and npc.y == target_y and not getattr(npc, "is_dead", False)]
+    if occupants:
+        start_dialogue(world, occupants[0], context_handler)
+        return True
+
+    # 6. Tree
+    if hasattr(tile, "is_choppable") and getattr(tile, "is_choppable", False):
+        world.player_attempt_chop_tree(target_x, target_y)
+        return True
+
+    # Fallback to standard interaction menu
+    open_interaction_menu(world, target_x, target_y)
+    return False
+
+
+def handle_look_mode_input(event: tcod.event.KeyDown, world: World) -> bool:
+    """Handles cursor movement and inspection in Look Mode."""
+    if not hasattr(world, "look_cursor_x"):
+        world.look_cursor_x, world.look_cursor_y = world.player.x, world.player.y
+
+    move_keys = {
+        tcod.event.KeySym.UP: (0, -1), tcod.event.KeySym.DOWN: (0, 1),
+        tcod.event.KeySym.LEFT: (-1, 0), tcod.event.KeySym.RIGHT: (1, 0),
+    }
+
+    if event.sym in move_keys:
+        dx, dy = move_keys[event.sym]
+        world.look_cursor_x = max(0, min(WORLD_WIDTH - 1, world.look_cursor_x + dx))
+        world.look_cursor_y = max(0, min(WORLD_HEIGHT - 1, world.look_cursor_y + dy))
+        summary = world.get_sensory_summary(world.look_cursor_x, world.look_cursor_y)
+        if summary:
+            world.add_message_to_chat_log(summary)
+        return False
+    elif event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, 'KP_ENTER', 1073741912), tcod.event.KeySym.E):
+        detail = world.inspect_tile(world.look_cursor_x, world.look_cursor_y)
+        world.add_message_to_chat_log(detail)
+        return False
+    elif event.sym in (tcod.event.KeySym.ESCAPE, getattr(tcod.event.KeySym, 'l', tcod.event.KeySym.ESCAPE)):
+        world.game_state = "PLAYING"
+        world.add_message_to_chat_log("Exited Look Mode.")
+        return False
+
+    return False
+
+
 def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
     """Handles input when the player is in the 'PLAYING' state. Returns True if turn taken."""
     move_keys = {
@@ -346,9 +437,14 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
     elif event.sym == tcod.event.KeySym.Q:
         world.game_state = "QUEST_MENU"
         world.quest_menu_context["selected_quest_index"] = 0
-    elif event.sym == tcod.event.KeySym.E:
-        target_x, target_y = _get_player_facing_position(world)
-        open_interaction_menu(world, target_x, target_y)
+    elif event.sym in (tcod.event.KeySym.SPACE, tcod.event.KeySym.E):
+        if execute_smart_interaction(world, context_handler):
+            return True
+    elif hasattr(tcod.event.KeySym, 'l') and event.sym in (tcod.event.KeySym.l, getattr(tcod.event.KeySym, 'L', tcod.event.KeySym.l)):
+        world.game_state = "LOOK_MODE"
+        world.look_cursor_x = world.player.x
+        world.look_cursor_y = world.player.y
+        world.add_message_to_chat_log("Look Mode active. Move cursor with arrow keys, [Enter] to inspect, [Esc] to exit.")
     elif event.sym == tcod.event.KeySym.T:
         closest_npc = _find_nearest_npc_to_talk_to(world)
 
@@ -619,7 +715,7 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Post Job": lambda: world.open_job_posting_menu(entity_data),
         "Read Notices": lambda: world.open_noticeboard_menu(),
 
-        "Examine": lambda: world.add_message_to_chat_log(f"You see a {selected_entity['name']}."),
+        "Examine": lambda: world.add_message_to_chat_log(world.inspect_tile(target_x, target_y)),
         "Cook": lambda: world.player_attempt_cook(target_x, target_y),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
         "Forge": lambda: world.player_attempt_forge(target_x, target_y),
@@ -1374,6 +1470,7 @@ def handle_events(world, context) -> bool:
 
                 if event.button == tcod.event.MouseButton.RIGHT:
                     world.player.state.current_path = [] # Stop moving if interaction menu opens
+                    world.add_message_to_chat_log(world.inspect_tile(mouse_world_x, mouse_world_y))
                     open_interaction_menu(world, mouse_world_x, mouse_world_y)
                 elif event.button == tcod.event.MouseButton.LEFT:
                     # Calculate path for left click movement
@@ -1419,6 +1516,8 @@ def handle_events(world, context) -> bool:
                 handle_crafting_input(event, world)
             elif world.game_state == "BUILDING_MENU":
                 handle_building_input(event, world)
+            elif world.game_state == "LOOK_MODE":
+                handle_look_mode_input(event, world)
             elif world.game_state == "PLAYING":
                 if handle_playing_input(event, world, context): turn_taken = True
 

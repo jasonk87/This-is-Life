@@ -498,6 +498,8 @@ class TestBuildingEntranceIntegrity(unittest.TestCase):
         world.chunks = [[SimpleNamespace(tiles=tiles, is_terrain_generated=True, poi_type="village", village=None)]]
         world.transparency_map = engine.np.full((config.WORLD_HEIGHT, config.WORLD_WIDTH), fill_value=True, )
         world.buildings_by_id = {}
+        world.village_npcs = []
+        world.npcs = []
         world.player = SimpleNamespace(
             id=1,
             x=0,
@@ -596,6 +598,83 @@ class TestBuildingEntranceIntegrity(unittest.TestCase):
                 candidate["inside"],
             )
         )
+
+    def test_starting_position_fallback_anchors_on_family_home_not_world_center(self):
+        # When the family home is known but no usable entrance can be
+        # resolved (e.g. a building too small for entrance integrity), the
+        # fallback search must anchor on the home's center rather than the
+        # world center where the player is initially constructed.
+        world = self.make_world()
+        building = self.make_building("house")
+        building.category = "residential"
+        # A 2x2 building is too small for entrance integrity, so
+        # _get_spawn_tile_for_building returns None and we exercise the
+        # fallback path.
+        building.width = 2
+        building.height = 2
+        world.buildings_by_id[building.id] = building
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+
+        relative = SimpleNamespace(schedule=SimpleNamespace(home_building_id=building.id))
+        world.player.social.family_ties = {"mother_id": relative.schedule.home_building_id}
+        world.get_entity_by_id = lambda entity_id: relative if entity_id == building.id else None
+        chosen_positions = []
+        world._update_entity_position = lambda entity, x, y: chosen_positions.append((x, y))
+
+        engine.World._find_starting_position(world)
+
+        # The player must have been placed somewhere, and that somewhere must
+        # be near the home building's center, not the world center.
+        self.assertTrue(chosen_positions)
+        spawn_x, spawn_y = chosen_positions[-1]
+        home_cx, home_cy = building.global_center_x, building.global_center_y
+        distance_to_home = abs(spawn_x - home_cx) + abs(spawn_y - home_cy)
+        # The fallback search expands outward from the home center; the
+        # player should land within a small radius of it.
+        self.assertLessEqual(distance_to_home, 8)
+
+    def test_player_spawns_inside_family_home_next_to_family_members(self):
+        world = self.make_world()
+        building = self.make_building("house")
+        building.category = "residential"
+        world.buildings_by_id[building.id] = building
+
+        engine.World._draw_building(world, world.chunks[0][0].tiles, building, "wood_wall")
+
+        # Create family members assigned to the home building
+        mother = SimpleNamespace(id="npc_mother", schedule=SimpleNamespace(home_building_id=building.id), x=building.global_center_x, y=building.global_center_y)
+        world.village_npcs.append(mother)
+        world.player.social.family_ties = {"mother_id": mother.id}
+        world.get_entity_by_id = lambda entity_id: mother if entity_id == mother.id else None
+
+        chosen_positions = []
+        world._update_entity_position = lambda entity, x, y: chosen_positions.append((x, y))
+
+        engine.World._find_starting_position(world)
+
+        self.assertTrue(chosen_positions)
+        spawn_x, spawn_y = chosen_positions[-1]
+        # Player must be placed at the building center or entrance inside tile
+        self.assertTrue(building.contains_global_coords(spawn_x, spawn_y))
+        distance_to_mother = abs(spawn_x - mother.x) + abs(spawn_y - mother.y)
+        self.assertLessEqual(distance_to_mother, max(building.width, building.height))
+
+    def test_starting_position_fallback_anchors_on_village_when_no_family(self):
+        world = self.make_world()
+        world.player.social.family_ties = {}
+        world.generator = SimpleNamespace(village_coords=[(0, 0)])
+        chosen_positions = []
+        world._update_entity_position = lambda entity, x, y: chosen_positions.append((x, y))
+
+        engine.World._find_starting_position(world)
+
+        self.assertTrue(chosen_positions)
+        spawn_x, spawn_y = chosen_positions[-1]
+        village_cx = config.CHUNK_SIZE // 2
+        village_cy = config.CHUNK_SIZE // 2
+        distance_to_village = abs(spawn_x - village_cx) + abs(spawn_y - village_cy)
+        self.assertLessEqual(distance_to_village, config.CHUNK_SIZE)
 
     def test_player_door_toggle_keeps_open_state_passability_and_transparency_in_sync(self):
         world = self.make_world()

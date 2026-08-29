@@ -264,6 +264,11 @@ from simulation.history import (
     MarriageRecord,
     MigrationRecord,
 )
+from presentation.sensory_observation import (
+    observe_entity,
+    observe_tile,
+    get_tile_sensory_summary,
+)
 from simulation.records import ChronicleArchive
 from simulation.knowledge import KnowledgeSystem
 from simulation.skills import SkillTracker
@@ -963,7 +968,7 @@ class World:
     @property
     def all_npcs(self):
         """Returns an iterator over all NPCs (village + world)."""
-        return itertools.chain(self.village_npcs, self.npcs)
+        return itertools.chain(getattr(self, "village_npcs", ()), getattr(self, "npcs", ()))
 
     """World class now uses a generator for a more complex map."""
     def __init__(self, seed=None, player_first_name: str | None = None):
@@ -5960,7 +5965,20 @@ class World:
         damage = random.randint(1, 4) # Example: 1d4 damage
 
         # Check if player can see the attack to log it
-        can_player_see = self.player_fov_map[attacker.x, attacker.y] or self.player_fov_map[target.x, target.y]
+        can_player_see = False
+        if getattr(self, "player_fov_map", None) is not None:
+            fov = self.player_fov_map
+            shape = getattr(fov, "shape", None)
+            if isinstance(shape, (tuple, list)) and len(shape) == 2:
+                h, w = shape
+                att_see = (0 <= attacker.y < h and 0 <= attacker.x < w and bool(fov[attacker.y, attacker.x]))
+                tgt_see = (0 <= target.y < h and 0 <= target.x < w and bool(fov[target.y, target.x]))
+                can_player_see = att_see or tgt_see
+            elif hasattr(fov, "__getitem__"):
+                try:
+                    can_player_see = bool(fov[attacker.y, attacker.x]) or bool(fov[target.y, target.x])
+                except Exception:
+                    can_player_see = False
 
         if can_player_see:
             self.add_message_to_chat_log(self.text.entity_attacks(attacker, target, damage), category="combat")
@@ -6102,21 +6120,21 @@ class World:
         Finds the village object an NPC is associated with.
         Can find by home building ID or by current coordinates.
         """
-        if not by_coords and npc.schedule.home_building_id:
-            # Find village by home building (for residents)
-            for y_idx, row in enumerate(self.chunks):
-                for x_idx, chk in enumerate(row):
-                    if chk.village:
-                        if self.buildings_by_id.get(npc.schedule.home_building_id) in chk.village.buildings:
+        if not by_coords and getattr(getattr(npc, "schedule", None), "home_building_id", None):
+            home_b = self.buildings_by_id.get(npc.schedule.home_building_id)
+            if home_b:
+                for row in self.chunks:
+                    for chk in row:
+                        if chk.village and home_b in chk.village.buildings:
                             return chk.village
-        else:
-            # Find village by current NPC coordinates (for travelers)
-            chunk_x = npc.x // CHUNK_SIZE
-            chunk_y = npc.y // CHUNK_SIZE
-            if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
-                chunk = self.chunks[chunk_y][chunk_x]
-                if chunk.village:
-                    return chunk.village
+
+        # Find village by current NPC coordinates (for travelers or unhoused residents)
+        chunk_x = npc.x // CHUNK_SIZE
+        chunk_y = npc.y // CHUNK_SIZE
+        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+            chunk = self.chunks[chunk_y][chunk_x]
+            if chunk.village:
+                return chunk.village
         return None
 
     def get_settlement_by_id(self, settlement_id: str | None) -> Village | None:
@@ -7556,6 +7574,20 @@ class World:
             self._resume_npc_after_survival_need(npc)
             return True
 
+        # Check home pantry before commercial travel if currently at home
+        if getattr(getattr(npc, "schedule", None), "home_building_id", None):
+            home_b = self.buildings_by_id.get(npc.schedule.home_building_id)
+            if home_b and hasattr(home_b, "building_inventory") and home_b.contains_global_coords(npc.x, npc.y):
+                _, consumed_home = self._npc_consume_from_inventory(
+                    npc,
+                    home_b.building_inventory,
+                    need_type=need_type,
+                    desperate=desperate,
+                )
+                if consumed_home:
+                    self._resume_npc_after_survival_need(npc)
+                    return True
+
         if desperate:
             self._maybe_generate_survival_help_quest(npc, need_type=need_type)
 
@@ -7585,9 +7617,6 @@ class World:
             npc.schedule.current_path = []
             npc.schedule.current_destination_coords = None
             return True
-
-        if not found_supply and not desperate and npc.schedule.current_task != seeking_task:
-            return False
 
         food_source = self._find_nearest_food_source(npc)
         if food_source and food_source.contains_global_coords(npc.x, npc.y):
@@ -7706,7 +7735,13 @@ class World:
                 self.chat_ui_history.append((turn_in_name, f"Excellent work! Here's your {contract['reward']} coins."))
                 if len(self.chat_ui_history) > self.chat_ui_max_history:
                     self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
-                self.chat_ui_scroll_offset = 0
+    def inspect_tile(self, x: int, y: int) -> str:
+        """Returns rich, realistic sensory observation of a coordinate."""
+        return observe_tile(self, x, y)
+
+    def get_sensory_summary(self, x: int, y: int) -> str:
+        """Returns a crisp one-line sensory summary of a coordinate."""
+        return get_tile_sensory_summary(self, x, y)
 
     def _get_interactables_at(self, x: int, y: int) -> list:
         """Returns a list of all interactable entities at a given coordinate."""
@@ -8060,9 +8095,9 @@ class World:
         door_x, door_y = candidate["door"]
         inside_x, inside_y = candidate["inside"]
         outside_x, outside_y = candidate["outside"]
-        door_tile = self._get_loaded_tile_at(door_x, door_y)
-        inside_tile = self._get_loaded_tile_at(inside_x, inside_y)
-        outside_tile = self._get_loaded_tile_at(outside_x, outside_y)
+        door_tile = self.get_tile_at(door_x, door_y)
+        inside_tile = self.get_tile_at(inside_x, inside_y)
+        outside_tile = self.get_tile_at(outside_x, outside_y)
         if door_tile is None or inside_tile is None or outside_tile is None:
             return False
         if building.contains_global_coords(outside_x, outside_y):
@@ -8083,7 +8118,7 @@ class World:
         chosen_candidate = None
         for candidate in self._get_building_entrance_candidates(building):
             outside_x, outside_y = candidate["outside"]
-            outside_tile = self._get_loaded_tile_at(outside_x, outside_y)
+            outside_tile = self.get_tile_at(outside_x, outside_y)
             if outside_tile and getattr(outside_tile, "passable", False) and not building.contains_global_coords(outside_x, outside_y):
                 chosen_candidate = candidate
                 break
@@ -8092,12 +8127,12 @@ class World:
             return None
 
         inside_x, inside_y = chosen_candidate["inside"]
-        inside_tile = self._get_loaded_tile_at(inside_x, inside_y)
+        inside_tile = self.get_tile_at(inside_x, inside_y)
         if inside_tile is None or not getattr(inside_tile, "passable", False):
             self._change_map_tile((inside_x, inside_y), TILE_DEFINITIONS["wood_floor"])
 
         door_x, door_y = chosen_candidate["door"]
-        door_tile = self._get_loaded_tile_at(door_x, door_y)
+        door_tile = self.get_tile_at(door_x, door_y)
         if door_tile is None or not door_tile.properties.get("is_door", False):
             self._change_map_tile((door_x, door_y), DECORATION_ITEM_DEFINITIONS["wooden_door_closed"])
 
@@ -8113,10 +8148,10 @@ class World:
         target: tuple[int, int],
     ) -> bool:
         if start == target:
-            tile = self._get_loaded_tile_at(*start)
+            tile = self.get_tile_at(*start)
             return bool(tile and getattr(tile, "passable", False))
-        start_tile = self._get_loaded_tile_at(*start)
-        target_tile = self._get_loaded_tile_at(*target)
+        start_tile = self.get_tile_at(*start)
+        target_tile = self.get_tile_at(*target)
         if not (start_tile and target_tile and start_tile.passable and target_tile.passable):
             return False
         if not (building.contains_global_coords(*start) and building.contains_global_coords(*target)):
@@ -8133,7 +8168,7 @@ class World:
                 next_pos = (next_x, next_y)
                 if next_pos in visited or not building.contains_global_coords(next_x, next_y):
                     continue
-                next_tile = self._get_loaded_tile_at(next_x, next_y)
+                next_tile = self.get_tile_at(next_x, next_y)
                 if not (next_tile and getattr(next_tile, "passable", False)):
                     continue
                 if next_pos == target:
@@ -10395,10 +10430,11 @@ class World:
         self.chat_ui_history.append(("System", f"[tone: {profile.tone}, openness: {profile.openness:.2f}]"))
         self.chat_ui_history.append((npc_display_name, greeting.strip()))
 
-        # If the NPC has a dynamic quest to offer, add it to the dialogue
+        # If the NPC has a pressing survival or craft need, express it naturally
         if hasattr(npc_target, 'active_quest') and npc_target.active_quest:
             quest = npc_target.active_quest
-            offer_text = f"I'm in a bit of a bind. I desperately need {quest.required_count} {quest.item_key.replace('_', ' ')}. Can you help me? (You can 'accept quest' or 'decline quest')"
+            item_name = quest.item_key.replace('_', ' ')
+            offer_text = f"If you happen across any {item_name}, we could really use {quest.required_count} around here."
             self.chat_ui_history.append((npc_display_name, offer_text))
 
 
@@ -11904,6 +11940,22 @@ class World:
             llm_response = self._call_llm_for_worldgen(llm_prompt)
             try:
                 npc_data = json.loads(llm_response)
+            except (json.JSONDecodeError, TypeError):
+                gender = random.choice(["male", "female"])
+                fallback_first = random.choice(FAMILY_FIRST_NAMES.get(gender, FAMILY_FIRST_NAMES["male"]))
+                fallback_last = random.choice(FAMILY_LAST_NAMES)
+                npc_data = {
+                    "name": f"{fallback_first} {fallback_last}",
+                    "dialogue": ["Greetings."],
+                    "personality": "commoner",
+                    "family_ties": "none",
+                    "attitude_to_player": "neutral",
+                    "wealth_level": random.choice(["poor", "average", "wealthy"]),
+                    "combat_behavior": "defensive",
+                    "base_attack_name": "fists"
+                }
+
+            try:
                 # Assign home
                 if not available_homes:
                     # self.add_message_to_chat_log("Warning: No available homes for new NPC.")
@@ -11937,8 +11989,22 @@ class World:
                     player_id=self.player.id
                 )
 
-                # Assign wealth (randomly for now) - This is now part of LLM prompt for personality
-                npc.economic.wealth_level = npc_data.get("wealth_level", random.choice(["poor", "average", "wealthy"]))
+                # Assign wealth and starter pocket money
+                wealth = npc_data.get("wealth_level", random.choice(["poor", "average", "wealthy"]))
+                npc.economic.wealth_level = wealth
+                if wealth == "poor":
+                    npc.economic.money = random.randint(8, 20)
+                elif wealth == "average":
+                    npc.economic.money = random.randint(25, 70)
+                else: # wealthy
+                    npc.economic.money = random.randint(100, 300)
+
+                # Starter subsistence supplies in personal inventory
+                npc.economic.npc_inventory["bread"] = random.randint(1, 2)
+                if random.random() < 0.6:
+                    npc.economic.npc_inventory["apple"] = random.randint(1, 2)
+                if random.random() < 0.5:
+                    npc.economic.npc_inventory["water_flask"] = 1
 
                 # Combat AI attributes from LLM
                 npc.combat.combat_behavior = npc_data.get("combat_behavior", "defensive")
@@ -11978,14 +12044,11 @@ class World:
                 # If NPC is a Merchant and assigned to a general store, pre-populate store inventory
                 if npc.economic.profession == "Merchant" and work_building and work_building.building_type == "general_store":
                     # Add some starting cash for the store to buy items
-                    work_building.building_inventory["money"] = random.randint(150, 500)
-                    # Add some items for sale
-                    work_building.building_inventory["axe_stone"] = random.randint(1, 3)
-                    work_building.building_inventory["healing_salve"] = random.randint(3, 8)
-                    work_building.building_inventory["wooden_plank"] = random.randint(10, 30)
-                    if random.random() < 0.5: # Chance to have some logs
-                        work_building.building_inventory["raw_log"] = random.randint(5, 20)
-                    # self.add_message_to_chat_log(f"Stocked General Store ({work_building.id[:6]}) for Merchant {npc.name}.")
+                    work_building.building_inventory["money"] = max(work_building.building_inventory.get("money", 0), random.randint(150, 500))
+                    work_building.building_inventory["axe_stone"] = max(work_building.building_inventory.get("axe_stone", 0), random.randint(1, 3))
+                    work_building.building_inventory["healing_salve"] = max(work_building.building_inventory.get("healing_salve", 0), random.randint(3, 8))
+                    work_building.building_inventory["wooden_plank"] = max(work_building.building_inventory.get("wooden_plank", 0), random.randint(10, 30))
+                    work_building.building_inventory["raw_log"] = max(work_building.building_inventory.get("raw_log", 0), random.randint(5, 20))
                 elif work_building and work_building.building_type in {"lumber_mill", "blacksmith_shop", "tavern", "bakery", "mill"}:
                     if work_building.building_inventory.get("money", 0) <= 0:
                         work_building.building_inventory["money"] = random.randint(80, 220)
@@ -12012,7 +12075,7 @@ class World:
                         well_coords = village.interaction_points["well"][0]
                         npc.knowledge.known_locations["the village well"] = well_coords
 
-                # Assign profession-based equipment so NPCs look distinct
+                # Assign profession-based equipment and trade tools so NPCs can work immediately
                 if npc.economic.profession in ["Sheriff", "Guard"] or npc.combat.combat_behavior == "aggressive":
                     if "rusty_sword" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["rusty_sword"] = npc.economic.npc_inventory.get("rusty_sword", 0) + 1
@@ -12033,6 +12096,8 @@ class World:
                     if "knife_stone" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["knife_stone"] = npc.economic.npc_inventory.get("knife_stone", 0) + 1
                         npc.equipment.weapon = "knife_stone"
+                    if "wheat_seeds" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["wheat_seeds"] = npc.economic.npc_inventory.get("wheat_seeds", 0) + random.randint(2, 5)
                     if "hooded_cowl" in ITEM_DEFINITIONS and random.random() < 0.4:
                         npc.economic.npc_inventory["hooded_cowl"] = npc.economic.npc_inventory.get("hooded_cowl", 0) + 1
                         npc.equipment.head = "hooded_cowl"
@@ -12040,6 +12105,10 @@ class World:
                     if "short_bow" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["short_bow"] = npc.economic.npc_inventory.get("short_bow", 0) + 1
                         npc.equipment.weapon = "short_bow"
+                    if "knife_stone" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["knife_stone"] = npc.economic.npc_inventory.get("knife_stone", 0) + 1
+                    if "smoked_meat" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["smoked_meat"] = npc.economic.npc_inventory.get("smoked_meat", 0) + 2
                     if "hooded_cowl" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["hooded_cowl"] = npc.economic.npc_inventory.get("hooded_cowl", 0) + 1
                         npc.equipment.head = "hooded_cowl"
@@ -12051,6 +12120,11 @@ class World:
                     if "stone_pickaxe" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["stone_pickaxe"] = npc.economic.npc_inventory.get("stone_pickaxe", 0) + 1
                         npc.equipment.weapon = "stone_pickaxe"
+                elif npc.economic.profession in ["Baker", "Miller"]:
+                    if "knife_stone" in ITEM_DEFINITIONS:
+                        npc.economic.npc_inventory["knife_stone"] = npc.economic.npc_inventory.get("knife_stone", 0) + 1
+                    npc.economic.npc_inventory["bread"] = npc.economic.npc_inventory.get("bread", 0) + 2
+
                 # General chance for any NPC to have a healing salve
                 if random.random() < 0.25:
                     npc.economic.npc_inventory["healing_salve"] = npc.economic.npc_inventory.get("healing_salve", 0) + 1
@@ -12064,9 +12138,6 @@ class World:
                     f"Work: {work_building.building_type if work_building else 'N/A'}."
                 )
 
-            except json.JSONDecodeError as e:
-                self.add_message_to_chat_log(f"Error parsing LLM response for Villager NPC: {e}")
-                self.add_message_to_chat_log(f"LLM Response: {llm_response}")
             except IndexError: # Ran out of homes or workplaces
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
@@ -13960,14 +14031,42 @@ class World:
                 self._update_entity_position(self.player, sx, sy)
                 return
 
-        # 2. Fallback to searching outwards from the center
-        center_x, center_y = self.player.x, self.player.y
+        # 2. Fallback to searching outwards from a sensible anchor. The
+        # player is constructed at world center (WORLD_WIDTH//2,
+        # WORLD_HEIGHT//2), so centering the search there would strand the
+        # player far from family and town. Anchor on the family home first,
+        # then the nearest village, and only fall back to world center as a
+        # last resort.
+        if home_building is not None:
+            center_x, center_y = home_building.global_center_x, home_building.global_center_y
+        else:
+            # village_coords holds CHUNK coordinates; convert each to world
+            # tile coordinates at the chunk's center. Defensively build the
+            # list (the attribute can be missing, empty, or a mock in tests)
+            # and only take min() when it is non-empty.
+            village_coords = getattr(getattr(self, "generator", None), "village_coords", None) or ()
+            village_tiles = []
+            try:
+                village_tiles = [
+                    (cx * CHUNK_SIZE + CHUNK_SIZE // 2, cy * CHUNK_SIZE + CHUNK_SIZE // 2)
+                    for cx, cy in village_coords
+                ]
+            except (TypeError, ValueError):
+                village_tiles = []
+            if village_tiles:
+                center_x, center_y = min(
+                    village_tiles,
+                    key=lambda c: (c[0] - self.player.x) ** 2 + (c[1] - self.player.y) ** 2,
+                )
+            else:
+                center_x, center_y = self.player.x, self.player.y
         margin = 15  # Keep player this many tiles away from the edge
 
         # Check if the initial center position is already valid and safe
         if (margin <= center_x < WORLD_WIDTH - margin and
             margin <= center_y < WORLD_HEIGHT - margin and
             self.get_tile_at(center_x, center_y) and self.get_tile_at(center_x, center_y).passable):
+            self._update_entity_position(self.player, center_x, center_y)
             return
 
         # Search outwards from the center
@@ -13983,10 +14082,13 @@ class World:
 
                     tile = self.get_tile_at(tx, ty)
                     if tile and tile.passable and "water" not in tile.name.lower():
-                        chunk = self.chunks[ty // CHUNK_SIZE][tx // CHUNK_SIZE]
-                        if chunk.biome == "plains": # Prioritize plains
-                            self._update_entity_position(self.player, tx, ty)
-                            return
+                        chunk_x = tx // CHUNK_SIZE
+                        chunk_y = ty // CHUNK_SIZE
+                        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+                            chunk = self.chunks[chunk_y][chunk_x]
+                            if getattr(chunk, "biome", None) == "plains": # Prioritize plains
+                                self._update_entity_position(self.player, tx, ty)
+                                return
 
             # Check left and right columns
             for y_offset in range(-r + 1, r):
@@ -13999,10 +14101,13 @@ class World:
 
                     tile = self.get_tile_at(tx, ty)
                     if tile and tile.passable and "water" not in tile.name.lower():
-                        chunk = self.chunks[ty // CHUNK_SIZE][tx // CHUNK_SIZE]
-                        if chunk.biome == "plains": # Prioritize plains
-                            self._update_entity_position(self.player, tx, ty)
-                            return
+                        chunk_x = tx // CHUNK_SIZE
+                        chunk_y = ty // CHUNK_SIZE
+                        if 0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height:
+                            chunk = self.chunks[chunk_y][chunk_x]
+                            if getattr(chunk, "biome", None) == "plains": # Prioritize plains
+                                self._update_entity_position(self.player, tx, ty)
+                                return
 
         # Fallback if no plains found, search again for any passable tile within margin
         for r in range(1, max(WORLD_WIDTH, WORLD_HEIGHT) // 2):
@@ -14090,6 +14195,14 @@ class World:
         npc.schedule.home_building_id = home_building.id
         home_building.residents.append(npc)
 
+        # Starter pocket money and basic sustenance
+        npc.economic.money = random.randint(15, 45)
+        npc.economic.npc_inventory["bread"] = random.randint(1, 2)
+        if random.random() < 0.6:
+            npc.economic.npc_inventory["apple"] = random.randint(1, 2)
+        if random.random() < 0.5:
+            npc.economic.npc_inventory["water_flask"] = 1
+
         # Assign a random job in the village if available
         village = self._get_village_for_npc(npc, by_coords=True)
         if village:
@@ -14123,11 +14236,13 @@ class World:
         self.player.first_name = first_name
         self.player.name = f"{first_name} {family_name}"
 
-        if not self.villages:
+        # 1. Pick a starting village with residential homes
+        villages_with_homes = [v for v in self.villages if any(b.category == "residential" for b in v.buildings)]
+        if not villages_with_homes:
+            villages_with_homes = self.villages
+        if not villages_with_homes:
             return
-
-        # 1. Pick a starting village
-        start_village = random.choice(self.villages)
+        start_village = random.choice(villages_with_homes)
 
         # 2. Pick a home in that village
         residential_buildings = [b for b in start_village.buildings if b.category == "residential"]
@@ -14177,7 +14292,8 @@ class World:
             self.player.social.family_ties["father_id"] = self.village_npcs[-1].id
 
         # Siblings
-        num_siblings = random.randint(0, 3)
+        min_siblings = 1 if scenario == "Siblings Only" else 0
+        num_siblings = random.randint(min_siblings, 3)
         for i in range(num_siblings):
             role = random.choice(["Brother", "Sister"])
             self._create_family_npc(role, family_name, player_home, {"sibling_id": self.player.id, "relation_to_player": role.lower()})
@@ -14223,6 +14339,8 @@ class World:
         # Render structures
         if chunk.village:
             self._render_village_tiles(chunk)
+        elif getattr(chunk, "poi_type", None) == "outlaw_camp":
+            self._generate_outlaw_camp_layout(chunk, chunk_x, chunk_y)
         elif chunk.ruin:
             self._generate_ruin_layout(chunk, chunk_x, chunk_y) # Renders directly to tiles
 
@@ -14688,9 +14806,44 @@ class World:
         if capital_hall and capital_hall.building_inventory.get("money", 0) <= 0:
             capital_hall.building_inventory["money"] = random.randint(600, 1200)
 
+        # General Store
+        general_store = try_place_building("general_store", "commercial_workplace", 8, 6, road_x - 10, road_y + 5, max_workers=2)
+        if general_store:
+            general_store.building_inventory["money"] = random.randint(150, 400)
+            general_store.building_inventory["bread"] = random.randint(6, 16)
+            general_store.building_inventory["apple"] = random.randint(10, 25)
+            general_store.building_inventory["smoked_meat"] = random.randint(4, 12)
+            general_store.building_inventory["water_flask"] = random.randint(6, 14)
+            general_store.building_inventory["axe_stone"] = random.randint(2, 4)
+            general_store.building_inventory["healing_salve"] = random.randint(3, 8)
+            general_store.building_inventory["wooden_plank"] = random.randint(10, 30)
+            general_store.building_inventory["raw_log"] = random.randint(5, 15)
+
+        # Tavern
+        tavern = try_place_building("tavern", "commercial_workplace", 9, 7, max_workers=3)
+        if tavern:
+            tavern.building_inventory["money"] = random.randint(150, 350)
+            tavern.building_inventory["bread"] = random.randint(10, 25)
+            tavern.building_inventory["cooked_meat"] = random.randint(6, 15)
+            tavern.building_inventory["water_flask"] = random.randint(8, 20)
+            tavern.building_inventory["apple"] = random.randint(8, 18)
+            tavern.work_zone_tiles["counter"] = [(tavern.global_origin_x + tavern.width // 2, tavern.global_origin_y + 2)]
+
+        # Houses (Prioritized so every village always has residential dwellings for residents and player family)
+        for _ in range(random.randint(3, 5)):
+            house = try_place_building("house", "residential", random.randint(5, 7), random.randint(5, 7))
+            if house:
+                house.building_inventory["bread"] = random.randint(1, 3)
+                house.building_inventory["apple"] = random.randint(1, 4)
+                house.building_inventory["water_flask"] = random.randint(1, 2)
+                house.building_inventory["money"] = random.randint(10, 30)
+
         # Clinic
         clinic = try_place_building("clinic", "civic_workplace", 7, 6, road_x - 10, road_y - 8, max_workers=2)
         if clinic:
+            clinic.building_inventory["money"] = random.randint(80, 200)
+            clinic.building_inventory["healing_salve"] = random.randint(5, 15)
+            clinic.building_inventory["medicinal_herb"] = random.randint(8, 20)
             clinic.work_zone_tiles["medical_bed"] = [(clinic.global_origin_x + 1, clinic.global_origin_y + 1)]
             clinic.work_zone_tiles["alchemy_station"] = [(clinic.global_origin_x + 5, clinic.global_origin_y + 1)]
 
@@ -14699,19 +14852,21 @@ class World:
 
         # Sheriff's Office
         if jail:
-            try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, jail.y + 7, max_workers=2)
+            sheriff = try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, jail.y + 7, max_workers=2)
         else:
-            try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, road_y + 5, max_workers=2)
-
-        # General Store
-        try_place_building("general_store", "commercial_workplace", 8, 6, road_x - 10, road_y + 5, max_workers=2)
-
-        # Tavern
-        try_place_building("tavern", "commercial_workplace", 9, 7, max_workers=3)
+            sheriff = try_place_building("sheriff_office", "civic_workplace", 7, 5, road_x + 2, road_y + 5, max_workers=2)
+        if sheriff:
+            sheriff.building_inventory["money"] = random.randint(80, 200)
+            sheriff.building_inventory["rusty_sword"] = random.randint(2, 4)
+            sheriff.building_inventory["leather_jerkin"] = random.randint(1, 3)
 
         # Lumber Mill
         lumber_mill = try_place_building("lumber_mill", "industrial_workplace", 7, 7, 1, CHUNK_SIZE - 8, max_workers=4)
         if lumber_mill:
+            lumber_mill.building_inventory["money"] = random.randint(80, 200)
+            lumber_mill.building_inventory["raw_log"] = random.randint(15, 35)
+            lumber_mill.building_inventory["wooden_plank"] = random.randint(20, 45)
+            lumber_mill.building_inventory["axe_stone"] = random.randint(2, 4)
             # Define zones (simplified logic)
             lumber_mill.work_zone_tiles["chopping_area"] = []
             # Add dummy global coords for internal zones based on offset
@@ -14719,33 +14874,55 @@ class World:
             lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
 
         # Carpenter
-        try_place_building("carpenter_shop", "industrial_workplace", 7, 6, max_workers=2)
+        carpenter = try_place_building("carpenter_shop", "industrial_workplace", 7, 6, max_workers=2)
+        if carpenter:
+            carpenter.building_inventory["money"] = random.randint(60, 150)
+            carpenter.building_inventory["wooden_plank"] = random.randint(15, 30)
 
         # Windmill
         windmill = try_place_building("mill", "industrial_workplace", 7, 7, CHUNK_SIZE - 8, CHUNK_SIZE - 8, max_workers=2)
         if windmill:
+            windmill.building_inventory["money"] = random.randint(60, 150)
+            windmill.building_inventory["wheat"] = random.randint(20, 45)
+            windmill.building_inventory["flour"] = random.randint(10, 25)
             windmill.work_zone_tiles["grinding_stone"] = [(windmill.global_origin_x + 3, windmill.global_origin_y + 3)]
 
         # Bakery
         bakery = try_place_building("bakery", "commercial_workplace", 7, 6, 1, 1, max_workers=2)
         if bakery:
+            bakery.building_inventory["money"] = random.randint(80, 200)
+            bakery.building_inventory["flour"] = random.randint(15, 30)
+            bakery.building_inventory["bread"] = random.randint(12, 28)
             bakery.work_zone_tiles["oven"] = [(bakery.global_origin_x + 3, bakery.global_origin_y + 1)]
 
         # Mine
         mine = try_place_building("mine", "industrial_workplace", 8, 6, 1, 1, max_workers=5)
         if mine:
+            mine.building_inventory["money"] = random.randint(80, 200)
+            mine.building_inventory["stone_chunk"] = random.randint(15, 35)
+            mine.building_inventory["iron_ore"] = random.randint(8, 20)
+            mine.building_inventory["stone_pickaxe"] = random.randint(2, 5)
             mine.work_zone_tiles["mine_face"] = [(mine.global_origin_x + i, mine.global_origin_y + 1) for i in range(1, 7)]
             mine.work_zone_tiles["storage_area"] = [(mine.global_origin_x + 1, mine.global_origin_y + 4)]
 
         # Blacksmith
         blacksmith = try_place_building("blacksmith_shop", "industrial_workplace", 7, 6, road_x + 2, road_y + 2, max_workers=2)
         if blacksmith:
+            blacksmith.building_inventory["money"] = random.randint(80, 220)
+            blacksmith.building_inventory["iron_ingot"] = random.randint(6, 14)
+            blacksmith.building_inventory["stone_chunk"] = random.randint(10, 25)
+            blacksmith.building_inventory["axe_stone"] = random.randint(2, 4)
+            blacksmith.building_inventory["stone_pickaxe"] = random.randint(2, 4)
             blacksmith.work_zone_tiles["forge"] = [(blacksmith.global_origin_x + 1, blacksmith.global_origin_y + 1)]
             blacksmith.work_zone_tiles["anvil"] = [(blacksmith.global_origin_x + 5, blacksmith.global_origin_y + 4)]
 
         # Farm
         farm = try_place_building("farm", "agricultural_workplace", 8, 6, max_workers=3)
         if farm:
+            farm.building_inventory["money"] = random.randint(60, 150)
+            farm.building_inventory["wheat_seeds"] = random.randint(15, 35)
+            farm.building_inventory["wheat"] = random.randint(6, 18)
+            farm.building_inventory["apple"] = random.randint(5, 12)
             # Logic for field patch
             field_width, field_height = 5, 5
             field_x = farm.x + 2
@@ -14761,22 +14938,6 @@ class World:
                     for rx in range(field_width):
                         if 0 <= field_y + ry < CHUNK_SIZE and 0 <= field_x + rx < CHUNK_SIZE:
                             layout_grid[field_y + ry][field_x + rx] = 1
-            if "wheat_seeds" in ITEM_DEFINITIONS:
-                 farm.building_inventory["wheat_seeds"] = random.randint(5, 15)
-
-        # Fishing Hut
-        # Needs water check. We don't have tiles yet.
-        # We can use the pond logic: if we generate a pond, we know where it is.
-        # Or we check macro elevation.
-        # For simplicity, we'll assume water exists if we decide to place one,
-        # but without tile map, precise placement next to water is hard.
-        # Strategy: Postpone Fishing Hut placement to render time? No, need Building object for NPCs.
-        # Strategy: Assume water at edges or specific spot.
-        # Let's skip dynamic water placement dependency for now or assume a pond exists at fixed location.
-
-        # Houses
-        for _ in range(random.randint(3, 5)):
-            try_place_building("house", "residential", random.randint(5, 9), random.randint(5, 9))
 
         # Library
         try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
@@ -14858,6 +15019,71 @@ class World:
                 local_y = wy % CHUNK_SIZE
                 tiles[local_y][local_x] = Tile(TILE_DEFINITIONS["well"]["char"], TILE_DEFINITIONS["well"]["color"], TILE_DEFINITIONS["well"]["passable"], TILE_DEFINITIONS["well"]["name"])
 
+
+    def _generate_outlaw_camp_layout(self, chunk: Chunk, global_chunk_x: int, global_chunk_y: int):
+        """Generates a rustic wilderness outlaw encampment within a chunk."""
+        rng = self._chunk_rng(global_chunk_x, global_chunk_y, "outlaw_camp_layout")
+        tiles = chunk.tiles if chunk.tiles else [[Tile(TILE_DEFINITIONS["plains"]["char"], TILE_DEFINITIONS["plains"]["color"], TILE_DEFINITIONS["plains"]["passable"], TILE_DEFINITIONS["plains"]["name"]) for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
+        chunk.tiles = tiles
+
+        center_x = CHUNK_SIZE // 2
+        center_y = CHUNK_SIZE // 2
+        radius = 5
+
+        # Clear trees and vegetation in camp clearing
+        plains_def = TILE_DEFINITIONS["plains"]
+        for y in range(max(0, center_y - radius), min(CHUNK_SIZE, center_y + radius + 1)):
+            for x in range(max(0, center_x - radius), min(CHUNK_SIZE, center_x + radius + 1)):
+                if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius ** 2:
+                    tiles[y][x] = Tile(plains_def["char"], plains_def["color"], plains_def["passable"], plains_def["name"], properties={})
+
+        # Place campfire at center
+        fire_def = DECORATION_ITEM_DEFINITIONS.get("fire_pit_lit", DECORATION_ITEM_DEFINITIONS.get("fire_pit", {"char": ord("*"), "color": (255, 100, 0), "passable": True, "name": "Fire Pit"})).copy()
+        fire_props = dict(fire_def.get("properties", {}))
+        fire_props["heat_source"] = True
+        fire_props["heat_source_radius"] = 4
+        fire_props["workstation_type"] = "fire"
+        tiles[center_y][center_x] = Tile(fire_def["char"], fire_def["color"], fire_def["passable"], fire_def["name"], properties=fire_props)
+
+        # Place campsite storage chest
+        chest_x = min(CHUNK_SIZE - 2, center_x + 2)
+        chest_y = center_y
+        chest_def = DECORATION_ITEM_DEFINITIONS["chest_wooden"].copy()
+        chest_props = dict(chest_def.get("properties", {}))
+        chest_props["is_container"] = True
+        chest_props["container_inventory"] = {
+            "money": rng.randint(15, 45),
+            "smoked_meat": rng.randint(2, 4),
+            "water_flask": rng.randint(1, 3),
+            "raw_log": rng.randint(2, 5),
+            "knife_stone": 1,
+        }
+        tiles[chest_y][chest_x] = Tile(chest_def["char"], chest_def["color"], chest_def["passable"], chest_def["name"], properties=chest_props)
+
+        # Spawn 1-2 authentic Outlaw NPCs
+        num_outlaws = rng.randint(1, 2)
+        outlaw_names = ["Kael", "Rorik", "Vanna", "Brant", "Theron", "Sari"]
+        for i in range(num_outlaws):
+            ox = max(1, min(CHUNK_SIZE - 2, center_x - 1 + i * 2))
+            oy = max(1, min(CHUNK_SIZE - 2, center_y + 1))
+            gx = global_chunk_x * CHUNK_SIZE + ox
+            gy = global_chunk_y * CHUNK_SIZE + oy
+            oname = f"{rng.choice(outlaw_names)} the Outlaw"
+            outlaw = NPC(
+                gx, gy,
+                name=oname,
+                dialogue=["Keep your distance, stranger. We survive out here by keeping to ourselves."],
+                personality="renegade",
+            )
+            outlaw.player_id = self.player.id
+            outlaw.social.relationships[self.player.id] = 40
+            self._set_entity_profession(outlaw, "Outlaw", reason="outlaw_campsite")
+            outlaw.economic.money = rng.randint(10, 30)
+            outlaw.economic.npc_inventory["smoked_meat"] = rng.randint(1, 3)
+            outlaw.economic.npc_inventory["water_flask"] = rng.randint(1, 2)
+            outlaw.economic.npc_inventory["short_bow"] = 1
+            outlaw.equipment.weapon = "short_bow"
+            self.npcs.append(outlaw)
 
     def _generate_ruin_layout(self, chunk: Chunk, global_chunk_x: int, global_chunk_y: int):
         """Generates a multi-room ruined structure within a chunk."""
@@ -15571,8 +15797,56 @@ class World:
             return ""
         return profession
 
+    def _ensure_profession_tools(self, entity) -> None:
+        """Equip and stock trade tools for an NPC based on their profession."""
+        if not entity or not hasattr(entity, "economic"):
+            return
+        prof = getattr(entity.economic, "profession", "")
+        inv = getattr(entity.economic, "npc_inventory", None)
+        eq = getattr(entity, "equipment", None)
+        if inv is None or eq is None:
+            return
+
+        if prof in ["Sheriff", "Guard"]:
+            if "rusty_sword" in ITEM_DEFINITIONS:
+                inv["rusty_sword"] = max(inv.get("rusty_sword", 0), 1)
+                eq.weapon = "rusty_sword"
+            if "leather_jerkin" in ITEM_DEFINITIONS:
+                inv["leather_jerkin"] = max(inv.get("leather_jerkin", 0), 1)
+                eq.body = "leather_jerkin"
+        elif prof in ["Blacksmith", "Woodcutter", "Lumber Mill Foreman"]:
+            if "axe_stone" in ITEM_DEFINITIONS:
+                inv["axe_stone"] = max(inv.get("axe_stone", 0), 1)
+                eq.weapon = "axe_stone"
+        elif prof in ["Farmer", "Cowherd"]:
+            if "knife_stone" in ITEM_DEFINITIONS:
+                inv["knife_stone"] = max(inv.get("knife_stone", 0), 1)
+                eq.weapon = "knife_stone"
+            if "wheat_seeds" in ITEM_DEFINITIONS:
+                inv["wheat_seeds"] = max(inv.get("wheat_seeds", 0), 3)
+        elif prof in ["Hunter"]:
+            if "short_bow" in ITEM_DEFINITIONS:
+                inv["short_bow"] = max(inv.get("short_bow", 0), 1)
+                eq.weapon = "short_bow"
+            if "knife_stone" in ITEM_DEFINITIONS:
+                inv["knife_stone"] = max(inv.get("knife_stone", 0), 1)
+            if "smoked_meat" in ITEM_DEFINITIONS:
+                inv["smoked_meat"] = max(inv.get("smoked_meat", 0), 1)
+        elif prof in ["Miner"]:
+            if "stone_pickaxe" in ITEM_DEFINITIONS:
+                inv["stone_pickaxe"] = max(inv.get("stone_pickaxe", 0), 1)
+                eq.weapon = "stone_pickaxe"
+        elif prof in ["Baker", "Miller"]:
+            if "knife_stone" in ITEM_DEFINITIONS:
+                inv["knife_stone"] = max(inv.get("knife_stone", 0), 1)
+        elif prof in ["Merchant", "Tavern Keeper"]:
+            if "knife_stone" in ITEM_DEFINITIONS:
+                inv["knife_stone"] = max(inv.get("knife_stone", 0), 1)
+
     def _set_entity_profession(self, entity, profession: str, reason: str = "") -> str:
-        return set_entity_profession(entity, profession, reason=reason, game_time=self.game_time)
+        result = set_entity_profession(entity, profession, reason=reason, game_time=self.game_time)
+        self._ensure_profession_tools(entity)
+        return result
 
     def _get_coworker_roles(self, work_building, exclude_entity=None) -> list[str]:
         if not work_building:
@@ -15723,8 +15997,22 @@ class World:
     def _fallback_dialogue_greeting(self, npc_target: NPC) -> str:
         relation = self.get_relationship_label(npc_target)
         attitude = npc_target.attitude_to_player
+
+        # Check if talking to household family with actual domestic needs
+        if relation in {"Mother", "Father", "Brother", "Sister", "Sibling", "Spouse"}:
+            home_b_id = getattr(getattr(npc_target, "schedule", None), "home_building_id", None)
+            if home_b_id:
+                home_b = self.buildings_by_id.get(home_b_id)
+                if home_b and hasattr(home_b, "building_inventory"):
+                    food_count = sum(home_b.building_inventory.get(k, 0) for k in ["bread", "apple", "smoked_meat", "cooked_meat", "stew"])
+                    wood_count = home_b.building_inventory.get("raw_log", 0) + home_b.building_inventory.get("wooden_plank", 0)
+                    if food_count <= 1:
+                        return "There you are. We're running low on bread in the pantry; let's make sure we gather some grain or visit the bakery."
+                    if wood_count <= 0 and getattr(self, "weather", "") in ["cold", "snow", "rain"]:
+                        return "Good to see you. The hearth needs wood—it gets bitter cold at night."
+
         if npc_target.knowledge.help_needed:
-            return f"Please, I need help with {npc_target.knowledge.help_needed}."
+            return f"Good day. We could really use some {npc_target.knowledge.help_needed.replace('_', ' ')} around here."
         if relation == "Mother":
             return "There you are. Are you keeping yourself fed?"
         if relation == "Father":
@@ -15753,6 +16041,45 @@ class World:
             return ("I've been alright.", "continue_conversation")
         if any(word in text for word in ["who are you", "your name", "name?"]):
             return (f"I'm {self.get_entity_display_name(npc_target)}.", "continue_conversation")
+
+        # Check for offering labor / helping with work
+        if any(word in text for word in ["work", "job", "need a hand", "help out", "apprentice", "labor"]):
+            prof = getattr(getattr(npc_target, "economic", None), "profession", "")
+            if prof in ["Farmer", "Baker", "Miller", "Blacksmith", "Carpenter", "Woodcutter", "Miner"]:
+                wage = getattr(npc_target.economic, "daily_wage", 15)
+                if hasattr(self.player, "gain_skill_experience"):
+                    self.player.gain_skill_experience(prof.lower(), 5)
+                earned_wage = max(5, wage // 3)
+                self.player.economic.money += earned_wage
+                npc_target.social.relationships[self.player.id] = min(100, npc_target.social.relationships.get(self.player.id, 50) + 5)
+                return (f"Always glad for an extra pair of hands with the {prof.lower()} work. Here's a share of coins ({earned_wage}) for your help.", "continue_conversation")
+            return ("Things are quiet here at the moment, but check around the workshops if you're looking for work.", "continue_conversation")
+
+        # Check for offering food or provisions to family or neighbor
+        if any(word in text for word in ["food", "bread", "apple", "meat", "firewood", "log"]):
+            offered_item = None
+            for k in ["bread", "apple", "smoked_meat", "cooked_meat", "raw_log", "wooden_plank"]:
+                if k.replace("_", " ") in text or (k in ["raw_log", "wooden_plank"] and "firewood" in text):
+                    if self.player.has_item(k):
+                        offered_item = k
+                        break
+            if not offered_item:
+                for k in ["bread", "apple", "smoked_meat", "cooked_meat", "raw_log"]:
+                    if self.player.has_item(k):
+                        offered_item = k
+                        break
+            if offered_item:
+                self.player.remove_item(offered_item, 1)
+                npc_target.economic.npc_inventory[offered_item] = npc_target.economic.npc_inventory.get(offered_item, 0) + 1
+                npc_target.social.relationships[self.player.id] = min(100, npc_target.social.relationships.get(self.player.id, 50) + 10)
+                home_b_id = getattr(getattr(npc_target, "schedule", None), "home_building_id", None)
+                if home_b_id and home_b_id in self.buildings_by_id:
+                    home_b = self.buildings_by_id[home_b_id]
+                    if hasattr(home_b, "building_inventory"):
+                        home_b.building_inventory[offered_item] = home_b.building_inventory.get(offered_item, 0) + 1
+                item_display = offered_item.replace("_", " ")
+                return (f"Thank you so much for the {item_display}! That really helps us out.", "continue_conversation")
+
         if any(word in text for word in ["follow me", "come with me"]):
             from simulation.systems.conversation_foundation import evaluate_service_request
             if evaluate_service_request(self, self.player, npc_target, "accompany") == "accept":
@@ -17378,11 +17705,12 @@ class World:
                 building.building_inventory["wheat"] = building.building_inventory.get("wheat", 0) + 1
                 produced_anything = True
                 break
-            if produces:
                 for item_key, quantity in consumes.items():
-                    building.building_inventory[item_key] = building.building_inventory.get(item_key, 0) - quantity
-                    if building.building_inventory[item_key] <= 0:
-                        del building.building_inventory[item_key]
+                    rem = building.building_inventory.get(item_key, 0) - quantity
+                    if rem <= 0:
+                        building.building_inventory.pop(item_key, None)
+                    else:
+                        building.building_inventory[item_key] = rem
                 for item_key, quantity in produces.items():
                     building.building_inventory[item_key] = building.building_inventory.get(item_key, 0) + quantity
                 produced_anything = True
@@ -18524,12 +18852,17 @@ class World:
 
     def player_attempt_till_soil(self, target_x: int, target_y: int):
         """Handles the player's attempt to till soil."""
-        if not self.player.has_item("stone_hoe"):
-            self.add_message_to_chat_log("You need a hoe to till the soil.")
+        has_tool = (
+            self.player.has_item("stone_hoe") or
+            self.player.has_item("knife_stone") or
+            getattr(self.player.equipment, "weapon", None) in ["stone_hoe", "knife_stone"]
+        )
+        if not has_tool:
+            self.add_message_to_chat_log("You need a hoe or knife to till the soil.")
             return
 
         target_tile = self.get_tile_at(target_x, target_y)
-        if not (target_tile and target_tile.name == "Plains"):
+        if not (target_tile and getattr(target_tile, "name", "") == "Plains"):
             self.add_message_to_chat_log("You can only till plains.")
             return
 
@@ -18537,7 +18870,7 @@ class World:
         tilled_soil_def = TILE_DEFINITIONS["tilled_soil"]
         self._change_map_tile((target_x, target_y), tilled_soil_def)
 
-        # Handle tool durability
+        # Handle tool durability if stone_hoe is present
         hoe_reference = self.player.get_item_reference("stone_hoe")
         if hoe_reference is not None:
             broke = hoe_reference.degrade(1)
@@ -18549,17 +18882,22 @@ class World:
 
     def player_attempt_plant_seeds(self, target_x: int, target_y: int):
         """Handles the player's attempt to plant seeds."""
-        if not self.player.has_item("wheat_seeds"):
+        seed_key = None
+        for k in ["wheat_seeds", "herb_generic", "medicinal_herb"]:
+            if self.player.has_item(k):
+                seed_key = k
+                break
+        if not seed_key:
             self.add_message_to_chat_log("You don't have any seeds to plant.")
             return
 
         target_tile = self.get_tile_at(target_x, target_y)
-        if not (target_tile and target_tile.name == "Tilled Soil"):
+        if not (target_tile and getattr(target_tile, "name", "") == "Tilled Soil"):
             self.add_message_to_chat_log("You can only plant seeds on tilled soil.")
             return
 
-        self.player.remove_item("wheat_seeds", 1)
-        self.add_message_to_chat_log("You plant the seeds.")
+        self.player.remove_item(seed_key, 1)
+        self.add_message_to_chat_log(f"You plant the {seed_key.replace('_', ' ')}.")
         wheat_plant_def = TILE_DEFINITIONS["wheat_plant_growing"]
         self._change_map_tile((target_x, target_y), wheat_plant_def)
 
@@ -18571,26 +18909,65 @@ class World:
             return
 
         self.add_message_to_chat_log("You begin to harvest the crop...")
+        harvest_yield = target_tile.properties.get("harvest_yield_item_key", "wheat")
+        yield_qty = target_tile.properties.get("harvest_yield_quantity", 1)
+        self.player.add_item(harvest_yield, yield_qty)
+        if "wheat_seeds" in ITEM_DEFINITIONS:
+            self.player.add_item("wheat_seeds", random.randint(1, 2))
 
-        if random.random() < 0.8: # 80% chance to successfully harvest
-            harvest_yield = target_tile.properties.get("harvest_yield_item_key")
-            if harvest_yield:
-                self.player.add_item(harvest_yield, 1)
-                if hasattr(self.player, "gain_skill_experience"):
-                    self.player.gain_skill_experience("farming", 4)
-                self.add_message_to_chat_log(f"You harvested one {harvest_yield}.")
-                becomes_on_harvest = target_tile.properties.get("becomes_on_harvest_key")
-                if becomes_on_harvest and becomes_on_harvest in TILE_DEFINITIONS:
-                    revert_tile_def = TILE_DEFINITIONS[becomes_on_harvest]
-                    self._change_map_tile((target_x, target_y), revert_tile_def)
-                else:
-                    # Fallback: turn it back to tilled_soil if key is missing
-                    self._change_map_tile((target_x, target_y), TILE_DEFINITIONS["tilled_soil"])
-            else:
-                 self.add_message_to_chat_log("The crop is not ready to be harvested or yields nothing.")
+        if hasattr(self.player, "gain_skill_experience"):
+            self.player.gain_skill_experience("farming", 5)
 
-        else:
-            self.add_message_to_chat_log("You failed to harvest the crop.")
+        self.add_message_to_chat_log(f"You harvested {yield_qty} {harvest_yield} and seeds.")
+        becomes_on_harvest = target_tile.properties.get("becomes_on_harvest_key", "tilled_soil")
+        revert_tile_def = TILE_DEFINITIONS.get(becomes_on_harvest, TILE_DEFINITIONS["tilled_soil"])
+        self._change_map_tile((target_x, target_y), revert_tile_def)
+
+    def player_attempt_mill_flour(self, x: int, y: int):
+        """Handles the player milling wheat into flour at a grinding stone."""
+        target_tile = self.get_tile_at(x, y)
+        is_mill = (target_tile and (
+            target_tile.properties.get("workstation_type") == "grinding_stone" or
+            "grinding" in getattr(target_tile, "name", "").lower() or
+            "mill" in getattr(target_tile, "name", "").lower()
+        ))
+        if not is_mill:
+            self.add_message_to_chat_log("You need a grinding stone or mill to grind grain.")
+            return
+
+        if not self.player.has_item("wheat"):
+            self.add_message_to_chat_log("You don't have any wheat to grind into flour.")
+            return
+
+        self.player.remove_item("wheat", 1)
+        self.player.add_item("flour", 1)
+        if hasattr(self.player, "gain_skill_experience"):
+            self.player.gain_skill_experience("crafting", 3)
+        self.add_message_to_chat_log("You mill the wheat into fine flour.")
+
+    def player_attempt_bake_bread(self, x: int, y: int):
+        """Handles the player baking flour into bread at an oven or hearth."""
+        target_tile = self.get_tile_at(x, y)
+        is_oven = (target_tile and (
+            target_tile.properties.get("workstation_type") in ["oven", "fire", "hearth"] or
+            target_tile.properties.get("heat_source", False) or
+            "oven" in getattr(target_tile, "name", "").lower() or
+            "hearth" in getattr(target_tile, "name", "").lower() or
+            "fireplace" in getattr(target_tile, "name", "").lower()
+        ))
+        if not is_oven:
+            self.add_message_to_chat_log("You need an oven, hearth, or fire to bake bread.")
+            return
+
+        if not self.player.has_item("flour"):
+            self.add_message_to_chat_log("You don't have any flour to bake bread.")
+            return
+
+        self.player.remove_item("flour", 1)
+        self.player.add_item("bread", 1)
+        if hasattr(self.player, "gain_skill_experience"):
+            self.player.gain_skill_experience("cooking", 4)
+        self.add_message_to_chat_log("You bake a warm loaf of bread.")
 
     def player_attempt_cook(self, x: int, y: int):
         """Handles the player's attempt to cook food at a fire."""

@@ -256,6 +256,7 @@ def run_world_tick(world) -> None:
     world.process_macro_daily_tick()
     world._update_npc_schedules()
     world._update_npc_movement()
+    advance_active_interactions(world)
     world._update_world_environment()
     world._update_economy()
     world._run_daily_governance()
@@ -288,6 +289,39 @@ def run_world_tick(world) -> None:
     advance_reserves = getattr(world, "advance_reserve_targets", None)
     if callable(advance_reserves):
         advance_reserves()
+    emit_environmental_sensory_cues(world)
+
+
+def emit_environmental_sensory_cues(world) -> None:
+    """Emit periodic, diegetic sensory messages for nearby environmental features."""
+    player = getattr(world, "player", None)
+    if not player or getattr(world, "game_time", 0) % 80 != 0:
+        return
+
+    px, py = player.x, player.y
+    for dy in range(-4, 5):
+        for dx in range(-4, 5):
+            tx, ty = px + dx, py + dy
+            tile = world.get_tile_at(tx, ty)
+            if not tile:
+                continue
+            props = getattr(tile, "properties", {})
+            ws = props.get("workstation_type")
+            tname = getattr(tile, "name", "")
+            if ws == "oven" or "Oven" in tname:
+                world.add_message_to_chat_log("The warm, sweet aroma of baking bread drifts from the oven.")
+                return
+            elif ws == "forge" or "Forge" in tname:
+                world.add_message_to_chat_log("The rhythmic clinking of hammer against iron rings out from the forge.")
+                return
+            elif ws == "grinding_stone" or "Mill" in tname:
+                world.add_message_to_chat_log("The low, rumbling groan of the millstone grinding grain echoes nearby.")
+                return
+            elif (ws == "fire" or "Fire" in tname) and props.get("heat_source"):
+                phys = getattr(player, "physical", None)
+                if phys and getattr(phys, "body_temperature", 37.0) < 36.5:
+                    world.add_message_to_chat_log("The glowing warmth of the hearth eases the chill in the air.")
+                    return
     advance_tasks = getattr(world, "advance_production_tasks", None)
     if callable(advance_tasks):
         advance_tasks()

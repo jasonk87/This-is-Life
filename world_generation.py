@@ -146,4 +146,8 @@ class WorldGenerator:
             coord_rng = random.Random(str((self.seed, x, y, "mountain")))
             if coord_rng.random() < POI_DENSITY / 3:
                 return "ruin"
+        elif biome == "forest":
+            coord_rng = random.Random(str((self.seed, x, y, "forest_camp")))
+            if coord_rng.random() < POI_DENSITY / 4:
+                return "outlaw_camp"
         return None

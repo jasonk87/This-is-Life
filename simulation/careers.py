@@ -34,6 +34,7 @@ PROFESSION_TRACKS = {
     "Child": "youth",
     "Creature": "creature",
     "Raider": "outlaw",
+    "Outlaw": "outlaw",
     "Cultist": "cult",
 }
 

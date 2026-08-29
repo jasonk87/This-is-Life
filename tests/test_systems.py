@@ -428,8 +428,8 @@ class TestQuestSystem(unittest.TestCase):
         self.mock_call_llm.side_effect = dialogue_side_effect
 
         self.world.start_npc_dialogue(npc)
-        # The offer text is hardcoded, so it should be in the history
-        self.assertTrue(any("desperately need" in text for _, text in self.world.chat_ui_history))
+        # Natural conversational living expresses urgent need cleanly
+        self.assertTrue(any("could really use" in text or "desperately need" in text for _, text in self.world.chat_ui_history))
 
         self.world.continue_npc_dialogue(npc, "I will accept your quest")
 

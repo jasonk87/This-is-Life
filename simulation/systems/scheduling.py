@@ -943,6 +943,20 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                     if dest_x is not None:
                         new_task_label = "following_parent"
                         destination_coords = (dest_x, dest_y)
+                else:
+                    # When close to working parent, watch and learn the trade
+                    parent_task = getattr(getattr(parent, "schedule", None), "current_task", "")
+                    if parent_task in [TaskType.AT_WORK, "tilling_soil", "harvesting", "forge_crafting"]:
+                        new_task_label = "observing_trade"
+            else:
+                # No trackable parent: seek siblings or peer children for outdoor play
+                siblings = [other for other in getattr(world, "village_npcs", []) if other.id != npc.id and getattr(getattr(other, "economic", None), "profession", "") == "Child" and not getattr(other.physical, "is_dead", False)]
+                if siblings and random.random() < 0.15:
+                    playmate = random.choice(siblings)
+                    dest_x, dest_y = world._find_best_adjacent_tile(playmate.x, playmate.y, npc)
+                    if dest_x is not None:
+                        new_task_label = "playing_with_friends"
+                        destination_coords = (dest_x, dest_y)
         elif npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
             dest_coords_temp = world._get_building_global_center_coords(npc.schedule.work_building_id)
             if dest_coords_temp:
@@ -975,16 +989,7 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                             destination_coords = dest_coords
                             npc.leisure_timer = random.randint(50, 100)
 
-    elif is_leisure_time and npc.economic.profession == "Child" and npc.schedule.current_task not in ["at_leisure", "playing_at_town_square", "following_parent", TaskType.GOING_HOME]:
-        # Ideation-audit item 4, leisure half: town-square play during
-        # leisure hours. Mirrors the existing tavern-going idiom directly
-        # below (leisure_timer countdown, then a per-tick chance to head
-        # to a shared social hub) rather than any of the adult
-        # tavern/courting/social branches, none of which fit a child NPC
-        # thematically. No dedicated "playing" activity system exists (or
-        # is being built here) - the child simply occupies the town
-        # square, which is enough for it to read as present and social
-        # rather than invisible/idle during leisure hours.
+    elif is_leisure_time and npc.economic.profession == "Child" and npc.schedule.current_task not in ["at_leisure", "playing_at_town_square", "following_parent", "playing_with_friends", TaskType.GOING_HOME]:
         if npc.leisure_timer > 0:
             npc.leisure_timer -= 1
         elif random.random() < 0.1:

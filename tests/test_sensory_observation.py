@@ -20,31 +20,46 @@ def disable_llm():
     engine.ENABLE_LLM_CONNECTION = False
 
 
-def test_observe_npc_sensory_details():
-    """Verify observe_entity generates deep, realistic sensory descriptions without shortcuts."""
+def test_observe_npc_epistemic_stranger_vs_known():
+    """Verify observe_entity respects epistemic knowledge boundaries: strangers are described
+    by physical appearance and attire, while acquaintances and kin reveal their names and relations."""
     world = World(seed=42)
     player = world.player
 
-    # Create an NPC farmer
+    # 1. Stranger NPC (not met yet)
     npc = NPC(player.x + 1, player.y, name="Cedric", personality="hardworking")
-    world._set_entity_profession(npc, "Farmer", reason="test")
-    npc.schedule.current_task = "tilling_soil"
-    npc.equipment.weapon = "knife_stone"
-    npc.equipment.body = "leather_jerkin"
-    npc.economic.npc_inventory["bread"] = 2
+    npc.age = 48
+    npc.gender = "male"
+    world._set_entity_profession(npc, "Blacksmith", reason="test")
+    npc.schedule.current_task = "forge_crafting"
+    npc.equipment.weapon = "hammer_iron"
+    npc.economic.npc_inventory["iron_ingot"] = 2
     npc.physical.hunger = 75
     npc.physical.body_temperature = 34.5  # Chilled
     world.npcs.append(npc)
 
-    desc = observe_entity(npc, player, world)
-    assert "Cedric" in desc
-    assert "Farmer" in desc
-    assert "tilling the soil" in desc.lower()
-    assert "knife" in desc.lower()
-    assert "leather jerkin" in desc.lower()
-    assert "carrying" in desc.lower()
-    assert "hungry" in desc.lower()
-    assert "shivering" in desc.lower() or "cold" in desc.lower()
+    # Observe as stranger
+    desc_stranger = observe_entity(npc, player, world)
+    assert "Cedric" not in desc_stranger, "Stranger's true name should not be omnisciently revealed"
+    assert "middle-aged man" in desc_stranger.lower()
+    assert "apron" in desc_stranger.lower() or "leathers" in desc_stranger.lower()
+    assert "roaring forge" in desc_stranger.lower() or "forge" in desc_stranger.lower()
+    assert "hammer iron" in desc_stranger.lower()
+    assert "carrying" in desc_stranger.lower()
+    assert "hungry" in desc_stranger.lower()
+    assert "shivering" in desc_stranger.lower() or "cold" in desc_stranger.lower()
+
+    # 2. Acquaintance (met / introduced)
+    player.social.relationships[npc.id] = {"acquaintance": True}
+    desc_known = observe_entity(npc, player, world)
+    assert "Cedric" in desc_known
+    assert "Blacksmith" in desc_known
+
+    # 3. Kin / Family (e.g. brother)
+    npc.social.family_ties = {"relation_to_player": "brother"}
+    desc_kin = observe_entity(npc, player, world)
+    assert "Cedric" in desc_kin
+    assert "brother" in desc_kin.lower()
 
 
 def set_tile(world, x, y, name, passable=True, properties=None):

@@ -43,6 +43,29 @@ from entities.items import (
 )
 from entities.social import AspirationType, KnowledgeComponent, MemoryEvent, TravelComponent
 from data.animals import ANIMAL_DEFINITIONS
+from simulation.systems.events import (
+    SCHEDULED_EVENT_DEFINITIONS,
+    run_scheduled_events,
+    start_scheduled_event,
+    end_scheduled_event,
+    is_scheduled_event_active,
+    is_crowd_event_active,
+)
+from simulation.systems.aging import (
+    update_npc_ages,
+    get_aging_work_capacity,
+)
+from simulation.systems.repair import (
+    describe_repairable_player_items,
+    calculate_repair_cost,
+    player_attempt_repair_gear as execute_player_repair_gear,
+)
+from simulation.systems.diplomacy_notices import (
+    describe_village_direction_from_player,
+    notify_war_declared,
+    notify_peace_treaty,
+    notify_raid_sighted,
+)
 from entities.tree import Tree, OakTree, AppleTree, PearTree # Tree classes seem partially defined/used.
 from config import (
     WORLD_WIDTH, WORLD_HEIGHT, POI_DENSITY, CHUNK_SIZE,
@@ -134,26 +157,7 @@ NPC_HOSTILITY_DECAY_SAFE_RADIUS = 20
 #   demand_boost_amount - how much demand is added per item, and removed
 #                         again symmetrically when the event ends
 #   status_effect       - a physical.status_effects string applied to every
-#                         living resident of a village for the duration
-#   draws_crowd         - if True, NPCs get an elevated chance of heading to
-#                         their village's town square during leisure hours
-#                         while the event is active (see scheduling.py)
-#   start_message / end_message - posted to the chat log on start/end
-SCHEDULED_EVENT_DEFINITIONS = [
-    {
-        "key": "harvest_festival",
-        "name": "Harvest Festival",
-        "season": "Autumn",
-        "start_day_of_season": 0,
-        "duration_days": 4,
-        "demand_boost_items": ["bread", "wheat", "apple"],
-        "demand_boost_amount": 8,
-        "status_effect": "Festive",
-        "draws_crowd": True,
-        "start_message": "The Harvest Festival has begun! Villages are alive with music, feasting, and full market stalls.",
-        "end_message": "The Harvest Festival has come to an end for another year.",
-    },
-]
+# (SCHEDULED_EVENT_DEFINITIONS is imported from simulation.systems.events)
 
 # --- Individual voter agency (elections) ---
 # Judgment calls (see World._score_candidate_for_voter / evaluate_elections).
@@ -2931,106 +2935,20 @@ class World:
             self.add_message_to_chat_log(self.text.season_changed(season_name))
 
     def _run_scheduled_events(self) -> None:
-        """Reusable scheduled-event (festival) dispatcher - ideation-audit
-        item 6. Checked once per day, gated the same way as
-        _run_daily_governance (a last-checked-day marker rather than a tick
-        offset, since unlike governance this doesn't need to land on a
-        specific tick within the day). SCHEDULED_EVENT_DEFINITIONS is the
-        only thing a future event needs to extend - this method has no
-        event-specific logic of its own."""
-        current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
-        if self.scheduled_events_last_checked_day >= current_day:
-            return
-        self.scheduled_events_last_checked_day = current_day
-
-        # End any events whose window has closed before considering new starts,
-        # so a definition with duration_days == the gap to its next occurrence
-        # (not possible with the current single entry, but kept correct for
-        # future ones) doesn't stay "active" for a spurious extra day.
-        for key in list(self.active_scheduled_events.keys()):
-            if current_day >= self.active_scheduled_events[key]["end_day"]:
-                self._end_scheduled_event(key)
-
-        days_into_season = current_day % DAYS_PER_SEASON
-        current_season_name = self.seasons[self.current_season_index]
-
-        for definition in SCHEDULED_EVENT_DEFINITIONS:
-            key = definition["key"]
-            if key in self.active_scheduled_events:
-                continue
-            if current_season_name != definition["season"]:
-                continue
-            if days_into_season != definition["start_day_of_season"]:
-                continue
-            self._start_scheduled_event(definition, current_day)
+        """Runs the scheduled-event dispatcher from simulation.systems.events."""
+        run_scheduled_events(self)
 
     def _start_scheduled_event(self, definition: dict, current_day: int) -> None:
-        """Applies a SCHEDULED_EVENT_DEFINITIONS entry's start effects:
-        village demand boost (feeds get_dynamic_price), a status_effects tag
-        on every living resident (and the player) for the UI to surface, and
-        a chat log announcement."""
-        key = definition["key"]
-        self.active_scheduled_events[key] = {
-            "end_day": current_day + definition["duration_days"],
-            "name": definition["name"],
-        }
-
-        boost_amount = definition.get("demand_boost_amount", 0)
-        for item_key in definition.get("demand_boost_items", []):
-            for village in self.villages:
-                village.demand[item_key] = village.demand.get(item_key, 0) + boost_amount
-
-        status_effect = definition.get("status_effect")
-        if status_effect:
-            for entity in [self.player, *self.all_npcs]:
-                physical = getattr(entity, "physical", None)
-                if physical is not None and not getattr(physical, "is_dead", False):
-                    if status_effect not in physical.status_effects:
-                        physical.status_effects.append(status_effect)
-
-        start_message = definition.get("start_message")
-        if start_message:
-            self.add_message_to_chat_log(start_message)
+        """Applies a scheduled event definition from simulation.systems.events."""
+        start_scheduled_event(self, definition, current_day)
 
     def _end_scheduled_event(self, key: str) -> None:
-        """Reverses _start_scheduled_event's effects for one event key. Safe
-        to call on a key that isn't actually active (no-op)."""
-        state = self.active_scheduled_events.pop(key, None)
-        if state is None:
-            return
-        definition = next((d for d in SCHEDULED_EVENT_DEFINITIONS if d["key"] == key), None)
-        if definition is None:
-            return
-
-        boost_amount = definition.get("demand_boost_amount", 0)
-        for item_key in definition.get("demand_boost_items", []):
-            for village in self.villages:
-                if item_key in village.demand:
-                    village.demand[item_key] = max(0, village.demand[item_key] - boost_amount)
-                    if village.demand[item_key] <= 0:
-                        del village.demand[item_key]
-
-        status_effect = definition.get("status_effect")
-        if status_effect:
-            for entity in [self.player, *self.all_npcs]:
-                physical = getattr(entity, "physical", None)
-                if physical is not None and status_effect in physical.status_effects:
-                    physical.status_effects.remove(status_effect)
-
-        end_message = definition.get("end_message")
-        if end_message:
-            self.add_message_to_chat_log(end_message)
+        """Reverses scheduled event effects via simulation.systems.events."""
+        end_scheduled_event(self, key)
 
     def _is_crowd_drawing_event_active(self) -> bool:
-        """Used by scheduling.py's leisure-hours logic to give NPCs an
-        elevated chance of heading to their village's town square while a
-        'draws_crowd' scheduled event (e.g. Harvest Festival) is active."""
-        if not self.active_scheduled_events:
-            return False
-        return any(
-            definition["key"] in self.active_scheduled_events and definition.get("draws_crowd")
-            for definition in SCHEDULED_EVENT_DEFINITIONS
-        )
+        """Check if any active scheduled event draws crowds to the town square."""
+        return is_crowd_event_active(self)
 
     def _check_for_shelter(self, x: int, y: int, max_dist: int = 10) -> bool:
         """
@@ -8771,129 +8689,16 @@ class World:
         )
 
     def _describe_repairable_player_items(self) -> list[dict]:
-        """Enumerates the player's damaged, repairable gear across both
-        durability representations in this codebase: equipped armor slots
-        (tracked via equipment.equipped_armor_durability/
-        equipped_armor_max_durability, since Player armor isn't
-        ItemReference-backed - see Player._degrade_equipped_armor_slot's
-        docstring) and inventory ItemReferences with their own
-        current_durability/max_durability (weapons/tools). Each entry
-        carries enough info for cost calculation and execution without the
-        caller needing to know which representation it is.
-        """
-        candidates: list[dict] = []
-
-        for slot, item_key in self.player.equipment.equipped_armor.items():
-            if not item_key:
-                continue
-            max_durability = self.player._get_equipped_armor_max_durability(slot)
-            if max_durability is None or max_durability <= 0:
-                continue
-            current = self.player.equipment.equipped_armor_durability.get(slot, max_durability)
-            if current >= max_durability:
-                continue
-            item_def = ITEM_DEFINITIONS.get(item_key, {})
-            candidates.append({
-                "kind": "armor_slot",
-                "slot": slot,
-                "item_key": item_key,
-                "display_name": item_def.get("name", item_key.replace("_", " ").title()),
-                "missing_fraction": max(0.0, min(1.0, 1 - (current / max_durability))),
-                "value": item_def.get("value", 0),
-            })
-
-        for item_key in list(self.player.economic.inventory.keys()):
-            if item_key in ("item_references", "money"):
-                continue
-            item_ref = self.player.get_item_reference(item_key)
-            if item_ref is None or item_ref.current_durability is None:
-                continue
-            max_durability = item_ref.max_durability
-            if max_durability is None or max_durability <= 0 or item_ref.current_durability >= max_durability:
-                continue
-            candidates.append({
-                "kind": "item_reference",
-                "item_key": item_key,
-                "item_reference": item_ref,
-                "display_name": item_ref.name,
-                "missing_fraction": max(0.0, min(1.0, 1 - (item_ref.current_durability / max_durability))),
-                "value": item_ref.value,
-            })
-
-        return candidates
+        """Enumerates damaged player items via simulation.systems.repair."""
+        return describe_repairable_player_items(self.player)
 
     def _calculate_repair_cost(self, candidate: dict) -> dict:
-        """Repair cost scales with how damaged the item is: a fully-broken
-        item (missing_fraction=1.0) costs at most
-        REPAIR_MONEY_COST_FRACTION_OF_VALUE of its own value in money, plus
-        up to REPAIR_MATERIAL_MAX_QTY of REPAIR_MATERIAL_KEY. A barely-worn
-        item costs proportionally less of both. See entities/items.py for
-        the constants and the reasoning behind using one generic repair
-        material regardless of the item's actual material."""
-        missing_fraction = max(0.0, min(1.0, candidate.get("missing_fraction", 0.0)))
-        money_cost = max(1, round(candidate.get("value", 0) * missing_fraction * REPAIR_MONEY_COST_FRACTION_OF_VALUE))
-        material_qty = max(1, round(missing_fraction * REPAIR_MATERIAL_MAX_QTY))
-        return {"money": money_cost, "material_key": REPAIR_MATERIAL_KEY, "material_qty": material_qty}
+        """Calculates item repair cost via simulation.systems.repair."""
+        return calculate_repair_cost(candidate)
 
     def player_attempt_repair_gear(self, npc: NPC):
-        """Repairs the single most-damaged piece of the player's own gear
-        at a Blacksmith (or any NPC with the "repair" profession
-        capability - see simulation/careers.py's PROFESSION_CAPABILITIES),
-        for a cost in money + REPAIR_MATERIAL_KEY scaled to how damaged it
-        is. Finite-use per Jason's design decision: each repair also
-        permanently lowers that item's max_durability ceiling a bit (see
-        ItemReference.repair() / Player._repair_equipped_armor_slot)
-        rather than being a free, unlimited undo of degrade().
-
-        Deliberately repairs one item per call (the single most-damaged
-        candidate) rather than opening a multi-item selection menu -
-        mirrors this codebase's existing single-purpose NPC-interaction
-        pattern (player_attempt_feed_animal, player_attempt_ride_animal)
-        rather than introducing a new selectable-list UI subsystem the way
-        Trade has. A player with several damaged items can just invoke
-        Repair again for the next one. Flagged as a scoping choice - a
-        proper per-item picker would need real UI work beyond this pass.
-        """
-        npc_display_name = self.get_entity_display_name(npc)
-        if not entity_has_capability(npc, "repair"):
-            self.add_message_to_chat_log(f"{npc_display_name} doesn't know how to repair gear.")
-            return
-
-        candidates = self._describe_repairable_player_items()
-        if not candidates:
-            self.add_message_to_chat_log("You have nothing that needs repairing.")
-            return
-
-        candidate = max(candidates, key=lambda c: c["missing_fraction"])
-        cost = self._calculate_repair_cost(candidate)
-
-        if self.player.economic.money < cost["money"]:
-            self.add_message_to_chat_log(
-                f"{npc_display_name} says repairing your {candidate['display_name']} would cost {cost['money']} coins - you don't have enough."
-            )
-            return
-        if not self.player.has_item(cost["material_key"], cost["material_qty"]):
-            material_name = ITEM_DEFINITIONS.get(cost["material_key"], {}).get("name", cost["material_key"])
-            self.add_message_to_chat_log(
-                f"{npc_display_name} says repairing your {candidate['display_name']} needs {cost['material_qty']}x {material_name} - you don't have enough."
-            )
-            return
-
-        self.player.economic.money -= cost["money"]
-        self.player.remove_item(cost["material_key"], cost["material_qty"])
-
-        if candidate["kind"] == "armor_slot":
-            result = self.player._repair_equipped_armor_slot(candidate["slot"])
-        else:
-            result = candidate["item_reference"].repair()
-
-        if result.get("at_repair_limit"):
-            self.add_message_to_chat_log(
-                f"{npc_display_name} repairs your {candidate['display_name']} as best they can - "
-                f"it's showing its age and won't hold up like it used to."
-            )
-        else:
-            self.add_message_to_chat_log(f"{npc_display_name} repairs your {candidate['display_name']}.")
+        """Executes player gear repair via simulation.systems.repair."""
+        return execute_player_repair_gear(self, npc)
 
     def player_attempt_mercenary_contract(self, npc: NPC):
         """Handles the player attempting to offer mercenary services to a warring village."""
@@ -16332,24 +16137,8 @@ class World:
             pass
 
     def _update_npc_ages(self):
-        """Increments the age of all NPCs once per game day."""
-        if self.game_time > 0 and self.game_time % DAY_LENGTH_TICKS == 0:
-            for npc in self.all_npcs:
-                npc.age += 1
-                # Child -> adult transition. Nothing in the codebase previously
-                # moved a "Child" NPC out of that profession as they aged, so
-                # children lived forever as children. Age 18 is used here
-                # because it's already the established "adulthood" threshold
-                # used elsewhere in this codebase (election voter eligibility,
-                # family-migration eligibility, courtship-candidate exclusion)
-                # - it's a game-time-day count, not literal years, but reusing
-                # the existing convention rather than inventing a new number.
-                # Deliberately scoped to profession only: housing/home-building
-                # assignment is left untouched, so a newly-adult NPC keeps
-                # living in the parental home until they move via existing
-                # migration/courtship mechanics.
-                if getattr(getattr(npc, "economic", None), "profession", None) == "Child" and npc.age >= 18:
-                    self._set_entity_profession(npc, "Unemployed", reason="came_of_age")
+        """Increments NPC ages and applies lifecycle transitions via simulation.systems.aging."""
+        update_npc_ages(self)
 
     def _update_inventory_spoilage(self):
         """Checks for food spoilage in all inventories once per day."""
@@ -16899,38 +16688,8 @@ class World:
 
 
     def _describe_village_direction_from_player(self, chunk_coords: tuple[int, int] | None) -> str:
-        """Returns a short, player-facing phrase describing where a village
-        chunk sits relative to the player's CURRENT position (recomputed
-        fresh on every call, never cached, so it stays accurate as the
-        player travels). Villages have no name field anywhere in this
-        codebase (only chunk_coords and LLM-generated flavor lore), so this
-        is how distant-village diplomacy/war/raid events get described to
-        the player without inventing a whole naming system.
-
-        Returns "nearby" whenever the village falls within
-        ABSTRACT_SIMULATION_DISTANCE_CHUNKS of the player's current chunk -
-        the same threshold _update_abstract_simulation already uses to
-        decide whether a village is "near" (actively simulated) or "far"
-        (abstracted), so "nearby" here means the same thing it means
-        everywhere else in the simulation.
-        """
-        if not chunk_coords:
-            return "somewhere in the region"
-
-        player_chunk_x = self.player.x // CHUNK_SIZE
-        player_chunk_y = self.player.y // CHUNK_SIZE
-        dx = chunk_coords[0] - player_chunk_x
-        dy = chunk_coords[1] - player_chunk_y
-
-        if abs(dx) <= ABSTRACT_SIMULATION_DISTANCE_CHUNKS and abs(dy) <= ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
-            return "nearby"
-
-        # atan2 with -dy since chunk_y increases southward (screen/grid
-        # convention) but a standard math angle expects "up" to be positive.
-        angle = math.degrees(math.atan2(-dy, dx)) % 360
-        directions = ["east", "northeast", "north", "northwest", "west", "southwest", "south", "southeast"]
-        direction = directions[round(angle / 45) % 8]
-        return f"to the {direction}"
+        """Returns player-relative direction via simulation.systems.diplomacy_notices."""
+        return describe_village_direction_from_player(self.player, chunk_coords)
 
     def _spawn_raiding_party(self, source_village, target_village):
         """Spawns a raiding party from source_village to attack target_village."""

@@ -4,7 +4,119 @@ from __future__ import annotations
 from typing import Any
 
 
-def observe_entity(entity: Any, viewer: Any, world: Any) -> str:
+def is_entity_known_to_viewer(entity: Any, viewer: Any, world: Any = None) -> bool:
+    """Return True if the viewer knows the identity/name of the entity."""
+    if entity is None or viewer is None:
+        return False
+
+    # The viewer always knows themselves
+    if getattr(viewer, "id", None) is not None and getattr(viewer, "id", None) == getattr(entity, "id", None):
+        return True
+    if viewer is entity:
+        return True
+
+    # Kinship / Family ties are always recognized
+    if world and hasattr(world, "get_relationship_label"):
+        relation = world.get_relationship_label(entity)
+        if relation:
+            return True
+    if hasattr(entity, "get_relationship_to"):
+        relation = entity.get_relationship_to(viewer)
+        if relation:
+            return True
+
+    # Direct acquaintance check
+    if getattr(entity, "met_by_player", False):
+        return True
+    if hasattr(viewer, "has_met_entity") and viewer.has_met_entity(entity):
+        return True
+    if world and hasattr(world, "player_has_met") and world.player_has_met(entity):
+        return True
+
+    # Check viewer social memory
+    viewer_social = getattr(viewer, "social", None)
+    if viewer_social:
+        entity_id = getattr(entity, "id", None)
+        if entity_id is not None:
+            if entity_id in getattr(viewer_social, "relationships", {}):
+                return True
+            if entity_id in getattr(viewer_social, "grudges", {}):
+                return True
+            if entity_id in getattr(viewer_social, "local_opinions", {}):
+                return True
+
+    # Check entity social memory
+    entity_social = getattr(entity, "social", None)
+    if entity_social:
+        viewer_id = getattr(viewer, "id", None)
+        if viewer_id is not None and viewer_id in getattr(entity_social, "relationships", {}):
+            return True
+
+    return False
+
+
+def describe_stranger_appearance(entity: Any) -> str:
+    """Generate an empirical physical description of a stranger based on observable traits."""
+    age = getattr(entity, "age", 25)
+    gender = str(getattr(entity, "gender", "male")).lower()
+
+    if age < 13:
+        noun = "young boy" if gender == "male" else ("young girl" if gender == "female" else "child")
+    elif age < 18:
+        noun = "teenage boy" if gender == "male" else ("teenage girl" if gender == "female" else "youth")
+    elif age < 40:
+        noun = "young man" if gender == "male" else ("young woman" if gender == "female" else "person")
+    elif age < 60:
+        noun = "middle-aged man" if gender == "male" else ("middle-aged woman" if gender == "female" else "middle-aged person")
+    else:
+        noun = "elderly man" if gender == "male" else ("elderly woman" if gender == "female" else "elderly person")
+
+    # Observable appearance features
+    app = getattr(entity, "appearance", None)
+    hair_desc = ""
+    if app:
+        style = getattr(app, "hairstyle", "none")
+        color = getattr(app, "hair_color", "brown")
+        facial = getattr(app, "facial_hair", "none")
+
+        parts = []
+        if style != "none":
+            parts.append(f"{style} {color} hair")
+        if facial != "none" and gender == "male" and age >= 18:
+            parts.append(f"a {facial.replace('_', ' ')}")
+        if parts:
+            hair_desc = f"with {' and '.join(parts)}"
+
+    # Visible attire / apron
+    eq = getattr(entity, "equipment", None)
+    body_armor = getattr(getattr(eq, "body", None), "item_key", getattr(eq, "body", None))
+    if body_armor and str(body_armor) != "None":
+        attire = f"wearing {str(body_armor).replace('_', ' ')}"
+    else:
+        prof = str(getattr(getattr(entity, "economic", None), "profession", "")).lower()
+        if any(w in prof for w in ["blacksmith", "weaponsmith", "armorer", "smith"]):
+            attire = "wearing a soot-stained leather apron"
+        elif any(w in prof for w in ["baker", "miller"]):
+            attire = "wearing a flour-dusted linen apron"
+        elif any(w in prof for w in ["farmer"]):
+            attire = "dressed in a coarse work tunic and muddy boots"
+        elif any(w in prof for w in ["woodcutter", "carpenter", "mason"]):
+            attire = "wearing rugged work leathers"
+        elif any(w in prof for w in ["guard", "soldier", "sheriff"]):
+            attire = "wearing a reinforced tabard and belt"
+        elif any(w in prof for w in ["hunter", "trapper"]):
+            attire = "wearing a hooded hunting cloak"
+        elif any(w in prof for w in ["child"]):
+            attire = "wearing simple youth linens"
+        else:
+            attire = "dressed in simple villager clothing"
+
+    if hair_desc:
+        return f"A {noun} {hair_desc}, {attire}"
+    return f"A {noun} {attire}"
+
+
+def observe_entity(entity: Any, viewer: Any = None, world: Any = None) -> str:
     """Build a rich, realistic physical observation of an NPC, Animal, or Player."""
     if entity is None:
         return "You see nothing here."
@@ -27,13 +139,20 @@ def observe_entity(entity: Any, viewer: Any, world: Any) -> str:
         return f"{name} ({species}): {health_desc}, currently {sub_task.lower()} ({behavior.lower()})."
 
     # Humanoid NPC inspection
-    name = str(getattr(entity, "name", "Stranger")).replace("_", " ")
-    prof = getattr(getattr(entity, "economic", None), "profession", "Villager")
-    relation = world.get_relationship_label(entity) if world and hasattr(world, "get_relationship_label") else ""
+    is_known = is_entity_known_to_viewer(entity, viewer, world)
+    
+    if is_known:
+        name = str(getattr(entity, "name", "Someone")).replace("_", " ")
+        prof = getattr(getattr(entity, "economic", None), "profession", "Villager")
+        relation = world.get_relationship_label(entity) if world and hasattr(world, "get_relationship_label") else ""
+        if not relation and hasattr(entity, "get_relationship_label") and viewer:
+            relation = entity.get_relationship_label(viewer)
 
-    header = f"{name} ({prof})"
-    if relation:
-        header += f" - your {relation.lower()}"
+        header = f"{name} ({prof})"
+        if relation:
+            header += f" - your {relation.lower()}"
+    else:
+        header = describe_stranger_appearance(entity)
 
     observations = []
 
@@ -219,7 +338,7 @@ def observe_tile(world: Any, x: int, y: int) -> str:
     if hasattr(world, "all_npcs"):
         occupants = [npc for npc in world.all_npcs if npc.x == x and npc.y == y and not getattr(npc, "is_dead", False)]
         for npc in occupants:
-            lines.append(observe_entity(npc, world.player, world))
+            lines.append(observe_entity(npc, world.player if hasattr(world, "player") else None, world))
 
     return "\n".join(lines)
 
@@ -236,16 +355,32 @@ def get_tile_sensory_summary(world: Any, x: int, y: int) -> str:
     props = getattr(tile, "properties", {})
 
     # Check for occupants first
-    occupants = [npc for npc in world.all_npcs if npc.x == x and npc.y == y and not getattr(npc, "is_dead", False)]
+    occupants = [npc for npc in getattr(world, "all_npcs", []) if npc.x == x and npc.y == y and not getattr(npc, "is_dead", False)]
     if occupants:
         npc = occupants[0]
-        name = getattr(npc, "name", "Someone").replace("_", " ")
-        prof = getattr(getattr(npc, "economic", None), "profession", "Villager")
+        viewer = getattr(world, "player", None)
+        is_known = is_entity_known_to_viewer(npc, viewer, world)
+        
+        if is_known:
+            name = getattr(npc, "name", "Someone").replace("_", " ")
+            prof = getattr(getattr(npc, "economic", None), "profession", "Villager")
+            header = f"{name} ({prof})"
+        else:
+            gender = str(getattr(npc, "gender", "male")).title()
+            age = getattr(npc, "age", 25)
+            age_desc = "Elderly" if age >= 60 else ("Older" if age >= 45 else ("Young" if age < 25 else "Adult"))
+            prof = getattr(getattr(npc, "economic", None), "profession", "Villager")
+            if prof not in ["Villager", "Unemployed"]:
+                header = f"{age_desc} {gender} ({prof}'s Attire)"
+            else:
+                header = f"{age_desc} {gender} (Stranger)"
+
         task = getattr(getattr(npc, "schedule", None), "current_task", "") or getattr(npc, "current_sub_task", "")
         task_str = f" | {task.replace('_', ' ').title()}" if task else ""
         weapon = getattr(getattr(npc, "equipment", None), "weapon", None)
-        weapon_str = f" | Holding {weapon.replace('_', ' ')}" if weapon else ""
-        return f"[{name} ({prof}){task_str}{weapon_str}]"
+        weapon_key = getattr(weapon, "item_key", weapon)
+        weapon_str = f" | Holding {str(weapon_key).replace('_', ' ')}" if weapon_key and str(weapon_key) != "None" else ""
+        return f"[{header}{task_str}{weapon_str}]"
 
     # Workstation / Special Tiles
     if props.get("workstation_type") == "fire":

@@ -194,6 +194,10 @@ except ModuleNotFoundError:
         def load_tilesheet(*args, **kwargs):
             return object()
 
+        @staticmethod
+        def load_truetype(*args, **kwargs):
+            return object()
+
     class _ContextManager:
         def __enter__(self):
             return self

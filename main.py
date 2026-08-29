@@ -945,12 +945,25 @@ def create_console():
 
 def load_custom_tileset():
     """Loads the base ASCII font and appends DawnLike tiles mapped to Unicode PUA."""
-    # Base ASCII tileset (16x16 pixels per tile, 32x8 tiles)
+    # Base font: DawnLike SDS_8x8 pixel font (same artist + CC-BY-SA 3.0 license
+    # as the DawnLike tiles already in the game), rendered at 16x16 per tile to
+    # preserve the existing console geometry and the 2-4x zoomed-sprite pipeline.
+    # SDS_8x8 is ASCII-only, so the Unicode box-drawing/arrow/block glyphs the UI
+    # relies on are backfilled from the bundled dejavu tilesheet below. If the
+    # TTF is missing entirely, fall back to the dejavu tilesheet for everything.
+    tileset = None
     try:
-        tileset = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
-    except FileNotFoundError:
-        print("Error: Font file not found: 'dejavu16x16_gs_tc.png'")
-        return None
+        tileset = tcod.tileset.load_truetype_font("SDS_8x8.ttf", 16, 16)
+    except Exception:
+        tileset = None
+    if tileset is None:
+        try:
+            tileset = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
+        except FileNotFoundError:
+            print("Error: Font file not found: 'dejavu16x16_gs_tc.png'")
+            return None
+    else:
+        _backfill_ui_glyphs(tileset)
 
     # Load combined DawnLike tiles
     try:
@@ -971,13 +984,51 @@ def load_custom_tileset():
         for r in range(rows):
             for c in range(cols):
                 tile_arr = arr[r * tile_height:(r + 1) * tile_height, c * tile_width:(c + 1) * tile_width, :]
-                tileset.set_tile(base_code + (r * cols) + c, tile_arr)
+                tileset[base_code + (r * cols) + c] = tile_arr
         register_zoomed_dawnlike_tiles(tileset, TILESET_PATH)
 
     except Exception as e:
         print(f"Warning: Could not load DawnLike tileset: {e}")
 
     return tileset
+
+
+def _backfill_ui_glyphs(tileset):
+    """Copy the non-ASCII UI glyphs into an SDS_8x8 base tileset.
+
+    SDS_8x8.ttf covers only ASCII (plus a few typographic quotes), so the box
+    drawing, arrows, block, shade, and bullet glyphs that the UI panels rely on
+    would otherwise render blank. This copies those specific tiles from the
+    bundled dejavu tilesheet (already shipped with the project) into the pixel
+    font's tileset so the UI stays intact while ASCII text stays pixel-styled.
+    """
+    ui_codepoints = (
+        0x2500,  # ─ single horizontal (RULE)
+        0x2502,  # │ single vertical (console_renderer)
+        0x2550,  # ═ double horizontal
+        0x2551,  # ║ double vertical
+        0x2554,  # ╔ double top-left
+        0x2557,  # ╗ double top-right
+        0x255A,  # ╚ double bottom-left
+        0x255D,  # ╝ double bottom-right
+        0x2588,  # █ full block (BAR_CELL / SCROLL_THUMB)
+        0x2591,  # ░ light shade (SCROLL_TRACK)
+        0x25B2,  # ▲ arrow up
+        0x25BC,  # ▼ arrow down
+        0x2022,  # • bullet
+    )
+    try:
+        dejavu = tcod.tileset.load_tilesheet("dejavu16x16_gs_tc.png", 32, 8, tcod.tileset.CHARMAP_TCOD)
+    except Exception:
+        return  # No fallback available; ASCII-only font stays as-is.
+    for cp in ui_codepoints:
+        try:
+            tile = dejavu.get_tile(cp)
+            if tile is not None:
+                tileset[cp] = tile
+        except Exception:
+            continue
+
 
 MENU_TAGLINE = "A life simulated, one tick at a time."
 

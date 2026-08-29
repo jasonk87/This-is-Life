@@ -16,31 +16,33 @@ and render as blanks, so bars here are whole cells only.
 # --- Surfaces -------------------------------------------------------------
 # Panels sit on top of the world view, so they need an opaque fill; the
 # "deep" variant is for the always-present status column, which should read
-# as part of the window chrome rather than as a popup.
-PANEL_BG = (12, 14, 20)
-PANEL_BG_DEEP = (8, 10, 16)
-PANEL_BG_RAISED = (22, 25, 34)
-LOG_BG = (6, 8, 12)
+# as part of the window chrome rather than as a popup. Tuned toward a warm,
+# muted pixel-art tone so the UI reads as one canvas with the DawnLike world
+# instead of a floating dark-theme overlay.
+PANEL_BG = (140, 122, 95)         # warm parchment tan
+PANEL_BG_DEEP = (118, 101, 78)    # deeper parchment (status chrome)
+PANEL_BG_RAISED = (160, 140, 111) # lighter parchment (focused popup)
+LOG_BG = (104, 89, 69)            # parchment message log
 
 # --- Frames ---------------------------------------------------------------
-FRAME = (128, 138, 156)
-FRAME_FOCUSED = (226, 198, 128)
+FRAME = (96, 80, 61)          # dark bronze, defines panel edge on parchment
+FRAME_FOCUSED = (236, 196, 108)  # warm parchment highlight
 
 # --- Text -----------------------------------------------------------------
-TEXT = (228, 228, 232)
-TEXT_DIM = (168, 170, 180)
-TEXT_MUTED = (120, 122, 132)
-TEXT_DISABLED = (96, 98, 106)
+TEXT = (240, 232, 218)        # warm off-white (bright, high contrast on parchment)
+TEXT_DIM = (96, 78, 58)       # dim brown (clearly darker than panel for legibility)
+TEXT_MUTED = (112, 96, 76)    # muted brown (darker than panel for legibility)
+TEXT_DISABLED = (84, 72, 58)  # disabled brown (darkest, dimmed)
 
 # --- Semantic accents -----------------------------------------------------
-HEADING = (255, 205, 110)     # section headings, menu titles, field labels
-SELECTION = (120, 225, 245)   # the row/action the cursor is on
-HOVER = (168, 208, 226)       # the row the mouse is over but not selected
-SUCCESS = (140, 226, 150)
-WARNING = (255, 190, 90)
-DANGER = (255, 116, 116)
-INFO = (170, 205, 255)
-SOCIAL = (214, 186, 232)
+HEADING = (176, 128, 48)      # section headings, menu titles, field labels (dark gold)
+SELECTION = (150, 104, 40)    # the row/action the cursor is on (dark amber)
+HOVER = (120, 96, 66)         # the row the mouse is over but not selected
+SUCCESS = (142, 206, 130)
+WARNING = (240, 176, 84)
+DANGER = (230, 96, 96)
+INFO = (150, 186, 226)
+SOCIAL = (200, 164, 222)
 
 # --- Item quality tiers ---------------------------------------------------
 QUALITY_ORDER = ("Poor", "Normal", "Fine", "Masterwork")

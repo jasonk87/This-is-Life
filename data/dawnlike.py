@@ -410,6 +410,11 @@ def get_human_sprite(
     if age is not None and age < 18:
         return HUMAN_SPRITES["female_child" if gender == "female" else "male_child"]
 
+    if profession:
+        profession_sprite = PROFESSION_SPRITES.get(profession)
+        if profession_sprite is not None:
+            return profession_sprite
+
     if gender == "female":
         return HUMAN_SPRITES["female_commoner"]
     return HUMAN_SPRITES["male_commoner"]

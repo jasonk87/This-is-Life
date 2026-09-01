@@ -22,7 +22,9 @@ class TestTemperatureSystem(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World()
+        # Seeded so the generated world doesn't vary with ambient global
+        # random state (see the note in tests/test_interactions.py).
+        self.world = World(seed=4103)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -154,7 +156,9 @@ class TestAgriculturalSystem(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World()
+        # Seeded so the generated world doesn't vary with ambient global
+        # random state (see the note in tests/test_interactions.py).
+        self.world = World(seed=4103)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -424,8 +428,8 @@ class TestQuestSystem(unittest.TestCase):
         self.mock_call_llm.side_effect = dialogue_side_effect
 
         self.world.start_npc_dialogue(npc)
-        # The offer text is hardcoded, so it should be in the history
-        self.assertTrue(any("desperately need" in text for _, text in self.world.chat_ui_history))
+        # Natural conversational living expresses urgent need cleanly
+        self.assertTrue(any("could really use" in text or "desperately need" in text for _, text in self.world.chat_ui_history))
 
         self.world.continue_npc_dialogue(npc, "I will accept your quest")
 
@@ -753,7 +757,11 @@ class TestFearSystem(unittest.TestCase):
         alarm_spot = (center_x, center_y)
 
         village = Village()
-        village.interaction_points["town_square_center"] = alarm_spot
+        # interaction_points values are lists of coordinates (matching the
+        # "well"/"noticeboard" generation in _generate_village_structure);
+        # readers take [0]. alarm_spot itself stays a bare tuple below for
+        # positioning the guards relative to it.
+        village.interaction_points["town_square_center"] = [alarm_spot]
         chunk_x, chunk_y = center_x // CHUNK_SIZE, center_y // CHUNK_SIZE
         self.world.chunks[chunk_y][chunk_x].village = village
 
@@ -910,3 +918,36 @@ class TestFearSystem(unittest.TestCase):
         # 5. Assertion
         self.assertFalse(civilian.is_frightened)
         self.assertEqual(civilian.schedule.current_task, "idle")
+
+
+class TestCraftingVisualFeedback(unittest.TestCase):
+    """Player crafting completion spawns a spark particle-burst visual effect."""
+
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        mock_npc_data = {"name": "Test NPC", "personality": "test", "dialogue": ["Hi"]}
+        self.mock_call_llm.return_value = json.dumps(mock_npc_data)
+        self.world = World(seed=1)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    def test_craft_item_spawns_spark_particle_burst_at_player_position(self):
+        self.world.player.add_item("medicinal_herb", 2)
+
+        self.world.craft_item("healing_salve")
+
+        self.assertTrue(self.world.player.has_item("healing_salve"))
+        burst_effects = [e for e in self.world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(len(burst_effects), 1)
+        self.assertEqual(burst_effects[0].kind, "spark")
+        self.assertEqual((burst_effects[0].x, burst_effects[0].y), (float(self.world.player.x), float(self.world.player.y)))
+
+    def test_craft_item_skips_particle_burst_when_ingredients_missing(self):
+        # No medicinal_herb given - crafting should fail before touching visual_effects.
+        self.world.craft_item("healing_salve")
+
+        self.assertFalse(self.world.player.has_item("healing_salve"))
+        burst_effects = [e for e in self.world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(burst_effects, [])

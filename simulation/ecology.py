@@ -12,6 +12,14 @@ import random
 from typing import Any
 
 
+# How far outside a settlement's built area a species will settle when it first
+# appears, in tiles. Grazers at the fence line are part of the scenery, so their
+# buffer only keeps them out of the streets; a predator turning up inside town
+# should be something that wandered in and got noticed, never how the world
+# started. Species without an entry use DEFAULT_SETTLEMENT_BUFFER.
+DEFAULT_SETTLEMENT_BUFFER = 4
+PREDATOR_SETTLEMENT_BUFFER = 12
+
 WILDLIFE_SPECIES: dict[str, dict[str, Any]] = {
     "deer": {
         "base_population": {"plains": 34, "forest": 48, "mountain": 10},
@@ -56,6 +64,13 @@ WILDLIFE_SPECIES: dict[str, dict[str, Any]] = {
         "max_visible_per_region": 4,
         "max_visible_per_chunk": 2,
         "group_size": (1, 2),
+        "settlement_buffer": PREDATOR_SETTLEMENT_BUFFER,
+        # Predator-prey link (see _recover_wildlife_populations): wolves are
+        # the only predator species currently modeled, so this is the only
+        # entry with a "prey_species" key. Anything without this key is
+        # treated as having no prey dependency and recovers exactly as
+        # before this change.
+        "prey_species": ("deer", "rabbit", "turkey"),
     },
 }
 
@@ -190,6 +205,72 @@ class EcologySystem:
         population.refresh_pressure()
         animal.ecology_death_recorded = True
 
+    def _prey_availability_ratio(self, region_populations: dict[str, "RegionalWildlifePopulation"], species_key: str) -> float | None:
+        """
+        Returns how well-fed a predator species' prey base is in this region,
+        as population/carrying_capacity summed across its configured prey
+        species, or None if this species has no prey dependency (i.e. it
+        isn't a predator - every non-wolf species today).
+
+        Missing prey species (e.g. no "rabbit" entry in a mountain-only
+        region) are skipped rather than counted as zero-availability, so a
+        predator isn't penalized just because one of its several prey types
+        doesn't exist in that biome. If NONE of a predator's prey species
+        have trackable data in this region at all, this conservatively
+        returns 1.0 (no penalty) rather than starving the predator based on
+        missing data instead of an actual scarcity signal.
+        """
+        species_def = WILDLIFE_SPECIES.get(species_key, {})
+        prey_keys = species_def.get("prey_species")
+        if not prey_keys:
+            return None
+
+        total_prey_population = 0
+        total_prey_capacity = 0
+        for prey_key in prey_keys:
+            prey_population = region_populations.get(prey_key)
+            if prey_population is None:
+                continue
+            total_prey_population += max(0, prey_population.population_count)
+            total_prey_capacity += max(0, prey_population.carrying_capacity)
+
+        if total_prey_capacity <= 0:
+            return 1.0
+        return total_prey_population / total_prey_capacity
+
+    def _predator_pressure_ratio(self, region_populations: dict[str, "RegionalWildlifePopulation"], species_key: str) -> float | None:
+        """
+        Reciprocal of _prey_availability_ratio: returns how much predator
+        pressure a PREY species is under in this region, as the highest
+        population/carrying_capacity ("how full is the predator's own
+        capacity") among predator species that list species_key in their
+        prey_species, or None if no known predator preys on this species
+        (every non-prey species today, and predators w.r.t. their own
+        predators - nothing preys on wolves).
+
+        Closes the gap flagged separately from the predator-side balance
+        pass above: that pass only ever constrained a PREDATOR's growth
+        based on prey scarcity, never the reverse. Missing predator
+        population data is skipped (not treated as zero pressure), matching
+        _prey_availability_ratio's same "don't penalize based on absent
+        data" stance.
+        """
+        predator_pressures = []
+        for predator_key, predator_def in WILDLIFE_SPECIES.items():
+            prey_keys = predator_def.get("prey_species")
+            if not prey_keys or species_key not in prey_keys:
+                continue
+            predator_population = region_populations.get(predator_key)
+            if predator_population is None or predator_population.carrying_capacity <= 0:
+                continue
+            predator_pressures.append(
+                max(0, predator_population.population_count) / predator_population.carrying_capacity
+            )
+
+        if not predator_pressures:
+            return None
+        return max(predator_pressures)
+
     def _recover_wildlife_populations(self, world) -> None:
         # Slow abstract recovery: sparse populations recover gradually, never above carrying capacity.
         if getattr(world, "game_time", 0) % 1000 != 0:
@@ -203,6 +284,57 @@ class EcologySystem:
                 if population.population_count < population.carrying_capacity // 3:
                     # Very sparse regions recover, but visibly and mechanically remain sparse for a while.
                     recovery = max(1, recovery // 2)
+
+                # --- Predator-prey balance (new) ---
+                # Conservative, deliberately narrow first pass: this only
+                # constrains a PREDATOR's own growth toward ITS carrying
+                # capacity when its prey is scarce. It does NOT touch prey
+                # population math at all (real predation already reduces prey
+                # counts through actual hunt/kill events via note_animal_death
+                # - adding a second, abstract prey-decrement here would double
+                # count that and was deliberately left out). It also never
+                # actively reduces an existing predator population (no
+                # starvation die-off) - worst case for a predator with no
+                # prey is simply zero growth that cycle, not a population
+                # crash. Both omissions are intentional scope limits for this
+                # pass, flagged for Jason to sanity check the tuning:
+                # - Below full prey availability, growth is granted
+                #   probabilistically in proportion to the prey ratio
+                #   (e.g. prey at 50% of capacity -> ~50% chance this cycle's
+                #   recovery is applied, otherwise 0) rather than scaling the
+                #   integer recovery amount down and truncating it - wolf's
+                #   baseline recovery_rate is already 1, so truncating a
+                #   fractional multiplier would silently zero out ALL growth
+                #   any time prey wasn't at exactly full capacity, which is a
+                #   much harsher constraint than "growth constrained by prey
+                #   availability" was meant to imply.
+                prey_availability_ratio = self._prey_availability_ratio(region_populations, population.species_key)
+                if prey_availability_ratio is not None:
+                    growth_chance = min(1.0, max(0.0, prey_availability_ratio))
+                    if random.random() >= growth_chance:
+                        recovery = 0
+
+                # --- Predator-prey balance (prey side, reciprocal) ---
+                # Mirrors the predator-side block above but inverted: when
+                # predator pressure (e.g. wolves relative to THEIR OWN
+                # carrying capacity) is high in this region, a PREY
+                # species's recovery is throttled too, using the exact same
+                # "growth is granted probabilistically, never actively
+                # reduced" idiom - no prey species population is ever
+                # decremented here, only its recovery chance this cycle.
+                # Real predation already removes prey through actual
+                # hunt/kill events (note_animal_death); this only makes
+                # abstract recovery slower while predators are numerous,
+                # it doesn't add a second abstract die-off on top of that.
+                # If recovery was already zeroed by some other check above,
+                # skip the (harmless but pointless) extra roll.
+                if recovery > 0:
+                    predator_pressure_ratio = self._predator_pressure_ratio(region_populations, population.species_key)
+                    if predator_pressure_ratio is not None:
+                        growth_chance = min(1.0, max(0.0, 1.0 - predator_pressure_ratio))
+                        if random.random() >= growth_chance:
+                            recovery = 0
+
                 population.population_count = min(population.carrying_capacity, population.population_count + recovery)
                 population.last_recovery_tick = getattr(world, "game_time", 0)
                 population.refresh_pressure()

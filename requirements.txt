@@ -1,4 +1,5 @@
 tcod
 requests
 numpy
-google-generativeai
+google-genai
+pygame

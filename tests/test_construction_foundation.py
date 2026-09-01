@@ -13,6 +13,8 @@ class TestConstructionFoundation(unittest.TestCase):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
         self.world = World(seed=123)
+        self.world.village_npcs.clear()
+        self.world.npcs.clear()
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(12, 12)]}
         self.world.chunks[0][0].village = self.village
@@ -181,6 +183,249 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertTrue(found_active_interaction, "Builder did not start an interaction")
         self.assertTrue(completed, "Component did not complete naturally via ticks")
         self.assertGreater(comp.build_progress, initial_progress)
+
+    def test_runtime_tick_advances_active_build_interaction_without_world_method(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        for comp in blueprint.components:
+            comp.required_work = 20
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Runtime Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        interaction_id = getattr(builder.schedule, "active_interaction_id", None)
+        self.assertIsNotNone(interaction_id)
+        self.assertIn(interaction_id, self.world.interaction_resolver.active_interactions)
+
+        component = blueprint.components[0]
+        initial_remaining_work = component.required_work - component.build_progress
+
+        from simulation.systems.tick import run_world_tick
+
+        with patch.object(self.world, "advance_active_interactions", side_effect=AssertionError("sandbox helper should not drive runtime advancement")):
+            run_world_tick(self.world)
+
+        self.assertLess(component.required_work - component.build_progress, initial_remaining_work)
+        self.assertGreater(component.build_progress, 0)
+        self.assertIn("build_progress", [entry["trace_type"] for entry in self.world.interaction_trace_log])
+        self.assertIn("build", [entry["cue"] for entry in self.world.animation_cue_log])
+
+        for _ in range(10):
+            if component.status == "complete":
+                break
+            run_world_tick(self.world)
+
+        self.assertEqual(component.status, "complete")
+
+    def test_runtime_interruption_preserves_partial_build_state(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        for comp in blueprint.components:
+            comp.required_work = 30
+            for item_key, qty in comp.required_materials.items():
+                for _ in range(qty):
+                    comp.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Interruptible Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        from simulation.systems.tick import run_world_tick
+
+        run_world_tick(self.world)
+        component = blueprint.components[0]
+        progress_after_tick = component.build_progress
+        delivered_after_tick = dict(component.deposited_inventory)
+
+        cancel_result = self.world.interaction_resolver.cancel_actor_interaction(builder.id, self.world, "unit_test_interrupt")
+
+        self.assertIsNotNone(cancel_result)
+        self.assertGreater(progress_after_tick, 0)
+        self.assertLess(progress_after_tick, component.required_work)
+        self.assertEqual(component.build_progress, progress_after_tick)
+        self.assertEqual(dict(component.deposited_inventory), delivered_after_tick)
+        self.assertFalse(component.needs_material("wooden_plank"))
+
+    def test_component_claim_prevents_duplicate_build_interactions(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        component = blueprint.components[0]
+        component.required_work = 30
+        for item_key, qty in component.required_materials.items():
+            for _ in range(qty):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        first_builder = NPC(8, 8, name="First Builder")
+        first_builder.economic.profession = "Builder"
+        second_builder = NPC(8, 8, name="Second Builder")
+        second_builder.economic.profession = "Builder"
+        self.world.village_npcs.extend([first_builder, second_builder])
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(first_builder))
+        self.assertTrue(self.world._handle_npc_construction_task(first_builder))
+        self.assertEqual(component.claimed_by_actor_id, first_builder.id)
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(second_builder))
+        self.assertFalse(self.world._handle_npc_construction_task(second_builder))
+
+        active_builds = [
+            interaction for interaction in self.world.interaction_resolver.active_interactions.values()
+            if getattr(interaction, "action_type", None) == "build" and getattr(interaction, "component_id", None) == component.id
+        ]
+        self.assertEqual(len(active_builds), 1)
+        self.assertEqual(active_builds[0].actor_id, first_builder.id)
+        self.assertIn("component_claimed", [entry["trace_type"] for entry in self.world.interaction_trace_log])
+
+    def test_interrupted_component_claim_expires_and_allows_resume(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        component = blueprint.components[0]
+        component.required_work = 30
+        for item_key, qty in component.required_materials.items():
+            for _ in range(qty):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        first_builder = NPC(8, 8, name="Interrupted Builder")
+        first_builder.economic.profession = "Builder"
+        second_builder = NPC(8, 8, name="Resuming Builder")
+        second_builder.economic.profession = "Builder"
+        self.world.village_npcs.extend([first_builder, second_builder])
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(first_builder))
+        self.assertTrue(self.world._handle_npc_construction_task(first_builder))
+
+        from simulation.systems.tick import run_world_tick
+
+        run_world_tick(self.world)
+        progress_after_tick = component.build_progress
+        delivered_after_tick = dict(component.deposited_inventory)
+        cancel_result = self.world.interaction_resolver.cancel_actor_interaction(first_builder.id, self.world, "survival_override")
+
+        self.assertIsNotNone(cancel_result)
+        self.assertEqual(component.claimed_by_actor_id, first_builder.id)
+        self.assertGreater(progress_after_tick, 0)
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(second_builder))
+        self.assertFalse(self.world._handle_npc_construction_task(second_builder))
+        self.assertEqual(component.claimed_by_actor_id, first_builder.id)
+
+        self.world.game_time = (component.claim_expiration_tick or self.world.game_time) + 1
+        self.assertTrue(self.world._assign_construction_task_to_npc(second_builder))
+        self.assertTrue(self.world._handle_npc_construction_task(second_builder))
+
+        self.assertEqual(component.claimed_by_actor_id, second_builder.id)
+        self.assertEqual(component.build_progress, progress_after_tick)
+        self.assertEqual(dict(component.deposited_inventory), delivered_after_tick)
+        trace_types = [entry["trace_type"] for entry in self.world.interaction_trace_log]
+        self.assertIn("component_claim_expired", trace_types)
+
+    def test_interrupted_builder_is_removed_from_assigned_workers(self):
+        """Regression test for the stale-claim bug found via _debug_test.py:
+        blueprint.assigned_workers is a coarser, separate tracking list from
+        the component-level claim above (see World._assign_construction_task_to_npc,
+        which appends here just for being "sent toward" a blueprint - and,
+        since an earlier fix, has an early-return fast path that treats
+        anyone still in this list as permanently already-assigned). Before
+        this fix, BuildInteraction.cancel() only ever released the
+        fine-grained component claim (and only for a few reasons that never
+        included "survival_override") - it never touched assigned_workers
+        at all, for any reason. That meant an interrupted builder stayed in
+        assigned_workers forever, even long after their own component claim
+        had expired and someone else had taken over the work, and even
+        after their own survival need was resolved and they were free to
+        do real work again - the fast path would just keep sending them
+        back to "constructing_site" for a blueprint they weren't actually
+        assigned to anymore."""
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        component = blueprint.components[0]
+        component.required_work = 30
+        for item_key, qty in component.required_materials.items():
+            for _ in range(qty):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        first_builder = NPC(8, 8, name="Interrupted Builder")
+        first_builder.economic.profession = "Builder"
+        second_builder = NPC(8, 8, name="Resuming Builder")
+        second_builder.economic.profession = "Builder"
+        self.world.village_npcs.extend([first_builder, second_builder])
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(first_builder))
+        self.assertTrue(self.world._handle_npc_construction_task(first_builder))
+
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(self.world)
+
+        self.assertIn(first_builder.id, blueprint.assigned_workers)
+
+        cancel_result = self.world.interaction_resolver.cancel_actor_interaction(
+            first_builder.id, self.world, "survival_override"
+        )
+        self.assertIsNotNone(cancel_result)
+
+        # The bug: this used to still be True after cancellation.
+        self.assertNotIn(first_builder.id, blueprint.assigned_workers)
+        # The component claim itself is untouched by a survival_override
+        # cancel - that grace-period/resume behavior is intentional and
+        # covered separately by test_interrupted_component_claim_expires_and_allows_resume.
+        self.assertEqual(component.claimed_by_actor_id, first_builder.id)
+
+        # second_builder can be freshly assigned (sent toward the blueprint)
+        # without inheriting a stale double-entry alongside first_builder.
+        self.assertTrue(self.world._assign_construction_task_to_npc(second_builder))
+        self.assertEqual(set(blueprint.assigned_workers), {second_builder.id})
+        # But can't actually start building yet - first_builder's component
+        # claim is still active (unchanged from before this fix).
+        self.assertFalse(self.world._handle_npc_construction_task(second_builder))
+
+    def test_interrupted_builder_is_not_stuck_reporting_as_already_assigned(self):
+        """Follow-up consequence of the same bug: _assign_construction_task_to_npc
+        has an early-return fast path (added separately, to stop re-scanning
+        every blueprint each tick for an already-assigned worker) that
+        treats presence in ANY buildable blueprint's assigned_workers as
+        "already working this, don't re-evaluate" - it just sets
+        current_task = "constructing_site" and returns True without
+        checking distance, materials, or anything else. Before this fix,
+        an interrupted builder's stale assigned_workers entry meant that
+        fast path kept firing for them forever, even long after they were
+        genuinely free again. This asserts the exact condition that fast
+        path checks (npc.id in some buildable blueprint's assigned_workers)
+        is false once the interruption has been cancelled."""
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        component = blueprint.components[0]
+        component.required_work = 30
+        for item_key, qty in component.required_materials.items():
+            for _ in range(qty):
+                component.deposit_item_reference(ItemReference(item_key))
+        blueprint.refresh_status()
+
+        builder = NPC(8, 8, name="Interrupted Builder")
+        builder.economic.profession = "Builder"
+        self.world.village_npcs.append(builder)
+
+        self.assertTrue(self.world._assign_construction_task_to_npc(builder))
+        self.assertTrue(self.world._handle_npc_construction_task(builder))
+
+        from simulation.systems.tick import run_world_tick
+        run_world_tick(self.world)
+
+        self.world.interaction_resolver.cancel_actor_interaction(builder.id, self.world, "survival_override")
+        builder.schedule.current_task = "idle"  # simulate the survival system moving them on to eat/drink
+
+        for candidate_blueprint in self.world._get_buildable_blueprints():
+            self.assertNotIn(
+                builder.id,
+                candidate_blueprint.assigned_workers,
+                "interrupted builder should not still be reported as assigned to any blueprint",
+            )
 
     def test_completed_construction_integrates_real_building(self):
         blueprint = self.world.place_construction_blueprint("workshop", 8, 8)
@@ -373,6 +618,18 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertEqual(completed.requester_id, self.world.player.id)
         self.assertTrue(completed.player_owned)
 
+    def test_completed_construction_spawns_spark_particle_burst_at_blueprint_position(self):
+        blueprint = self.world.place_construction_blueprint("workshop", 8, 8, owner_id=self.world.player.id, requester_id=self.world.player.id)
+        self._fully_supply_blueprint(blueprint)
+        blueprint_x, blueprint_y = blueprint.x, blueprint.y
+
+        self.assertTrue(self.world._complete_construction_blueprint(blueprint))
+
+        burst_effects = [e for e in self.world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(len(burst_effects), 1)
+        self.assertEqual(burst_effects[0].kind, "spark")
+        self.assertEqual((burst_effects[0].x, burst_effects[0].y), (float(blueprint_x), float(blueprint_y)))
+
     def test_owner_built_workplace_activates_owner_management_without_public_vacancy(self):
         owner = NPC(8, 8, name="Owner Builder")
         owner.economic.profession = "Unemployed"
@@ -385,6 +642,51 @@ class TestConstructionFoundation(unittest.TestCase):
         self.assertEqual(owner.schedule.work_building_id, completed.id)
         self.assertNotEqual(owner.economic.profession, "Unemployed")
         self.assertEqual(self.world.town_board.get_open_employment_tasks(completed.id), [])
+    def test_stockpile_inventory_operations_validate_and_trace(self):
+        stockpile = self.world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=2, village_id=self.village.id)
+
+        self.assertEqual(stockpile.stockpile_id in self.world.stockpiles_by_id, True)
+        self.assertEqual(self.world.deposit_item_into_stockpile(stockpile.stockpile_id, "raw_log", 2), 2)
+        self.assertEqual(stockpile.quantity("raw_log"), 2)
+        self.assertEqual(self.world.deposit_item_into_stockpile(stockpile.stockpile_id, "stone_chunk", 1), 0)
+        self.assertEqual(self.world.deposit_item_into_stockpile(stockpile.stockpile_id, "raw_log", 1), 0)
+        self.assertIs(self.world.find_stockpile_for_item("raw_log", require_available=True), stockpile)
+
+        trace_types = [entry["trace_type"] for entry in self.world.interaction_trace_log]
+        self.assertIn("stockpile_created", trace_types)
+        self.assertIn("stockpile_deposit", trace_types)
+        warning_types = [entry["warning_type"] for entry in self.world.validation_warnings]
+        self.assertIn("unsupported_stockpile_item", warning_types)
+        self.assertIn("full_stockpile", warning_types)
+
+    def test_hauler_prefers_stockpile_and_delivers_to_component_without_duplicate_reservation(self):
+        blueprint = self.world.place_construction_blueprint("wooden_chair", 8, 8)
+        stockpile = self.world.create_stockpile(3, 3, accepted_item_types={"wooden_plank"}, max_item_count=10)
+        self.world.deposit_item_into_stockpile(stockpile.stockpile_id, "wooden_plank", 1)
+
+        first = NPC(3, 3, name="First Hauler")
+        second = NPC(3, 3, name="Second Hauler")
+        first.economic.profession = "Laborer"
+        second.economic.profession = "Laborer"
+        self.world.village_npcs.extend([first, second])
+
+        self.assertTrue(self.world._assign_haul_task_to_npc(first))
+        self.assertEqual(first.task_context_data["source"]["source_type"], "stockpile")
+        self.assertEqual(stockpile.available_quantity("wooden_plank"), 0)
+        self.assertFalse(self.world._assign_haul_task_to_npc(second))
+
+        self.assertTrue(self.world._handle_npc_hauling_task(first))
+        self.assertEqual(stockpile.quantity("wooden_plank"), 0)
+        first.x, first.y = 8, 8
+        first.schedule.current_path = []
+        self.assertTrue(self.world._handle_npc_hauling_task(first))
+        self.assertEqual(blueprint.delivered_materials.get("wooden_plank", 0), 1)
+
+        trace_types = [entry["trace_type"] for entry in self.world.interaction_trace_log]
+        self.assertIn("stockpile_reservation_created", trace_types)
+        self.assertIn("stockpile_withdraw", trace_types)
+        self.assertIn("haul_delivered", trace_types)
+
 
 if __name__ == "__main__":
     unittest.main()

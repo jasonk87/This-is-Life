@@ -39,6 +39,17 @@ class MockWorld:
     def _start_npc_socialization(self, npc):
         return None
 
+    def _is_crowd_drawing_event_active(self):
+        """No festival running by default.
+
+        scheduling.update_npc_daily_goal_policy consults this in its
+        leisure-hours branch; the real World derives it from
+        active_scheduled_events. These tests are about anchor selection,
+        not festivals, so the neutral answer is "no crowd-drawing event" -
+        tests that want the festival path can patch this per-case.
+        """
+        return False
+
 class TestArchitectureAnchors(unittest.TestCase):
     def setUp(self):
         self.world = MockWorld()
@@ -320,9 +331,12 @@ class TestArchitectureAnchors(unittest.TestCase):
         current_time_in_day = int(DAY_LENGTH_TICKS * 0.95)
 
         # When there is no sleep spot, it checks `world._building_contains_item_with_interaction`, which we mock to False.
-        # But it still sets new_task_label = "going_home" to the center, so we check that
-        self.npc.x = 0
-        self.npc.y = 0
+        # But it still sets new_task_label = "going_home" to the center, so we check that.
+        # Stand outside the house's 10x10 footprint (origin 0,0): arrival is
+        # tested by containment, so anywhere inside already counts as home and
+        # would take the "already indoors" branch instead of the walk-home one.
+        self.npc.x = 50
+        self.npc.y = 50
         update_npc_daily_goal_policy(self.world, self.npc, current_time_in_day)
 
         self.assertEqual(self.npc.schedule.current_task, "going_home")

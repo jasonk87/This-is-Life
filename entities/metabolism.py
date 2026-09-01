@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from entities.pickle_compat import dataclass_setstate
+
 
 @dataclass
 class MetabolismComponent:
@@ -10,6 +12,12 @@ class MetabolismComponent:
     max_hunger: int = 100
     thirst: int = 0
     max_thirst: int = 100
+    # Sickness follows the same modeling pattern as hunger/thirst, but has
+    # no passive per-tick increase - it only rises via contagion (see
+    # simulation/systems/illness.py). Everything else (min/max clamping,
+    # property naming) mirrors hunger/thirst exactly.
+    sickness: int = 0
+    max_sickness: int = 100
     temperature: float = 37.0
     base_temperature_resistance: float = 2.0
     clothing_insulation: float = 0.0
@@ -51,3 +59,6 @@ class MetabolismComponent:
             status_effects.append("Freezing")
         elif self.temperature > 38.5:
             status_effects.append("Overheating")
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)

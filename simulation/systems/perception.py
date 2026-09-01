@@ -33,5 +33,6 @@ def update_npc_sound_perception(world, npc) -> None:
             if path:
                 npc.schedule.current_path = path
             else:
-                npc.schedule.current_task = "idle_confused"
+                from simulation.systems.task_types import TaskType
+                npc.schedule.current_task = TaskType.IDLE
                 npc.schedule.current_destination_coords = None

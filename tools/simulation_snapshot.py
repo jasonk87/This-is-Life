@@ -84,6 +84,7 @@ def render_snapshot(
     layout, ownership, pathing, and actor placement.
     """
 
+    return_path = str(path)
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     overlay_set = set(DEFAULT_OVERLAYS if overlays is None else overlays)
@@ -91,13 +92,13 @@ def render_snapshot(
 
     if force_text or output_path.suffix.lower() not in {".png"}:
         output_path.write_text(canvas.text(), encoding="utf-8")
-        return str(output_path)
+        return return_path
 
     try:
         write_canvas_png(output_path, canvas)
     except Exception:
         output_path.write_text(canvas.text(), encoding="utf-8")
-    return str(output_path)
+    return return_path
 
 
 def write_snapshot_artifact(
@@ -277,7 +278,7 @@ def _draw_blueprints(canvas: SnapshotCanvas, world: Any) -> None:
             for comp in components:
                 cx, cy = getattr(comp, "x", x), getattr(comp, "y", y)
                 status = getattr(comp, "status", "pending")
-                comp_char = "#" if status == "complete" else ("c" if status == "building" else "C")
+                comp_char = "#" if status == "complete" else ("+" if status == "building" else "?")
                 comp_color = (150, 150, 150) if status == "complete" else color
                 canvas.set(cx, cy, comp_char, comp_color)
         else:
@@ -314,6 +315,20 @@ def _draw_actors(canvas: SnapshotCanvas, world: Any, overlays: set[str]) -> None
         carried = _first_inventory_key(getattr(getattr(actor, "economic", None), "npc_inventory", None))
         if carried:
             canvas.set(x, y + 1, "t", _asset_color(ITEM_SPRITES.get(carried)))
+        schedule = getattr(actor, "schedule", None)
+        active_iid = getattr(schedule, "active_interaction_id", None)
+        active = getattr(getattr(world, "interaction_resolver", None), "active_interactions", {}).get(active_iid) if active_iid else None
+        if active is not None:
+            action = str(getattr(active, "action_type", "") or "")
+            glyph = {"chop_tree":"C", "build":"B", "eat_food":"E", "workshop_transform":"W"}.get(action, "*")
+            canvas.set(x, y - 1, glyph, (255, 220, 90))
+            rem = getattr(active, "remaining_work", None)
+            if rem is not None:
+                canvas.set(x + 1, y - 1, str(int(rem))[-1], (255, 220, 90))
+        if bool(getattr(actor, "sheltered_state", False)):
+            canvas.set(x - 1, y, "S", (120, 220, 255))
+        if float(getattr(actor, "cold_exposure", 0.0) or 0.0) > 0.7:
+            canvas.set(x - 1, y + 1, "!", (255, 120, 120))
         important = getattr(actor, "task_context", None) in {"delivery", "construction", "hunting"}
         if "labels" in overlays and labels_used < label_budget and (important or labels_used < 3):
             _draw_compact_label(canvas, x + 2, y, _actor_label(actor, important=important))
@@ -335,7 +350,8 @@ def _draw_items(canvas: SnapshotCanvas, world: Any) -> None:
     for (x, y), inventory in (getattr(world, "items_on_map", {}) or {}).items():
         item_key = _first_inventory_key(inventory)
         if item_key:
-            canvas.set(int(x), int(y), "i", _asset_color(ITEM_SPRITES.get(item_key)))
+            char = "l" if item_key == "raw_log" else "p" if item_key == "wooden_plank" else "f" if "food" in item_key or item_key in {"processed_meat", "cooked_meat"} else "i"
+            canvas.set(int(x), int(y), char, _asset_color(ITEM_SPRITES.get(item_key)))
 
 
 def _draw_interactions(canvas: SnapshotCanvas, world: Any) -> None:
@@ -351,6 +367,13 @@ def _draw_interactions(canvas: SnapshotCanvas, world: Any) -> None:
         for coords in (getattr(building, "work_zone_tiles", {}) or {}).values():
             for x, y in _iter_coords(coords):
                 canvas.set(int(x), int(y), "a", (90, 220, 240))
+    for cf in getattr(world, "campfires_by_id", {}).values():
+        cx, cy = int(getattr(cf, "x", 0)), int(getattr(cf, "y", 0))
+        lit = bool(getattr(cf, "lit", False) and getattr(cf, "fuel_quantity", 0) > 0)
+        low = int(getattr(cf, "fuel_quantity", 0) or 0) <= int(getattr(cf, "minimum_fuel_quantity", 0) or 0)
+        canvas.set(cx, cy, "F" if lit else "f", (255, 140, 40) if lit else (130, 130, 130))
+        if low:
+            canvas.set(cx + 1, cy, "!", (255, 80, 80))
     _draw_blocked_tiles(canvas, world)
 
 

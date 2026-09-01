@@ -9,6 +9,13 @@ from collections import deque
 
 from runtime_compat import np
 
+# Whether the real tcod is installed. The shim below is good enough for
+# headless simulation and tests, but it cannot render: its Console discards
+# every draw call and its event queue is always empty. Callers that need an
+# actual window must check this rather than discovering it as a stray
+# AttributeError deep inside tileset loading.
+TCOD_AVAILABLE = True
+
 try:
     import tcod as _tcod  # type: ignore
     from tcod import libtcodpy as _libtcodpy  # type: ignore
@@ -16,6 +23,7 @@ try:
     tcod = _tcod
     libtcodpy = _libtcodpy
 except ModuleNotFoundError:
+    TCOD_AVAILABLE = False
     class _KeySym:
         UP = "UP"
         DOWN = "DOWN"
@@ -35,6 +43,8 @@ except ModuleNotFoundError:
         BACKSPACE = "BACKSPACE"
         LCTRL = "LCTRL"
         RCTRL = "RCTRL"
+        PAGEUP = "PAGEUP"
+        PAGEDOWN = "PAGEDOWN"
 
     class _MouseButton:
         LEFT = 1
@@ -182,6 +192,10 @@ except ModuleNotFoundError:
 
         @staticmethod
         def load_tilesheet(*args, **kwargs):
+            return object()
+
+        @staticmethod
+        def load_truetype(*args, **kwargs):
             return object()
 
     class _ContextManager:

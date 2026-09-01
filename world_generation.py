@@ -65,16 +65,44 @@ class WorldGenerator:
                 noise_map[y, x] = self.noise[x * NOISE_SCALE, y * NOISE_SCALE].item()
         return noise_map
 
-    def _select_village_coords(self) -> set[tuple[int, int]]:
-        candidates = [
+    # Biomes settlements may be founded on, best first. Plains is the
+    # intended home for a village; the rest are fallbacks used only when a
+    # map doesn't offer enough plains. Water is never habitable.
+    HABITABLE_BIOMES = ("plains", "mountain", "snow")
+
+    def _candidate_village_coords(self, biomes) -> list[tuple[int, int]]:
+        """Inland chunks whose biome is in `biomes`.
+
+        Border chunks are excluded so a village always has room to generate
+        its surroundings.
+        """
+        return [
             (x, y)
             for y in range(self.height)
             for x in range(self.width)
-            if self.get_biome_at(x, y) == "plains"
+            if self.get_biome_at(x, y) in biomes
             and 1 <= x < self.width - 1
             and 1 <= y < self.height - 1
         ]
+
+    def _select_village_coords(self) -> set[tuple[int, int]]:
+        # Widen the search to less hospitable land rather than returning no
+        # villages at all. Restricting candidates to plains meant a map that
+        # generated mostly ocean produced a world with zero settlements -
+        # no NPCs, no quests, no economy, nothing to do - and that happened
+        # for roughly one seed in thirteen. Plains are still strongly
+        # preferred: the fallback only contributes when plains alone can't
+        # supply the target count.
+        candidates = self._candidate_village_coords(("plains",))
         self.random.shuffle(candidates)
+        if len(candidates) < 3:
+            fallback = self._candidate_village_coords(self.HABITABLE_BIOMES)
+            self.random.shuffle(fallback)
+            seen = set(candidates)
+            candidates.extend(coord for coord in fallback if coord not in seen)
+
+        if not candidates:
+            return set()
         target_count = min(4, max(3, len(candidates)))
         selected: list[tuple[int, int]] = []
         min_spacing = max(3, min(self.width, self.height) // 3)
@@ -118,4 +146,8 @@ class WorldGenerator:
             coord_rng = random.Random(str((self.seed, x, y, "mountain")))
             if coord_rng.random() < POI_DENSITY / 3:
                 return "ruin"
+        elif biome == "forest":
+            coord_rng = random.Random(str((self.seed, x, y, "forest_camp")))
+            if coord_rng.random() < POI_DENSITY / 4:
+                return "outlaw_camp"
         return None

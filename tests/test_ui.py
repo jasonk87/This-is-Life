@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
 import json
@@ -31,6 +31,11 @@ class TestMainInputHelpers(unittest.TestCase):
     def test_normalize_player_first_name_falls_back_for_empty_or_invalid_input(self):
         self.assertEqual(main.normalize_player_first_name("  "), "Player")
         self.assertEqual(main.normalize_player_first_name("1234!!!"), "Player")
+
+    def test_new_world_starts_at_configured_initial_time(self):
+        world = World(seed=123)
+
+        self.assertEqual(world.game_time, config.INITIAL_TIME_OF_DAY)
 
     def test_open_interaction_menu_skips_entities_without_actions(self):
         world = SimpleNamespace(
@@ -717,8 +722,181 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
         self.assertIn("12", rendered)
         self.assertIn("*", rendered)
 
+    def test_hit_flash_effect_expires_after_its_duration(self):
+        effect = engine.HitFlashEffect(3, 4, duration=0.28)
+
+        self.assertEqual(effect.effect_type, "hit_flash")
+        self.assertFalse(effect.update(0.1))
+        self.assertFalse(effect.update(0.1))
+        self.assertTrue(effect.update(0.2))
+
+    def test_hit_flash_effect_alternates_a_small_screen_offset(self):
+        effect = engine.HitFlashEffect(3, 4, magnitude=1)
+
+        offsets = set()
+        for _ in range(6):
+            offsets.add(effect.shake_offset())
+            effect.update(1 / 30)
+
+        self.assertEqual(offsets, {(1, 0), (-1, 0)})
+
+    def test_draw_visual_effect_renders_hit_flash_with_shake_offset(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        effect = engine.HitFlashEffect(5, 6, color=(255, 60, 60))
+
+        console_renderer._draw_visual_effect(console, world, effect, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 1)
+        call = console.print_calls[0]
+        self.assertEqual(call["string"], "*")
+        self.assertEqual(call["fg"], (255, 60, 60))
+        # Base position is (5, 6); shake_offset() at elapsed=0 is (magnitude, 0).
+        self.assertEqual((call["x"], call["y"]), (6, 6))
+
+    def test_player_take_damage_triggers_hit_flash_alongside_floating_text(self):
+        player = engine.Player(2, 3)
+        world = SimpleNamespace(visual_effects=[], add_message_to_chat_log=lambda *a, **k: None)
+
+        player.take_damage(5, world=world)
+
+        effect_types = [getattr(e, "effect_type", None) for e in world.visual_effects]
+        self.assertIn("floating_text", effect_types)
+        self.assertIn("hit_flash", effect_types)
+
+    def test_npc_take_damage_triggers_hit_flash_alongside_floating_text(self):
+        npc = engine.NPC(4, 5, name="Target Dummy")
+        world = SimpleNamespace(visual_effects=[], add_message_to_chat_log=lambda *a, **k: None)
+
+        npc.take_damage(5, world)
+
+        effect_types = [getattr(e, "effect_type", None) for e in world.visual_effects]
+        self.assertIn("floating_text", effect_types)
+        self.assertIn("hit_flash", effect_types)
+
+    def test_particle_burst_effect_expires_after_its_duration(self):
+        effect = engine.ParticleBurstEffect(3, 4, kind="dust", duration=0.35)
+
+        self.assertEqual(effect.effect_type, "particle_burst")
+        self.assertFalse(effect.update(0.2))
+        self.assertTrue(effect.update(0.2))
+
+    def test_particle_burst_effect_generates_requested_particle_count(self):
+        effect = engine.ParticleBurstEffect(0, 0, kind="spark", count=4)
+
+        self.assertEqual(len(effect.particles), 4)
+        for offset_x, offset_y, char in effect.particles:
+            self.assertIn(char, engine.ParticleBurstEffect._KIND_STYLES["spark"]["chars"])
+
+    def test_particle_burst_effect_falls_back_to_dust_for_unknown_kind(self):
+        effect = engine.ParticleBurstEffect(0, 0, kind="not_a_real_kind")
+
+        self.assertEqual(effect.kind, "dust")
+        self.assertEqual(effect.color, engine.ParticleBurstEffect._KIND_STYLES["dust"]["color"])
+
+    def test_particle_burst_fade_ratio_decreases_toward_zero(self):
+        effect = engine.ParticleBurstEffect(0, 0, duration=1.0)
+
+        self.assertEqual(effect.fade_ratio(), 1.0)
+        effect.update(0.5)
+        self.assertAlmostEqual(effect.fade_ratio(), 0.5)
+        effect.update(0.5)
+        self.assertEqual(effect.fade_ratio(), 0.0)
+
+    def test_draw_visual_effect_renders_particle_burst_at_full_brightness_when_fresh(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        effect = engine.ParticleBurstEffect(5, 6, kind="spark", count=3)
+
+        console_renderer._draw_visual_effect(console, world, effect, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 3)
+        for call in console.print_calls:
+            self.assertEqual(call["fg"], effect.color)
+
+    def test_draw_visual_effect_dims_particle_burst_color_as_it_fades(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(1.0,), zoom_index=0)
+        effect = engine.ParticleBurstEffect(5, 6, kind="spark", count=2, duration=1.0)
+        effect.update(0.9)  # nearly expired -> mostly faded
+
+        console_renderer._draw_visual_effect(console, world, effect, 0, 0)
+
+        for call in console.print_calls:
+            self.assertLess(call["fg"][0], effect.color[0])
+
+    def test_player_movement_triggers_dust_particle_burst(self):
+        mock_ollama_patcher = patch('engine.World._call_llm')
+        mock_call_llm = mock_ollama_patcher.start()
+        self.addCleanup(mock_ollama_patcher.stop)
+        mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        world = World(seed=17)
+        origin_x, origin_y = world.player.x, world.player.y
+
+        with patch("engine.random.random", return_value=0.0):  # force the dust roll to succeed
+            movement_cost = world.handle_player_movement(1, 0)
+
+        self.assertGreater(movement_cost, 0)
+        self.assertEqual((world.player.x, world.player.y), (origin_x + 1, origin_y))
+
+        burst_effects = [e for e in world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(len(burst_effects), 1)
+        self.assertEqual(burst_effects[0].kind, "dust")
+        # Dust kicks up where the player stepped from, not where they landed.
+        self.assertEqual((burst_effects[0].x, burst_effects[0].y), (float(origin_x), float(origin_y)))
+
+    def test_player_movement_skips_dust_particle_burst_on_failed_roll(self):
+        mock_ollama_patcher = patch('engine.World._call_llm')
+        mock_call_llm = mock_ollama_patcher.start()
+        self.addCleanup(mock_ollama_patcher.stop)
+        mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        world = World(seed=17)
+
+        with patch("engine.random.random", return_value=0.99):  # force the dust roll to fail
+            world.handle_player_movement(1, 0)
+
+        burst_effects = [e for e in world.visual_effects if getattr(e, "effect_type", None) == "particle_burst"]
+        self.assertEqual(burst_effects, [])
+
 
 class TestConsoleRendererEntities(unittest.TestCase):
+    def test_format_world_clock_uses_configured_day_length(self):
+        self.assertEqual(console_renderer._format_world_clock(0), "Day 0, 00:00")
+        self.assertEqual(console_renderer._format_world_clock(config.INITIAL_TIME_OF_DAY), "Day 0, 08:00")
+        self.assertEqual(
+            console_renderer._format_world_clock(config.DAY_LENGTH_TICKS + config.INITIAL_TIME_OF_DAY),
+            "Day 1, 08:00",
+        )
+
     def test_get_hover_inspect_returns_tile_coords_entity_and_building(self):
         tile = SimpleNamespace(name="Wood Floor")
         villager = {"type": "npc", "name": "Mira"}
@@ -891,6 +1069,46 @@ class TestConsoleRendererEntities(unittest.TestCase):
         glyph_calls = [call for call in console.print_calls if call["string"] == "."]
         self.assertEqual(len(glyph_calls), 1)
 
+    def test_draw_world_tile_uses_textured_fill_for_zoomed_terrain(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(2.0,), zoom_index=0)
+        floor_tile = SimpleNamespace(name="Wood Floor", char=ord("."), color=(120, 80, 40))
+
+        with patch("rendering.console_renderer.zoomed_sprite_codepoint", side_effect=AssertionError("terrain should not stamp sprites")):
+            console_renderer._draw_world_tile(console, world, 0, 0, 1, 1, floor_tile, (120, 80, 40), (60, 40, 20))
+
+        self.assertEqual(len(console.print_calls), 4)
+        self.assertTrue(all(call.get("bg") is not None for call in console.print_calls))
+
+    def test_draw_world_tile_uses_zoomed_sprite_stamp_when_available(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        world = SimpleNamespace(zoom_levels=(2.0,), zoom_index=0)
+        tile = SimpleNamespace(name="Tree", char=0xE000, color=(90, 180, 90))
+
+        with patch("rendering.console_renderer.zoomed_sprite_codepoint", side_effect=lambda _base, _zoom, x, y: 0xF0000 + (y * 2) + x):
+            console_renderer._draw_world_tile(console, world, 0, 0, 1, 1, tile, (90, 180, 90), (10, 30, 10))
+
+        self.assertEqual(len(console.print_calls), 4)
+        self.assertEqual(
+            {call["string"] for call in console.print_calls},
+            {chr(0xF0000), chr(0xF0001), chr(0xF0002), chr(0xF0003)},
+        )
+        self.assertTrue(all(call.get("bg") == (10, 30, 10) for call in console.print_calls))
+
     def test_draw_entities_uses_logical_visibility_not_stale_render_position(self):
         class FakeConsole:
             def __init__(self):
@@ -1006,6 +1224,44 @@ class TestConsoleRendererEntities(unittest.TestCase):
         self.assertEqual(console.print_calls[0]["string"], "@")
         self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (1, 1))
 
+    def test_draw_entities_uses_zoomed_sprite_stamp_when_available(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+                self.bg = np.zeros((4, 4, 3), dtype=np.uint8)
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        player = SimpleNamespace(
+            x=1,
+            y=1,
+            render_x=1.0,
+            render_y=1.0,
+            state=SimpleNamespace(is_riding=False),
+            render_order=SimpleNamespace(value=2),
+        )
+        world = SimpleNamespace(
+            npcs=[],
+            village_npcs=[],
+            player=player,
+            zoom_levels=(2.0,),
+            zoom_index=0,
+        )
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True), \
+             patch("rendering.console_renderer.get_entity_sprite", return_value=0xE000), \
+             patch("rendering.console_renderer.zoomed_sprite_codepoint", side_effect=lambda _base, _zoom, x, y: 0xF0100 + (y * 2) + x):
+            console_renderer._draw_entities(console, world, 0, 0)
+
+        self.assertEqual(len(console.print_calls), 4)
+        self.assertEqual(
+            {call["string"] for call in console.print_calls},
+            {chr(0xF0100), chr(0xF0101), chr(0xF0102), chr(0xF0103)},
+        )
+        self.assertTrue(all("bg" not in call for call in console.print_calls))
+
     def test_entity_marker_skips_overlay_cell_outside_visibility(self):
         class FakeConsole:
             def __init__(self):
@@ -1053,6 +1309,232 @@ class TestConsoleRendererEntities(unittest.TestCase):
             console_renderer._draw_entity_markers(console, world, 0, 0, {"entity": None})
 
         self.assertEqual(console.print_calls, [])
+
+    def test_mini_health_bar_fills_fully_at_full_health(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 0, 0, 5, 10, 10)
+
+        fill_color, _track_color = console_renderer.theme.METER_ENTITY_HP
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual(console.print_calls[0]["string"], console_renderer.theme.BAR_CELL * 5)
+        self.assertEqual(console.print_calls[0]["fg"], fill_color)
+
+    def test_mini_health_bar_empties_fully_at_zero_health(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 0, 0, 5, 0, 10)
+
+        _fill_color, track_color = console_renderer.theme.METER_ENTITY_HP
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual(console.print_calls[0]["string"], console_renderer.theme.BAR_CELL * 5)
+        self.assertEqual(console.print_calls[0]["fg"], track_color)
+
+    def test_mini_health_bar_shows_at_least_one_filled_cell_when_barely_alive(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 0, 0, 5, 1, 100)
+
+        fill_color, _track_color = console_renderer.theme.METER_ENTITY_HP
+        fill_calls = [c for c in console.print_calls if c["fg"] == fill_color]
+        self.assertEqual(fill_calls[0]["string"], console_renderer.theme.BAR_CELL)
+
+    def test_mini_health_bar_splits_proportionally_for_partial_health(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        console = FakeConsole()
+        console_renderer._draw_mini_health_bar(console, 2, 3, 5, 5, 10)
+
+        bar_cell = console_renderer.theme.BAR_CELL
+        fill_color, track_color = console_renderer.theme.METER_ENTITY_HP
+        calls_by_color = {c["fg"]: c for c in console.print_calls}
+        self.assertEqual(calls_by_color[fill_color]["string"], bar_cell * 2)
+        self.assertEqual(calls_by_color[fill_color]["x"], 2)
+        self.assertEqual(calls_by_color[track_color]["string"], bar_cell * 3)
+        self.assertEqual(calls_by_color[track_color]["x"], 4)
+
+    def _make_combat_npc(self, x, y, *, hostile=False, hp=8, max_hp=10, dead=False):
+        return SimpleNamespace(
+            x=x,
+            y=y,
+            is_sleeping=False,
+            physical=SimpleNamespace(is_dead=dead),
+            combat=SimpleNamespace(is_hostile_to_player=hostile, hp=hp, max_hp=max_hp),
+        )
+
+    def test_draw_entity_health_bars_draws_for_hostile_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=4, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertTrue(len(console.print_calls) >= 1)
+
+    def test_draw_entity_health_bars_draws_for_targeted_non_hostile_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=False, hp=6, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus={"entity": npc})
+
+        self.assertTrue(len(console.print_calls) >= 1)
+
+    def test_draw_entity_health_bars_skips_neutral_untargeted_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=False, hp=6, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_entity_health_bars_skips_dead_hostile_npc(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=0, max_hp=10, dead=True)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_entity_health_bars_skips_cells_outside_visibility(self):
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=4, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=False):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=None)
+
+        self.assertEqual(console.print_calls, [])
+
+    def test_hostile_focused_npc_marker_does_not_overlap_health_bar_center(self):
+        """Regression test: an entity that's both hostile and the current
+        focus target gets both a "!" marker (_draw_entity_markers) and an
+        HP bar (_draw_entity_health_bars), and both used to draw on the
+        same row (entity.y - 1) with the marker landing dead center on the
+        bar, overwriting one of its cells. The marker should now be nudged
+        sideways past the bar instead."""
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        npc = self._make_combat_npc(5, 5, hostile=True, hp=4, max_hp=10)
+        world = SimpleNamespace(npcs=[npc], village_npcs=[])
+        console = FakeConsole()
+        focus = {"entity": npc}
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_health_bars(console, world, 0, 0, focus=focus)
+            console_renderer._draw_entity_markers(console, world, 0, 0, focus=focus)
+
+        bar_calls = [c for c in console.print_calls if c["string"][0] == console_renderer.theme.BAR_CELL]
+        marker_calls = [c for c in console.print_calls if c["string"] == "!"]
+        self.assertEqual(len(marker_calls), 1)
+        self.assertTrue(bar_calls)
+
+        bar_y = bar_calls[0]["y"]
+        bar_columns = set()
+        for call in bar_calls:
+            bar_columns.update(range(call["x"], call["x"] + len(call["string"])))
+
+        marker_call = marker_calls[0]
+        self.assertEqual(marker_call["y"], bar_y)  # still on the same overhead row
+        self.assertNotIn(marker_call["x"], bar_columns)  # but no longer inside the bar
+
+    def test_marker_position_is_unchanged_for_focused_entity_without_health_bar(self):
+        """An entity that's focused but neither hostile nor otherwise
+        eligible for a health bar should keep the original centered marker
+        position - the sideways nudge should only kick in when a bar is
+        actually being drawn on that row."""
+        class FakeConsole:
+            def __init__(self):
+                self.print_calls = []
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+        merchant = SimpleNamespace(
+            x=5,
+            y=5,
+            is_sleeping=False,
+            economic=SimpleNamespace(profession="Merchant"),
+            combat=SimpleNamespace(is_hostile_to_player=False),
+            physical=SimpleNamespace(is_dead=False),
+        )
+        world = SimpleNamespace(npcs=[merchant], village_npcs=[])
+        console = FakeConsole()
+
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._draw_entity_markers(console, world, 0, 0, {"entity": merchant})
+
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (5, 4))
 
     def test_draw_orders_entities_after_world_lighting_and_before_overlays(self):
         class FakeConsole:
@@ -1109,7 +1591,6 @@ class TestConsoleRendererEntities(unittest.TestCase):
              patch("rendering.console_renderer._draw_entity_markers", side_effect=lambda *args: order.append("entity_markers")), \
              patch("rendering.console_renderer._draw_world_markers", side_effect=lambda *args: order.append("world_markers")), \
              patch("rendering.console_renderer.draw_status_panel"), \
-             patch("rendering.console_renderer.draw_cursor_info"), \
              patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
              patch("rendering.console_renderer._draw_focus_badge"), \
              patch("rendering.console_renderer.draw_weather_overlay"), \
@@ -1117,6 +1598,74 @@ class TestConsoleRendererEntities(unittest.TestCase):
             console_renderer.draw(console, world, 0, 0)
 
         self.assertEqual(order, ["lighting", "entities", "entity_markers", "world_markers"])
+
+    def test_draw_forwards_menu_fade_ratio_to_active_menu_dispatch(self):
+        class FakeConsole:
+            def __init__(self):
+                self.width = 1
+                self.height = 1
+                self.fg = np.zeros((1, 1, 3), dtype=np.uint8)
+                self.bg = np.zeros((1, 1, 3), dtype=np.uint8)
+                self.print_calls = []
+
+            def clear(self):
+                pass
+
+            def print(self, **kwargs):
+                self.print_calls.append(kwargs)
+
+            def draw_frame(self, *args, **kwargs):
+                pass
+
+        tile = SimpleNamespace(name="Plains", char=ord("."), color=(10, 20, 30), blocks_fov=False)
+        chunk = SimpleNamespace(is_terrain_generated=True, tiles=[[tile]])
+        player = SimpleNamespace(x=0, y=0, state=SimpleNamespace(current_path=[]))
+        world = SimpleNamespace(
+            explored_map=np.zeros((1, 1), dtype=bool),
+            player_fov_map=np.ones((1, 1), dtype=bool),
+            chunks=[[chunk]],
+            _generate_chunk_detail=lambda *args, **kwargs: None,
+            get_tile_at=lambda x, y: tile,
+            visual_effects=[],
+            npcs=[],
+            village_npcs=[],
+            player=player,
+            items_on_map={},
+            weather="clear",
+            mouse_x=-1,
+            mouse_y=-1,
+            interaction_context={"active": False},
+            game_state="INVENTORY_MENU",
+            game_time=0,
+            chat_ui_active=False,
+            trade_ui_active=False,
+            chat_log=[],
+        )
+        console = FakeConsole()
+        captured_ratios = []
+
+        with patch.object(console_renderer, "MAP_WIDTH", 1), \
+             patch.object(console_renderer, "MAP_HEIGHT", 1), \
+             patch.object(console_renderer, "WORLD_WIDTH", 1), \
+             patch.object(console_renderer, "WORLD_HEIGHT", 1), \
+             patch.object(console_renderer, "CHUNK_SIZE", 1), \
+             patch("rendering.console_renderer._apply_lighting_and_depth"), \
+             patch("rendering.console_renderer._draw_entities"), \
+             patch("rendering.console_renderer._draw_entity_markers"), \
+             patch("rendering.console_renderer._draw_world_markers"), \
+             patch("rendering.console_renderer.draw_status_panel"), \
+             patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
+             patch("rendering.console_renderer._draw_focus_badge"), \
+             patch("rendering.console_renderer.draw_weather_overlay"), \
+             patch("rendering.console_renderer._get_visible_nearby_entities", return_value=[]), \
+             patch(
+                 "rendering.console_renderer._draw_active_game_state_menu_with_fade",
+                 side_effect=lambda c, w, ratio: captured_ratios.append(ratio),
+             ):
+            console_renderer.draw(console, world, 0, 0, menu_fade_ratio=0.4)
+            console_renderer.draw(console, world, 0, 0)  # default should be 1.0
+
+        self.assertEqual(captured_ratios, [0.4, 1.0])
 
     def test_draw_skips_label_when_overlay_cell_is_not_visible(self):
         class FakeConsole:
@@ -1182,7 +1731,6 @@ class TestConsoleRendererEntities(unittest.TestCase):
              patch("rendering.console_renderer._draw_entity_markers"), \
              patch("rendering.console_renderer._draw_world_markers"), \
              patch("rendering.console_renderer.draw_status_panel"), \
-             patch("rendering.console_renderer.draw_cursor_info"), \
              patch("rendering.console_renderer._get_focus_target", return_value={"x": None, "y": None, "label": "", "actions": [], "source": "", "entity": None}), \
              patch("rendering.console_renderer._draw_focus_badge"), \
              patch("rendering.console_renderer.draw_weather_overlay"), \
@@ -1192,6 +1740,90 @@ class TestConsoleRendererEntities(unittest.TestCase):
 
         label_calls = [call for call in console.print_calls if call.get("string") == "Villager"]
         self.assertEqual(label_calls, [])
+
+
+class TestMenuFadeTransition(unittest.TestCase):
+    """Menu fade-in: _draw_active_game_state_menu_with_fade blends the
+    console's world-view buffers with the freshly-drawn menu buffers by
+    fade_ratio, instead of threading opacity through every menu draw fn."""
+
+    def test_skips_blend_and_draws_directly_at_full_ratio(self):
+        console = SimpleNamespace(
+            fg=np.zeros((1, 1, 3), dtype=np.uint8),
+            bg=np.zeros((1, 1, 3), dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu") as mock_draw:
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 1.0)
+
+        mock_draw.assert_called_once_with(console, world)
+
+    def test_falls_back_to_direct_draw_when_console_has_no_pixel_buffers(self):
+        class FakeConsole:
+            pass
+
+        console = FakeConsole()
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu") as mock_draw:
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 0.3)  # must not raise
+
+        mock_draw.assert_called_once_with(console, world)
+
+    def test_blends_halfway_between_world_view_and_menu_color_at_half_ratio(self):
+        console = SimpleNamespace(
+            fg=np.full((1, 1, 3), 50, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 20, dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        def fake_menu_draw(c, w):
+            c.fg[:] = 250
+            c.bg[:] = 220
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu", side_effect=fake_menu_draw):
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 0.5)
+
+        self.assertEqual(tuple(int(v) for v in console.fg[0, 0]), (150, 150, 150))
+        self.assertEqual(tuple(int(v) for v in console.bg[0, 0]), (120, 120, 120))
+
+    def test_stays_at_world_view_color_at_ratio_zero(self):
+        console = SimpleNamespace(
+            fg=np.full((1, 1, 3), 50, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 20, dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        def fake_menu_draw(c, w):
+            c.fg[:] = 250
+            c.bg[:] = 220
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu", side_effect=fake_menu_draw):
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 0.0)
+
+        self.assertEqual(tuple(int(v) for v in console.fg[0, 0]), (50, 50, 50))
+        self.assertEqual(tuple(int(v) for v in console.bg[0, 0]), (20, 20, 20))
+
+    def test_reaches_full_menu_color_once_ratio_hits_one_after_a_partial_fade(self):
+        # Sanity check that a menu which has finished fading in (ratio 1.0)
+        # shows the menu's real color, not something still blended toward
+        # the world view from an earlier frame.
+        console = SimpleNamespace(
+            fg=np.full((1, 1, 3), 50, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 20, dtype=np.uint8),
+        )
+        world = SimpleNamespace(game_state="INVENTORY_MENU")
+
+        def fake_menu_draw(c, w):
+            c.fg[:] = 250
+            c.bg[:] = 220
+
+        with patch.object(console_renderer, "_draw_active_game_state_menu", side_effect=fake_menu_draw):
+            console_renderer._draw_active_game_state_menu_with_fade(console, world, 1.0)
+
+        self.assertEqual(tuple(int(v) for v in console.fg[0, 0]), (250, 250, 250))
+        self.assertEqual(tuple(int(v) for v in console.bg[0, 0]), (220, 220, 220))
 
 
 class TestConsoleRendererLighting(unittest.TestCase):
@@ -1210,6 +1842,56 @@ class TestConsoleRendererLighting(unittest.TestCase):
 
         with patch("rendering.console_renderer.is_visible", return_value=True):
             console_renderer._apply_lighting_and_depth(console, world, 0, 0)
+
+    def test_tint_for_light_level_leaves_day_and_unknown_levels_unchanged(self):
+        self.assertEqual(console_renderer._tint_for_light_level((100, 150, 200), "DAY"), (100, 150, 200))
+        self.assertEqual(console_renderer._tint_for_light_level((100, 150, 200), "SOME_UNKNOWN_LEVEL"), (100, 150, 200))
+
+    def test_tint_for_light_level_casts_cool_at_night(self):
+        r, g, b = console_renderer._tint_for_light_level((200, 200, 200), "NIGHT")
+        self.assertLess(r, b)
+        r2, g2, b2 = console_renderer._tint_for_light_level((200, 200, 200), "PITCH BLACK")
+        self.assertLess(r2, b2)
+
+    def test_tint_for_light_level_casts_warm_at_dawn_and_dusk(self):
+        r, g, b = console_renderer._tint_for_light_level((200, 200, 200), "DAWN")
+        self.assertGreater(r, b)
+        r2, g2, b2 = console_renderer._tint_for_light_level((200, 200, 200), "DUSK")
+        self.assertGreater(r2, b2)
+
+    def _run_single_cell_lighting(self, light_level_name):
+        console = SimpleNamespace(
+            width=1,
+            height=1,
+            fg=np.full((1, 1, 3), 200, dtype=np.uint8),
+            bg=np.full((1, 1, 3), 200, dtype=np.uint8),
+        )
+        world = SimpleNamespace(
+            player=SimpleNamespace(x=0, y=0),
+            current_light_level_name=light_level_name,
+            get_tile_at=lambda x, y: SimpleNamespace(blocks_fov=False),
+        )
+        with patch("rendering.console_renderer.is_visible", return_value=True):
+            console_renderer._apply_lighting_and_depth(console, world, 0, 0)
+        return tuple(console.fg[0, 0]), tuple(console.bg[0, 0])
+
+    def test_apply_lighting_and_depth_applies_night_tint_end_to_end(self):
+        day_fg, day_bg = self._run_single_cell_lighting("DAY")
+        night_fg, night_bg = self._run_single_cell_lighting("NIGHT")
+
+        # DAY applies no tint, so the uniform brightness dim keeps channels equal.
+        self.assertEqual(day_fg[0], day_fg[2])
+        # NIGHT casts a cool wash: blue ends up stronger than red on the same
+        # starting color, unlike the neutral DAY pass above.
+        self.assertLess(night_fg[0], night_fg[2])
+        self.assertLess(night_bg[0], night_bg[2])
+
+    def test_apply_lighting_and_depth_applies_dusk_tint_end_to_end(self):
+        dusk_fg, dusk_bg = self._run_single_cell_lighting("DUSK")
+
+        # DUSK casts a warm wash: red ends up stronger than blue.
+        self.assertGreater(dusk_fg[0], dusk_fg[2])
+        self.assertGreater(dusk_bg[0], dusk_bg[2])
 
 
 class TestConsoleRendererFocusBadge(unittest.TestCase):
@@ -1525,3 +2207,369 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.assertEqual(npc.social.title, "the Bold")
         self.assertFalse(hasattr(npc, "title"))
+
+
+class TestMenuItemIcons(unittest.TestCase):
+    """Item sprite icons wired into the inventory/trade/crafting menu screens."""
+
+    def setUp(self):
+        self.mock_ollama_patcher = patch('engine.World._call_llm')
+        self.mock_call_llm = self.mock_ollama_patcher.start()
+        self.mock_call_llm.return_value = json.dumps({
+            "name": "Test NPC",
+            "personality": "neutral",
+            "dialogue": ["..."],
+        })
+        self.real_world = World(seed=17)
+
+    def tearDown(self):
+        self.mock_ollama_patcher.stop()
+
+    class FakeConsole:
+        def __init__(self):
+            self.print_calls = []
+
+        def draw_frame(self, *args, **kwargs):
+            pass
+
+        def draw_rect(self, *args, **kwargs):
+            pass
+
+        def print(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def print_box(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def get_height_rect(self, **kwargs):
+            return 1
+
+    def test_get_item_icon_codepoint_returns_none_for_unknown_item(self):
+        self.assertIsNone(console_renderer._get_item_icon_codepoint(None))
+        self.assertIsNone(console_renderer._get_item_icon_codepoint("not_a_real_item"))
+
+    def test_get_item_icon_codepoint_returns_catalogued_sprite(self):
+        from data.dawnlike import ITEM_SPRITES
+
+        self.assertEqual(
+            console_renderer._get_item_icon_codepoint("healing_salve"),
+            ITEM_SPRITES["healing_salve"],
+        )
+
+    def test_draw_item_icon_draws_for_known_item_and_skips_unknown(self):
+        console = self.FakeConsole()
+
+        drawn = console_renderer._draw_item_icon(console, 3, 4, "healing_salve")
+        self.assertTrue(drawn)
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (3, 4))
+
+        console.print_calls.clear()
+        skipped = console_renderer._draw_item_icon(console, 3, 4, "not_a_real_item")
+        self.assertFalse(skipped)
+        self.assertEqual(console.print_calls, [])
+
+    def test_draw_inventory_menu_draws_icon_next_to_known_item(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 2)
+        world = SimpleNamespace(
+            player=SimpleNamespace(
+                economic=SimpleNamespace(
+                    inventory=inventory,
+                    money=10,
+                )
+            ),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)
+
+        from data.dawnlike import ITEM_SPRITES
+
+        icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["healing_salve"])]
+        self.assertEqual(len(icon_calls), 1)
+        text_calls = [c for c in console.print_calls if "Healing Salve" in c.get("string", "")]
+        self.assertEqual(len(text_calls), 1)
+        # Icon sits two columns left of the text it labels.
+        self.assertEqual(icon_calls[0]["y"], text_calls[0]["y"])
+        self.assertEqual(text_calls[0]["x"] - icon_calls[0]["x"], 2)
+
+    def test_draw_inventory_menu_uses_real_inventory_object_not_list_of_dicts(self):
+        """Regression test: world.player.economic.inventory is an
+        entities.items.Inventory (a dict subclass backed by per-instance
+        ItemReference stacks), not a list of {"key", "quantity"} dicts.
+        Iterating it directly used to raise TypeError as soon as the menu
+        had any items in it."""
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 1)
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(inventory=inventory, money=0)),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)  # must not raise
+
+    def test_draw_inventory_menu_shows_quality_prefixed_name_and_color(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 1, quality="Masterwork")
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(inventory=inventory, money=0)),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)
+
+        matches = [c for c in console.print_calls if "Masterwork Healing Salve" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Masterwork"])
+
+    def test_draw_inventory_menu_keeps_different_qualities_as_separate_lines(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        inventory = Inventory()
+        inventory.add_item("healing_salve", 2, quality="Fine")
+        inventory.add_item("healing_salve", 1, quality="Poor")
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(inventory=inventory, money=0)),
+            interaction_context={},
+        )
+
+        console_renderer.draw_inventory_menu(console, world)
+
+        fine_lines = [c for c in console.print_calls if c.get("string", "").startswith("Fine Healing Salve x2")]
+        poor_lines = [c for c in console.print_calls if c.get("string", "").startswith("Poor Healing Salve x1")]
+        self.assertEqual(len(fine_lines), 1)
+        self.assertEqual(len(poor_lines), 1)
+        self.assertEqual(fine_lines[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Fine"])
+        self.assertEqual(poor_lines[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Poor"])
+
+    def test_draw_trade_menu_draws_icon_next_to_item_row(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(money=100)),
+            trade_ui_npc_target=SimpleNamespace(name="Merchant Sam"),
+            trade_ui_player_selling=False,
+            trade_ui_merchant_inventory_snapshot=[("rusty_sword", 1, 25)],
+            trade_ui_merchant_item_index=0,
+        )
+
+        console_renderer.draw_trade_menu(console, world)
+
+        from data.dawnlike import ITEM_SPRITES
+
+        icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["rusty_sword"])]
+        self.assertEqual(len(icon_calls), 1)
+
+    def test_draw_trade_menu_shows_quality_prefixed_name_and_color_for_unselected_row(self):
+        from entities.items import Inventory
+
+        console = self.FakeConsole()
+        npc_inventory = Inventory()
+        npc_inventory.add_item("rusty_sword", 1, quality="Fine")
+        world = SimpleNamespace(
+            player=SimpleNamespace(economic=SimpleNamespace(money=100)),
+            trade_ui_npc_target=SimpleNamespace(
+                name="Merchant Sam",
+                economic=SimpleNamespace(npc_inventory=npc_inventory),
+                schedule=SimpleNamespace(work_building_id=None),
+            ),
+            trade_ui_player_selling=False,
+            trade_ui_merchant_inventory_snapshot=[("rusty_sword", 1, 25)],
+            trade_ui_merchant_item_index=5,  # not the row being drawn -> not "selected"
+            buildings_by_id={},
+        )
+
+        console_renderer.draw_trade_menu(console, world)
+
+        matches = [c for c in console.print_calls if "Fine Rusty Sword" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["fg"], console_renderer.QUALITY_TEXT_COLORS["Fine"])
+
+    def test_draw_status_panel_fetch_quest_progress_does_not_crash_with_real_inventory(self):
+        """Regression test: draw_status_panel's fetch-quest progress counter
+        had the same broken `for item in inventory: item["key"]` pattern as
+        draw_inventory_menu - it would raise TypeError on the very first
+        frame drawn after accepting a fetch quest with any item carried."""
+        world = self.real_world
+        world.player.economic.inventory.add_item("raw_log", 3)
+        world.player.knowledge.active_quests["quest_1"] = {
+            "title": "Gather Logs",
+            "description": "Bring 5 logs.",
+            "type": "fetch",
+            "quest_giver_id": None,
+            "item_to_fetch_key": "raw_log",
+            "item_fetch_count": 5,
+            "progress": 0,
+        }
+        console = self.FakeConsole()
+
+        console_renderer.draw_status_panel(console, world, 0, 0)  # must not raise
+
+        matches = [c for c in console.print_calls if "Fetch Raw Log: 3/5" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+
+    def test_draw_quest_menu_fetch_progress_does_not_crash_with_real_inventory(self):
+        """Same regression as above, for the quest log's fetch progress line."""
+        world = self.real_world
+        world.player.economic.inventory.add_item("raw_log", 2)
+        world.player.knowledge.active_quests["quest_1"] = {
+            "title": "Gather Logs",
+            "description": "Bring 5 logs.",
+            "type": "fetch",
+            "quest_giver_id": None,
+            "item_to_fetch_key": "raw_log",
+            "item_fetch_count": 5,
+            "progress": 0,
+        }
+        world.quest_menu_context = {"selected_quest_index": 0}
+        console = self.FakeConsole()
+
+        console_renderer.draw_quest_menu(console, world)  # must not raise
+
+        matches = [c for c in console.print_calls if "Fetch Raw Log: 2/5" in c.get("string", "")]
+        self.assertEqual(len(matches), 1)
+
+    def test_draw_crafting_menu_draws_icon_next_to_recipe(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            crafting_menu_context={"all_recipes": ["healing_salve"], "selected_recipe_index": 0, "scroll_offset": 0},
+            player_can_craft=lambda key: True,
+        )
+
+        console_renderer.draw_crafting_menu(console, world)
+
+        from data.dawnlike import ITEM_SPRITES
+
+        icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["healing_salve"])]
+        self.assertEqual(len(icon_calls), 1)
+
+
+class TestEntityPortraits(unittest.TestCase):
+    """NPC portrait stamped in the dialogue and social menus."""
+
+    class FakeConsole:
+        def __init__(self):
+            self.print_calls = []
+
+        def draw_frame(self, *args, **kwargs):
+            pass
+
+        def draw_rect(self, *args, **kwargs):
+            pass
+
+        def print(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def print_box(self, **kwargs):
+            self.print_calls.append(kwargs)
+
+        def get_height_rect(self, **kwargs):
+            return 1
+
+    def test_draw_entity_portrait_falls_back_to_single_cell_when_zoom_registry_empty(self):
+        # In headless/test mode register_zoomed_dawnlike_tiles() never runs,
+        # so zoomed_sprite_codepoint returns None - the portrait helper must
+        # degrade to a single unzoomed cell instead of drawing nothing.
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Villager")
+
+        drawn = console_renderer._draw_entity_portrait(console, 5, 6, npc)
+
+        self.assertTrue(drawn)
+        self.assertEqual(len(console.print_calls), 1)
+        self.assertEqual((console.print_calls[0]["x"], console.print_calls[0]["y"]), (5, 6))
+
+    def test_draw_entity_portrait_stamps_full_zoom_grid_when_registry_populated(self):
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Villager")
+
+        with patch(
+            "rendering.console_renderer.zoomed_sprite_codepoint",
+            side_effect=lambda _base, zoom, ox, oy: 0xF0000 + (oy * zoom) + ox,
+        ):
+            drawn = console_renderer._draw_entity_portrait(console, 10, 10, npc, zoom=3)
+
+        self.assertTrue(drawn)
+        self.assertEqual(len(console.print_calls), 9)
+        positions = {(c["x"], c["y"]) for c in console.print_calls}
+        self.assertEqual(positions, {(10 + ox, 10 + oy) for ox in range(3) for oy in range(3)})
+
+    def test_draw_social_menu_draws_portrait_beside_npc_name(self):
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Merchant Sam", economic=SimpleNamespace(profession="Merchant"))
+        world = SimpleNamespace(
+            get_social_menu_target=lambda: npc,
+            get_social_attitude_label=lambda n: ("Friendly", 5),
+            social_menu_context={"mode": "root", "selected_action_index": 0},
+            get_social_menu_actions=lambda: ["Give Gift", "Share Gossip"],
+        )
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_social_menu(console, world)
+
+        mock_portrait.assert_called_once()
+        call_args = mock_portrait.call_args
+        self.assertIs(call_args[0][0], console)
+        self.assertIs(call_args[0][3], npc)
+        # Portrait sits inside the menu frame, to the right of the name line.
+        menu_width = 74
+        x = (config.MAP_WIDTH - menu_width) // 2
+        expected_portrait_x = x + menu_width - 2 - console_renderer.PORTRAIT_ZOOM
+        self.assertEqual(call_args[0][1], expected_portrait_x)
+
+    def test_draw_social_menu_skips_portrait_when_no_target(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(get_social_menu_target=lambda: None)
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_social_menu(console, world)
+
+        mock_portrait.assert_not_called()
+
+    def test_draw_dialogue_menu_draws_portrait_and_shifts_history_down(self):
+        console = self.FakeConsole()
+        npc = SimpleNamespace(name="Merchant Sam")
+        world = SimpleNamespace(
+            chat_ui_target_npc=npc,
+            chat_ui_history=[("Merchant Sam", "Hello there, traveler!")],
+            chat_ui_input_line="",
+            get_entity_display_name=lambda entity, include_relationship=False: entity.name,
+        )
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_dialogue_menu(console, world)
+
+        mock_portrait.assert_called_once()
+        call_args = mock_portrait.call_args
+        self.assertIs(call_args[0][3], npc)
+
+        name_calls = [c for c in console.print_calls if c.get("string") == "Merchant Sam"]
+        self.assertEqual(len(name_calls), 1)
+
+        history_calls = [c for c in console.print_calls if "Hello there, traveler!" in c.get("string", "")]
+        self.assertEqual(len(history_calls), 1)
+        # History must be drawn below the portrait header, not overlapping it.
+        self.assertGreater(history_calls[0]["y"], name_calls[0]["y"])
+
+    def test_draw_dialogue_menu_skips_portrait_when_no_target_npc(self):
+        console = self.FakeConsole()
+        world = SimpleNamespace(
+            chat_ui_target_npc=None,
+            chat_ui_history=[],
+            chat_ui_input_line="",
+        )
+
+        with patch.object(console_renderer, "_draw_entity_portrait") as mock_portrait:
+            console_renderer.draw_dialogue_menu(console, world)  # must not raise
+
+        mock_portrait.assert_not_called()

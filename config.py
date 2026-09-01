@@ -7,16 +7,20 @@ SCREEN_HEIGHT = 56
 MAP_WIDTH = 78
 MAP_HEIGHT = 50
 STATUS_PANEL_WIDTH = SCREEN_WIDTH - MAP_WIDTH
-MINIMAP_WIDTH = STATUS_PANEL_WIDTH
-MINIMAP_HEIGHT = 13
-MINIMAP_X = MAP_WIDTH
-MINIMAP_Y = 1
 TILE_SIZE = 16
-WINDOW_WIDTH = 1920
-WINDOW_HEIGHT = 1040
+WINDOW_WIDTH = SCREEN_WIDTH * TILE_SIZE
+WINDOW_HEIGHT = SCREEN_HEIGHT * TILE_SIZE
 SCREEN_WIDTH_TILES = SCREEN_WIDTH
 SCREEN_HEIGHT_TILES = SCREEN_HEIGHT
-ZOOM_LEVELS = (1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+# Only whole-number zoom factors are listed. A DawnLike sprite is one 16px
+# image per console cell, so drawing it larger means stamping pre-split
+# quadrants across an NxN block of cells (see rendering/sprite_atlas.py).
+# That split only exists for integer N, so a fractional level like 1.5 or
+# 2.5 produced a rect no sprite could fill and silently fell back to bare
+# ASCII glyphs - the art style visibly changed as the player scrolled the
+# wheel. 1.0 stays: at one cell per tile the base sprite is drawn directly,
+# no split needed, and it's the only way to see a wide area.
+ZOOM_LEVELS = (1.0, 2.0, 3.0, 4.0)
 DEFAULT_ZOOM_INDEX = 2
 
 # World generation
@@ -29,7 +33,18 @@ WORLD_WIDTH = WORLD_WIDTH_CHUNKS * CHUNK_WIDTH
 WORLD_HEIGHT = WORLD_HEIGHT_CHUNKS * CHUNK_HEIGHT
 POI_DENSITY = 0.3
 # Noise settings for world generation
-NOISE_SCALE = 0.1
+# Multiplied by the CHUNK coordinate to sample the elevation noise, so it
+# sets how much of the noise field the whole world spans. At 0.1 a 10x10
+# chunk world covered only x,y in [0, 0.9] - less than a single noise
+# period - so every map was one smooth gradient and the seed alone decided
+# whether that blob sat above or below sea level. Land came out anywhere
+# from 2% to 100%, and roughly one seed in thirteen produced an ocean with
+# no habitable chunks at all: no villages, no NPCs, no quests, no economy.
+# At 0.25 the world spans a few periods, which yields actual coastlines and
+# keeps land between ~30% and ~85% across seeds - still varied (watery
+# worlds and continental ones both occur) without the unplayable extremes.
+# Raising it further flattens that variety toward a uniform ~60%.
+NOISE_SCALE = 0.25
 NOISE_OCTAVES = 4
 NOISE_PERSISTENCE = 0.5
 NOISE_LACUNARITY = 2.0
@@ -53,6 +68,7 @@ USE_LLM_FOR_SCHEDULES = False
 DAY_LENGTH_TICKS = 14400
 WORK_START_TIME_RATIO = 0.333 # 8 AM
 WORK_END_TIME_RATIO = 0.708 # 5 PM
+PRE_SIMULATION_HOURS = 24 # Number of in-game hours of pre-simulation during world init
 
 # Gameplay settings
 DEFAULT_SPEECH_VOLUME = 8
@@ -71,7 +87,7 @@ SECONDS_PER_MINUTE = 60
 GAME_TICKS_PER_SECOND = 10
 SECONDS_PER_GAME_TICK = 1 / GAME_TICKS_PER_SECOND
 TIME_PER_TICK = (HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE) / (GAME_TICKS_PER_SECOND * 60 * 24) # Placeholder for more complex time system
-INITIAL_TIME_OF_DAY = 8 * 60 # 8:00 AM
+INITIAL_TIME_OF_DAY = int(DAY_LENGTH_TICKS * (8 / HOURS_PER_DAY)) # 8:00 AM
 
 # FOV and Light Level
 FOV_RADIUS_DAY = 18
@@ -120,7 +136,6 @@ COLOR_LIGHT_GREY = (192, 192, 192)
 COLOR_DARK_GREY = (64, 64, 64)
 COLOR_PLAYER_STATUS_WET = (0, 100, 255)
 COLOR_PLAYER_STATUS_FREEZING = (100, 100, 255)
-COLOR_CURSOR_INFO_TEXT = (200, 200, 200)
 
 # Factions
 FACTION_COMMON_FOLK = "common_folk"

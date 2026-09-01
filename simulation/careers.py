@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from entities.pickle_compat import dataclass_setstate
+
 
 UNEMPLOYED_PROFESSIONS = {"Unemployed", "unemployed", ""}
 CREATURE_PROFESSIONS = {"Creature"}
@@ -32,6 +34,7 @@ PROFESSION_TRACKS = {
     "Child": "youth",
     "Creature": "creature",
     "Raider": "outlaw",
+    "Outlaw": "outlaw",
     "Cultist": "cult",
 }
 
@@ -47,6 +50,7 @@ PROFESSION_CAPABILITIES = {
     "Town Official": {"civic", "authority"},
     "Lumber Mill Foreman": {"management", "job_offers"},
     "Healer": {"medical"},
+    "Blacksmith": {"repair"},
 }
 
 BUILDING_ROLE_RULES = {
@@ -71,11 +75,60 @@ BUILDING_ROLE_RULES = {
 }
 
 
+# Age thresholds for gradual work-performance decline (ideation-audit item
+# 3: previously age affected nothing but the old-age death roll (age > 70,
+# see engine.py's _simulate_village_population_lifecycle) and the
+# child/adult sprite split - zero productivity effect at all). Chosen to
+# be gradual, not a cliff: decline starts well before the old-age
+# mortality threshold so it reads as "slowing down over a couple of
+# decades" rather than a sudden late-life drop. The floor
+# (WORK_PERFORMANCE_AGE_FLOOR) is deliberately kept above every
+# consequential work_performance threshold elsewhere in engine.py
+# (<=20 skips that day's pay, <20 has a 10% daily firing chance - see
+# _pay_daily_company_wages/_update_npc_careers) so aging alone can never
+# talk an elderly NPC out of a paycheck or into losing their job on its
+# own - this dampens the ceiling on how good elderly workers can get, not
+# a backdoor forced-retirement mechanic.
+WORK_PERFORMANCE_AGE_DECLINE_START = 55
+WORK_PERFORMANCE_AGE_DECLINE_END = 80
+WORK_PERFORMANCE_AGE_FLOOR = 60
+
+
+def get_age_work_performance_ceiling(age: int | None) -> int:
+    """Returns the highest work_performance an NPC of this age can reach.
+
+    100 at or below WORK_PERFORMANCE_AGE_DECLINE_START, linearly declining
+    to WORK_PERFORMANCE_AGE_FLOOR by WORK_PERFORMANCE_AGE_DECLINE_END, held
+    at the floor beyond that. `age=None` (e.g. the player, who has no age
+    field at all in this codebase) is treated as unaffected.
+
+    This only caps work_performance *increases* - it's applied at the
+    handful of call sites that raise the value (see
+    simulation/systems/work.py), never used to actively lower an
+    already-set value on its own. An NPC who was already above their new,
+    lower ceiling simply can't climb any higher until the normal
+    idle-at-work decay (-1/tick, see work.py) brings them back down to it -
+    a real, gradual decline driven by ordinary daily ticks rather than an
+    instant markdown the moment they cross an age threshold.
+    """
+    if age is None or age <= WORK_PERFORMANCE_AGE_DECLINE_START:
+        return 100
+    if age >= WORK_PERFORMANCE_AGE_DECLINE_END:
+        return WORK_PERFORMANCE_AGE_FLOOR
+    span_years = WORK_PERFORMANCE_AGE_DECLINE_END - WORK_PERFORMANCE_AGE_DECLINE_START
+    span_points = 100 - WORK_PERFORMANCE_AGE_FLOOR
+    progress = (age - WORK_PERFORMANCE_AGE_DECLINE_START) / span_years
+    return round(100 - progress * span_points)
+
+
 @dataclass
 class CareerHistoryEntry:
     role: str
     reason: str = ""
     game_time: int | None = None
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 
 @dataclass
@@ -85,6 +138,9 @@ class CareerState:
     level: int = 0
     tenure_days: int = 0
     history: list[CareerHistoryEntry] = field(default_factory=list)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
     def set_role(self, role: str, reason: str = "", game_time: int | None = None):
         normalized = normalize_profession(role)

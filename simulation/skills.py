@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from entities.pickle_compat import dataclass_setstate
+
 
 DEFAULT_SKILL_LEVELS = {
     "melee": 5,
@@ -37,6 +39,14 @@ class SkillTracker:
     def get_level(self, skill_name: str, default_level: int = 1) -> int:
         self.ensure_skill(skill_name, default_level=default_level)
         return self.levels[skill_name]
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+        # __post_init__'s normalization doesn't re-run on unpickle (only
+        # __setstate__ does) - re-apply it so a restored tracker gets the
+        # same int-coercion/floor-at-1 guarantees a freshly constructed one
+        # does, in case a legacy pickle had raw/unnormalized values.
+        self.__post_init__()
 
     def xp_to_next_level(self, skill_name: str) -> int:
         level = self.get_level(skill_name)

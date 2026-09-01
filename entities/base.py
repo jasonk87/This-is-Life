@@ -7,7 +7,27 @@ import random
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from config import DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
+from config import DAY_LENGTH_TICKS, DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
+
+# Judgment call (see CombatStats.hostility_grace_expires_tick / NPC.take_damage):
+# how long incidental (non-deliberate) hostility lingers before it's eligible
+# to decay in World._decay_incidental_npc_hostility. A few in-game hours -
+# long enough that a genuinely ongoing scuffle doesn't get cut short by a
+# lucky timing window, short enough that a villager who got hurt by illness
+# or a stray hit doesn't stay a permanent enemy.
+NPC_HOSTILITY_GRACE_TICKS = DAY_LENGTH_TICKS // 4
+
+# Personality drift (see NPC.has_trait/record_trait_pressure): how many
+# qualifying life events of the SAME kind a trait needs before it actually
+# activates (becomes visible to has_trait() checks) - gradual onset, not a
+# flip from a single event - and how many drifted traits an NPC can ever
+# accumulate, so a rough life doesn't overload them with every trait at
+# once. Once activated, a trait is permanent (no decay) and sticky (never
+# displaced by a later trait reaching threshold once the cap is full) -
+# personality is meant to be a slower-moving characteristic than reputation
+# or grudges, which are explicitly designed to fade.
+TRAIT_DRIFT_ACTIVATION_THRESHOLD = 3
+TRAIT_DRIFT_MAX_ACTIVE_TRAITS = 3
 from data.dawnlike import ANIMAL_SPRITES, get_human_sprite
 from data.items import ITEM_DEFINITIONS
 from entities.anatomy import Anatomy
@@ -26,6 +46,7 @@ from entities.social import (
 from simulation.activity import ensure_activity_state
 from simulation.careers import CareerState, infer_career_level, normalize_profession, set_entity_profession
 from simulation.skills import SkillTracker
+from entities.pickle_compat import backfill_missing_plain_attributes, dataclass_setstate
 
 PLACEHOLDER_FAMILY_NAME_RE = re.compile(r"^(Mother|Father|Brother|Sister)\s+Family_\d+$", re.IGNORECASE)
 
@@ -35,6 +56,15 @@ class CombatStats:
     anatomy: Anatomy = field(default_factory=Anatomy.humanoid)
     toughness: str = "average"
     is_hostile_to_player: bool = False
+    # Set only when is_hostile_to_player is flipped True by take_damage's
+    # generic, attacker-agnostic fallback (below) - the least purpose-built
+    # of the game's hostility triggers, as opposed to raider logic, the
+    # wanted-NPC pursuit system, Sheriff/Guard bounty response, or
+    # wolf-desperation attacks, which all set is_hostile_to_player directly
+    # at their own call sites for a deliberate narrative reason and leave
+    # this field untouched. See World._decay_incidental_npc_hostility in
+    # engine.py, which is the only thing that reads it.
+    hostility_grace_expires_tick: int | None = None
     combat_behavior: str = "defensive"
     base_attack_name: str = "fists"
     base_attack_damage_dice: str = "1d3"
@@ -67,6 +97,9 @@ class CombatStats:
     def hp(self, value):
         self.anatomy.set_total_hp(value)
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 @dataclass
 class PhysicalState:
     """Stores physical attributes and states for an entity."""
@@ -75,6 +108,7 @@ class PhysicalState:
     is_dead: bool = False
     hunger_level_msg: str = ""
     thirst_level_msg: str = ""
+    sickness_level_msg: str = ""
     is_wet: bool = False
     wetness_timer: int = 0
     is_sheltered: bool = False
@@ -113,6 +147,22 @@ class PhysicalState:
         self.metabolism.max_thirst = value
 
     @property
+    def sickness(self) -> int:
+        return self.metabolism.sickness
+
+    @sickness.setter
+    def sickness(self, value: int) -> None:
+        self.metabolism.sickness = value
+
+    @property
+    def max_sickness(self) -> int:
+        return self.metabolism.max_sickness
+
+    @max_sickness.setter
+    def max_sickness(self, value: int) -> None:
+        self.metabolism.max_sickness = value
+
+    @property
     def temperature(self) -> float:
         return self.metabolism.temperature
 
@@ -139,6 +189,9 @@ class PhysicalState:
     def process_tick(self, **kwargs) -> None:
         self.metabolism.process_tick(status_effects=self.status_effects, **kwargs)
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 @dataclass
 class SocialState:
     """Stores social and reputational attributes for an entity."""
@@ -160,6 +213,17 @@ class SocialState:
     fame: int = 0
     infamy: int = 0
     title: str = ""
+    # Personality drift (see NPC.has_trait/record_trait_pressure below):
+    # trait_pressure counts qualifying life events per candidate trait word;
+    # activated_traits is the ordered, sticky (never displaced), capped list
+    # of traits that have actually crossed the activation threshold and are
+    # therefore live for has_trait() checks. `personality` itself (the
+    # LLM-generated base string) is never rewritten by drift.
+    trait_pressure: dict[str, int] = field(default_factory=dict)
+    activated_traits: list[str] = field(default_factory=list)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 @dataclass
 class EconomicState:
@@ -199,6 +263,17 @@ class EconomicState:
     def job_performance(self, value: int) -> None:
         self.work_performance = int(value)
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+        # npc_inventory's __setattr__ coercion (above) only runs for normal
+        # attribute assignment, which dataclass_setstate's dict-restore and
+        # default_factory backfill both bypass - if npc_inventory ended up
+        # missing and got backfilled, it's already a fresh Inventory() from
+        # its own default_factory, but defensively re-coerce in case a
+        # legacy save had it as a plain dict before Inventory existed.
+        if not isinstance(self.__dict__.get("npc_inventory"), Inventory):
+            self.npc_inventory = self.__dict__.get("npc_inventory") or {}
+
 @dataclass
 class Schedule:
     """Stores scheduling and task-related attributes for an entity."""
@@ -212,6 +287,34 @@ class Schedule:
     previous_task: str = TaskType.IDLE
     game_time_last_updated: int = 0
     last_paid_day: int = 0
+    # NPC jail state (mirrors PlayerState.is_jailed/jail_cell_coords/
+    # jail_time_remaining, but lives on Schedule since NPCs have no
+    # PlayerState). See World._serve_npc_jail_time in engine.py.
+    is_jailed: bool = False
+    jail_cell_coords: tuple[int, int] | None = None
+    jail_time_remaining: int = 0
+    # Bounty at the moment of arrest, captured by World._serve_npc_jail_time
+    # right before it zeroes economic.bounty. Kept for display/back-compat,
+    # but NOT the primary severity signal for trait drift anymore - see
+    # crime_kinds_since_last_jailing below. (Arrest only ever fires once
+    # bounty >= NPC_ARREST_BOUNTY_THRESHOLD, so this value is always >= that
+    # threshold by construction - it can't distinguish "one bad crime" from
+    # "many small ones", which is why severity is now tracked by crime kind
+    # instead.)
+    jail_intake_bounty: int = 0
+    # Crime kinds ("theft"/"assault"/"murder") accrued by this NPC since
+    # their last jailing (or since creation, if never jailed), appended to
+    # by World._accrue_crime_bounty. World._serve_npc_jail_time snapshots
+    # this into jail_intake_crime_kinds and clears it at arrest time, so
+    # World._apply_jail_release_trait_drift can judge severity by what kind
+    # of crime(s) actually got this NPC arrested, not just the accumulated
+    # bounty total (which is always >= NPC_ARREST_BOUNTY_THRESHOLD regardless
+    # of severity).
+    crime_kinds_since_last_jailing: list = field(default_factory=list)
+    jail_intake_crime_kinds: list = field(default_factory=list)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 @dataclass
 class Equipment:
@@ -220,6 +323,20 @@ class Equipment:
     body: EquipmentSlot = field(default_factory=EquipmentSlot)
     head: EquipmentSlot = field(default_factory=EquipmentSlot)
     equipped_armor: dict[str, str | None] = field(default_factory=lambda: {"head": None, "body": None, "hands": None, "feet": None})
+    # Per-slot remaining durability for the player's equipped_armor items.
+    # NPC armor durability lives on the ItemReference instances tracked via
+    # equipment.body/equipment.head + degrade_equipped_item; the player's
+    # equipped_armor is just an item_key string per slot with no such
+    # per-instance tracking, so durability is tracked here instead, seeded
+    # from the item's max_durability property the first time it's hit. See
+    # Player._degrade_equipped_armor_slot.
+    equipped_armor_durability: dict[str, int] = field(default_factory=dict)
+    # Per-slot repair-worn max_durability ceiling for player equipped_armor,
+    # the finite-use-repair counterpart to equipped_armor_durability. Absent
+    # entry means "never repaired" - the item's own true max_durability
+    # (from ITEM_DEFINITIONS) still applies. See
+    # Player._repair_equipped_armor_slot.
+    equipped_armor_max_durability: dict[str, int] = field(default_factory=dict)
     equipped_light_item_key: str | None = None
     light_source_active_until_tick: int = -1
     current_personal_light_radius: int = 0
@@ -228,6 +345,113 @@ class Equipment:
         if name in {"weapon", "body", "head"} and not isinstance(value, EquipmentSlot):
             value = EquipmentSlot(value)
         super().__setattr__(name, value)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
+# Recognized values for Appearance fields. Kept as plain module-level tuples
+# (not an enum) to match how HUMAN_SPRITES/PROFESSION_SPRITES etc. in
+# data/dawnlike.py key off plain strings - roll_appearance below and any
+# future UI (a barber/mirror screen, character creation) can import these
+# instead of hand-copying the value lists.
+HAIRSTYLES = ("none", "short", "long", "braided", "curly", "bald")
+HAIR_COLORS = ("black", "brown", "blonde", "red", "gray", "white")
+FACIAL_HAIR_STYLES = ("none", "stubble", "mustache", "short_beard", "full_beard")
+SKIN_TONES = ("pale", "light", "medium", "tan", "dark")
+
+
+@dataclass
+class Appearance:
+    """Stores an entity's static physical-appearance traits - hairstyle,
+    hair color, facial hair, skin tone - as opposed to Equipment, which
+    stores what they're currently wearing/wielding. Rolled once at
+    NPC/Player creation by roll_appearance() below and otherwise left
+    mutable for future features (aging into gray hair, a barber/grooming
+    mechanic, etc.).
+
+    IMPORTANT - current status: the DawnLike tile sheet this game renders
+    with (assets/dawnlike_combined.png) does not contain separable hair or
+    facial-hair sprite tiles to stamp as an overlay - it's a library of
+    complete, pre-baked character sprites (see HUMAN_SPRITES in
+    data/dawnlike.py), not a layered paperdoll system. Confirmed by
+    visually surveying the sheet's character block and its GUI/item
+    sections. data/dawnlike.py's HAIR_SPRITES/BEARD_SPRITES tables are
+    therefore empty today, so setting hairstyle/facial_hair on an entity
+    has NO visible effect yet - see _get_appearance_overlays in
+    data/dawnlike.py, which already does the compositing work and will pick
+    these values up automatically once suitable tile art is sourced and
+    catalogued (no further code changes needed at that point). skin_tone is
+    tracked for the same forward-looking reason and isn't wired to any
+    sprite/palette logic yet either.
+    """
+    hairstyle: str = "none"
+    hair_color: str = "brown"
+    facial_hair: str = "none"
+    skin_tone: str = "medium"
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
+
+def roll_appearance(gender: str | None = None, age: int | None = None) -> "Appearance":
+    """Randomly roll a plausible Appearance for a new NPC or Player.
+
+    Judgment calls (flagged rather than silently baked in):
+      - Facial hair is rolled far more often for adult males than anyone
+        else. It's not impossible for other entities (a small base rate
+        applies to everyone) since facial hair in reality isn't strictly
+        binary by gender, but the bulk of the probability mass is on adult
+        males, matching the "villager with a beard" mental model this
+        feature was requested for. Reasonable people could weight this
+        differently.
+      - Children (age < 18) never roll facial hair, and get "bald" rolled
+        far less often than adults.
+      - "none" is always the single most likely outcome for both hairstyle
+        and facial_hair, so most NPCs are visually unremarkable - only a
+        minority end up bearded/distinctively-haired, per the "not
+        everyone bearded" requirement.
+    """
+    is_adult = age is None or age >= 18
+    is_male = gender == "male"
+
+    if is_adult:
+        hairstyle = random.choices(
+            ["none", "short", "long", "braided", "curly", "bald"],
+            weights=[30, 25, 15, 10, 10, 10],
+        )[0]
+    else:
+        hairstyle = random.choices(
+            ["none", "short", "long", "braided", "curly", "bald"],
+            weights=[30, 30, 15, 15, 8, 2],
+        )[0]
+
+    hair_color = random.choices(
+        ["black", "brown", "blonde", "red", "gray", "white"],
+        weights=[30, 30, 15, 10, 10, 5],
+    )[0]
+
+    if not is_adult:
+        facial_hair = "none"
+    elif is_male:
+        facial_hair = random.choices(
+            ["none", "stubble", "mustache", "short_beard", "full_beard"],
+            weights=[55, 15, 10, 10, 10],
+        )[0]
+    else:
+        facial_hair = random.choices(
+            ["none", "stubble", "mustache", "short_beard", "full_beard"],
+            weights=[97, 1, 1, 1, 0],
+        )[0]
+
+    skin_tone = random.choice(["pale", "light", "medium", "tan", "dark"])
+
+    return Appearance(
+        hairstyle=hairstyle,
+        hair_color=hair_color,
+        facial_hair=facial_hair,
+        skin_tone=skin_tone,
+    )
+
 
 Knowledge = KnowledgeComponent
 
@@ -269,6 +493,7 @@ class NPC:
         self.combat, self.physical, self.social = CombatStats(), PhysicalState(), SocialState()
         self.economic, self.schedule = EconomicState(), Schedule()
         self.equipment, self.knowledge = Equipment(), Knowledge()
+        self.appearance = roll_appearance(self.gender, self.age)
         self.career = CareerState()
         self.skills = SkillTracker()
         self.aspiration = AspirationComponent(aspiration_type=random.choice(list(AspirationType)))
@@ -286,12 +511,137 @@ class NPC:
             self._initialize_relationships(attitude_to_player, self.player_id)
 
         self.ai_brain = NPCBrain(profession=self.economic.profession, task_state=NPCTaskState())
+        self.work_tags: set[str] = {"woodcutting", "hauling", "construction", "crafting"}
+        self.skill_levels: dict[str, int] = {"woodcutting": 1, "hauling": 1, "construction": 1, "crafting": 1}
+        self.preferred_work_types: list[str] = []
+        self.fatigue_modifier: float = 0.0
+        self.recent_task_history: list[str] = []
+        self.current_work_focus: str | None = None
+        self.work_efficiency_modifiers: dict[str, float] = {"woodcutting": 1.0, "hauling": 1.0, "construction": 1.0, "crafting": 1.0}
+        self.skill_experience_by_tag: dict[str, float] = {"woodcutting": 0.0, "hauling": 0.0, "construction": 0.0, "crafting": 0.0}
+        self.last_skill_gain_tick: int = 0
+        self.specialization_pressure: dict[str, float] = {"woodcutting": 0.0, "hauling": 0.0, "construction": 0.0, "crafting": 0.0}
+        self.recent_skill_usage: list[str] = []
+        self.actor_work_profile: dict[str, object] = {
+            "dominant_work_tag": "hauling",
+            "recent_work_summary": "No strong labor trend yet.",
+            "specialization_summary": "General labor profile.",
+            "fatigue_state": "rested",
+            "work_identity_label": "General Laborer",
+            "work_history_snapshot": [],
+            "preferred_task_bias": [],
+            "lifetime_work_totals": {"woodcutting": 0, "hauling": 0, "construction": 0, "crafting": 0},
+        }
+        self.cold_exposure: float = 0.0
+        self.warmth_state: str = "neutral"
+        self.last_warmed_tick: int = 0
+        self.last_cold_tick: int = 0
+        self.exposure_fatigue_modifier: float = 0.0
+        self.sheltered_state: bool = False
+        self.last_sheltered_tick: int = 0
+        self.current_shelter_id: str | None = None
+        self.shelter_exposure_modifier: float = 1.0
+        self.survival_override_reason: str | None = None
+        self.survival_override_active: bool = False
+        self.survival_override_started_tick: int = 0
+        self.survival_override_target_id: str | None = None
+        self.survival_override_target_position: tuple[int, int] | None = None
+        self.survival_override_recovery_threshold: float = 0.7
+        self.survival_override_previous_task_id: str | None = None
+        self.survival_override_cooldown_until_tick: int = 0
+        self.resting_state: bool = False
+        self.resting_since_tick: int = 0
+        self.current_rest_target_id: str | None = None
+        self.fatigue_recovery_modifier: float = 1.0
+        self.active_survival_pressure: str | None = None
+        self.deferred_survival_pressures: list[str] = []
+        self.survival_pressure_scores: dict[str, float] = {}
+        self.survival_pressure_records: dict[str, dict] = {}
+        self.last_survival_override_switch_tick: int = 0
+        self.hunger: float = 0.0
+        self.hunger_rate_per_tick: float = 0.01
+        self.hunger_override_threshold: float = 0.7
+        self.hunger_recovery_threshold: float = 0.3
+        self.hunger_last_eat_tick: int = 0
+        self.hunger_target_food_id: str | None = None
+        self.hunger_nutrition_pending: float = 0.0
         self.den_location: tuple[int, int] | None = None
         self.desire_for_furniture, self.is_frightened = 0, False
         self.threat_source_ids: list[str] = []
         self.defense_bonus = 0
         self.debug_autonomy: dict = {}
         set_entity_profession(self, self.economic.profession, reason="spawn")
+
+    # Identity/random-per-instance attributes that have existed since NPC's
+    # earliest version, set in the first few lines of __init__ above - these
+    # can never legitimately be "missing" from a real save, so __setstate__
+    # below never backfills them from the defaults template even
+    # defensively, since doing so would silently overwrite a real NPC's
+    # identity rather than filling in a genuinely absent field.
+    _PICKLE_TEMPLATE_SKIP_ATTRS = frozenset({
+        "x", "y", "name", "render_x", "render_y", "age", "gender", "char",
+        "color", "speed", "id", "dialogue", "player_id",
+    })
+    _pickle_defaults_template = None
+
+    @classmethod
+    def _get_pickle_defaults_template(cls):
+        """Lazily-built, process-wide "freshly constructed NPC" used only
+        as a source of default values for NPC.__setstate__ (see below) -
+        NPC isn't a dataclass, so its ~100 plain instance attributes can't
+        use the generic dataclass-field backfill in entities/pickle_compat.py.
+        Built the same way every worldgen NPC already is; not mutated."""
+        if cls._pickle_defaults_template is None:
+            cls._pickle_defaults_template = NPC(
+                0, 0, name="__pickle_defaults_template__", dialogue=["Hi"], personality="villager",
+            )
+        return cls._pickle_defaults_template
+
+    def __setstate__(self, state):
+        """Post-unpickle migration: pickle bypasses __init__ entirely and
+        just replays the old __dict__, so any attribute (component object
+        or plain literal) added to NPC since a save was written is simply
+        absent from a restored instance - the next line of code that
+        touches it raises AttributeError. See entities/pickle_compat.py for
+        the full rationale; this mirrors World.__setstate__'s migration
+        pattern in engine.py, adapted for a non-dataclass class with a very
+        large, fast-growing attribute list where hand-enumerating every
+        field (as World's does) would itself become a maintenance hazard.
+        """
+        self.__dict__.update(state)
+
+        # Component objects: each has its own __setstate__ (see CombatStats/
+        # PhysicalState/SocialState/EconomicState/Schedule/Equipment above,
+        # and KnowledgeComponent/AspirationComponent/TravelComponent/
+        # CareerState/SkillTracker elsewhere) that backfills ITS OWN missing
+        # fields automatically as part of being unpickled. This only covers
+        # the more extreme case of a whole component attribute being absent.
+        if not hasattr(self, "combat"): self.combat = CombatStats()
+        if not hasattr(self, "physical"): self.physical = PhysicalState()
+        if not hasattr(self, "social"): self.social = SocialState()
+        if not hasattr(self, "economic"): self.economic = EconomicState()
+        if not hasattr(self, "schedule"): self.schedule = Schedule()
+        if not hasattr(self, "equipment"): self.equipment = Equipment()
+        # Older saves predate the Appearance component entirely - backfill
+        # with a fresh random roll rather than the all-"none" dataclass
+        # default, so a save/load cycle doesn't visibly flatten every
+        # pre-existing NPC's rolled hairstyle/facial hair back to nothing
+        # once appearance overlays actually have art to draw.
+        if not hasattr(self, "appearance"): self.appearance = roll_appearance(getattr(self, "gender", None), getattr(self, "age", None))
+        if not hasattr(self, "knowledge"): self.knowledge = Knowledge()
+        if not hasattr(self, "career"): self.career = CareerState()
+        if not hasattr(self, "skills"): self.skills = SkillTracker()
+        if not hasattr(self, "aspiration"):
+            self.aspiration = AspirationComponent(aspiration_type=random.choice(list(AspirationType)))
+        if not hasattr(self, "travel"): self.travel = TravelComponent()
+
+        # Everything else: the many plain `self.x = ...` attributes set
+        # directly in __init__ (cold_exposure, work_efficiency_modifiers,
+        # actor_work_profile, etc.) rather than as dataclass fields.
+        backfill_missing_plain_attributes(
+            self, self._get_pickle_defaults_template(), skip=self._PICKLE_TEMPLATE_SKIP_ATTRS
+        )
+        ensure_activity_state(self)
 
     def _task_state_holder(self):
         ai_brain = getattr(self, "ai_brain", None)
@@ -515,6 +865,52 @@ class NPC:
         relationship_distrust = max(0, 50 - relationship_score)
         grudge_distrust = self.get_grudge_severity_towards(target_id)
         return max(relationship_distrust, grudge_distrust)
+
+    def has_trait(self, trait_word: str) -> bool:
+        """
+        True if trait_word describes this NPC, either because it appears in
+        their base (LLM-generated) personality string - the existing
+        substring check every utility-AI/job-suitability gate already used
+        - or because it's a drift-activated trait (see
+        record_trait_pressure). The base string is never rewritten by
+        drift; this just widens what "having" a trait means to include
+        traits earned through life events.
+        """
+        base_personality = (self.social.personality or "").lower()
+        if trait_word in base_personality:
+            return True
+        return trait_word in self.social.activated_traits
+
+    def record_trait_pressure(
+        self,
+        trait_word: str,
+        *,
+        threshold: int = TRAIT_DRIFT_ACTIVATION_THRESHOLD,
+        cap: int = TRAIT_DRIFT_MAX_ACTIVE_TRAITS,
+    ) -> bool:
+        """
+        Register one qualifying life event pushing this NPC toward
+        trait_word. Purely additive/gradual: nothing happens until the same
+        trait_word has accumulated `threshold` events, and once
+        `cap` traits are active, further pressure on a NEW trait_word keeps
+        being counted but never activates (existing active traits are never
+        displaced - no flip-flopping). Returns True if this call caused a
+        brand-new activation (mainly useful for tests/logging).
+        """
+        if not trait_word:
+            return False
+        pressure = self.social.trait_pressure.get(trait_word, 0) + 1
+        self.social.trait_pressure[trait_word] = pressure
+
+        if trait_word in self.social.activated_traits:
+            return False
+        if pressure < threshold:
+            return False
+        if len(self.social.activated_traits) >= cap:
+            return False
+
+        self.social.activated_traits.append(trait_word)
+        return True
 
     def set_local_opinion(self, target_id: int, score: float, *, current_day: int, evidence_count: int) -> None:
         self.social.local_opinions[target_id] = LocalOpinionRecord(
@@ -784,10 +1180,25 @@ class NPC:
                     world.add_message_to_chat_log(f"{self.name}'s {item_name} broke!")
         return result
 
-    def take_damage(self, amount: int, world) -> bool:
+    def take_damage(self, amount: int, world, *, apply_hostility: bool = True) -> bool:
         """
         Applies damage to the NPC, accounting for armor, and handles death.
         Returns True if the NPC was killed, False otherwise.
+
+        apply_hostility: whether a non-lethal hit is allowed to flip
+        is_hostile_to_player True via the fallback below. Defaults True to
+        preserve existing combat behavior (player-vs-NPC and NPC-vs-NPC
+        melee both still go through this path unchanged). Status-effect/
+        environmental damage that isn't really "combat" at all - illness's
+        untreated-worsening tick (simulation/systems/illness.py) and
+        Freezing/Overheating (simulation/systems/survival.py) - now passes
+        apply_hostility=False, since a villager taking incidental illness
+        or weather damage becoming permanently hostile to a player who was
+        nowhere near them was a real bug, not intended behavior. Checked
+        starvation too: NPC hunger/thirst never calls take_damage at all
+        today (only the player's own starvation does, via the separate
+        Player.take_damage, which has no hostility flag to begin with), so
+        there's nothing to change there.
         """
         if self.physical.is_dead:
             return False
@@ -834,16 +1245,32 @@ class NPC:
 
         # Add visual effect if world is passed
         if world:
-            from engine import FloatingTextEffect
+            from engine import FloatingTextEffect, HitFlashEffect
             world.visual_effects.append(FloatingTextEffect(self.x, self.y, str(effective_damage), color=(255, 50, 50)))
+            world.visual_effects.append(HitFlashEffect(self.x, self.y))
 
         if self.combat.hp <= 0:
             self.combat.hp = 0
             self.physical.is_dead = True
             return True
-        if not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
+        if apply_hostility and not self.combat.is_hostile_to_player and self.economic.profession != "Creature":
             self.combat.is_hostile_to_player = True
-            if world:
+            # This fallback is attacker-agnostic (it doesn't know or care who
+            # actually dealt the damage - could be the player, could be
+            # another NPC), which makes it the bluntest, least deliberate
+            # hostility trigger in the game, unlike raider logic/wanted-NPC
+            # pursuit/Sheriff-Guard bounty response/wolf-desperation attacks,
+            # which all set is_hostile_to_player directly for a specific,
+            # deliberate reason and are meant to persist. Give this one a
+            # grace window instead, so a villager who got tagged as hostile
+            # from an isolated hit doesn't stay locked into combat AI against
+            # a player who's since moved on (or was never actually involved -
+            # see the apply_hostility=False callers above). World's tick loop
+            # (_decay_incidental_npc_hostility in engine.py) clears it once
+            # the grace period passes and the NPC isn't still near/seeing
+            # the player.
+            if world is not None:
+                self.combat.hostility_grace_expires_tick = getattr(world, "game_time", 0) + NPC_HOSTILITY_GRACE_TICKS
                 world.add_message_to_chat_log(f"{self.name} becomes hostile!")
         return False
 

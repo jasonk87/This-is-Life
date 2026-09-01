@@ -4,9 +4,34 @@ from __future__ import annotations
 from dataclasses import dataclass
 import random
 
+from config import DAY_LENGTH_TICKS
 from data.items import ITEM_DEFINITIONS
+from entities.pickle_compat import dataclass_setstate
 
 _MISSING = object()
+
+# `spoilage_chance` in data/items.py is the chance an item spoils over a *day* -
+# 2% for bread, 5% for an apple, 20% for raw meat all read as daily figures, and
+# World._update_inventory_spoilage (the only other reader) applies them on a
+# once-a-day gate. ItemReference.update_tick runs every world tick, though, and
+# rolled the daily number directly: at 14400 ticks to the day that gave a loaf
+# an expected life of about fifty ticks - five in-game minutes - so no
+# settlement could keep food in a building for as long as it took to eat it.
+_PER_TICK_SPOILAGE_CACHE: dict[float, float] = {}
+
+
+def per_tick_spoilage_chance(daily_chance: float) -> float:
+    """The per-tick probability equivalent to `daily_chance` over one whole day."""
+    if daily_chance <= 0:
+        return 0.0
+    if daily_chance >= 1:
+        return 1.0
+    cached = _PER_TICK_SPOILAGE_CACHE.get(daily_chance)
+    if cached is None:
+        cached = 1.0 - (1.0 - daily_chance) ** (1.0 / DAY_LENGTH_TICKS)
+        _PER_TICK_SPOILAGE_CACHE[daily_chance] = cached
+    return cached
+
 QUALITY_VALUE_MODIFIERS = {
     "Poor": 0.8,
     "Normal": 1.0,
@@ -19,6 +44,23 @@ QUALITY_UTILITY_MODIFIERS = {
     "Fine": 1.15,
     "Masterwork": 1.35,
 }
+
+# Repair mechanic constants (finite-use repair: each repair permanently
+# shaves a bit off the item's true max_durability ceiling, rather than
+# being a free undo of degrade() forever - see ItemReference.repair()).
+REPAIR_WEAR_PER_REPAIR_FRACTION = 0.10
+REPAIR_DURABILITY_FLOOR_FRACTION = 0.20
+
+# Repair economics for the player-facing Blacksmith interaction (see
+# World.player_attempt_repair_gear in engine.py). A fully-broken item
+# (100% missing durability) costs at most half its own value in money to
+# fully restore, plus a small amount of a generic repair material -
+# deliberately always iron_ingot regardless of the item's actual
+# material (a common game simplification: "the smith always wants iron
+# and coin," not a fully materials-accurate system).
+REPAIR_MONEY_COST_FRACTION_OF_VALUE = 0.5
+REPAIR_MATERIAL_KEY = "iron_ingot"
+REPAIR_MATERIAL_MAX_QTY = 3
 
 
 def normalize_item_quality(quality: str | None) -> str:
@@ -68,12 +110,25 @@ class ItemReference:
     age_in_ticks: int = 0
     written_text: str = ""
     title: str | None = None
+    # Cumulative permanent reduction to max_durability from past repairs -
+    # see repair(). 0 means "never repaired" / undamaged-ceiling.
+    repair_wear: int = 0
 
     def __post_init__(self) -> None:
         self.quality = normalize_item_quality(self.quality)
         max_durability = self.max_durability
         if self.current_durability is None and max_durability is not None:
             self.current_durability = max_durability
+
+    def __setstate__(self, state):
+        # ItemReference was flagged as an explicit, documented scoping
+        # exclusion in the earlier save/load migration pass (fix 1) -
+        # unpickling bypasses __init__ entirely, so old saves predating a
+        # newly-added field (like repair_wear, added alongside the repair
+        # mechanic) would otherwise crash the first time something reads
+        # it. Closing that gap now since this change is exactly the kind
+        # of new-field addition that would have hit it.
+        dataclass_setstate(self, state)
 
     @property
     def definition(self) -> dict:
@@ -104,11 +159,25 @@ class ItemReference:
         return self.definition.get("color")
 
     @property
-    def max_durability(self) -> int | None:
+    def true_base_max_durability(self) -> int | None:
+        """max_durability with quality applied but BEFORE repair_wear -
+        i.e. what this item's ceiling would be if it had never been
+        repaired. Used as the reference point for both the per-repair wear
+        amount and the repair floor, so repeated repairs erode toward a
+        fixed floor rather than the floor itself drifting as repair_wear
+        accumulates."""
         base_max_durability = self.definition.get("properties", {}).get("max_durability")
         if base_max_durability is None:
             return None
         return max(1, int(round(base_max_durability * self.quality_multiplier)))
+
+    @property
+    def max_durability(self) -> int | None:
+        true_base = self.true_base_max_durability
+        if true_base is None:
+            return None
+        floor = max(1, int(round(true_base * REPAIR_DURABILITY_FLOOR_FRACTION)))
+        return max(floor, true_base - self.repair_wear)
 
     @property
     def value(self) -> int:
@@ -174,12 +243,50 @@ class ItemReference:
         self.current_durability = max(0, self.current_durability - max(0, int(amount)))
         return self.current_durability <= 0
 
+    def repair(self) -> dict:
+        """Restores current_durability to max_durability and permanently
+        wears the item's ceiling down a bit (finite-use repair, per
+        Jason's design decision: repair should cost the item something
+        real, not just undo degrade() forever for a fee).
+
+        Each call adds REPAIR_WEAR_PER_REPAIR_FRACTION * true_base_max_durability
+        to repair_wear - a flat amount per repair regardless of how damaged
+        the item was, since it's the act of reworking the material that
+        fatigues it, not how much durability happened to be restored.
+        max_durability's own floor (REPAIR_DURABILITY_FLOOR_FRACTION of
+        true_base_max_durability) means repeated repairs approach a fixed
+        floor rather than ever reaching zero/unrepairable.
+
+        Returns a result dict mirroring degrade_equipped_item's shape:
+        {"repaired": bool, "new_max_durability": int|None,
+        "at_repair_limit": bool} - at_repair_limit is True once this item's
+        ceiling is already at (or would already be at) the floor, so
+        callers can tell the player "this is as good as repair can make it
+        anymore" instead of implying infinite future repairs are useful.
+        """
+        true_base = self.true_base_max_durability
+        if true_base is None or self.current_durability is None:
+            return {"repaired": False, "new_max_durability": None, "at_repair_limit": False}
+
+        floor = max(1, int(round(true_base * REPAIR_DURABILITY_FLOOR_FRACTION)))
+        wear_increment = max(1, int(round(true_base * REPAIR_WEAR_PER_REPAIR_FRACTION)))
+        self.repair_wear = min(true_base - floor, self.repair_wear + wear_increment)
+
+        new_ceiling = self.max_durability
+        self.current_durability = new_ceiling
+        return {
+            "repaired": True,
+            "new_max_durability": new_ceiling,
+            "at_repair_limit": new_ceiling is not None and new_ceiling <= floor,
+        }
+
     def update_tick(self) -> str:
         """Advance this item by one tick and apply any spoilage transformation."""
         self.age_in_ticks += 1
 
-        spoilage_chance = self.definition.get("properties", {}).get("spoilage_chance", 0.0)
-        rots_into = self.definition.get("properties", {}).get("rots_into")
+        properties = self.definition.get("properties", {})
+        spoilage_chance = per_tick_spoilage_chance(properties.get("spoilage_chance", 0.0))
+        rots_into = properties.get("rots_into")
         if spoilage_chance > 0 and rots_into and random.random() < spoilage_chance:
             self.key = rots_into
             self.quality = "Normal"
@@ -306,10 +413,29 @@ class Inventory(dict):
                 yield item
 
     def process_tick(self) -> None:
-        """Advance all item instances and apply any key transformations safely."""
+        """Advance all item instances and apply any key transformations safely.
+
+        Whether a thing can rot is a property of the item *kind*, so it is
+        resolved once per stack rather than once per instance. It used to be
+        looked up - and a die rolled - for every object every tick, and 96% of
+        what a village stores cannot spoil at all: a general store's coins alone
+        are thousands of individual instances, each rolling against a spoilage
+        chance of zero. That single pass was costing about a fifth of every
+        world tick.
+        """
         transformations: list[tuple[str, ItemReference]] = []
 
         for item_key, stack in list(self._item_stacks.items()):
+            if not stack:
+                continue
+            properties = stack[0].definition.get("properties", {})
+            can_spoil = bool(properties.get("spoilage_chance", 0.0)) and bool(properties.get("rots_into"))
+            if not can_spoil:
+                # Nothing to roll for; age still advances.
+                for item in stack:
+                    item.age_in_ticks += 1
+                continue
+
             for item in list(stack):
                 previous_key = item_key
                 updated_key = item.update_tick()

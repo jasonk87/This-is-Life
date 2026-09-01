@@ -8,6 +8,7 @@ import random
 from typing import Any
 
 from config import DAY_LENGTH_TICKS
+from entities.pickle_compat import dataclass_setstate
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,9 @@ class GrudgeRecord:
     decay_days: int = 5
     persistent: bool = False
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class LocalOpinionRecord:
@@ -62,6 +66,9 @@ class LocalOpinionRecord:
     evidence_count: int = 0
     last_updated_day: int = 0
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class HistoryFactReactionState:
@@ -71,6 +78,9 @@ class HistoryFactReactionState:
     reacted_source_type: str = ""
     last_reaction_tick: int = 0
     applied_reaction_strength: float = 0.0
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 
 @dataclass(frozen=True)
@@ -514,6 +524,11 @@ class KnowledgeComponent:
     perceived_item_tiles: list[tuple[int, int]] = field(default_factory=list)
     active_quests: dict = field(default_factory=dict)
     completed_quests: list[str] = field(default_factory=list)
+    # Quests that became permanently uncompletable (currently: their giver
+    # NPC died - see World._fail_quests_orphaned_by_death) rather than being
+    # finished. Kept separate from completed_quests so quest-log UI/logic
+    # can distinguish "done" from "failed" if it ever wants to.
+    failed_quests: list[str] = field(default_factory=list)
     claimed_tasks: list[str] = field(default_factory=list)
     known_books: set[str] = field(default_factory=set)
     recently_spoken_topic_ids: list[str] = field(default_factory=list)
@@ -608,6 +623,21 @@ class KnowledgeComponent:
     REPUTATION_EVENT_SCORES = {
         "murder": -50,
         "unpaid_wages": -20,
+        # Witnessed crime (theft, assault, etc. - see engine.py's
+        # record_crime_event / _process_npc_witness_events, which log these
+        # with event_type="crime_witnessed") previously wasn't in this table
+        # at all, so a witnessed theft or assault never touched reputation -
+        # only unpaid wages and murder actually fed pricing/elections.
+        # -25 is a judgment call: worse than unpaid_wages (-20), a purely
+        # economic/civil wrong, since this covers real criminal acts against
+        # people or property including violence, but well short of murder
+        # (-50). This is a single flat value for all crime_kind values
+        # (theft, assault, etc. alike) - REPUTATION_EVENT_SCORES has no
+        # mechanism to differentiate by crime_kind today (murder/unpaid_wages
+        # are flat single values too), so a theft and an assault currently
+        # cost a witness's opinion the same amount. Splitting that out would
+        # be a reasonable follow-up but is a bigger change than this pass.
+        "crime_witnessed": -25,
         "crafted_masterwork": 10,
         "quest_complete": 15,
         "heroic_rescue": 25,
@@ -617,6 +647,16 @@ class KnowledgeComponent:
         "lowered_taxes": 12,
         "issued_bounty": -15,
         "issued_arrest_warrant": -10,
+        # Grudge escalation (simulation/systems/scheduling.py's
+        # run_npc_grudge_escalation_policy): a rare, severe/long-held
+        # NPC-on-NPC grudge can now actually escalate into targeted gossip
+        # or petty sabotage instead of just sitting there as a passive
+        # distrust modifier. Both are deliberately milder than
+        # crime_witnessed (-25) - unproven rumor/petty spite, not an actual
+        # witnessed crime - with sabotage worse than plain gossip since it's
+        # a real material act, not just talk.
+        "malicious_gossip": -8,
+        "petty_sabotage": -15,
     }
 
     def record_event(self, event: MemoryEvent) -> bool:
@@ -674,7 +714,56 @@ class KnowledgeComponent:
         selected.sort(key=lambda memory: (-memory.importance_score, -memory.timestamp, memory.id))
         return selected
 
-    def get_reputation_towards(self, target_entity) -> int:
+    # --- Reputation decay (redemption over time) ---
+    # Previously get_reputation_towards summed REPUTATION_EVENT_SCORES over
+    # every known memory forever, with no way for an NPC who stopped
+    # committing crimes to ever rebuild trust - the only pruning was
+    # _trim_memory_events' capacity-based eviction, which can just as easily
+    # drop a positive memory as a negative one and isn't triggered by time
+    # passing at all.
+    #
+    # Design (judgment call, flagged for review): a fixed "grace period"
+    # during which an event counts at full weight (recent behavior should
+    # matter fully, not be discounted from day one), followed by exponential
+    # half-life decay after that. Half-life decay was chosen over a hard
+    # cutoff or linear fade so contribution shrinks quickly at first but
+    # never fully vanishes - a notorious past murder should still leave a
+    # faint trace generations later, matching "slow redemption, not instant
+    # forgiveness" rather than a clean memory wipe. Both constants are in
+    # game-days (via DAY_LENGTH_TICKS) and deliberately long relative to
+    # GrudgeRecord's 5-12 day decay_days values elsewhere in this file -
+    # grudges are personal, situational suspicion; reputation is meant to be
+    # a much slower-moving, longer-memory signal.
+    #
+    # Applied symmetrically to positive AND negative events (a reformed
+    # criminal's old good deeds fade at the same rate as their old crimes) -
+    # the alternative (decay negative-only) would mean a single ancient
+    # crime could keep outweighing a lifetime of subsequent good behavior,
+    # which runs against the "gradual rebuilding of trust" goal.
+    REPUTATION_DECAY_GRACE_DAYS = 14
+    REPUTATION_DECAY_HALFLIFE_DAYS = 45
+
+    def _reputation_decay_multiplier(self, current_tick: int, event_tick: int) -> float:
+        age_ticks = current_tick - event_tick
+        if age_ticks <= 0:
+            return 1.0
+        age_days = age_ticks / DAY_LENGTH_TICKS
+        if age_days <= self.REPUTATION_DECAY_GRACE_DAYS:
+            return 1.0
+        decayed_days = age_days - self.REPUTATION_DECAY_GRACE_DAYS
+        return 0.5 ** (decayed_days / self.REPUTATION_DECAY_HALFLIFE_DAYS)
+
+    def get_reputation_towards(self, target_entity, *, current_tick: int | None = None) -> int:
+        """Sum this entity's reputation-relevant memories about target_entity.
+
+        current_tick: pass the world's current game_time to apply real
+        time-based decay (older events count for progressively less, per
+        _reputation_decay_multiplier). Left as None (no decay - identical
+        to the old always-full-weight behavior) by default so callers that
+        only care about an instantaneous, timeless comparison (and existing
+        tests written against fixed-timestamp memories) are unaffected;
+        production call sites in engine.py pass self.game_time explicitly.
+        """
         if target_entity is None:
             return 0
         if hasattr(target_entity, "is_identity_concealed") and target_entity.is_identity_concealed():
@@ -684,12 +773,15 @@ class KnowledgeComponent:
         if target_id is None:
             return 0
 
-        total_score = 0
+        total_score = 0.0
         for memory in self.known_memories.values():
             if memory.subject_id != target_id:
                 continue
-            total_score += self.REPUTATION_EVENT_SCORES.get(memory.event_type, 0)
-        return total_score
+            base_score = self.REPUTATION_EVENT_SCORES.get(memory.event_type, 0)
+            if current_tick is not None:
+                base_score *= self._reputation_decay_multiplier(current_tick, memory.timestamp)
+            total_score += base_score
+        return int(round(total_score))
 
     def _trim_memory_events(self) -> None:
         while len(self.known_memories) > self.max_memory_events:
@@ -698,6 +790,9 @@ class KnowledgeComponent:
                 key=lambda memory: (memory.importance_score, memory.timestamp, memory.id),
             )
             self.known_memories.pop(lowest_priority.id, None)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 
 class AspirationType(str, Enum):
@@ -712,6 +807,9 @@ class AspirationComponent:
     target_settlement_id: str | None = None
     last_evaluated_day: int = -1
 
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
 
 @dataclass
 class TravelComponent:
@@ -723,3 +821,6 @@ class TravelComponent:
     group_leader_id: int | None = None
     group_member_ids: list[int] = field(default_factory=list)
     target_employment_task_id: str | None = None
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)

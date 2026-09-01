@@ -41,7 +41,14 @@ class TestWorldInteractionActions(unittest.TestCase):
             "combat_behavior": "defensive",
             "base_attack_name": "fists"
         })
-        self.world = World()
+        # Seeded, like the rest of the suite's World() construction. An
+        # unseeded World draws from the ambient global random state, which
+        # depends on everything that ran - and even on everything pytest
+        # merely *imported* during collection - before this test. That made
+        # the social-reaction tests below pass when this file was run alone
+        # and fail in a full-suite run, with the culprit appearing to move
+        # between runs.
+        self.world = World(seed=20250808)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -2024,6 +2031,48 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertEqual(lumber_mill.building_inventory.get("money", 0), 200 - item_reference.value)
         self.assertIs(stored_item, item_reference)
         self.assertEqual(stored_item.crafter_name, "Woodcutter")
+
+    def test_produce_sub_task_output_rolls_back_when_workplace_lacks_required_item(self):
+        """Regression test for the item-consumption rollback bug: an NPC's
+        personal inventory must not be touched if the workplace side of the
+        same sub-task can't supply what it needs. Previously the NPC's items
+        were consumed in step 1 before the workplace shortage was discovered
+        in step 2, destroying the NPC's items for nothing."""
+        worker = engine.NPC(0, 0, name="Blacksmith Apprentice")
+        worker.economic.npc_inventory["iron_ore"] = 2
+        forge = engine.Building(0, 0, 5, 5, building_type="blacksmith_shop", category="industrial_workplace")
+        # Deliberately no coal in the forge: the workplace side of this
+        # sub-task cannot be satisfied.
+        sub_task_data = {
+            "consumes_item_from_npc_inventory": {"iron_ore": 2},
+            "consumes_item_from_workplace": {"coal": 1},
+            "produces_item_at_workplace": {"iron_ingot": 1},
+        }
+
+        result = self.world._produce_sub_task_output(worker, forge, sub_task_data)
+
+        self.assertFalse(result)
+        self.assertEqual(worker.economic.npc_inventory.get("iron_ore", 0), 2)
+        self.assertEqual(forge.building_inventory.get("iron_ingot", 0), 0)
+
+    def test_produce_sub_task_output_rolls_back_when_npc_lacks_required_item(self):
+        """Mirror case: if the NPC can't supply its half, the workplace's
+        inventory must not be touched either."""
+        worker = engine.NPC(0, 0, name="Blacksmith Apprentice")
+        # No iron_ore on the worker.
+        forge = engine.Building(0, 0, 5, 5, building_type="blacksmith_shop", category="industrial_workplace")
+        forge.building_inventory["coal"] = 5
+        sub_task_data = {
+            "consumes_item_from_npc_inventory": {"iron_ore": 2},
+            "consumes_item_from_workplace": {"coal": 1},
+            "produces_item_at_workplace": {"iron_ingot": 1},
+        }
+
+        result = self.world._produce_sub_task_output(worker, forge, sub_task_data)
+
+        self.assertFalse(result)
+        self.assertEqual(forge.building_inventory.get("coal", 0), 5)
+        self.assertEqual(forge.building_inventory.get("iron_ingot", 0), 0)
 
     def test_workplace_supply_chain_crafts_recipe_driven_goods_for_lumber_mill_foreman(self):
         foreman = engine.NPC(0, 0, name="Foreman")

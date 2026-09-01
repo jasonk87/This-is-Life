@@ -7,6 +7,17 @@ import math
 import random
 
 from config import WORLD_HEIGHT, WORLD_WIDTH
+from simulation.systems.illness import SICK_STATUS_EFFECT, recover_from_sickness
+
+# Status effects that route an NPC into the seeking-healer/treatment flow.
+# broken_leg and "sick" (illness.py) share this pipeline; each is cured with
+# its own remedy item (healing_salve / herbal_remedy respectively) in the
+# treating_patient completion block below.
+TREATABLE_STATUS_EFFECTS = ("broken_leg", SICK_STATUS_EFFECT)
+
+
+def _needs_treatment(entity) -> bool:
+    return any(effect in entity.physical.status_effects for effect in TREATABLE_STATUS_EFFECTS)
 
 
 def update_npc_medical_state(world, npc) -> None:
@@ -15,7 +26,15 @@ def update_npc_medical_state(world, npc) -> None:
         if not hasattr(npc, "original_speed"):
             npc.original_speed = getattr(npc, "speed", 1)
         npc.speed = max(0.5, getattr(npc, "original_speed", 1) / 2.0)
+        if npc.schedule.current_task in ["resting_in_bed", TaskType.SLEEPING]:
+            rest_ticks = getattr(npc, "_bed_rest_recovery_ticks", 0) + 1
+            npc._bed_rest_recovery_ticks = rest_ticks
+            if rest_ticks >= 2400:
+                npc.physical.status_effects.remove("broken_leg")
+                npc.speed = getattr(npc, "original_speed", 1)
+                npc._bed_rest_recovery_ticks = 0
 
+    if _needs_treatment(npc):
         if npc.schedule.current_task not in ["seeking_healer", "waiting_for_treatment", "resting_in_bed"]:
             npc.schedule.current_task = "seeking_healer"
 
@@ -42,6 +61,10 @@ def update_npc_medical_state(world, npc) -> None:
             else:
                 npc.schedule.current_task = "resting_in_bed"
                 npc.schedule.current_path = []
+    elif npc.schedule.current_task in ["seeking_healer", "waiting_for_treatment", "resting_in_bed"]:
+        npc.schedule.current_task = TaskType.IDLE
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None
 
     if npc.schedule.current_task == "seeking_healer":
         if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
@@ -53,7 +76,7 @@ def update_npc_medical_state(world, npc) -> None:
 
     if npc.economic.profession == "Healer":
         if npc.schedule.current_task not in ["treating_patient", "foraging_for_herbs", "crafting_medical_supplies"]:
-            patients = [p for p in world.all_npcs if not p.physical.is_dead and "broken_leg" in p.physical.status_effects]
+            patients = [p for p in world.all_npcs if not p.physical.is_dead and _needs_treatment(p)]
             if patients:
                 closest_patient = min(patients, key=lambda p: abs(npc.x - p.x) + abs(npc.y - p.y))
                 if abs(npc.x - closest_patient.x) + abs(npc.y - closest_patient.y) < 15:
@@ -66,8 +89,15 @@ def update_npc_medical_state(world, npc) -> None:
                         if path:
                             npc.schedule.current_path = path
             else:
-                salves_count = npc.economic.npc_inventory.get("healing_salve", 0)
-                if salves_count < 5:
+                # Keep both remedies stocked - healing_salve (broken_leg) and
+                # herbal_remedy (sick) share the same forage-then-craft loop.
+                needed_remedy = None
+                if npc.economic.npc_inventory.get("healing_salve", 0) < 5:
+                    needed_remedy = "healing_salve"
+                elif npc.economic.npc_inventory.get("herbal_remedy", 0) < 5:
+                    needed_remedy = "herbal_remedy"
+
+                if needed_remedy:
                     herbs_count = npc.economic.npc_inventory.get("medicinal_herb", 0)
                     if herbs_count < 2:
                         npc.schedule.current_task = "foraging_for_herbs"
@@ -83,6 +113,7 @@ def update_npc_medical_state(world, npc) -> None:
                             npc.schedule.current_task = TaskType.IDLE
                     else:
                         npc.schedule.current_task = "crafting_medical_supplies"
+                        npc.task_context_data = {"remedy": needed_remedy}
                         clinic = world._find_nearest_building_of_type(npc, "clinic")
                         if clinic and "alchemy_station" in clinic.work_zone_tiles and clinic.work_zone_tiles["alchemy_station"]:
                             dest = clinic.work_zone_tiles["alchemy_station"][0]
@@ -114,17 +145,21 @@ def update_npc_medical_state(world, npc) -> None:
                 npc.task_timer -= 1
                 if npc.task_timer <= 0:
                     if npc.economic.npc_inventory.get("medicinal_herb", 0) >= 2:
+                        remedy = getattr(npc, "task_context_data", None) or {}
+                        remedy_item = remedy.get("remedy", "healing_salve")
+                        remedy_label = "herbal remedy" if remedy_item == "herbal_remedy" else "healing salve"
                         npc.economic.npc_inventory["medicinal_herb"] -= 2
                         if npc.economic.npc_inventory["medicinal_herb"] <= 0:
                             del npc.economic.npc_inventory["medicinal_herb"]
-                        npc.craft_item("healing_salve", 1)
-                        world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} crafted a healing salve.")
+                        npc.craft_item(remedy_item, 1)
+                        world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} crafted a {remedy_label}.")
                     npc.schedule.current_task = TaskType.IDLE
                     npc.schedule.current_destination_coords = None
+                    npc.task_context_data = None
 
     if npc.schedule.current_task == "treating_patient":
         patient = world.get_entity_by_id(npc.task_target_entity_id)
-        if not patient or patient.physical.is_dead or "broken_leg" not in patient.physical.status_effects:
+        if not patient or patient.physical.is_dead or not _needs_treatment(patient):
             npc.schedule.current_task = TaskType.IDLE
             npc.task_target_entity_id = None
             return
@@ -133,22 +168,38 @@ def update_npc_medical_state(world, npc) -> None:
             if npc.task_timer > 0:
                 npc.task_timer -= 1
             else:
-                patient.physical.status_effects.remove("broken_leg")
-                if patient.combat.body_parts_hp.get("left_leg", 0) <= 0:
-                    patient.combat.body_parts_hp["left_leg"] = max(1, patient.combat.body_parts_max_hp.get("left_leg", 5))
-                if patient.combat.body_parts_hp.get("right_leg", 0) <= 0:
-                    patient.combat.body_parts_hp["right_leg"] = max(1, patient.combat.body_parts_max_hp.get("right_leg", 5))
+                # Instant, full cure per visit (first-pass design: no
+                # partial/multi-session recovery) - treats every treatable
+                # ailment the patient currently has in one visit.
+                treated = []
+                if "broken_leg" in patient.physical.status_effects:
+                    patient.physical.status_effects.remove("broken_leg")
+                    if patient.combat.body_parts_hp.get("left_leg", 0) <= 0:
+                        patient.combat.body_parts_hp["left_leg"] = max(1, patient.combat.body_parts_max_hp.get("left_leg", 5))
+                    if patient.combat.body_parts_hp.get("right_leg", 0) <= 0:
+                        patient.combat.body_parts_hp["right_leg"] = max(1, patient.combat.body_parts_max_hp.get("right_leg", 5))
+                    treated.append(("broken leg", "healing_salve"))
+                if SICK_STATUS_EFFECT in patient.physical.status_effects:
+                    recover_from_sickness(patient)
+                    treated.append(("sickness", "herbal_remedy"))
+                    drift = getattr(world, "_apply_illness_recovery_trait_drift", None)
+                    if callable(drift):
+                        drift(patient)
 
                 if patient.economic.money >= 10:
                     patient.economic.money -= 10
                     npc.economic.money += 10
-                elif npc.economic.npc_inventory.get("healing_salve", 0) >= 1:
-                    npc.economic.npc_inventory["healing_salve"] -= 1
-                    if npc.economic.npc_inventory["healing_salve"] <= 0:
-                        del npc.economic.npc_inventory["healing_salve"]
+                else:
+                    for _, remedy_item in treated:
+                        if npc.economic.npc_inventory.get(remedy_item, 0) >= 1:
+                            npc.economic.npc_inventory[remedy_item] -= 1
+                            if npc.economic.npc_inventory[remedy_item] <= 0:
+                                del npc.economic.npc_inventory[remedy_item]
+                            break
 
+                ailment_summary = " and ".join(name for name, _ in treated) if treated else "ailment"
                 world.add_message_to_chat_log(
-                    f"{world.get_entity_display_name(npc)} successfully treats {world.get_entity_display_name(patient)}'s broken leg."
+                    f"{world.get_entity_display_name(npc)} successfully treats {world.get_entity_display_name(patient)}'s {ailment_summary}."
                 )
                 npc.schedule.current_task = TaskType.IDLE
                 patient.schedule.current_task = TaskType.IDLE

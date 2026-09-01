@@ -16,6 +16,7 @@ from simulation.systems.social_reaction import (
     apply_known_history_fact_reactions,
     evaluate_social_reaction_stance,
 )
+from presentation import message_log
 from simulation.systems.utility_ai import evaluate_needs_utility
 
 
@@ -25,6 +26,115 @@ def _is_coordinate_pair(coords) -> bool:
         and len(coords) == 2
         and all(isinstance(value, int) for value in coords)
     )
+
+
+def find_dispersed_destination_coords(
+    world,
+    target_coords: tuple[int, int],
+    radius: int = 3,
+    requesting_entity=None,
+    building=None,
+) -> tuple[int, int]:
+    """Find a walkable, unoccupied tile in a radius around target_coords to prevent stacking."""
+    if not _is_coordinate_pair(target_coords):
+        return target_coords
+    cx, cy = target_coords
+
+    occupied = set()
+    entity_positions = getattr(world, "entity_positions", {})
+    if isinstance(entity_positions, dict):
+        for pos, eid in entity_positions.items():
+            if requesting_entity is None or eid != getattr(requesting_entity, "id", None):
+                occupied.add(pos)
+
+    # Also avoid coordinates currently targeted by other nearby active NPCs
+    all_actors = list(getattr(world, "all_npcs", [])) if hasattr(world, "all_npcs") else list(getattr(world, "village_npcs", []))
+    for other in all_actors:
+        if requesting_entity is not None and getattr(other, "id", None) == getattr(requesting_entity, "id", None):
+            continue
+        other_dest = getattr(getattr(other, "schedule", None), "current_destination_coords", None)
+        if other_dest:
+            occupied.add(other_dest)
+
+    # Check if (cx, cy) itself is completely free and valid
+    if (cx, cy) not in occupied:
+        tile = world.get_tile_at(cx, cy)
+        if tile and getattr(tile, "passable", False):
+            if building is None or building.contains_global_coords(cx, cy):
+                return (cx, cy)
+
+    # Search outwards ring-by-ring to spread entities evenly
+    for r in range(1, max(1, radius) + 1):
+        ring_candidates = []
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                tx, ty = cx + dx, cy + dy
+                if (tx, ty) in occupied:
+                    continue
+                tile = world.get_tile_at(tx, ty)
+                if not (tile and getattr(tile, "passable", False)):
+                    continue
+                if building is not None and not building.contains_global_coords(tx, ty):
+                    continue
+                ring_candidates.append((tx, ty))
+        if ring_candidates:
+            return random.choice(ring_candidates)
+
+    return target_coords
+
+
+# Which kind of work anchor a profession prefers to stand at. Anything not
+# listed works at a bench.
+WORK_ANCHOR_IDEAL_ROLES = {
+    "Mayor": "desk",
+    "Scribe": "desk",
+    "Town Official": "desk",
+    "Sheriff": "desk",
+    "Merchant": "counter",
+    "Tavern Keeper": "counter",
+    "Traveling Merchant": "counter",
+}
+
+
+def get_work_anchor_coords(world, npc, work_building) -> tuple[int, int]:
+    """The tile `npc` should stand on while working at `work_building`.
+
+    Generated buildings mostly carry no anchors at all, so this usually comes
+    back as the building's centre - a single tile. Callers seating more than one
+    worker have to spread them out themselves.
+    """
+    fallback = (work_building.global_center_x, work_building.global_center_y)
+    ideal_role = WORK_ANCHOR_IDEAL_ROLES.get(
+        getattr(getattr(npc, "economic", None), "profession", ""), "workbench"
+    )
+    anchor = work_building.get_anchor_coordinates(
+        ["work", "service"], world=world, requesting_entity=npc, ideal_role=ideal_role
+    )
+    if not _is_coordinate_pair(anchor):
+        return fallback
+    refined = work_building.refine_anchor_coordinates(
+        world, anchor[0], anchor[1], requesting_entity=npc
+    )
+    return tuple(refined) if _is_coordinate_pair(refined) else tuple(anchor)
+
+
+def _is_inside_building(world, npc, building_id) -> bool:
+    """Whether the NPC is standing anywhere inside the given building.
+
+    Deliberately the whole footprint rather than the centre tile. Only one NPC
+    can ever stand on a centre tile, so a centre-tile test meant the second and
+    subsequent workers at a shop - or residents of a shared house - never
+    counted as arrived, and re-issued a "walk to the centre tile" order every
+    tick against a square that was already taken.
+    """
+    if not building_id:
+        return False
+    building = world.buildings_by_id.get(building_id)
+    if building is None:
+        return False
+    return building.contains_global_coords(npc.x, npc.y)
 
 
 def run_npc_presence_micro_reactions(world, npc) -> bool:
@@ -114,7 +224,10 @@ def run_npc_proactive_help_seeking_policy(world, npc) -> bool:
                     required_kills=0,
                 )
                 setattr(npc, "active_quest", quest)
-                world.add_message_to_chat_log(f"Debug: {npc.name} generated quest '{quest.title}'.")
+                world.add_message_to_chat_log(
+                    f"Debug: {npc.name} generated quest '{quest.title}'.",
+                    category=message_log.DEBUG_CATEGORY,
+                )
 
             if needs_help and npc.id in world.npc_fov_maps and world.npc_fov_maps[npc.id][world.player.y, world.player.x]:
                 npc.schedule.current_task = "approaching_player_for_help"
@@ -369,7 +482,19 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
     current_day = world.game_time // DAY_LENGTH_TICKS
     if run_npc_grudge_suspicion_policy(world, npc, current_day):
         return
+    if run_npc_grudge_escalation_policy(world, npc, current_day):
+        return
     if run_npc_social_reaction_policy(world, npc):
+        return
+
+    # Asking for help comes before the needs system, deliberately. This is the
+    # branch for a villager who is desperate AND cannot solve it themselves -
+    # they do not know where any food or water is - and it only fires at hunger
+    # or thirst of 90. evaluate_needs_utility claims the turn at 70 and returns,
+    # so this was never once reached at the level it needs: the whole "villager
+    # walks up to the player and asks for help" quest line could not happen.
+    # Verified: an NPC at hunger 95 with no known food source generated nothing.
+    if run_npc_proactive_help_seeking_policy(world, npc):
         return
 
     # Utility-based needs can override routine schedules, but not immediate
@@ -380,7 +505,6 @@ def run_npc_humanoid_scheduling_flow(world, npc, current_time_in_day: int) -> No
         return
     if run_npc_social_gathering_policy(world, npc):
         return
-    run_npc_proactive_help_seeking_policy(world, npc)
     run_npc_crime_reporting_policy(world, npc)
     run_npc_item_pickup_policy(world, npc)
     if run_npc_follower_envelope_policy(world, npc):
@@ -736,6 +860,118 @@ def run_npc_grudge_suspicion_policy(world, npc, current_day: int) -> bool:
     return True
 
 
+# --- Grudge escalation (NPC-on-NPC) ---
+# run_npc_grudge_suspicion_policy above only ever acts on a grudge held
+# against the PLAYER (avoidance / reporting to the sheriff). Grudges held
+# against other NPCs (e.g. from unpaid wages, witnessed crimes, or fear
+# reactions to known history facts - see World.add_grudge's callers)
+# previously just sat there passively affecting distrust/stance checks -
+# they never actually did anything. This adds a real, deliberately rare
+# escalation path for the worst, longest-held NPC-on-NPC grudges: spreading
+# targeted negative gossip, or in rarer/more severe cases, a small act of
+# sabotage (a bit of stolen/ruined money). Conservative by design - a high
+# severity+age bar, low per-check odds, and at most one action per NPC per
+# scheduling check - this should read as occasional, memorable friction
+# between villagers, not constant NPC-vs-NPC warfare.
+GRUDGE_ESCALATION_SEVERITY_THRESHOLD = 70   # matches the existing player-grudge "report to sheriff" bar
+GRUDGE_ESCALATION_MIN_AGE_DAYS = 5          # a grudge needs to have simmered a while, not fire on day one
+GRUDGE_ESCALATION_CHANCE_PER_CHECK = 0.03   # rare - most eligible grudges never escalate on any given check
+GRUDGE_SABOTAGE_SEVERITY_THRESHOLD = 90     # only the very worst grudges risk sabotage rather than gossip
+GRUDGE_SABOTAGE_CHANCE_MULTIPLIER = 0.25    # sabotage is rarer still than gossip, even once eligible
+GRUDGE_SABOTAGE_MAX_MONEY_STOLEN = 15
+
+
+def run_npc_grudge_escalation_policy(world, npc, current_day: int) -> bool:
+    """Apply rare, severe NPC-on-NPC grudge escalation (targeted gossip or,
+    more rarely, sabotage). Player-directed grudges are intentionally
+    skipped here - those are already handled by
+    run_npc_grudge_suspicion_policy just above, and mixing the two policies
+    on the same grudge would risk conflicting/duplicate reactions."""
+    grudges = getattr(getattr(npc, "social", None), "grudges", None)
+    if not grudges:
+        return False
+
+    player = getattr(world, "player", None)
+    player_id = getattr(player, "id", None)
+    protected_tasks = {"going_to_report_crime", "attacking_player", "combat_action_flee_from_player", "jailed"}
+    if npc.schedule.current_task in protected_tasks:
+        return False
+
+    for target_id, grudge in list(grudges.items()):
+        if target_id == player_id:
+            continue  # player-directed grudges: run_npc_grudge_suspicion_policy's job
+        if getattr(grudge, "severity", 0) < GRUDGE_ESCALATION_SEVERITY_THRESHOLD:
+            continue
+        if (current_day - getattr(grudge, "created_day", current_day)) < GRUDGE_ESCALATION_MIN_AGE_DAYS:
+            continue
+
+        target = world.get_entity_by_id(target_id)
+        if target is None or target is player:
+            continue
+        if getattr(getattr(target, "physical", None), "is_dead", False):
+            continue
+        if not hasattr(target, "economic") or not hasattr(target, "knowledge"):
+            continue  # not a real NPC-shaped entity
+
+        if random.random() >= GRUDGE_ESCALATION_CHANCE_PER_CHECK:
+            continue
+
+        if (
+            grudge.severity >= GRUDGE_SABOTAGE_SEVERITY_THRESHOLD
+            and random.random() < GRUDGE_SABOTAGE_CHANCE_MULTIPLIER
+        ):
+            _escalate_grudge_via_sabotage(world, npc, target)
+        else:
+            _escalate_grudge_via_gossip(world, npc, target)
+        return True
+
+    return False
+
+
+def _escalate_grudge_via_gossip(world, npc, target) -> None:
+    """The grudge-holder starts spreading unflattering rumors about the
+    target - seeded as a memory in the gossiper's own knowledge, then left
+    to propagate through the existing gossip-sharing machinery
+    (KnowledgeComponent.choose_memories_to_share / ambient_info.py's
+    sharing gate) exactly like any other memory, rather than building a
+    separate propagation path just for this."""
+    memory = world.create_memory_event(
+        event_type="malicious_gossip",
+        subject_id=target.id,
+        target_id=npc.id,
+        importance_score=25,
+        headline=f"{world.get_entity_display_name(npc)} has been spreading unkind rumors about {world.get_entity_display_name(target)}.",
+    )
+    world.record_memory_event(npc, memory)
+    world.add_message_to_chat_log(
+        f"{world.get_entity_display_name(npc)} has been spreading unkind rumors about {world.get_entity_display_name(target)}."
+    )
+
+
+def _escalate_grudge_via_sabotage(world, npc, target) -> None:
+    """The rarer, more severe escalation: a small, capped act of material
+    sabotage (petty theft/damage) rather than just talk. The target learns
+    who was responsible immediately (no separate detection/witness model
+    for this first pass) so it can feed back into their own opinion of the
+    saboteur via the usual reputation machinery."""
+    stolen = min(GRUDGE_SABOTAGE_MAX_MONEY_STOLEN, max(0, getattr(target.economic, "money", 0)))
+    if stolen > 0:
+        target.economic.money -= stolen
+        npc.economic.money += stolen
+
+    memory = world.create_memory_event(
+        event_type="petty_sabotage",
+        subject_id=npc.id,
+        target_id=target.id,
+        importance_score=35,
+        headline=f"{world.get_entity_display_name(target)}'s belongings were tampered with - {world.get_entity_display_name(npc)} is responsible.",
+    )
+    world.record_memory_event(target, memory)
+    world.add_message_to_chat_log(
+        f"{world.get_entity_display_name(target)}'s things have been tampered with..."
+    )
+
+
 def run_npc_traveling_merchant_policy(world, npc) -> None:
     """Run schedule-time travel and village trading behavior for traveling merchants."""
     if npc.economic.profession != "Traveling Merchant":
@@ -786,235 +1022,258 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
     new_task_label = None
     destination_coords = None
 
-    is_at_home = False
-    if npc.schedule.home_building_id:
-        home_coords = world._get_building_global_center_coords(npc.schedule.home_building_id)
-        if home_coords and (npc.x, npc.y) == home_coords:
-            is_at_home = True
-
-    is_at_work = False
-    if npc.schedule.work_building_id:
-        work_building = world.buildings_by_id.get(npc.schedule.work_building_id)
-        if work_building:
-            work_coords = (work_building.global_center_x, work_building.global_center_y)
-            if work_coords and (npc.x, npc.y) == work_coords:
-                is_at_work = True
+    is_at_home = _is_inside_building(world, npc, npc.schedule.home_building_id)
+    is_at_work = _is_inside_building(world, npc, npc.schedule.work_building_id)
 
     work_start_tick = DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
     work_end_tick = DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
-    sleep_start_tick = DAY_LENGTH_TICKS * 0.85
-    sleep_end_tick = DAY_LENGTH_TICKS * 0.15
+    sleep_start_tick = DAY_LENGTH_TICKS * (22.0 / 24.0)
+    sleep_end_tick = DAY_LENGTH_TICKS * (6.0 / 24.0)
     is_night_time = current_time_in_day >= sleep_start_tick or current_time_in_day < sleep_end_tick
     is_leisure_time = work_end_tick <= current_time_in_day < sleep_start_tick
 
-    if work_start_tick <= current_time_in_day < work_end_tick:
-        if npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
-            dest_coords_temp = world._get_building_global_center_coords(npc.schedule.work_building_id)
-            if dest_coords_temp:
-                work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
-                if work_building_obj:
-                    # Guess ideal role based on profession
-                    ideal_role = "workbench"
-                    if npc.economic.profession in {"Mayor", "Scribe", "Town Official", "Sheriff"}:
-                        ideal_role = "desk"
-                    elif npc.economic.profession in {"Merchant", "Tavern Keeper", "Traveling Merchant"}:
-                        ideal_role = "counter"
-
-                    work_anchor = work_building_obj.get_anchor_coordinates(["work", "service"], world=world, requesting_entity=npc, ideal_role=ideal_role)
-                    if work_anchor:
-                        dest_coords_temp = work_building_obj.refine_anchor_coordinates(world, work_anchor[0], work_anchor[1], requesting_entity=npc)
-                new_task_label = TaskType.GOING_TO_WORK
-                destination_coords = dest_coords_temp
-        elif npc.schedule.work_building_id and is_at_work:
-            npc.schedule.current_task = TaskType.AT_WORK
-        elif npc.economic.profession.lower() == "unemployed" and npc.schedule.current_task != TaskType.LOOKING_FOR_WORK:
-            if random.random() < 0.02:
-                npc_village = world._get_village_for_npc(npc)
-                if npc_village:
-                    workplaces = [b for b in npc_village.buildings if "workplace" in b.category]
-                    if workplaces:
-                        target_workplace = random.choice(workplaces)
-                        dest_coords = (target_workplace.global_center_x, target_workplace.global_center_y)
-                        if (npc.x, npc.y) != dest_coords:
-                            new_task_label = TaskType.LOOKING_FOR_WORK
-                            destination_coords = dest_coords
-                            npc.leisure_timer = random.randint(50, 100)
-
-    elif is_leisure_time and npc.schedule.current_task not in ["at_leisure", "going_to_tavern", "socializing", TaskType.GOING_HOME, "visiting_friend", "gathering_social", "socializing_at_focal_point"]:
-        if npc.leisure_timer > 0:
-            npc.leisure_timer -= 1
-        elif random.random() < 0.05:
-            tavern = world._find_nearest_tavern(npc)
-            if tavern:
-                new_task_label = "going_to_tavern"
-                destination_coords = (tavern.global_center_x, tavern.global_center_y)
-        elif npc.economic.profession == "Town Official" and random.random() < 0.1:
-            village = world._get_village_for_npc(npc)
-            if village and "town_square_center" in village.interaction_points and npc.knowledge.known_events:
-                event_to_shout = world._get_most_interesting_known_event(npc)
-                if event_to_shout:
-                    new_task_label = "crying_news"
-                    destination_coords = village.interaction_points["town_square_center"][0]
-                    npc.clear_work_sub_task_state(reset_sequence=True)
-                    npc.task_target_entity_id = None
-                    npc.task_context_data = event_to_shout.id
-        elif random.random() < 0.1:
-            potential_partners = [
-                p for p in world.village_npcs
-                if p.id != npc.id and not p.physical.is_dead and abs(npc.x - p.x) + abs(npc.y - p.y) < 20
-            ]
-            if potential_partners:
-                weights = [max(1, npc.social.relationships.get(p.id, 50)) for p in potential_partners]
-                chat_partner = random.choices(potential_partners, weights=weights, k=1)[0]
-                new_task_label = "socializing"
-                dest_x, dest_y = world._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
-                if dest_x is not None:
-                    destination_coords = (dest_x, dest_y)
-                    npc.task_target_entity_id = chat_partner.id
-                    npc.leisure_timer = random.randint(50, 150)
-        elif random.random() < 0.1:
-            world._start_npc_socialization(npc)
-        elif random.random() < 0.05:
-            friends = [n for n in world.village_npcs if n.id != npc.id and npc.social.relationships.get(n.id, 50) > 60]
-            if friends:
-                friend_to_visit = random.choice(friends)
-                if friend_to_visit.schedule.home_building_id:
-                    friend_home = world.buildings_by_id.get(friend_to_visit.schedule.home_building_id)
-                    if friend_home:
-                        new_task_label = "visiting_friend"
-                        destination_coords = (friend_home.global_center_x, friend_home.global_center_y)
-                        npc.task_target_entity_id = friend_to_visit.id
-                        npc.leisure_timer = random.randint(100, 300)
-        elif random.random() < 0.1 and npc.knowledge.known_locations:
-            location_name, location_coords = random.choice(list(npc.knowledge.known_locations.items()))
-            if location_coords != (npc.x, npc.y):
-                new_task_label = "acting_on_knowledge"
-                destination_coords = location_coords
-                npc.leisure_timer = random.randint(100, 200)
-                npc.task_context_data = {
-                    "knowledge_target_name": location_name,
-                    "knowledge_target_coords": location_coords,
-                }
-        elif random.random() < 0.05 or npc.economic.profession == "Fisherman":
-            npc_village = world._get_village_for_npc(npc)
-            if npc_village and "fishing_spot" in npc_village.interaction_points:
-                fishing_spot = random.choice(npc_village.interaction_points["fishing_spot"])
-                new_task_label = "working_fishing" if npc.economic.profession == "Fisherman" else "leisure_fishing"
-                destination_coords = fishing_spot
-                npc.leisure_timer = random.randint(100, 300)
-
-    if npc.schedule.current_task == "going_to_social_anchor" and (npc.x, npc.y) == destination_coords:
-        npc.schedule.current_task = TaskType.AT_HOME
-        npc.leisure_timer = random.randint(50, 150)
-    elif npc.schedule.current_task == "working_fishing" and (npc.x, npc.y) == destination_coords:
-        world.npc_attempt_fish(npc, npc.x, npc.y)
-    elif npc.schedule.current_task == "crying_news" and (npc.x, npc.y) == destination_coords:
-        event_id_to_shout = npc.task_context_data
-        event_to_shout = npc.knowledge.known_events.get(event_id_to_shout)
-        if not event_to_shout and npc.knowledge.known_events:
-            event_to_shout = list(npc.knowledge.known_events.values())[-1]
-        if event_to_shout:
-            world.broadcast_news(npc, 15, event_to_shout)
-        npc.schedule.current_task = TaskType.IDLE
-        npc.leisure_timer = 50
-        npc.task_context_data = None
-    elif is_night_time and npc.schedule.home_building_id and npc.schedule.current_task not in [TaskType.SLEEPING, TaskType.GOING_HOME_TO_SLEEP]:
-        home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
-        if home_building_obj:
-            sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
-            if not sleep_spot_coords:
-                sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
-                if _is_coordinate_pair(sleep_spot_coords):
-                    refined_sleep_spot = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
-                    sleep_spot_coords = tuple(refined_sleep_spot) if _is_coordinate_pair(refined_sleep_spot) else tuple(sleep_spot_coords)
-                elif not _is_coordinate_pair(sleep_spot_coords):
-                    sleep_spot_coords = None
-            if is_at_home:
-                if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords:
-                    npc.schedule.current_task = TaskType.SLEEPING
-                elif sleep_spot_coords and (npc.x, npc.y) != sleep_spot_coords:
-                    new_task_label = TaskType.GOING_TO_BED
-                    destination_coords = sleep_spot_coords
-                elif not sleep_spot_coords and world._building_contains_item_with_interaction(home_building_obj, "sleep"):
-                    npc.schedule.current_task = TaskType.SLEEPING
-            else:
-                if sleep_spot_coords:
-                    new_task_label = TaskType.GOING_HOME_TO_SLEEP
-                    destination_coords = sleep_spot_coords
-                else:
-                    dest_coords_temp = world._get_building_global_center_coords(npc.schedule.home_building_id)
-                    if dest_coords_temp:
-                        new_task_label = TaskType.GOING_HOME
-                        destination_coords = dest_coords_temp
-    elif npc.schedule.home_building_id and not is_at_home and npc.schedule.current_task not in [TaskType.GOING_HOME, TaskType.GOING_HOME_TO_SLEEP, TaskType.SLEEPING]:
-        dest_coords_temp = world._get_building_global_center_coords(npc.schedule.home_building_id)
-        if dest_coords_temp:
-            home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id)
-            if home_building_obj:
-                sleep_anchor = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
-                if _is_coordinate_pair(sleep_anchor):
-                    refined_home_coords = home_building_obj.refine_anchor_coordinates(world, sleep_anchor[0], sleep_anchor[1], requesting_entity=npc)
-                    if _is_coordinate_pair(refined_home_coords):
-                        dest_coords_temp = tuple(refined_home_coords)
-            new_task_label = TaskType.GOING_HOME
-            destination_coords = dest_coords_temp
-
-    if npc.schedule.current_task == TaskType.SLEEPING:
-        if not is_night_time:
-            npc.schedule.current_task = TaskType.AT_HOME
-        elif getattr(world, "game_time", 0) % 50 == 0 and hasattr(world, "visual_effects"):
-            from engine import FloatingTextEffect
-            world.visual_effects.append(FloatingTextEffect(npc.x, npc.y, "Zzz", color=(100, 100, 255)))
-    elif npc.schedule.current_task == "seeking_partner":
-        potential_partners = [
-            p for p in world.village_npcs
-            if p.id != npc.id and not p.physical.is_dead and p.age > 18 and not p.social.family_ties.get("partner_id")
-            and world._get_village_for_npc(p) == world._get_village_for_npc(npc)
-        ]
-        if potential_partners:
-            weights = [max(1, npc.social.relationships.get(p.id, 50)) for p in potential_partners]
-            chosen_partner = random.choices(potential_partners, weights=weights, k=1)[0]
-            world.add_message_to_chat_log(f"Debug: {npc.name} is considering courting {chosen_partner.name}.")
-            dest_x, dest_y = world._find_best_adjacent_tile(chosen_partner.x, chosen_partner.y, npc)
-            if dest_x is not None:
-                destination_coords = (dest_x, dest_y)
-                new_task_label = "courting"
-                npc.task_target_entity_id = chosen_partner.id
-        else:
-            npc.schedule.current_task = TaskType.IDLE
-    elif is_leisure_time and npc.age > 18 and not npc.social.family_ties.get("partner_id"):
-        if random.random() < 0.01:
-            npc.schedule.current_task = "seeking_partner"
-
-    is_day_leisure_time = not is_night_time and not (work_start_tick <= current_time_in_day < work_end_tick)
-    if not new_task_label and is_day_leisure_time and random.random() < 0.01:
-        npc_village = None
-        for row in world.chunks:
-            for chk in row:
-                if chk.village and npc.schedule.home_building_id and world.buildings_by_id.get(npc.schedule.home_building_id) in chk.village.buildings:
-                    npc_village = chk.village
-                    break
-            if npc_village:
-                break
-
-        if npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
-            well_coords = random.choice(npc_village.interaction_points["well"])
-            if (npc.x, npc.y) != well_coords:
-                new_task_label = "fetching water"
-                destination_coords = well_coords
-            else:
-                npc.schedule.current_task = "at_well"
-
-    if new_task_label and destination_coords:
-        if (npc.x, npc.y) == destination_coords:
-            if new_task_label == TaskType.GOING_TO_WORK:
+    # 0. Active self-recovery from idle_confused with bounded timer & safe fallback
+    if npc.schedule.current_task == "idle_confused":
+        confused_ticks = getattr(npc, "_confused_ticks", 0) + 1
+        npc._confused_ticks = confused_ticks
+        if confused_ticks >= 5:
+            npc._confused_ticks = 0
+            npc.schedule.current_path = []
+            npc.schedule.current_destination_coords = None
+            if hasattr(world, "_reset_npc_path_blocking"):
+                world._reset_npc_path_blocking(npc)
+            if is_night_time:
+                npc.schedule.current_task = TaskType.SLEEPING if is_at_home else TaskType.GOING_HOME_TO_SLEEP
+            elif work_start_tick <= current_time_in_day < work_end_tick and npc.schedule.work_building_id:
                 npc.schedule.current_task = TaskType.AT_WORK
-            elif new_task_label == TaskType.GOING_HOME:
-                npc.schedule.current_task = TaskType.AT_HOME
             else:
                 npc.schedule.current_task = TaskType.IDLE
+        return
+    else:
+        npc._confused_ticks = 0
+
+    # 1. Morning Wake-Up Transition
+    if not is_night_time and npc.schedule.current_task in [TaskType.SLEEPING, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
+        npc.schedule.current_task = TaskType.AT_HOME if is_at_home else TaskType.IDLE
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None
+
+    # Helper for failure memory & backoff
+    game_time = getattr(world, "game_time", 0)
+    if not hasattr(npc, "_destination_failures"):
+        npc._destination_failures = {}
+
+    def is_dest_blocked(target_coords):
+        if not target_coords or not hasattr(npc, "_destination_failures"):
+            return False
+        fail_info = npc._destination_failures.get(target_coords)
+        if fail_info and game_time < fail_info.get("blocked_until", 0):
+            return True
+        return False
+
+    # 2. Night-Time Lodging & Sleep (Preempts normal work & leisure)
+    if is_night_time:
+        if npc.schedule.current_task not in [TaskType.SLEEPING, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
+            if npc.schedule.current_task in [TaskType.AT_WORK, TaskType.GOING_TO_WORK]:
+                npc.clear_work_sub_task_state(reset_sequence=True)
+            home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id) if npc.schedule.home_building_id else world._find_nearest_tavern(npc)
+            if home_building_obj:
+                sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
+                if not sleep_spot_coords:
+                    sleep_spot_coords = home_building_obj.get_anchor_coordinates("sleep", world=world, requesting_entity=npc, ideal_role="bed")
+                    if _is_coordinate_pair(sleep_spot_coords):
+                        refined_sleep_spot = home_building_obj.refine_anchor_coordinates(world, sleep_spot_coords[0], sleep_spot_coords[1], requesting_entity=npc)
+                        sleep_spot_coords = tuple(refined_sleep_spot) if _is_coordinate_pair(refined_sleep_spot) else tuple(sleep_spot_coords)
+                    elif not _is_coordinate_pair(sleep_spot_coords):
+                        sleep_spot_coords = None
+                is_inside_lodging = getattr(home_building_obj, "contains_global_coords", lambda x, y: False)(npc.x, npc.y)
+                if is_inside_lodging:
+                    if sleep_spot_coords and (npc.x, npc.y) == sleep_spot_coords:
+                        npc.schedule.current_task = TaskType.SLEEPING
+                        npc.schedule.current_path = []
+                    elif sleep_spot_coords and (npc.x, npc.y) != sleep_spot_coords:
+                        new_task_label = TaskType.GOING_TO_BED
+                        destination_coords = find_dispersed_destination_coords(world, sleep_spot_coords, radius=max(1, home_building_obj.width // 2), requesting_entity=npc, building=home_building_obj)
+                    else:
+                        npc.schedule.current_task = TaskType.SLEEPING
+                        npc.schedule.current_path = []
+                else:
+                    dest_coords_temp = sleep_spot_coords if sleep_spot_coords else (home_building_obj.global_center_x, home_building_obj.global_center_y)
+                    new_task_label = TaskType.GOING_TO_BED if sleep_spot_coords else "going_home"
+                    destination_coords = find_dispersed_destination_coords(world, dest_coords_temp, radius=max(1, home_building_obj.width // 2), requesting_entity=npc, building=home_building_obj)
+            else:
+                npc.schedule.current_task = TaskType.SLEEPING
+                npc.schedule.current_path = []
+
+    # 3. Work Shift (Daytime: 08:00 - 17:00)
+    elif work_start_tick <= current_time_in_day < work_end_tick:
+        if npc.economic.profession == "Child":
+            parent = world._find_trackable_parent(npc)
+            if parent is not None:
+                distance_to_parent = abs(npc.x - parent.x) + abs(npc.y - parent.y)
+                if distance_to_parent > 3:
+                    dest_x, dest_y = world._find_best_adjacent_tile(parent.x, parent.y, npc)
+                    if dest_x is not None:
+                        new_task_label = "following_parent"
+                        destination_coords = (dest_x, dest_y)
+                else:
+                    parent_task = getattr(getattr(parent, "schedule", None), "current_task", "")
+                    if parent_task in [TaskType.AT_WORK, "tilling_soil", "harvesting", "forge_crafting"]:
+                        new_task_label = "observing_trade"
+            else:
+                siblings = [other for other in getattr(world, "village_npcs", []) if other.id != npc.id and getattr(getattr(other, "economic", None), "profession", "") == "Child" and not getattr(other.physical, "is_dead", False)]
+                if siblings and random.random() < 0.15:
+                    playmate = random.choice(siblings)
+                    dest_x, dest_y = world._find_best_adjacent_tile(playmate.x, playmate.y, npc)
+                    if dest_x is not None:
+                        new_task_label = "playing_with_friends"
+                        destination_coords = (dest_x, dest_y)
+        elif npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
+            work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
+            if work_building_obj:
+                new_task_label = TaskType.GOING_TO_WORK
+                raw_anchor = get_work_anchor_coords(world, npc, work_building_obj)
+                destination_coords = find_dispersed_destination_coords(world, raw_anchor, radius=2, requesting_entity=npc, building=work_building_obj)
+        elif npc.schedule.work_building_id and is_at_work:
+            npc.schedule.current_task = TaskType.AT_WORK
+        elif npc.economic.profession.lower() == "unemployed":
+            # Activity commitment lock: persist active daytime tasks instead of rapidly discarding
+            if getattr(npc, "leisure_timer", 0) > 0:
+                npc.leisure_timer -= 1
+            else:
+                npc_village = world._get_village_for_npc(npc)
+                roll = random.random()
+                if roll < 0.25 and npc_village and getattr(world, "town_board", None):
+                    nb_coords = getattr(world.town_board, "coords", None)
+                    if not nb_coords and "town_square_center" in npc_village.interaction_points:
+                        nb_coords = npc_village.interaction_points["town_square_center"][0]
+                    if nb_coords and not is_dest_blocked(nb_coords):
+                        dest = find_dispersed_destination_coords(world, nb_coords, radius=2, requesting_entity=npc)
+                        if (npc.x, npc.y) != dest:
+                            new_task_label = "reviewing_noticeboard_jobs"
+                            destination_coords = dest
+                            npc.leisure_timer = random.randint(180, 360)
+                elif roll < 0.50 and npc_village and "town_square_center" in npc_village.interaction_points:
+                    ts_coords = npc_village.interaction_points["town_square_center"][0]
+                    if not is_dest_blocked(ts_coords):
+                        dest = find_dispersed_destination_coords(world, ts_coords, radius=4, requesting_entity=npc)
+                        if (npc.x, npc.y) != dest:
+                            new_task_label = "socializing_at_focal_point"
+                            destination_coords = dest
+                            npc.leisure_timer = random.randint(180, 360)
+                elif roll < 0.75 and npc_village:
+                    workplaces = [b for b in npc_village.buildings if "workplace" in b.category or "commercial" in b.category]
+                    if workplaces:
+                        target_b = random.choice(workplaces)
+                        dest_c = (target_b.global_center_x, target_b.global_center_y)
+                        if not is_dest_blocked(dest_c):
+                            dest = find_dispersed_destination_coords(world, dest_c, radius=3, requesting_entity=npc, building=target_b)
+                            if (npc.x, npc.y) != dest:
+                                new_task_label = "strolling_in_village"
+                                destination_coords = dest
+                                npc.leisure_timer = random.randint(180, 360)
+                elif roll < 0.90:
+                    potential_partners = [
+                        p for p in world.village_npcs
+                        if p.id != npc.id and not p.physical.is_dead and abs(npc.x - p.x) + abs(npc.y - p.y) < 15
+                    ]
+                    if potential_partners:
+                        chat_partner = random.choice(potential_partners)
+                        dest_x, dest_y = world._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
+                        if dest_x is not None and (dest_x, dest_y) != (npc.x, npc.y) and not is_dest_blocked((dest_x, dest_y)):
+                            new_task_label = "socializing"
+                            destination_coords = (dest_x, dest_y)
+                            npc.task_target_entity_id = chat_partner.id
+                            npc.leisure_timer = random.randint(180, 360)
+                elif npc_village and "well" in npc_village.interaction_points and npc_village.interaction_points["well"]:
+                    well_coords = random.choice(npc_village.interaction_points["well"])
+                    if not is_dest_blocked(well_coords):
+                        dest = find_dispersed_destination_coords(world, well_coords, radius=2, requesting_entity=npc)
+                        if (npc.x, npc.y) != dest:
+                            new_task_label = "fetching water"
+                            destination_coords = dest
+                            npc.leisure_timer = random.randint(150, 250)
+
+    # 4. Evening Leisure (17:00 - 22:00)
+    elif is_leisure_time:
+        # Deterministic work-end transition: clear AT_WORK when workday concludes
+        if npc.schedule.current_task in [TaskType.AT_WORK, TaskType.GOING_TO_WORK]:
+            npc.clear_work_sub_task_state(reset_sequence=True)
+            npc.schedule.current_task = "at_leisure"
+            npc.leisure_timer = random.randint(150, 300)
+
+        if getattr(npc, "leisure_timer", 0) > 0:
+            npc.leisure_timer -= 1
+        else:
+            village = world._get_village_for_npc(npc)
+            if npc.economic.profession == "Child":
+                if village and "town_square_center" in village.interaction_points:
+                    new_task_label = "playing_at_town_square"
+                    destination_coords = find_dispersed_destination_coords(world, village.interaction_points["town_square_center"][0], radius=4, requesting_entity=npc)
+                    npc.leisure_timer = random.randint(180, 360)
+            elif world._is_crowd_drawing_event_active() and village and "town_square_center" in village.interaction_points:
+                new_task_label = "attending_festival"
+                destination_coords = find_dispersed_destination_coords(world, village.interaction_points["town_square_center"][0], radius=5, requesting_entity=npc)
+                npc.leisure_timer = random.randint(180, 360)
+            else:
+                roll = random.random()
+                if roll < 0.35:
+                    tavern = world._find_nearest_tavern(npc)
+                    if tavern and not is_dest_blocked((tavern.global_center_x, tavern.global_center_y)):
+                        new_task_label = "going_to_tavern"
+                        destination_coords = find_dispersed_destination_coords(world, (tavern.global_center_x, tavern.global_center_y), radius=3, requesting_entity=npc, building=tavern)
+                        npc.leisure_timer = random.randint(180, 360)
+                elif roll < 0.65:
+                    potential_partners = [
+                        p for p in world.village_npcs
+                        if p.id != npc.id and not p.physical.is_dead and abs(npc.x - p.x) + abs(npc.y - p.y) < 20
+                    ]
+                    if potential_partners:
+                        weights = [max(1, npc.social.relationships.get(p.id, 50)) for p in potential_partners]
+                        chat_partner = random.choices(potential_partners, weights=weights, k=1)[0]
+                        dest_x, dest_y = world._find_best_adjacent_tile(chat_partner.x, chat_partner.y, npc)
+                        if dest_x is not None and not is_dest_blocked((dest_x, dest_y)):
+                            new_task_label = "socializing"
+                            destination_coords = (dest_x, dest_y)
+                            npc.task_target_entity_id = chat_partner.id
+                            npc.leisure_timer = random.randint(180, 360)
+                elif roll < 0.80 and npc.schedule.home_building_id:
+                    home_b = world.buildings_by_id.get(npc.schedule.home_building_id)
+                    if home_b and not is_dest_blocked((home_b.global_center_x, home_b.global_center_y)):
+                        new_task_label = TaskType.GOING_HOME
+                        destination_coords = find_dispersed_destination_coords(world, (home_b.global_center_x, home_b.global_center_y), radius=2, requesting_entity=npc, building=home_b)
+                        npc.leisure_timer = random.randint(180, 360)
+                else:
+                    npc.schedule.current_task = "at_leisure"
+                    npc.leisure_timer = random.randint(150, 300)
+
+    # 5. Execute Task Transition and Destination Pathing
+    if new_task_label and destination_coords:
+        dist_to_dest = abs(npc.x - destination_coords[0]) + abs(npc.y - destination_coords[1])
+        if dist_to_dest <= 1:
+            npc.schedule.current_path = []
+            npc.schedule.current_destination_coords = None
+            if new_task_label == TaskType.GOING_TO_WORK:
+                npc.schedule.current_task = TaskType.AT_WORK
+            elif new_task_label in [TaskType.GOING_HOME, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
+                npc.schedule.current_task = TaskType.SLEEPING if is_night_time else TaskType.AT_HOME
+            elif new_task_label == TaskType.LOOKING_FOR_WORK:
+                npc.schedule.current_task = "applying_for_job"
+            elif new_task_label == "going_to_tavern":
+                npc.schedule.current_task = "at_tavern"
+            elif new_task_label == "fetching water":
+                npc.schedule.current_task = "at_well"
+            else:
+                npc.schedule.current_task = new_task_label
+            if new_task_label not in [TaskType.GOING_TO_WORK, TaskType.AT_WORK]:
+                npc.clear_work_sub_task_state(reset_sequence=True)
         else:
             path = world.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
+            if not path and hasattr(world, "_find_best_adjacent_tile"):
+                adj = world._find_best_adjacent_tile(destination_coords[0], destination_coords[1], npc)
+                if adj and adj != (None, None):
+                    destination_coords = adj
+                    path = world.calculate_path(npc.x, npc.y, destination_coords[0], destination_coords[1])
             if path:
                 npc.schedule.current_path = path
                 npc.schedule.current_destination_coords = destination_coords
@@ -1022,4 +1281,17 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                 if new_task_label not in [TaskType.GOING_TO_WORK, TaskType.AT_WORK]:
                     npc.clear_work_sub_task_state(reset_sequence=True)
             else:
-                npc.schedule.current_task = "idle_confused"
+                # Path failed: apply backoff to memory
+                fail_info = npc._destination_failures.setdefault(destination_coords, {"count": 0, "blocked_until": 0})
+                fail_info["count"] += 1
+                fail_info["blocked_until"] = game_time + min(1200, 30 * (2 ** (fail_info["count"] - 1)))
+                if new_task_label == TaskType.GOING_TO_WORK:
+                    npc.schedule.current_task = TaskType.AT_WORK
+                elif new_task_label in [TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
+                    npc.schedule.current_task = TaskType.SLEEPING if is_night_time else TaskType.AT_HOME
+                elif new_task_label == TaskType.GOING_HOME:
+                    npc.schedule.current_task = TaskType.AT_HOME
+                else:
+                    npc.schedule.current_task = TaskType.IDLE
+                npc.schedule.current_destination_coords = None
+                npc.schedule.current_path = []

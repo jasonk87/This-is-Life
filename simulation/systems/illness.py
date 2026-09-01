@@ -28,12 +28,12 @@ SICK_STATUS_EFFECT = "sick"
 SICKNESS_THRESHOLD_SICK = 70        # crosses into the "sick" status effect - debilitating, treatable
 SICKNESS_THRESHOLD_FEVERISH = 40    # flavor-only early warning, no mechanical effect yet
 
-# Contagion tuning (judgment calls - flagged in the commit message).
-CONTAGION_CHECK_INTERVAL_TICKS = 30   # how often the proximity scan runs, not every tick, to keep it cheap
-CONTAGION_RADIUS = 3                  # tiles (Manhattan distance) counted as "proximity"
-CONTAGION_CHANCE_PER_CHECK = 0.06     # per sick/healthy pair within radius, per check
-AMBIENT_ONSET_CHANCE_PER_CHECK = 0.0008  # rare spontaneous "patient zero" case per healthy entity, per check
-SICKNESS_INFECTION_GAIN = 20          # sickness gained per successful exposure roll
+# Contagion tuning
+CONTAGION_CHECK_INTERVAL_TICKS = 60   # periodic proximity scan
+CONTAGION_RADIUS = 2                  # tiles (Manhattan distance) counted as "proximity"
+CONTAGION_CHANCE_PER_CHECK = 0.01     # per sick/healthy pair within radius, per check
+AMBIENT_ONSET_CHANCE_PER_CHECK = 0.00005  # rare spontaneous "patient zero" onset per check
+SICKNESS_INFECTION_GAIN = 15          # sickness gained per successful exposure roll
 
 # Untreated-illness worsening, mirrors StarvationBehavior's 10%-per-check
 # damage-roll idiom and survival.py's starvation-damage cadence.
@@ -65,8 +65,8 @@ def _apply_sickness_status(world, entity) -> None:
 
 def recover_from_sickness(entity) -> None:
     """Fully cures an entity's sickness - called by medical.py once
-    treatment completes, and by the player's direct herbal_remedy use in
-    engine.py's use_item. Mirrors how broken_leg treatment restores speed."""
+    treatment completes, natural immune recovery, and by the player's direct
+    herbal_remedy use in engine.py's use_item."""
     physical = entity.physical
     if SICK_STATUS_EFFECT in physical.status_effects:
         physical.status_effects.remove(SICK_STATUS_EFFECT)
@@ -78,33 +78,33 @@ def recover_from_sickness(entity) -> None:
 def update_entity_illness(world, entity) -> None:
     """Advance one entity's sickness meter/status. Called once per tick for
     the player and every living NPC, mirroring survival.update_npc_survival.
-    Sickness itself only rises from contagion (see spread_contagion) - there
-    is no passive per-tick increase like hunger/thirst, since illness needs
-    an actual cause."""
+    Natural immune clearance gradually cures sickness over time, accelerated
+    by bed rest."""
     physical = getattr(entity, "physical", None)
     if physical is None or not hasattr(physical, "sickness"):
         return
 
     _apply_sickness_status(world, entity)
 
+    # Natural immune clearance: resting in bed accelerates recovery
+    is_resting = getattr(getattr(entity, "schedule", None), "current_task", "") in ["resting_in_bed", "sleeping"]
+    if is_resting and physical.sickness > 0 and world.game_time > 0 and world.game_time % 60 == 0:
+        physical.sickness = max(0, physical.sickness - 2)
+        if physical.sickness <= 0 and SICK_STATUS_EFFECT in physical.status_effects:
+            recover_from_sickness(entity)
+            world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} has recovered from their illness.")
+
     if physical.sickness >= SICKNESS_THRESHOLD_SICK and world.game_time % WORSENING_INTERVAL_TICKS == 0:
         physical.sickness = min(physical.max_sickness, physical.sickness + WORSENING_SICKNESS_GAIN)
         if random.random() < WORSENING_DAMAGE_CHANCE:
             world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)}'s illness is taking a toll...")
-            # apply_hostility=False: this is status-effect damage, not an
-            # attack - without it, NPC.take_damage's generic fallback would
-            # flag the (possibly bedridden, possibly nowhere near the
-            # player) sick entity as permanently hostile to the player.
             entity.take_damage(1, world=world, apply_hostility=False)
 
 
 def spread_contagion(world) -> None:
     """Proximity-based contagion pass across the player and all village
     NPCs. Periodic rather than per-tick (see CONTAGION_CHECK_INTERVAL_TICKS)
-    to keep the O(sick * nearby) scan cheap. Each sick entity has a per-check
-    chance to infect each healthy entity within CONTAGION_RADIUS tiles; a
-    much smaller ambient chance lets sickness start spontaneously so the
-    system has somewhere to begin without needing a manually-seeded case."""
+    to keep the O(sick * nearby) scan cheap."""
     if world.game_time % CONTAGION_CHECK_INTERVAL_TICKS != 0:
         return
 

@@ -298,6 +298,24 @@ class FarmerTileTransitionSubTaskCommand(CompletedWorkSubTaskCommand):
         return False
 
 
+class FishAtSpotSubTaskCommand(CompletedWorkSubTaskCommand):
+    """Finishing a stint at the water's edge actually catches something.
+
+    World.npc_attempt_fish was fully implemented and had no caller anywhere.
+    The Fisherman's "fish_at_spot" declares no produces_item_at_workplace, so it
+    fell through to the default command, which produces whatever the sub-task
+    declares - nothing. A fisherman worked a full day at the riverbank and the
+    village never saw a fish.
+    """
+
+    def execute(self, world, npc, work_building, sub_task_data: dict):
+        water = world.find_water_near(npc.x, npc.y)
+        if water is None:
+            return False
+        world.npc_attempt_fish(npc, water[0], water[1])
+        return True
+
+
 class DefaultProduceOutputSubTaskCommand(CompletedWorkSubTaskCommand):
     def execute(self, world, npc, work_building, sub_task_data: dict):
         return world._produce_sub_task_output(npc, work_building, sub_task_data)
@@ -317,6 +335,7 @@ def create_completed_work_sub_task_commands():
         "write_biography": WriteBiographySubTaskCommand(),
         "compile_census": CompileCensusSubTaskCommand(),
         "mill_flour": WorkBuildingConversionSubTaskCommand("wheat", 1, "flour", 1),
+        "fish_at_spot": FishAtSpotSubTaskCommand(),
         "till_soil": FarmerTileTransitionSubTaskCommand(),
         "plant_seeds": FarmerTileTransitionSubTaskCommand(consume_output=True),
         "harvest_crops": FarmerTileTransitionSubTaskCommand(harvest_output=True),

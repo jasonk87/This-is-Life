@@ -21,6 +21,7 @@ from config import (
     TILESET_PATH,
     ZOOM_LEVELS,
     DEFAULT_ZOOM_INDEX,
+    SECONDS_PER_GAME_TICK,
 )
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
@@ -30,6 +31,11 @@ from rendering import ui_theme as theme
 from rendering import widgets
 from rendering.console_renderer import draw
 from rendering.sprite_atlas import register_zoomed_dawnlike_tiles
+from presentation.sensory_observation import (
+    describe_focus_target,
+    list_tile_focus_targets,
+    observe_focus_target,
+)
 from save_manager import save_game, load_game, load_save_metadata
 from ui_requests import apply_ui_requests
 
@@ -79,6 +85,18 @@ def _get_camera_origin(world: World) -> tuple[int, int]:
 def _screen_to_world_position(world: World, camera_x: int, camera_y: int, screen_x: int, screen_y: int) -> tuple[int, int]:
     zoom = _get_zoom(world)
     return camera_x + int(screen_x // zoom), camera_y + int(screen_y // zoom)
+
+
+def _is_inside_map_view(world: World) -> bool:
+    """Whether the cursor is over the world view rather than the surrounding UI.
+
+    The console is wider and taller than the map, so the status panel down the
+    right and the message log along the bottom are outside it. Converting a
+    click there to a world position walks off the edge of the map, which is a
+    meaningless place to inspect or path to. Mirrors the same check the renderer
+    makes before it will hover-focus a tile.
+    """
+    return 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT
 
 
 def prompt_for_new_player_name(console, context) -> str | None:
@@ -314,69 +332,164 @@ def _scroll_message_log(world, lines):
     world.chat_log_scroll = max(0, min(max_scroll, current + int(lines)))
 
 
-def execute_smart_interaction(world: World, context_handler) -> bool:
-    """Performs the most natural in-world action for the player's facing position."""
-    target_x, target_y = _get_player_facing_position(world)
+def _neighbour_offsets_by_facing(facing_dx: int, facing_dy: int) -> list[tuple[int, int]]:
+    """The eight neighbouring offsets, ordered from straight ahead round to behind.
+
+    Interaction used to consider only the single tile the player last stepped
+    towards, so walking north up to a door on your left left you pressing E at a
+    blank wall with no clue why nothing happened. Ordering the whole ring by how
+    closely it lines up with the way you are facing keeps the old behaviour when
+    something is in front of you, and reaches the door when there isn't.
+    """
+    if (facing_dx, facing_dy) == (0, 0):
+        facing_dx, facing_dy = 0, 1  # a player who has not moved yet faces south
+
+    offsets = [(dx, dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dx, dy) != (0, 0)]
+
+    def sort_key(offset):
+        dx, dy = offset
+        alignment = dx * facing_dx + dy * facing_dy  # positive ahead, negative behind
+        return (-alignment, 1 if dx and dy else 0, dx, dy)
+
+    return sorted(offsets, key=sort_key)
+
+
+def _smart_interaction_candidates(world: World) -> list[tuple[int, int]]:
+    """Tiles E will consider, best first: straight ahead, then around, then underfoot."""
+    player = world.player
+    offsets = _neighbour_offsets_by_facing(player.state.last_dx, player.state.last_dy)
+    candidates = [(player.x + dx, player.y + dy) for dx, dy in offsets]
+    candidates.append((player.x, player.y))
+    return candidates
+
+
+def _classify_smart_action(world: World, target_x: int, target_y: int, context_handler):
+    """What E would do on one tile, as a callable, or None if there is nothing to do.
+
+    Split out of execute_smart_interaction so the same rules decide both which
+    of the surrounding tiles to act on and what to do once one is chosen.
+    """
     if not hasattr(world, "get_tile_at"):
-        open_interaction_menu(world, target_x, target_y)
-        return False
+        return None
     tile = world.get_tile_at(target_x, target_y)
     if not tile:
-        open_interaction_menu(world, target_x, target_y)
-        return False
+        return None
+
+    properties = getattr(tile, "properties", {})
+    tile_name = getattr(tile, "name", "")
 
     # 1. Door Toggle
-    if getattr(tile, "properties", {}).get("is_door"):
-        world.player_attempt_toggle_door(target_x, target_y)
-        return True
+    if properties.get("is_door"):
+        return lambda: world.player_attempt_toggle_door(target_x, target_y)
 
     # 2. Workstations
-    ws_type = getattr(tile, "properties", {}).get("workstation_type", "")
-    if ws_type == "grinding_stone" or "Mill" in getattr(tile, "name", "") or "Grinding" in getattr(tile, "name", ""):
-        world.player_attempt_mill_flour(target_x, target_y)
-        return True
-    elif ws_type in ["oven", "fire"] or "Oven" in getattr(tile, "name", ""):
+    ws_type = properties.get("workstation_type", "")
+    if ws_type == "grinding_stone" or "Mill" in tile_name or "Grinding" in tile_name:
+        return lambda: world.player_attempt_mill_flour(target_x, target_y)
+    if ws_type in ["oven", "fire"] or "Oven" in tile_name:
         if world.player.has_item("flour"):
-            world.player_attempt_bake_bread(target_x, target_y)
-            return True
-        elif ws_type == "fire":
-            world.player_attempt_cook(target_x, target_y)
-            return True
+            return lambda: world.player_attempt_bake_bread(target_x, target_y)
+        if ws_type == "fire":
+            return lambda: world.player_attempt_cook(target_x, target_y)
 
     # 3. Crops & Soil
-    if tile.name == "Wheat" or getattr(tile, "properties", {}).get("is_harvestable"):
-        world.player_attempt_harvest(target_x, target_y)
-        return True
-    elif tile.name == "Tilled Soil" and (world.player.has_item("wheat_seeds") or world.player.has_item("herb_generic")):
-        world.player_attempt_plant_seeds(target_x, target_y)
-        return True
-    elif tile.name == "Plains" and (world.player.has_item("stone_hoe") or world.player.has_item("knife_stone")):
-        world.player_attempt_till_soil(target_x, target_y)
-        return True
+    if tile_name == "Wheat" or properties.get("is_harvestable"):
+        return lambda: world.player_attempt_harvest(target_x, target_y)
+    if tile_name == "Tilled Soil" and (world.player.has_item("wheat_seeds") or world.player.has_item("herb_generic")):
+        return lambda: world.player_attempt_plant_seeds(target_x, target_y)
+    if tile_name == "Plains" and (world.player.has_item("stone_hoe") or world.player.has_item("knife_stone")):
+        return lambda: world.player_attempt_till_soil(target_x, target_y)
 
     # 4. Containers
-    if getattr(tile, "properties", {}).get("is_container") or "Chest" in getattr(tile, "name", ""):
-        world.player_attempt_loot_chest(target_x, target_y)
-        return True
+    if properties.get("is_container") or "Chest" in tile_name:
+        return lambda: world.player_attempt_loot_chest(target_x, target_y)
 
-    # 5. Nearby NPC
-    occupants = [npc for npc in world.all_npcs if npc.x == target_x and npc.y == target_y and not getattr(npc, "is_dead", False)]
+    # 5. Someone standing there
+    occupants = [
+        npc for npc in world.all_npcs
+        if npc.x == target_x and npc.y == target_y and not getattr(npc, "is_dead", False)
+    ]
     if occupants:
-        start_dialogue(world, occupants[0], context_handler)
-        return True
+        return lambda: start_dialogue(world, occupants[0], context_handler)
 
     # 6. Tree
-    if hasattr(tile, "is_choppable") and getattr(tile, "is_choppable", False):
-        world.player_attempt_chop_tree(target_x, target_y)
-        return True
+    if getattr(tile, "is_choppable", False):
+        return lambda: world.player_attempt_chop_tree(target_x, target_y)
 
-    # Fallback to standard interaction menu
-    open_interaction_menu(world, target_x, target_y)
+    return None
+
+
+def execute_smart_interaction(world: World, context_handler) -> bool:
+    """Performs the most natural in-world action within the player's reach."""
+    candidates = _smart_interaction_candidates(world)
+
+    for target_x, target_y in candidates:
+        action = _classify_smart_action(world, target_x, target_y, context_handler)
+        if action is not None:
+            action()
+            return True
+
+    # Nothing has an obvious action, so offer a menu instead - on the first tile
+    # that holds anything at all, which is usually what the player was reaching
+    # for. Standing on a dropped item counts, hence the player's own tile.
+    # Guarded like the get_tile_at check above, because callers pass in
+    # stand-in world objects that implement only what they need.
+    if hasattr(world, "_get_interactables_at"):
+        for target_x, target_y in candidates:
+            if world._get_interactables_at(target_x, target_y):
+                open_interaction_menu(world, target_x, target_y)
+                return False
+
+    open_interaction_menu(world, *_get_player_facing_position(world))
     return False
 
 
+def enter_look_mode(world: World) -> None:
+    """Start Look Mode with the cursor on the player."""
+    world.game_state = "LOOK_MODE"
+    world.look_cursor_x = world.player.x
+    world.look_cursor_y = world.player.y
+    world.look_focus_index = 0
+    world.add_message_to_chat_log(
+        "Look Mode active. Arrows move the cursor, [Tab] cycles what is on the tile, "
+        "[Enter] examines it, [Esc] exits."
+    )
+
+
+def _clamp_look_cursor(world: World) -> None:
+    """Keep the look cursor inside the world and inside the visible map view.
+
+    The camera stays on the player, so a cursor free to roam the whole world
+    spends most of its time off screen with nothing to show the player where it
+    went. Bounding it to the view means the highlight is always somewhere they
+    can see.
+    """
+    view_width, view_height = _get_world_view_size(world)
+    camera_x, camera_y = _get_camera_origin(world)
+    world.look_cursor_x = max(camera_x, min(camera_x + view_width - 1, int(world.look_cursor_x)))
+    world.look_cursor_y = max(camera_y, min(camera_y + view_height - 1, int(world.look_cursor_y)))
+    world.look_cursor_x = max(0, min(WORLD_WIDTH - 1, world.look_cursor_x))
+    world.look_cursor_y = max(0, min(WORLD_HEIGHT - 1, world.look_cursor_y))
+
+
+def get_look_focus_targets(world: World) -> list[dict]:
+    """Everything on the looked-at tile, in the order Look Mode steps through."""
+    if not hasattr(world, "look_cursor_x"):
+        return []
+    return list_tile_focus_targets(world, world.look_cursor_x, world.look_cursor_y)
+
+
+def get_look_focus_target(world: World) -> dict | None:
+    """The one thing on the tile Look Mode is currently focused on."""
+    targets = get_look_focus_targets(world)
+    if not targets:
+        return None
+    index = int(getattr(world, "look_focus_index", 0)) % len(targets)
+    return targets[index]
+
+
 def handle_look_mode_input(event: tcod.event.KeyDown, world: World) -> bool:
-    """Handles cursor movement and inspection in Look Mode."""
+    """Handles cursor movement, focus cycling and inspection in Look Mode."""
     if not hasattr(world, "look_cursor_x"):
         world.look_cursor_x, world.look_cursor_y = world.player.x, world.player.y
 
@@ -387,15 +500,31 @@ def handle_look_mode_input(event: tcod.event.KeyDown, world: World) -> bool:
 
     if event.sym in move_keys:
         dx, dy = move_keys[event.sym]
-        world.look_cursor_x = max(0, min(WORLD_WIDTH - 1, world.look_cursor_x + dx))
-        world.look_cursor_y = max(0, min(WORLD_HEIGHT - 1, world.look_cursor_y + dy))
+        world.look_cursor_x += dx
+        world.look_cursor_y += dy
+        _clamp_look_cursor(world)
+        # A new tile holds different things, so start from the top of its list.
+        world.look_focus_index = 0
         summary = world.get_sensory_summary(world.look_cursor_x, world.look_cursor_y)
         if summary:
             world.add_message_to_chat_log(summary)
         return False
+    elif event.sym == tcod.event.KeySym.TAB:
+        targets = get_look_focus_targets(world)
+        if len(targets) <= 1:
+            world.add_message_to_chat_log("Nothing else on this tile.")
+            return False
+        world.look_focus_index = (int(getattr(world, "look_focus_index", 0)) + 1) % len(targets)
+        world.add_message_to_chat_log(
+            f"{world.look_focus_index + 1}/{len(targets)} {describe_focus_target(world, targets[world.look_focus_index])}"
+        )
+        return False
     elif event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, 'KP_ENTER', 1073741912), tcod.event.KeySym.E):
-        detail = world.inspect_tile(world.look_cursor_x, world.look_cursor_y)
-        world.add_message_to_chat_log(detail)
+        target = get_look_focus_target(world)
+        if target is None:
+            world.add_message_to_chat_log(world.inspect_tile(world.look_cursor_x, world.look_cursor_y))
+        else:
+            world.add_message_to_chat_log(observe_focus_target(world, target))
         return False
     elif event.sym in (tcod.event.KeySym.ESCAPE, getattr(tcod.event.KeySym, 'l', tcod.event.KeySym.ESCAPE)):
         world.game_state = "PLAYING"
@@ -437,14 +566,35 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
     elif event.sym == tcod.event.KeySym.Q:
         world.game_state = "QUEST_MENU"
         world.quest_menu_context["selected_quest_index"] = 0
-    elif event.sym in (tcod.event.KeySym.SPACE, tcod.event.KeySym.E):
+    elif event.sym in (tcod.event.KeySym.E, getattr(tcod.event.KeySym, 'e', tcod.event.KeySym.E)):
         if execute_smart_interaction(world, context_handler):
             return True
+    elif event.sym in (tcod.event.KeySym.SPACE, getattr(tcod.event.KeySym, 'p', tcod.event.KeySym.SPACE), getattr(tcod.event.KeySym, 'P', tcod.event.KeySym.SPACE)):
+        world.is_paused = not getattr(world, "is_paused", False)
+        status_msg = "Simulation Paused." if world.is_paused else f"Simulation Resumed ({getattr(world, 'simulation_speed', 1.0):.0f}x)."
+        world.add_message_to_chat_log(status_msg, category="system")
+    elif event.sym in (getattr(tcod.event.KeySym, 'N1', None), getattr(tcod.event.KeySym, 'KP_1', None), getattr(tcod.event.KeySym, '_1', None)) or event.sym == 49:
+        world.simulation_speed = 1.0
+        world.is_paused = False
+        world.add_message_to_chat_log("Simulation speed: 1x (Normal)", category="system")
+    elif event.sym in (getattr(tcod.event.KeySym, 'N2', None), getattr(tcod.event.KeySym, 'KP_2', None), getattr(tcod.event.KeySym, '_2', None)) or event.sym == 50:
+        world.simulation_speed = 2.0
+        world.is_paused = False
+        world.add_message_to_chat_log("Simulation speed: 2x (Fast)", category="system")
+    elif event.sym in (getattr(tcod.event.KeySym, 'N3', None), getattr(tcod.event.KeySym, 'KP_3', None), getattr(tcod.event.KeySym, '_3', None)) or event.sym == 51:
+        world.simulation_speed = 4.0
+        world.is_paused = False
+        world.add_message_to_chat_log("Simulation speed: 4x (Ultra)", category="system")
+    elif event.sym in (getattr(tcod.event.KeySym, 'N0', None), getattr(tcod.event.KeySym, 'KP_0', None), getattr(tcod.event.KeySym, '_0', None)) or event.sym == 48:
+        world.is_paused = True
+        world.add_message_to_chat_log("Simulation Paused.", category="system")
+    elif event.sym in (getattr(tcod.event.KeySym, 'PERIOD', None), getattr(tcod.event.KeySym, 'KP_PERIOD', None)) or event.sym == 46:
+        # Step 1 tick while paused
+        world.update()
+        world.add_message_to_chat_log("Stepped 1 tick.", category="system")
+        return True
     elif hasattr(tcod.event.KeySym, 'l') and event.sym in (tcod.event.KeySym.l, getattr(tcod.event.KeySym, 'L', tcod.event.KeySym.l)):
-        world.game_state = "LOOK_MODE"
-        world.look_cursor_x = world.player.x
-        world.look_cursor_y = world.player.y
-        world.add_message_to_chat_log("Look Mode active. Move cursor with arrow keys, [Enter] to inspect, [Esc] to exit.")
+        enter_look_mode(world)
     elif event.sym == tcod.event.KeySym.T:
         closest_npc = _find_nearest_npc_to_talk_to(world)
 
@@ -702,6 +852,8 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Dismount": lambda: world.player_attempt_dismount(entity_data),
         "Shear": lambda: world.player_attempt_shear(entity_data),
         "Fish": lambda: world.player_attempt_fish(target_x, target_y),
+        "Pick Lock": lambda: world.player_attempt_pick_lock(target_x, target_y),
+        "Plant Sapling": lambda: world.player_attempt_plant_sapling(target_x, target_y),
         "Harvest": lambda: world.player_attempt_harvest(target_x, target_y),
         "Trade": lambda: start_trade(world, entity_data),
         "Repair": lambda: world.player_attempt_repair_gear(entity_data),
@@ -754,16 +906,35 @@ def handle_info_menu_input(event: tcod.event.KeyDown, world: World):
         world.game_state = "INVENTORY_MENU"
 
 def handle_inventory_menu_input(event: tcod.event.KeyDown, world: World):
-    """Handles input for the dedicated inventory menu."""
-    if "inventory_scroll_offset" not in world.interaction_context:
-        world.interaction_context["inventory_scroll_offset"] = 0
+    """Handles input for the dedicated inventory menu.
+
+    The menu used to only scroll: there was no way to eat, drink, equip or light
+    anything from it, and World.use_item - which does all of that - had no caller
+    anywhere in the game. A player could carry food and still starve.
+    """
+    context = world.interaction_context
+    context.setdefault("inventory_scroll_offset", 0)
+    context.setdefault("inventory_selected_index", 0)
+    # Populated by draw_inventory_menu, which is the thing that knows which
+    # display rows are items rather than headers or spacers.
+    selectable = context.get("inventory_selectable") or []
 
     if event.sym == tcod.event.KeySym.ESCAPE or (hasattr(tcod.event.KeySym, 'u') and event.sym == tcod.event.KeySym.u) or (hasattr(tcod.event.KeySym, 'U') and event.sym == tcod.event.KeySym.U):
         world.game_state = "PLAYING"
     elif event.sym == tcod.event.KeySym.UP:
-        world.interaction_context["inventory_scroll_offset"] = max(0, world.interaction_context["inventory_scroll_offset"] - 1)
+        if selectable:
+            context["inventory_selected_index"] = (context["inventory_selected_index"] - 1) % len(selectable)
+        context["inventory_scroll_offset"] = max(0, context["inventory_scroll_offset"] - 1)
     elif event.sym == tcod.event.KeySym.DOWN:
-        world.interaction_context["inventory_scroll_offset"] += 1
+        if selectable:
+            context["inventory_selected_index"] = (context["inventory_selected_index"] + 1) % len(selectable)
+        context["inventory_scroll_offset"] += 1
+    elif event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, "KP_ENTER", tcod.event.KeySym.RETURN)):
+        if not selectable:
+            world.add_message_to_chat_log("You are carrying nothing to use.")
+            return
+        index = max(0, min(context["inventory_selected_index"], len(selectable) - 1))
+        world.use_item(selectable[index])
 
 def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is reading a book."""
@@ -1347,6 +1518,8 @@ def start_game(context, console, world_state=None, player_first_name: str | None
     _ensure_zoom_state(world)
 
     last_time = time.perf_counter()
+    tick_accumulator = 0.0
+    MAX_ACCUMULATOR_TICKS = 5
 
     # Menu fade-in: tracks how long the current game_state has been active
     # so draw() can ramp a just-opened menu in from the world view over a
@@ -1382,11 +1555,20 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         # Handle Input
         player_acted = handle_events(world, context)
 
-        # Handle turn updates
-        # Update if player performed an action OR if auto-moving along a path
-        if player_acted or (world.player.state.current_path and world.game_state == "PLAYING"):
-            world.update()
-            apply_ui_requests(world, context)
+        # Advance real-time world simulation when active
+        if world.game_state == "PLAYING" and not getattr(world, "is_paused", False):
+            speed = getattr(world, "simulation_speed", 1.0)
+            if speed > 0:
+                tick_accumulator += dt * speed
+                # Clamp accumulator to prevent catch-up lag
+                tick_accumulator = min(tick_accumulator, SECONDS_PER_GAME_TICK * MAX_ACCUMULATOR_TICKS)
+
+                while tick_accumulator >= SECONDS_PER_GAME_TICK:
+                    world.update()
+                    apply_ui_requests(world, context)
+                    tick_accumulator -= SECONDS_PER_GAME_TICK
+        else:
+            tick_accumulator = 0.0
 
         if world.needs_text_input:
             if hasattr(context, "start_text_input"):
@@ -1464,7 +1646,7 @@ def handle_events(world, context) -> bool:
             # else falls through to the world view underneath.
             if handle_menu_mouse_click(event, world, context):
                 turn_taken = True
-            elif world.game_state == "PLAYING":
+            elif world.game_state == "PLAYING" and _is_inside_map_view(world):
                 camera_x, camera_y = _get_camera_origin(world)
                 mouse_world_x, mouse_world_y = _screen_to_world_position(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
 

@@ -26,7 +26,19 @@ _CATEGORY_KEYWORDS = (
 )
 
 DEFAULT_CATEGORY = "default"
+
+# Developer diagnostics. They stay in the history - and in world.chat_log, which
+# tests read - but the log panel hides them, because a handful of them per tick
+# is enough to push everything the player actually did off a four-line panel.
+DEBUG_CATEGORY = "debug"
 MAX_LOG_ENTRIES = 100
+
+
+def visible_entries(entries, *, include_debug=False):
+    """The entries a player should see, newest last."""
+    if include_debug:
+        return list(entries)
+    return [entry for entry in entries if entry.category != DEBUG_CATEGORY]
 
 
 def classify_message(text) -> str:

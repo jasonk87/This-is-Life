@@ -12,6 +12,14 @@ import random
 from typing import Any
 
 
+# How far outside a settlement's built area a species will settle when it first
+# appears, in tiles. Grazers at the fence line are part of the scenery, so their
+# buffer only keeps them out of the streets; a predator turning up inside town
+# should be something that wandered in and got noticed, never how the world
+# started. Species without an entry use DEFAULT_SETTLEMENT_BUFFER.
+DEFAULT_SETTLEMENT_BUFFER = 4
+PREDATOR_SETTLEMENT_BUFFER = 12
+
 WILDLIFE_SPECIES: dict[str, dict[str, Any]] = {
     "deer": {
         "base_population": {"plains": 34, "forest": 48, "mountain": 10},
@@ -56,6 +64,7 @@ WILDLIFE_SPECIES: dict[str, dict[str, Any]] = {
         "max_visible_per_region": 4,
         "max_visible_per_chunk": 2,
         "group_size": (1, 2),
+        "settlement_buffer": PREDATOR_SETTLEMENT_BUFFER,
         # Predator-prey link (see _recover_wildlife_populations): wolves are
         # the only predator species currently modeled, so this is the only
         # entry with a "prey_species" key. Anything without this key is

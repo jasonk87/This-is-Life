@@ -23,6 +23,10 @@ from rendering import ui_theme as theme
 from rendering import widgets
 from runtime_compat import np
 from presentation import message_log
+from presentation.sensory_observation import (
+    describe_focus_target,
+    list_tile_focus_targets,
+)
 from presentation.ambient_speech import (
     format_ambient_speech_for_player,
     visible_ambient_speech_lines,
@@ -940,9 +944,11 @@ def _get_log_entries(world):
     """The log's display model, tolerating worlds that only have the plain
     string list (older saves, and the minimal fakes used in tests)."""
     entries = getattr(world, "chat_log_entries", None)
-    if entries:
-        return entries
-    return message_log.entries_from_plain_log(getattr(world, "chat_log", []) or [])
+    if not entries:
+        entries = message_log.entries_from_plain_log(getattr(world, "chat_log", []) or [])
+    return message_log.visible_entries(
+        entries, include_debug=getattr(world, "show_debug_log", False)
+    )
 
 
 def _draw_log_panel(console, world):
@@ -1238,6 +1244,9 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     light_level_name = getattr(world, "current_light_level_name", "DAY")
     ambient = lighting.ambient_for_light_level(light_level_name)
 
+    # The root console is built row-major (see main.create_console): fg/bg are
+    # shaped (height, width, 3) and indexed [y, x], which is the order every
+    # array in this function uses.
     console_height = min(MAP_HEIGHT, getattr(console, "height", MAP_HEIGHT), console.bg.shape[0], console.fg.shape[0])
     console_width = min(MAP_WIDTH, getattr(console, "width", MAP_WIDTH), console.bg.shape[1], console.fg.shape[1])
     if console_height <= 0 or console_width <= 0:
@@ -1474,7 +1483,21 @@ def _draw_world_markers(console, world, camera_x, camera_y):
                 console.print(x=screen_x, y=screen_y, string=marker_char, fg=marker_color)
                 marked += 1
 
-STATUS_LEGEND_ROWS = 6
+# Glyph key, then the controls themselves. The controls are here because the
+# only place they existed was the help menu, which a player has to already know
+# to press "?" to find - so the inventory and the character sheet may as well
+# not have had keys at all.
+STATUS_LEGEND_ROWS_CONTENT = (
+    ("@ You", (255, 245, 140)),
+    ("! hostile  ? quest", "INFO"),
+    ("$ trader   * loot", "SUCCESS"),
+    ("Pulse = focus", "TEXT_DIM"),
+    ("Keys", "HEADING"),
+    ("E act    T talk", "TEXT_DIM"),
+    ("I sheet  U bag", "TEXT_DIM"),
+    ("L look   ? help", "TEXT_DIM"),
+)
+STATUS_LEGEND_ROWS = len(STATUS_LEGEND_ROWS_CONTENT) + 1
 
 
 class _PanelCursor:
@@ -1561,15 +1584,9 @@ def _draw_status_legend(console, panel_x, panel_width):
     """Draw the glyph legend pinned to the bottom of the status column."""
     y = SCREEN_HEIGHT - 1 - STATUS_LEGEND_ROWS - 1
     widgets.heading(console, panel_x + 1, y, "Legend")
-    rows = [
-        ("@ You", (255, 245, 140)),
-        ("! hostile  ? quest", theme.INFO),
-        ("$ trader   * loot", theme.SUCCESS),
-        ("Pulse = focus", theme.TEXT_DIM),
-        ("E/T act  + civic", theme.TEXT_DIM),
-    ]
-    for offset, (text, color) in enumerate(rows, start=1):
-        console.print(x=panel_x + 2, y=y + offset, string=text[: panel_width - 3], fg=color)
+    for offset, (text, color) in enumerate(STATUS_LEGEND_ROWS_CONTENT, start=1):
+        resolved = getattr(theme, color) if isinstance(color, str) else color
+        console.print(x=panel_x + 2, y=y + offset, string=text[: panel_width - 3], fg=resolved)
     return y
 
 
@@ -1634,8 +1651,31 @@ def draw_status_panel(console, world, camera_x, camera_y):
     cursor = _PanelCursor(console, panel_x + 1, 2, panel_width - 3, legend_top - 1)
 
     standing_on, focus_target = _get_focus_summary(world)
+
+    # Who the player is. Nothing on the main screen named the character, and
+    # the character sheet did not either, so a player had no way to learn their
+    # own name short of reading a save file.
+    cursor.heading("You")
+    cursor.line(str(getattr(world.player, "name", "You")), color=theme.HEADING)
+    cursor.line(
+        f"{world.player.economic.profession} - {world.player.economic.money}c",
+        color=theme.TEXT_DIM,
+    )
+    cursor.blank()
+
     cursor.heading("Scene")
-    cursor.line(_format_world_clock(world.game_time), color=theme.TEXT_DIM)
+    clock_str = _format_world_clock(world.game_time)
+    if getattr(world, "is_paused", False):
+        speed_badge = " [PAUSED]"
+    else:
+        speed = getattr(world, "simulation_speed", 1.0)
+        if speed >= 4.0:
+            speed_badge = " [>>> 4x]"
+        elif speed >= 2.0:
+            speed_badge = " [>> 2x]"
+        else:
+            speed_badge = " [> 1x]"
+    cursor.line(f"{clock_str}{speed_badge}", color=theme.TEXT_DIM)
     cursor.line(
         f"{world.seasons[world.current_season_index]} / {world.weather.replace('_', ' ').title()}",
         color=theme.INFO,
@@ -1788,13 +1828,55 @@ def _draw_active_game_state_menu(console, world):
         draw_look_mode_ui(console, world)
 
 
+LOOK_CURSOR_BG = (150, 120, 20)
+LOOK_CURSOR_FG = (255, 255, 190)
+LOOK_CURSOR_CORNERS = ("\u250c", "\u2510", "\u2514", "\u2518")
+
+
+def draw_look_cursor(console, world, camera_x, camera_y):
+    """Mark the tile Look Mode is pointing at, on the map itself.
+
+    Look Mode used to report only a pair of coordinates in its banner, which
+    told the player nothing they could act on - there was no way to see which
+    tile the cursor was actually on. The tile is highlighted, and at zoom levels
+    where a tile is more than one cell it also gets corner brackets, which read
+    as a reticle rather than as a coloured floor tile.
+    """
+    if getattr(world, "game_state", None) != "LOOK_MODE":
+        return
+    cursor_x = getattr(world, "look_cursor_x", getattr(world.player, "x", 0))
+    cursor_y = getattr(world, "look_cursor_y", getattr(world.player, "y", 0))
+    rect = _world_to_screen_rect(world, camera_x, camera_y, cursor_x, cursor_y)
+    if rect is None:
+        return
+
+    x0, y0, x1, y1 = rect
+    for draw_y in range(y0, y1 + 1):
+        for draw_x in range(x0, x1 + 1):
+            console.bg[draw_y, draw_x] = LOOK_CURSOR_BG
+
+    if x1 > x0 and y1 > y0:
+        corners = ((x0, y0), (x1, y0), (x0, y1), (x1, y1))
+        for (corner_x, corner_y), glyph in zip(corners, LOOK_CURSOR_CORNERS):
+            console.print(x=corner_x, y=corner_y, string=glyph, fg=LOOK_CURSOR_FG, bg=LOOK_CURSOR_BG)
+
+
 def draw_look_mode_ui(console, world):
-    """Draw the Look Mode cursor highlight and sensory inspection banner."""
+    """Draw the Look Mode banner: what is focused, and what else shares the tile."""
     cursor_x = getattr(world, "look_cursor_x", getattr(world.player, "x", 0))
     cursor_y = getattr(world, "look_cursor_y", getattr(world.player, "y", 0))
 
-    summary = world.get_sensory_summary(cursor_x, cursor_y) if hasattr(world, "get_sensory_summary") else ""
-    banner_text = f" [LOOK MODE] ({cursor_x}, {cursor_y}) {summary}  [Arrows: Move | Enter/E: Deep Examine | Esc: Exit] "
+    targets = list_tile_focus_targets(world, cursor_x, cursor_y)
+    if targets:
+        index = int(getattr(world, "look_focus_index", 0)) % len(targets)
+        focus_text = describe_focus_target(world, targets[index])
+        counter = f" {index + 1}/{len(targets)}" if len(targets) > 1 else ""
+    else:
+        focus_text = world.get_sensory_summary(cursor_x, cursor_y) if hasattr(world, "get_sensory_summary") else ""
+        counter = ""
+
+    banner_text = f" [LOOK] ({cursor_x}, {cursor_y}){counter} {focus_text} "
+    hint_text = " [Arrows: Move | Tab: Next thing here | Enter/E: Examine | Esc: Exit] "
     console.print_box(
         0,
         max(0, console.height - 2),
@@ -1802,6 +1884,15 @@ def draw_look_mode_ui(console, world):
         1,
         banner_text[:console.width - 2],
         fg=(255, 255, 120),
+        bg=(30, 30, 60),
+    )
+    console.print_box(
+        0,
+        max(0, console.height - 1),
+        console.width,
+        1,
+        hint_text[:console.width - 2],
+        fg=(190, 185, 140),
         bg=(30, 30, 60),
     )
 
@@ -1930,9 +2021,15 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
             label_x = max(0, min(MAP_WIDTH - len(label), screen_x - (len(label) // 2)))
             console.print(x=label_x, y=screen_y, string=label, fg=(142, 148, 156))
 
+    draw_look_cursor(console, world, camera_x, camera_y)
+
     current_tile = world.get_tile_at(world.player.x, world.player.y)
     area_label = current_tile.name if current_tile else "Unknown"
-    hud_text = f"@ {area_label}  [{world.player.x},{world.player.y}]  {world.weather.replace('_', ' ').title()}"
+    player_name = getattr(world.player, "name", "You")
+    hud_text = (
+        f"{player_name}  @ {area_label}  [{world.player.x},{world.player.y}]  "
+        f"{world.weather.replace('_', ' ').title()}"
+    )
     console.print(x=1, y=1, string=hud_text[:MAP_WIDTH - 2], fg=(255, 255, 255), bg=(0, 0, 0))
 
     _draw_focus_badge(console, world, focus, camera_x, camera_y)
@@ -2652,6 +2749,20 @@ def draw_info_menu(console, world):
     inner_width = geometry.inner_width
     y = geometry.inner_y
 
+    y = widgets.field(console, inner_x, y, "Name", getattr(world.player, "name", "You"),
+                      width=inner_width, value_color=theme.HEADING)
+    y = widgets.field(console, inner_x, y, "Profession", world.player.economic.profession,
+                      width=inner_width, value_color=theme.INFO)
+    career_level = getattr(getattr(world.player, "career", None), "level", 0)
+    if career_level:
+        y = widgets.field(console, inner_x, y, "Career Level", career_level,
+                          width=inner_width, value_color=theme.INFO)
+    y = widgets.field(console, inner_x, y, "Coin", f"{world.player.economic.money}",
+                      width=inner_width, value_color=theme.SUCCESS)
+
+    y += 1
+    y = widgets.rule(console, inner_x, y, inner_width)
+
     y = widgets.field(console, inner_x, y, "Fame", world.player.social.fame,
                       width=inner_width, value_color=theme.HEADING)
     y = widgets.field(console, inner_x, y, "Infamy", world.player.social.infamy,
@@ -2734,7 +2845,7 @@ def draw_inventory_menu(console, world):
     widgets.panel(console, x, y, menu_width, menu_height, title="Inventory", focused=True)
 
     widgets.hint_bar(console, x + theme.PAD_X, y + menu_height - 2, menu_width - (theme.PAD_X * 2),
-                     [("Up/Down", "scroll"), ("Esc", "close")])
+                     [("Up/Down", "select"), ("Enter", "use"), ("Esc", "close")])
 
     # Aggregate and categorize inventory
     categories = {
@@ -2790,17 +2901,33 @@ def draw_inventory_menu(console, world):
         widgets.Row(text=f"Money: {world.player.economic.money} coins", color=theme.SUCCESS),
         widgets.Row(text=""),
     ]
+    # Which display rows are actually items, in order. The input handler needs
+    # this to turn "the third thing down" into an item key: the list is mostly
+    # headers and spacers, so a raw row index is not a selection.
+    selectable_keys = []
+    selectable_rows = []
     for cat_name, items in categories.items():
         if not items:
             continue
         rows.append(widgets.Row(text=f"--- {cat_name} ---", color=theme.HEADING))
         for item_text, item_key, quality in items:
+            selectable_keys.append(item_key)
+            selectable_rows.append(len(rows))
             rows.append(widgets.Row(
                 text=item_text,
                 color=_quality_text_color(quality),
                 icon_key=item_key,
             ))
         rows.append(widgets.Row(text=""))
+
+    world.interaction_context["inventory_selectable"] = selectable_keys
+    selected = world.interaction_context.get("inventory_selected_index", 0)
+    if selectable_keys:
+        selected = max(0, min(int(selected), len(selectable_keys) - 1))
+    else:
+        selected = 0
+    world.interaction_context["inventory_selected_index"] = selected
+    selected_row = selectable_rows[selected] if selectable_rows else None
 
     region = widgets.ListRegion(
         x=x + theme.PAD_X,
@@ -3070,7 +3197,10 @@ def draw_quest_menu(console, world):
 HELP_CONTROLS = [
     ("Move", "Arrows / Left Click"),
     ("Interact", "E / Right Click"),
-    ("Wait", "."),
+    ("Pause / Resume", "Space / P"),
+    ("Sim Speed (1-4x)", "1 / 2 / 3"),
+    ("Single Step", "."),
+    ("Look Around", "L"),
     ("Talk", "T"),
     ("Character Info", "I"),
     ("Inventory", "U"),
@@ -3085,7 +3215,10 @@ HELP_CONTROLS = [
 
 def draw_help_menu(console):
     """Draws the help menu with controls."""
-    geometry = widgets.centered_menu(50, 30)
+    # Two rows per entry, plus the frame, the top padding and a blank row above
+    # the hint footer - so the panel grows with the list instead of the last
+    # entry creeping onto the footer as controls are added.
+    geometry = widgets.centered_menu(50, len(HELP_CONTROLS) * 2 + 5)
     widgets.panel(console, *geometry, title="Help / Controls", focused=True)
 
     y = geometry.inner_y + 1

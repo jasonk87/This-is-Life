@@ -4,10 +4,34 @@ from __future__ import annotations
 from dataclasses import dataclass
 import random
 
+from config import DAY_LENGTH_TICKS
 from data.items import ITEM_DEFINITIONS
 from entities.pickle_compat import dataclass_setstate
 
 _MISSING = object()
+
+# `spoilage_chance` in data/items.py is the chance an item spoils over a *day* -
+# 2% for bread, 5% for an apple, 20% for raw meat all read as daily figures, and
+# World._update_inventory_spoilage (the only other reader) applies them on a
+# once-a-day gate. ItemReference.update_tick runs every world tick, though, and
+# rolled the daily number directly: at 14400 ticks to the day that gave a loaf
+# an expected life of about fifty ticks - five in-game minutes - so no
+# settlement could keep food in a building for as long as it took to eat it.
+_PER_TICK_SPOILAGE_CACHE: dict[float, float] = {}
+
+
+def per_tick_spoilage_chance(daily_chance: float) -> float:
+    """The per-tick probability equivalent to `daily_chance` over one whole day."""
+    if daily_chance <= 0:
+        return 0.0
+    if daily_chance >= 1:
+        return 1.0
+    cached = _PER_TICK_SPOILAGE_CACHE.get(daily_chance)
+    if cached is None:
+        cached = 1.0 - (1.0 - daily_chance) ** (1.0 / DAY_LENGTH_TICKS)
+        _PER_TICK_SPOILAGE_CACHE[daily_chance] = cached
+    return cached
+
 QUALITY_VALUE_MODIFIERS = {
     "Poor": 0.8,
     "Normal": 1.0,
@@ -260,8 +284,9 @@ class ItemReference:
         """Advance this item by one tick and apply any spoilage transformation."""
         self.age_in_ticks += 1
 
-        spoilage_chance = self.definition.get("properties", {}).get("spoilage_chance", 0.0)
-        rots_into = self.definition.get("properties", {}).get("rots_into")
+        properties = self.definition.get("properties", {})
+        spoilage_chance = per_tick_spoilage_chance(properties.get("spoilage_chance", 0.0))
+        rots_into = properties.get("rots_into")
         if spoilage_chance > 0 and rots_into and random.random() < spoilage_chance:
             self.key = rots_into
             self.quality = "Normal"
@@ -388,10 +413,29 @@ class Inventory(dict):
                 yield item
 
     def process_tick(self) -> None:
-        """Advance all item instances and apply any key transformations safely."""
+        """Advance all item instances and apply any key transformations safely.
+
+        Whether a thing can rot is a property of the item *kind*, so it is
+        resolved once per stack rather than once per instance. It used to be
+        looked up - and a die rolled - for every object every tick, and 96% of
+        what a village stores cannot spoil at all: a general store's coins alone
+        are thousands of individual instances, each rolling against a spoilage
+        chance of zero. That single pass was costing about a fifth of every
+        world tick.
+        """
         transformations: list[tuple[str, ItemReference]] = []
 
         for item_key, stack in list(self._item_stacks.items()):
+            if not stack:
+                continue
+            properties = stack[0].definition.get("properties", {})
+            can_spoil = bool(properties.get("spoilage_chance", 0.0)) and bool(properties.get("rots_into"))
+            if not can_spoil:
+                # Nothing to roll for; age still advances.
+                for item in stack:
+                    item.age_in_ticks += 1
+                continue
+
             for item in list(stack):
                 previous_key = item_key
                 updated_key = item.update_tick()

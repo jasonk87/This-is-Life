@@ -70,6 +70,12 @@ class TestPathfindingTileCostCache(unittest.TestCase):
         import numpy as np
         import tcod
 
+        # This mirrors calculate_path with the cache taken out - that is the only
+        # difference the test is here to measure. It is deliberately NOT a frozen
+        # copy of some older version: it used to be one, and so pinned a
+        # transposed AStar call and a path missing its first step long after both
+        # were fixed. Path correctness itself is covered by
+        # tests/test_pathfinding_and_work_chain.py.
         def reference_calculate_path(world, start_x, start_y, end_x, end_y):
             start_tile = world.get_tile_at(start_x, start_y)
             if not (start_tile and start_tile.passable):
@@ -89,7 +95,13 @@ class TestPathfindingTileCostCache(unittest.TestCase):
                 for x_local in range(local_width):
                     x_world, y_world = min_x + x_local, min_y + y_local
                     tile = world.get_tile_at(x_world, y_world)
-                    if not tile or not tile.passable:
+                    if (
+                        tile is not None
+                        and not tile.passable
+                        and (getattr(tile, "properties", None) or {}).get("is_door")
+                    ):
+                        cost[y_local, x_local] = engine.DOOR_PATHFINDING_COST
+                    elif not tile or not tile.passable:
                         cost[y_local, x_local] = 0
                     else:
                         base_cost = 1.0
@@ -109,8 +121,14 @@ class TestPathfindingTileCostCache(unittest.TestCase):
             start_x_local, start_y_local = start_x - min_x, start_y - min_y
             end_x_local, end_y_local = end_x - min_x, end_y - min_y
             try:
-                path_indices_local = astar.get_path(start_x_local, start_y_local, end_x_local, end_y_local)
-                return [(min_x + int(p[1]), min_y + int(p[0])) for p in path_indices_local]
+                # (row, column) = (y, x), the order the cost array is built in.
+                path_indices_local = astar.get_path(start_y_local, start_x_local, end_y_local, end_x_local)
+                path_coords = [(min_x + int(p[1]), min_y + int(p[0])) for p in path_indices_local]
+                if (start_x, start_y) == (end_x, end_y):
+                    return [(start_x, start_y)]
+                if not path_coords:
+                    return []
+                return [(start_x, start_y)] + path_coords
             except IndexError:
                 return []
 

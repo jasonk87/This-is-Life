@@ -63,7 +63,7 @@ class TestWeatherMovementCostMultiplier(unittest.TestCase):
     def test_riding_movement_cost_also_respects_snow(self):
         from engine import NPC
 
-        animal = NPC(self.world.player.x + 1, self.world.player.y, name="Horse", dialogue=["Neigh"], personality="villager", player_id=self.world.player.id)
+        animal = NPC(self.world.player.x, self.world.player.y, name="Horse", dialogue=["Neigh"], personality="villager", player_id=self.world.player.id)
         self.world.npcs.append(animal)
         self.world.player.state.is_riding = True
         self.world.player.state.riding_animal_id = animal.id

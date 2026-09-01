@@ -26,6 +26,13 @@ def update_npc_medical_state(world, npc) -> None:
         if not hasattr(npc, "original_speed"):
             npc.original_speed = getattr(npc, "speed", 1)
         npc.speed = max(0.5, getattr(npc, "original_speed", 1) / 2.0)
+        if npc.schedule.current_task in ["resting_in_bed", TaskType.SLEEPING]:
+            rest_ticks = getattr(npc, "_bed_rest_recovery_ticks", 0) + 1
+            npc._bed_rest_recovery_ticks = rest_ticks
+            if rest_ticks >= 2400:
+                npc.physical.status_effects.remove("broken_leg")
+                npc.speed = getattr(npc, "original_speed", 1)
+                npc._bed_rest_recovery_ticks = 0
 
     if _needs_treatment(npc):
         if npc.schedule.current_task not in ["seeking_healer", "waiting_for_treatment", "resting_in_bed"]:
@@ -54,6 +61,10 @@ def update_npc_medical_state(world, npc) -> None:
             else:
                 npc.schedule.current_task = "resting_in_bed"
                 npc.schedule.current_path = []
+    elif npc.schedule.current_task in ["seeking_healer", "waiting_for_treatment", "resting_in_bed"]:
+        npc.schedule.current_task = TaskType.IDLE
+        npc.schedule.current_path = []
+        npc.schedule.current_destination_coords = None
 
     if npc.schedule.current_task == "seeking_healer":
         if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:

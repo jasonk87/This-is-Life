@@ -271,11 +271,15 @@ def observe_entity(entity: Any, viewer: Any = None, world: Any = None) -> str:
     return f"{header}. " + ". ".join(s[0].upper() + s[1:] for s in observations if s) + "."
 
 
-def observe_tile(world: Any, x: int, y: int) -> str:
-    """Build a detailed sensory description of a world tile and everything on it."""
-    tile = world.get_tile_at(x, y) if world else None
+def describe_tile_ground(tile: Any) -> list[str]:
+    """Describe the ground itself, with nothing standing on it.
+
+    Split out of observe_tile so Look Mode can describe the ground as one of
+    several things sharing a tile, rather than only ever as the preamble to
+    everything else on it.
+    """
     if not tile:
-        return "An unexplored void beyond the horizon."
+        return ["An unexplored void beyond the horizon."]
 
     lines = []
 
@@ -325,6 +329,135 @@ def observe_tile(world: Any, x: int, y: int) -> str:
         radius = props.get("heat_source_radius", 4)
         lines.append(f"Radiating comfortable warmth up to {radius} paces away.")
 
+    return lines
+
+
+def short_entity_label(world: Any, entity: Any) -> str:
+    """A compact name for an entity, saying only as much as the player can tell.
+
+    Animals are named by species: routing them through the person-describing
+    branch below turned a wolf into "Adult Male (Stranger)".
+    """
+    if entity is None:
+        return "Something"
+    if getattr(entity, "is_animal", False) or hasattr(entity, "animal_type"):
+        species = str(getattr(entity, "animal_type", "creature")).replace("_", " ").title()
+        name = str(getattr(entity, "name", species))
+        return species if name == species else f"{name} ({species})"
+
+    profession = getattr(getattr(entity, "economic", None), "profession", "Villager")
+    if is_entity_known_to_viewer(entity, getattr(world, "player", None), world):
+        name = str(getattr(entity, "name", "Someone")).replace("_", " ")
+        return f"{name} ({profession})"
+
+    gender = str(getattr(entity, "gender", "male")).title()
+    age = getattr(entity, "age", 25)
+    if age >= 60:
+        age_desc = "Elderly"
+    elif age >= 45:
+        age_desc = "Older"
+    elif age < 25:
+        age_desc = "Young"
+    else:
+        age_desc = "Adult"
+    if profession not in ["Villager", "Unemployed"]:
+        return f"{age_desc} {gender} ({profession}'s Attire)"
+    return f"{age_desc} {gender} (Stranger)"
+
+
+# Most interesting first, so Look Mode opens on the wolf rather than the road
+# it is standing on.
+FOCUS_KIND_ORDER = {"npc": 0, "blueprint": 1, "item": 2, "building": 3, "tile": 4}
+
+
+def list_tile_focus_targets(world: Any, x: int, y: int) -> list[dict]:
+    """Everything on one tile that can be looked at, most interesting first.
+
+    A tile routinely holds several things at once - someone standing on a road
+    inside a building's footprint, over a dropped axe. A one-line summary can
+    only ever describe one of them, so Look Mode steps through this list.
+    """
+    if world is None or not hasattr(world, "_get_interactables_at"):
+        return []
+    targets = list(world._get_interactables_at(x, y))
+    targets.sort(key=lambda target: FOCUS_KIND_ORDER.get(target.get("type"), 99))
+    return targets
+
+
+def describe_focus_target(world: Any, target: dict | None) -> str:
+    """One-line label for the thing Look Mode is currently pointing at."""
+    if not target:
+        return "[Nothing of note]"
+    kind = target.get("type")
+    data = target.get("data")
+    name = str(target.get("name") or "Something").replace("_", " ")
+
+    if kind == "npc":
+        label = short_entity_label(world, data)
+        task = getattr(getattr(data, "schedule", None), "current_task", "") or getattr(data, "current_sub_task", "")
+        task_str = f" | {str(task).replace('_', ' ').title()}" if task else ""
+        return f"[{label}{task_str}]"
+    if kind == "item":
+        quantity = data.get("quantity", 1) if isinstance(data, dict) else 1
+        return f"[{quantity}x {name}]"
+    if kind == "building":
+        return f"[{name.title()}]"
+    if kind == "blueprint":
+        return f"[Building site: {name}]"
+    return f"[{name}]"
+
+
+def observe_focus_target(world: Any, target: dict | None) -> str:
+    """The detailed description Look Mode prints when one thing is examined."""
+    if not target:
+        return "There is nothing here to examine."
+    kind = target.get("type")
+    data = target.get("data")
+    name = str(target.get("name") or "Something").replace("_", " ")
+
+    if kind == "npc":
+        return observe_entity(data, getattr(world, "player", None), world)
+
+    if kind == "tile":
+        return "\n".join(describe_tile_ground(data))
+
+    if kind == "item":
+        quantity = data.get("quantity", 1) if isinstance(data, dict) else 1
+        item_key = data.get("item_key", "") if isinstance(data, dict) else ""
+        definition = {}
+        if hasattr(world, "get_item_definition") and item_key:
+            definition = world.get_item_definition(item_key) or {}
+        description = definition.get("description") or "Nothing remarkable about it."
+        return f"{quantity}x {name} lying on the ground. {description}"
+
+    if kind == "building":
+        residents = len(getattr(data, "residents", []) or [])
+        occupants = len(getattr(data, "occupants", []) or [])
+        detail = f"A {name.lower()}, {getattr(data, 'width', 0)} by {getattr(data, 'height', 0)} paces."
+        if residents:
+            detail += f" {residents} resident(s) live here."
+        if occupants:
+            detail += f" {occupants} person(s) inside."
+        return detail
+
+    if kind == "blueprint":
+        progress = getattr(data, "build_progress", None)
+        required = getattr(data, "required_work", None)
+        if progress is not None and required:
+            return f"An unfinished {name.lower()}, {int(progress / max(1, required) * 100)}% built."
+        return f"An unfinished {name.lower()}."
+
+    return name
+
+
+def observe_tile(world: Any, x: int, y: int) -> str:
+    """Build a detailed sensory description of a world tile and everything on it."""
+    tile = world.get_tile_at(x, y) if world else None
+    if not tile:
+        return "An unexplored void beyond the horizon."
+
+    lines = describe_tile_ground(tile)
+
     # 3. Ground Items
     if hasattr(world, "items_on_map") and (x, y) in world.items_on_map:
         ground_items = []
@@ -358,22 +491,10 @@ def get_tile_sensory_summary(world: Any, x: int, y: int) -> str:
     occupants = [npc for npc in getattr(world, "all_npcs", []) if npc.x == x and npc.y == y and not getattr(npc, "is_dead", False)]
     if occupants:
         npc = occupants[0]
-        viewer = getattr(world, "player", None)
-        is_known = is_entity_known_to_viewer(npc, viewer, world)
-        
-        if is_known:
-            name = getattr(npc, "name", "Someone").replace("_", " ")
-            prof = getattr(getattr(npc, "economic", None), "profession", "Villager")
-            header = f"{name} ({prof})"
-        else:
-            gender = str(getattr(npc, "gender", "male")).title()
-            age = getattr(npc, "age", 25)
-            age_desc = "Elderly" if age >= 60 else ("Older" if age >= 45 else ("Young" if age < 25 else "Adult"))
-            prof = getattr(getattr(npc, "economic", None), "profession", "Villager")
-            if prof not in ["Villager", "Unemployed"]:
-                header = f"{age_desc} {gender} ({prof}'s Attire)"
-            else:
-                header = f"{age_desc} {gender} (Stranger)"
+        header = short_entity_label(world, npc)
+        # Say so when the tile is crowded, since only the first is described.
+        if len(occupants) > 1:
+            header = f"{header} +{len(occupants) - 1} more"
 
         task = getattr(getattr(npc, "schedule", None), "current_task", "") or getattr(npc, "current_sub_task", "")
         task_str = f" | {task.replace('_', ' ').title()}" if task else ""

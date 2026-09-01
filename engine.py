@@ -111,6 +111,41 @@ from config import (
 # otherwise arbitrary - preserved as-is from the prior unnamed literal.
 DAILY_GOVERNANCE_TICK_OFFSET = 360
 
+# --- Village layout pressure ---
+# VILLAGE_LAYOUT_NOTE: a 40x40 chunk with its roads cannot hold every building
+# _generate_village_structure asks for. Measured over sixteen villages with the
+# original ordering (houses first): the clinic and carpenter's shop were never
+# placed once, and the mill, library, farm and mine only sometimes - so Healer,
+# Carpenter and Scribe were professions no generated world ever contained.
+# Reordering only moves the shortage: houses first starves the trades, trades
+# first starves housing. A real fix is a scale decision - bigger village chunks,
+# smaller building footprints, or villages that specialise in a subset of trades
+# and differ from one another - and is left for a deliberate choice rather than
+# guessed at here.
+
+# --- Village growth headroom ---
+# How many people a village may add beyond the upper bound generation itself
+# uses (twice its building count). Without headroom a village that generated at
+# its maximum could never have a single birth.
+VILLAGE_GROWTH_HEADROOM = 6
+
+# --- Seeded marriages at world generation ---
+# A village predates the player, so it should already contain families.
+# _simulate_village_population_lifecycle gates every birth behind a real married
+# couple, and courtship can only make one for villagers in an active chunk, so
+# without a seed a generated world never has a single birth (measured: zero over
+# 60 in-game days). Rate is per opposite-gender pair of unmarried adults.
+MARRIAGE_SEED_RATE = 0.65
+MARRIAGE_SEED_MIN_AGE = 20
+MARRIAGE_SEED_MAX_AGE = 55
+
+# --- Doors in pathfinding ---
+# What a shut door costs an NPC relative to open ground. High enough that a
+# route through open air is preferred when one exists, low enough that a door
+# is never mistaken for a wall (see World._get_pathfinding_tile_cost and
+# World.npc_toggle_door).
+DOOR_PATHFINDING_COST = 4.0
+
 # --- Village-level food supply decay ---
 # Judgment call (see World._decay_village_food_supply): 3%/day, applied to
 # every item tagged "food" in village.supply. Deliberately NOT derived from
@@ -292,6 +327,7 @@ from simulation.systems.incidents import (
     update_local_incident_opinion,
 )
 from simulation.systems.scheduling import (
+    get_work_anchor_coords,
     run_npc_humanoid_scheduling_flow,
     run_npc_traveling_merchant_policy,
 )
@@ -305,7 +341,11 @@ from simulation.systems.conversation_topics import (
     select_conversation_topic,
 )
 from simulation.systems.tick import run_world_tick
-from simulation.ecology import EcologySystem, WILDLIFE_SPECIES
+from simulation.ecology import (
+    DEFAULT_SETTLEMENT_BUFFER,
+    EcologySystem,
+    WILDLIFE_SPECIES,
+)
 from simulation.systems.work import update_npc_work_sub_tasks
 from simulation.world_model import (
     Building,
@@ -1015,6 +1055,8 @@ class World:
         self.mouse_x = 0
         self.mouse_y = 0
         self.game_state = "PLAYING"
+        self.simulation_speed: float = 1.0
+        self.is_paused: bool = False
         self.entities_by_chunk = {} # Map (chunk_x, chunk_y) -> set(npc_id)
         self.game_time = INITIAL_TIME_OF_DAY
         # Per-tick cache for calculate_path's per-tile movement-cost lookups
@@ -2198,18 +2240,25 @@ class World:
 
             treasury_balance = self._get_trade_money_balance(town_hall)
             if treasury_balance < office.daily_salary:
+                paid_amount = max(0, treasury_balance)
+                if paid_amount > 0:
+                    self._set_trade_money_balance(town_hall, 0)
+                    self._set_trade_money_balance(holder, self._get_trade_money_balance(holder) + paid_amount)
+
                 unpaid_memory = self.create_memory_event(
                     event_type="unpaid_wages",
                     subject_id=mayor_id,
                     target_id=getattr(holder, "id", None),
-                    importance_score=70,
-                    headline=f"{office_name} went unpaid from the city treasury.",
+                    importance_score=50,
+                    headline=f"{office_name} received partial or no salary from the city treasury ({paid_amount}/{office.daily_salary}).",
                     location=(town_hall.global_center_x, town_hall.global_center_y),
-                    metadata={"office": office_name, "salary": office.daily_salary},
+                    metadata={"office": office_name, "salary": office.daily_salary, "paid": paid_amount},
                 )
                 self.record_memory_event(holder, unpaid_memory)
                 if mayor_id is not None and mayor_id != getattr(holder, "id", None) and hasattr(holder, "add_grudge"):
-                    holder.add_grudge(mayor_id, f"Missed civic salary as {office_name}.")
+                    existing_grudges = getattr(getattr(holder, "social", None), "grudges", {}) or {}
+                    if mayor_id not in existing_grudges:
+                        holder.add_grudge(mayor_id, f"Missed civic salary as {office_name}.")
                 continue
 
             self._set_trade_money_balance(town_hall, treasury_balance - office.daily_salary)
@@ -2678,6 +2727,99 @@ class World:
     def _is_player_owned_workplace(self, building: Building | None) -> bool:
         return bool(building and "workplace" in str(getattr(building, "category", "")) and self._building_is_owned_by_player(building))
 
+    # Chance per simulated hour that an off-screen job-seeker lands one of their
+    # settlement's open posts. Deliberately not a certainty: a village should
+    # take a day or two to absorb its unemployed, not refill every vacancy the
+    # first hour after the player walks away.
+    ABSTRACT_HIRE_CHANCE_PER_HOUR = 0.12
+
+    def _count_building_workers(self, building: Building) -> int:
+        return sum(
+            1
+            for npc in self.village_npcs
+            if npc.schedule.work_building_id == building.id and not npc.physical.is_dead
+        )
+
+    def _find_open_post_for(self, npc: NPC) -> Building | None:
+        """The best vacancy in this villager's own settlement, if there is one."""
+        village = self._get_npc_settlement(npc)
+        if village is None:
+            return None
+        best_building = None
+        best_score = None
+        for building in village.buildings:
+            if "workplace" not in str(getattr(building, "category", "")):
+                continue
+            if self._is_player_owned_workplace(building):
+                continue
+            if self._count_building_workers(building) >= building.max_workers:
+                continue
+            score = self._evaluate_job_suitability(npc, building)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_building = building
+        return best_building
+
+    def _run_abstract_labour_market(self, sleeping_npcs: list[NPC]) -> int:
+        """Let off-screen villagers take the vacancies in their own settlement.
+
+        A generated world starts with roughly half its villagers unemployed and
+        more open posts than people to fill them, and two thirds of those
+        villagers are dormant at any moment - outside the player's active chunks,
+        so they never run the scheduling flow that would send them job-hunting.
+        The one on-screen path (walk to a workshop on a LOOKING_FOR_WORK errand)
+        cannot help them, and the job-hopping pass skips the unemployed by
+        design, since it compares one job against another. Without this, an
+        off-screen village keeps its vacancies and its idle hands forever.
+
+        Returns the number hired.
+        """
+        hired = 0
+        for npc in sleeping_npcs:
+            if npc not in self.village_npcs:
+                continue
+            if str(getattr(npc.economic, "profession", "")).lower() != "unemployed":
+                continue
+            if random.random() >= self.ABSTRACT_HIRE_CHANCE_PER_HOUR:
+                continue
+            building = self._find_open_post_for(npc)
+            if building is None:
+                continue
+            if self._assign_job(npc, building, reason="abstract_hire"):
+                hired += 1
+        return hired
+
+    def _try_walk_in_hire(self, npc: NPC) -> Building | None:
+        """Hire a villager who has walked to a workplace looking for work, if there is room.
+
+        A generated village starts with about half its residents unemployed and
+        more vacancies than unemployed people to fill them - forty open posts to
+        twenty-seven job-seekers in a typical world. Nothing connected the two.
+        The job-hopping pass skips anyone unemployed by design (it compares one
+        job against another), and arriving on a LOOKING_FOR_WORK errand simply
+        set the villager back to idle, so the one labour-market path an
+        unemployed villager could actually walk was a dead end: they crossed the
+        village to a workshop's door, stood there, and went home no better off.
+
+        Returns the building they were taken on at, or None.
+        """
+        building = self.get_building_at(npc.x, npc.y)
+        if building is None or "workplace" not in str(getattr(building, "category", "")):
+            return None
+        # The player does their own hiring in their own business.
+        if self._is_player_owned_workplace(building):
+            return None
+        workers = sum(
+            1
+            for other in self.village_npcs
+            if other.schedule.work_building_id == building.id and not other.physical.is_dead
+        )
+        if workers >= building.max_workers:
+            return None
+        if not self._assign_job(npc, building, reason="walk_in_hire"):
+            return None
+        return building
+
     def _find_best_employment_task_for_npc(self, npc: NPC) -> EmploymentTask | None:
         best_task = None
         best_score = None
@@ -2743,7 +2885,12 @@ class World:
             return False
 
         board_x, board_y = noticeboard_points[0]
-        if (npc.x, npc.y) == (board_x, board_y):
+        # Standing next to the board counts as reading it. Only one villager
+        # fits on the board's own tile, so an exact test left the second and
+        # later readers waiting beside it forever: _update_npc_movement drops
+        # the path of anyone blocked by an occupant, and nothing here ever
+        # cleared the task, so they froze on the errand permanently.
+        if max(abs(npc.x - board_x), abs(npc.y - board_y)) <= 1:
             # First, check if they can just take an open service role to fulfill a town need
             if open_service_needs:
                 for need in open_service_needs:
@@ -2775,7 +2922,15 @@ class World:
             npc.schedule.current_destination_coords = (board_x, board_y)
             npc.schedule.current_path = path
             return True
-        return bool(npc.schedule.current_path)
+
+        if not npc.schedule.current_path:
+            # Already on the errand, but the route is gone - blocked, or the
+            # board tile taken. Give it up and let the villager do something
+            # else rather than stand there holding a task that cannot finish.
+            npc.schedule.current_task = TaskType.IDLE
+            npc.schedule.current_destination_coords = None
+            return False
+        return True
 
     def _mark_entity_positions_dirty(self):
         """Mark the occupancy map for a deferred rebuild after bulk changes."""
@@ -3189,7 +3344,19 @@ class World:
             return cached
 
         tile = self.get_tile_at(x_world, y_world)
-        if not tile or not tile.passable:
+        if (
+            tile is not None
+            and not tile.passable
+            and (getattr(tile, "properties", None) or {}).get("is_door")
+        ):
+            # A shut door costs an NPC a moment to open, not a detour round the
+            # building - _update_npc_movement opens it when they step up to it.
+            # Costed as a wall, it walled them in: a villager indoors when the
+            # door was shut could reach nothing beyond the room, which is how
+            # one ended up freezing at 17 degrees with a tavern a short walk
+            # away and no route to it.
+            cost = DOOR_PATHFINDING_COST
+        elif not tile or not tile.passable:
             cost = 0.0
         else:
             base_cost = 1.0
@@ -3238,9 +3405,27 @@ class World:
         end_x_local, end_y_local = end_x - min_x, end_y - min_y
 
         try:
-            path_indices_local = astar.get_path(start_x_local, start_y_local, end_x_local, end_y_local)
+            # `cost` is indexed [y, x], and tcod's AStar takes and returns
+            # indices in that same order. Passing x first transposed every
+            # path: a request to step one tile east came back as one tile
+            # south. Diagonal moves happened to survive it - they are
+            # symmetric under a transpose - which is why NPCs could still
+            # shuffle about while never landing on an orthogonal target
+            # such as a work station.
+            path_indices_local = astar.get_path(start_y_local, start_x_local, end_y_local, end_x_local)
             path_coords = [(min_x + int(p[1]), min_y + int(p[0])) for p in path_indices_local]
-            return path_coords
+            if (start_x, start_y) == (end_x, end_y):
+                return [(start_x, start_y)]
+            if not path_coords:
+                return []
+            # tcod returns the steps only. Every consumer here expects the
+            # walker's own tile at index 0 - _update_npc_movement says so in a
+            # comment and reads from index 1, main.py pops it if present, and
+            # the test doubles return [start, end]. Without it each path lost
+            # its first step, and a one-step path never moved the walker at
+            # all, which is how workers ended up parked one tile short of a
+            # station they never reached.
+            return [(start_x, start_y)] + path_coords
         except IndexError:
             return []
 
@@ -3482,6 +3667,18 @@ class World:
                     next_x, next_y = npc.schedule.current_path[1] # Path index 0 is current pos
 
                     next_tile = self.get_tile_at(next_x, next_y)
+                    if (
+                        next_tile is not None
+                        and not next_tile.passable
+                        and (getattr(next_tile, "properties", None) or {}).get("is_door")
+                    ):
+                        # Open it and spend the move doing so; they walk through
+                        # on a later tick. npc_toggle_door was written for this
+                        # and had no caller, so NPCs could neither path through
+                        # a shut door nor open one.
+                        self.npc_toggle_door(npc, next_x, next_y)
+                        self._reset_npc_path_blocking(npc)
+                        break
                     if not (next_tile and next_tile.passable):
                         npc.schedule.current_path = []
                         npc.schedule.current_destination_coords = None
@@ -3591,7 +3788,10 @@ class World:
                             radius_sq=(CHUNK_SIZE * 1.5) ** 2,
                         )
                         if npc.knowledge.known_events:
-                            self.add_message_to_chat_log(f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.")
+                            self.add_message_to_chat_log(
+                f"Debug: {npc.name} learned about {len(npc.knowledge.known_events)} events in the new village.",
+                category=message_log.DEBUG_CATEGORY,
+            )
 
                     elif npc.schedule.current_task == "mobile_conversation_follow":
                         npc.schedule.current_task = TaskType.IDLE
@@ -3642,14 +3842,12 @@ class World:
                                 # self.add_message_to_chat_log(f"Debug: {npc.name} is visiting {friend.name}, relationship increased.")
                         npc.schedule.current_task = TaskType.IDLE # Done visiting
                     elif npc.schedule.current_task == "applying_for_job":
-                        # Arrived at potential workplace to apply
-                        target_building = None
-                        village = self._get_village_for_npc(npc, by_coords=True)
-                        if village:
-                            for b in village.buildings:
-                                if (b.global_center_x, b.global_center_y) == (npc.x, npc.y):
-                                    target_building = b
-                                    break
+                        # Arrived at potential workplace to apply. Matched on the
+                        # building's footprint rather than its exact centre tile,
+                        # which only one villager can ever be standing on.
+                        target_building = self.get_building_at(npc.x, npc.y)
+                        if target_building is not None and "workplace" not in str(getattr(target_building, "category", "")):
+                            target_building = None
 
                         if target_building:
                              current_workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == target_building.id and not n.physical.is_dead)
@@ -3720,9 +3918,10 @@ class World:
                     elif npc.schedule.current_task == TaskType.GOING_TO_WORK:
                         npc.schedule.current_task = TaskType.AT_WORK
                     elif npc.schedule.current_task == TaskType.LOOKING_FOR_WORK:
-                        # Arrived at potential workplace
-                        npc.schedule.current_task = TaskType.IDLE # Or "lingering" if handled elsewhere, for now idle means they stay put
-                        # self.add_message_to_chat_log(f"Debug: {npc.name} is looking for work at a building.")
+                        # Arrived at a potential workplace - ask for the job.
+                        npc.schedule.current_task = (
+                            TaskType.AT_WORK if self._try_walk_in_hire(npc) else TaskType.IDLE
+                        )
                     elif npc.schedule.current_task == "leaving_village":
                         # NPC has arrived at the edge of the map
                         self._remove_npc_from_world(npc, reason="emigrated")
@@ -4869,7 +5068,7 @@ class World:
         npc.schedule.current_path = []
         npc.schedule.current_destination_coords = None
         npc.task_target_coords = None
-        npc._work_validation_retry_after_tick = getattr(self, "game_time", 0) + 120
+        npc._work_validation_retry_after_tick = getattr(self, "game_time", 0) + 15
 
     def _find_target_coords_for_sub_task(self, npc: NPC, work_building: Building, sub_task_data: dict) -> tuple[int, int] | None:
         """Determines the global target coordinates for a given sub-task."""
@@ -4887,13 +5086,15 @@ class World:
         if target_zone_tag == "corpse":
             return self._find_nearest_corpse(npc)
 
+        occupied = set(getattr(self, "entity_positions", {}).keys())
 
         if target_zone_tag == "manager_spot":
             manager_spots = work_building.work_zone_tiles.get("manager_spot", [])
             if manager_spots:
-                return random.choice(manager_spots)
+                unoccupied_spots = [pos for pos in manager_spots if pos not in occupied or pos == (npc.x, npc.y)]
+                return random.choice(unoccupied_spots if unoccupied_spots else manager_spots)
             else:
-                return (work_building.global_center_x, work_building.global_center_y)
+                return self._find_unclaimed_tile_near(work_building.global_center_x, work_building.global_center_y, occupied, prefer=(npc.x, npc.y), radius=max(2, work_building.width // 2))
 
         if target_zone_tag == "scout_route":
             # For scouting, pick a random point in a wider radius around the village/workplace
@@ -4917,34 +5118,60 @@ class World:
                     return (scout_x, scout_y)
             return None
 
+        if target_zone_tag in {"patrol_route", "town_patrol_route"}:
+            # For patrolling, pick dynamic waypoints around the village
+            village = self._get_village_for_npc(npc, by_coords=True)
+            if village and village.interaction_points:
+                patrol_candidates = []
+                for pt_list in village.interaction_points.values():
+                    patrol_candidates.extend(pt_list)
+                if village.buildings:
+                    for b in village.buildings:
+                        patrol_candidates.append((b.global_center_x, b.global_center_y))
+                if patrol_candidates:
+                    filtered = [p for p in patrol_candidates if abs(p[0] - npc.x) + abs(p[1] - npc.y) > 3]
+                    choice = random.choice(filtered if filtered else patrol_candidates)
+                    return self._find_unclaimed_tile_near(choice[0], choice[1], occupied, prefer=(npc.x, npc.y), radius=3)
+            ox = work_building.global_center_x + random.randint(-8, 8)
+            oy = work_building.global_center_y + random.randint(-8, 8)
+            return self._find_unclaimed_tile_near(ox, oy, occupied, prefer=(npc.x, npc.y), radius=3)
+
         if target_zone_tag == "chopping_area":
             # For chopping, we find a dynamic tree target near the building.
             # The work_building itself is passed to help center the search.
             return self._find_nearest_tree_for_chopping(npc, work_building)
         elif target_zone_tag == "lumber_mill":
-            # For fetching wood, find the nearest lumber mill
+            # For fetching wood, find the nearest lumber mill or fallback to internal storage
             lumber_mill = self._find_nearest_lumber_mill(npc)
-            if lumber_mill:
-                return (lumber_mill.global_center_x, lumber_mill.global_center_y)
-            return None
+            if lumber_mill and lumber_mill.id != work_building.id:
+                return self._find_unclaimed_tile_near(lumber_mill.global_center_x, lumber_mill.global_center_y, occupied, prefer=(npc.x, npc.y), radius=max(2, lumber_mill.width // 2))
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + 1, work_building.global_origin_y + work_building.height - 2, occupied, prefer=(npc.x, npc.y))
         elif target_zone_tag == "farm":
-            # For fetching wheat, find the nearest farm
+            # For fetching wheat, find the nearest farm or fallback to internal storage
             farm = self._find_nearest_farm(npc)
-            if farm:
-                return (farm.global_center_x, farm.global_center_y)
-            return None
+            if farm and farm.id != work_building.id:
+                return self._find_unclaimed_tile_near(farm.global_center_x, farm.global_center_y, occupied, prefer=(npc.x, npc.y), radius=max(2, farm.width // 2))
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + 1, work_building.global_origin_y + work_building.height - 2, occupied, prefer=(npc.x, npc.y))
         elif target_zone_tag == "mill":
-            # For fetching flour, find the nearest mill
+            # For fetching flour, find the nearest mill or fallback to internal storage
             mill = self._find_nearest_mill(npc)
-            if mill:
-                return (mill.global_center_x, mill.global_center_y)
-            return None
+            if mill and mill.id != work_building.id:
+                return self._find_unclaimed_tile_near(mill.global_center_x, mill.global_center_y, occupied, prefer=(npc.x, npc.y), radius=max(2, mill.width // 2))
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + 1, work_building.global_origin_y + work_building.height - 2, occupied, prefer=(npc.x, npc.y))
         elif target_zone_tag == "mine":
-            # For fetching ore, find the nearest mine
+            # For fetching ore, find the nearest mine or fallback to internal storage
             mine = self._find_nearest_mine(npc)
-            if mine:
-                return (mine.global_center_x, mine.global_center_y)
-            return None
+            if mine and mine.id != work_building.id:
+                return self._find_unclaimed_tile_near(mine.global_center_x, mine.global_center_y, occupied, prefer=(npc.x, npc.y), radius=max(2, mine.width // 2))
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + 1, work_building.global_origin_y + work_building.height - 2, occupied, prefer=(npc.x, npc.y))
+        elif target_zone_tag in {"tables", "patron_area"}:
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + 2, work_building.global_origin_y + work_building.height - 2, occupied, prefer=(npc.x, npc.y), radius=2)
+        elif target_zone_tag in {"cellar", "crates", "storage_area"}:
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + work_building.width - 2, work_building.global_origin_y + work_building.height - 2, occupied, prefer=(npc.x, npc.y), radius=2)
+        elif target_zone_tag in {"shelves", "storefront"}:
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + 2, work_building.global_origin_y + 2, occupied, prefer=(npc.x, npc.y), radius=2)
+        elif target_zone_tag == "counter":
+            return self._find_unclaimed_tile_near(work_building.global_origin_x + work_building.width // 2, work_building.global_origin_y + 2, occupied, prefer=(npc.x, npc.y), radius=2)
         elif npc.economic.profession == "Farmer" and target_zone_tag == "field_patch":
             field_tiles_coords = work_building.work_zone_tiles.get("field_patch", [])
             if not field_tiles_coords:
@@ -5043,6 +5270,7 @@ class World:
                     refined_coords = work_building.refine_anchor_coordinates(self, anchor_coords[0], anchor_coords[1], requesting_entity=npc)
                     if self._is_valid_coordinate_pair(refined_coords):
                         return tuple(refined_coords)
+                return self._find_unclaimed_tile_near(work_building.global_center_x, work_building.global_center_y, occupied, prefer=(npc.x, npc.y), radius=max(2, work_building.width // 2))
 
                 # self.add_message_to_chat_log(f"Warning: No coordinates defined for work zone '{target_zone_tag}' in building {work_building.id} for {npc.name}.")
                 return None
@@ -5273,9 +5501,17 @@ class World:
                 for item_key, quantity_needed in consumes_from_building_def.items():
                     current_building_qty = work_building.building_inventory.get(item_key, 0)
                     if current_building_qty >= quantity_needed:
-                        work_building.building_inventory[item_key] = current_building_qty - quantity_needed
-                        if work_building.building_inventory[item_key] <= 0:
-                            del work_building.building_inventory[item_key]
+                        # Inventory drops a key the moment its quantity hits
+                        # zero, so writing 0 and then reading it back raises
+                        # KeyError - which crashed the game outright the first
+                        # time a workplace used the last of an ingredient. Found
+                        # by a long run: a bakery baking its final sack of flour
+                        # took the whole simulation down.
+                        remaining = current_building_qty - quantity_needed
+                        if remaining > 0:
+                            work_building.building_inventory[item_key] = remaining
+                        else:
+                            work_building.building_inventory.pop(item_key, None)
                         # self.add_message_to_chat_log(f"Debug: Task consumed {quantity_needed} {item_key} from {work_building.building_type}.")
                     else:
                         # self.add_message_to_chat_log(f"Debug: {work_building.building_type} needed {quantity_needed} {item_key} for task, but only had {current_building_qty}.")
@@ -6277,6 +6513,82 @@ class World:
         )
         return True
 
+    MERCHANT_DEPARTURE_CHANCE_PER_DAY = 0.5
+
+    def _advance_abstract_merchant_travel(self) -> int:
+        """Move traveling merchants between settlements while they are off-screen.
+
+        A merchant's whole job is the road between villages, which is almost
+        always somewhere the player is not - so they are dormant nearly all the
+        time, and run_npc_traveling_merchant_policy only runs for NPCs in active
+        chunks. Nothing else moved them: the daily travel pass reads
+        self.village_npcs, and merchants live in self.npcs. The result was two
+        merchants standing in the village they spawned in, for ever.
+
+        Self-contained rather than folded into the migration pass above, which
+        also rehomes and marries people - things a merchant passing through
+        should not be signed up for.
+
+        Returns the number of merchants that arrived somewhere this day.
+        """
+        settlements = [
+            chunk.village
+            for row in self.chunks
+            for chunk in row
+            if getattr(chunk, "village", None) is not None
+        ]
+        if len(settlements) < 2:
+            return 0
+
+        arrivals = 0
+        for npc in list(self.npcs):
+            if getattr(getattr(npc, "physical", None), "is_dead", False):
+                continue
+            if getattr(getattr(npc, "economic", None), "profession", None) != "Traveling Merchant":
+                continue
+            if not getattr(npc, "is_sleeping", False):
+                continue  # on-screen merchants walk the road themselves
+            travel = getattr(npc, "travel", None)
+            if travel is None:
+                continue
+
+            if travel.is_traveling:
+                travel.eta_days = max(0, int(travel.eta_days) - 1)
+                if travel.eta_days <= 0:
+                    destination = self.get_settlement_by_id(travel.destination_settlement_id)
+                    coords = self._get_village_anchor_coords(destination) if destination else None
+                    if coords:
+                        self._update_entity_position(npc, coords[0], coords[1])
+                    travel.is_traveling = False
+                    travel.origin_settlement_id = travel.destination_settlement_id
+                    travel.destination_settlement_id = None
+                    # Back to the task the on-screen policy expects, so a merchant
+                    # the player then walks up to behaves like one who arrived.
+                    npc.schedule.current_task = "lingering_in_village"
+                    npc.leisure_timer = random.randint(DAY_LENGTH_TICKS // 4, DAY_LENGTH_TICKS)
+                    if destination is not None:
+                        self.share_abstract_rumors_with_settlement(npc, destination)
+                    arrivals += 1
+                continue
+
+            if random.random() >= self.MERCHANT_DEPARTURE_CHANCE_PER_DAY:
+                continue
+            here = self._get_npc_settlement(npc)
+            elsewhere = [v for v in settlements if v is not here]
+            if not elsewhere:
+                continue
+            target = random.choice(elsewhere)
+            anchor = self._get_village_anchor_coords(target)
+            if anchor is None:
+                continue
+            distance = abs(npc.x - anchor[0]) + abs(npc.y - anchor[1])
+            travel.is_traveling = True
+            travel.origin_settlement_id = getattr(here, "id", None)
+            travel.destination_settlement_id = target.id
+            travel.eta_days = max(1, int(math.ceil(distance / max(1, CHUNK_SIZE * 2))))
+            npc.schedule.current_task = "traveling_to_village"
+        return arrivals
+
     def _complete_travel_arrival(self, leader: NPC) -> None:
         travel = getattr(leader, "travel", None)
         if travel is None or not travel.is_traveling:
@@ -6326,6 +6638,8 @@ class World:
             npc for npc in self.village_npcs
             if not npc.physical.is_dead and getattr(npc, "is_sleeping", False)
         ]
+
+        self._advance_abstract_merchant_travel()
 
         processed_groups: set[int] = set()
         for npc in sleeping_npcs:
@@ -7471,14 +7785,23 @@ class World:
             npc.schedule.current_task = seeking_task
             return True
 
+        desperate = current_value >= desperate_threshold
+        if hasattr(npc, "_survival_failures") and need_type in npc._survival_failures:
+            fail_info = npc._survival_failures[need_type]
+            if self.game_time < fail_info.get("retry_after", 0) and not desperate:
+                return False
+
         if current_value < urgent_threshold and npc.schedule.current_task == seeking_task:
             self._resume_npc_after_survival_need(npc)
+            if hasattr(npc, "_survival_failures"):
+                npc._survival_failures.pop(need_type, None)
             return False
 
         if current_value < urgent_threshold:
+            if hasattr(npc, "_survival_failures"):
+                npc._survival_failures.pop(need_type, None)
             return False
 
-        desperate = current_value >= desperate_threshold
         if npc.schedule.current_task != seeking_task:
             self._remember_npc_interrupted_task(npc)
         inventory = npc.economic.npc_inventory
@@ -7490,6 +7813,8 @@ class World:
         )
         if consumed_supply:
             self._resume_npc_after_survival_need(npc)
+            if hasattr(npc, "_survival_failures"):
+                npc._survival_failures.pop(need_type, None)
             return True
 
         # Check home pantry before commercial travel if currently at home
@@ -7504,37 +7829,50 @@ class World:
                 )
                 if consumed_home:
                     self._resume_npc_after_survival_need(npc)
+                    if hasattr(npc, "_survival_failures"):
+                        npc._survival_failures.pop(need_type, None)
                     return True
 
         if desperate:
             self._maybe_generate_survival_help_quest(npc, need_type=need_type)
 
+        if not hasattr(npc, "_survival_failures"):
+            npc._survival_failures = {}
+
         if need_type == "thirst":
             water_source = self._find_nearest_water_source(npc)
             if water_source is None:
-                npc.schedule.current_task = "idle_confused"
+                fail_info = npc._survival_failures.setdefault("thirst", {"count": 0, "retry_after": 0})
+                fail_info["count"] += 1
+                fail_info["retry_after"] = self.game_time + min(600, 30 * (2 ** (fail_info["count"] - 1)))
+                npc.schedule.current_task = "wandering_thirsty" if desperate else TaskType.IDLE
                 npc.schedule.current_path = []
                 npc.schedule.current_destination_coords = None
-                return True
+                return False
 
             destination_tile = self.get_tile_at(water_source[0], water_source[1])
             if destination_tile and destination_tile.passable and (npc.x, npc.y) == water_source:
                 npc.physical.thirst = 0
                 self._resume_npc_after_survival_need(npc)
+                npc._survival_failures.pop("thirst", None)
                 return True
 
             if abs(npc.x - water_source[0]) + abs(npc.y - water_source[1]) <= 1:
                 npc.physical.thirst = 0
                 self._resume_npc_after_survival_need(npc)
+                npc._survival_failures.pop("thirst", None)
                 return True
 
             if self._path_npc_to_survival_target(npc, water_source, task_name=seeking_task, adjacent_if_blocked=True):
                 return True
 
-            npc.schedule.current_task = "idle_confused"
+            fail_info = npc._survival_failures.setdefault("thirst", {"count": 0, "retry_after": 0})
+            fail_info["count"] += 1
+            fail_info["retry_after"] = self.game_time + min(600, 30 * (2 ** (fail_info["count"] - 1)))
+            npc.schedule.current_task = "wandering_thirsty" if desperate else TaskType.IDLE
             npc.schedule.current_path = []
             npc.schedule.current_destination_coords = None
-            return True
+            return False
 
         food_source = self._find_nearest_food_source(npc)
         if food_source and food_source.contains_global_coords(npc.x, npc.y):
@@ -7547,19 +7885,32 @@ class World:
                 )
                 if consumed_after_purchase:
                     self._resume_npc_after_survival_need(npc)
+                    npc._survival_failures.pop("hunger", None)
                     return True
             npc.schedule.current_task = seeking_task
             npc.schedule.current_path = []
-            npc.schedule.current_destination_coords = (food_source.global_center_x, food_source.global_center_y)
+            # Not the raw centre: a tavern's is its table, and a tenth of the
+            # buildings in a village have furniture on the middle tile, so
+            # aiming there made the food source simply unreachable.
+            npc.schedule.current_destination_coords = (
+                self.get_standable_tile_in_building(food_source, npc)
+                or (food_source.global_center_x, food_source.global_center_y)
+            )
             return True
 
         if food_source and self._path_npc_to_survival_target(
             npc,
-            (food_source.global_center_x, food_source.global_center_y),
+            self.get_standable_tile_in_building(food_source, npc)
+            or (food_source.global_center_x, food_source.global_center_y),
             task_name=seeking_task,
+            # Same courtesy the thirst branch above already grants itself.
+            adjacent_if_blocked=True,
         ):
             return True
 
+        fail_info = npc._survival_failures.setdefault("hunger", {"count": 0, "retry_after": 0})
+        fail_info["count"] += 1
+        fail_info["retry_after"] = self.game_time + min(600, 30 * (2 ** (fail_info["count"] - 1)))
         npc.schedule.current_task = "wandering_hungry"
         npc.schedule.current_path = []
         npc.schedule.current_destination_coords = None
@@ -7756,6 +8107,18 @@ class World:
 
         elif entity_type == "tile":
             interaction_hint = entity_data.properties.get("interaction_hint")
+
+            # Checked before the chain below rather than inside it: a locked
+            # chest is still a chest and a grass tile is still tillable, so
+            # these sit alongside whatever else the tile offers instead of
+            # competing with it. Both had a full implementation, an item to
+            # gate them, and tile data to act on - and nothing that offered
+            # them, so a lockpick and a sapling were unusable objects.
+            if entity_data.properties.get("is_locked") and self.player.has_item("lockpick"):
+                actions.append("Pick Lock")
+            if entity_data.name in ("Plains", "Tilled Soil") and self.player.has_item("sapling"):
+                actions.append("Plant Sapling")
+
             if isinstance(entity_data, Tree) and entity_data.is_choppable:
                 actions.append("Chop")
             elif entity_data.properties.get("is_door"):
@@ -7772,6 +8135,15 @@ class World:
                 actions.append("Sleep")
             elif interaction_hint == "forge":
                 actions.append("Forge")
+            elif interaction_hint == "smoke" or entity_data.properties.get("workstation_type") == "smoking_rack":
+                # player_attempt_smoke and the menu's "Smoke Meat" entry both
+                # existed; nothing ever offered the action, so a smoking rack
+                # was scenery the player could walk up to and do nothing with.
+                actions.append("Smoke Meat")
+            elif entity_data.name in ("Water", "Deep Water") and self.player.has_item("fishing_rod"):
+                # Same for fishing - gated on the rod, the way tilling is gated
+                # on the hoe just below.
+                actions.append("Fish")
 
             elif entity_data.name == "Plains" and self.player.has_item("stone_hoe"):
                 actions.append("Till Soil")
@@ -8094,6 +8466,33 @@ class World:
                 visited.add(next_pos)
                 queue.append(next_pos)
         return False
+
+    def get_standable_tile_in_building(self, building: Building, entity=None) -> tuple[int, int] | None:
+        """A tile in `building` something can actually stand on.
+
+        A building's global centre is very often furniture - a tavern's is
+        typically its table - and furniture is impassable. Pathing straight at
+        the centre therefore finds no route, and the caller concludes the whole
+        building is unreachable: a freezing villager one tile from their tavern
+        door decided they could not get there and stood outside.
+        """
+        if building is None:
+            return None
+        centre = (building.global_center_x, building.global_center_y)
+        tile = self.get_tile_at(*centre)
+        if tile is not None and tile.passable:
+            return centre
+
+        spawn_tile = self._get_spawn_tile_for_building(building)
+        if spawn_tile is not None:
+            tile = self.get_tile_at(*spawn_tile)
+            if tile is not None and tile.passable:
+                return spawn_tile
+
+        adjacent_x, adjacent_y = self._find_best_adjacent_tile(centre[0], centre[1], entity)
+        if adjacent_x is not None:
+            return adjacent_x, adjacent_y
+        return None
 
     def _get_spawn_tile_for_building(self, building: Building) -> tuple[int, int] | None:
         entrance = self._ensure_building_entrance_integrity(building)
@@ -9416,6 +9815,51 @@ class World:
                 f"You overhear {self.get_entity_display_name(npc)} and {self.get_entity_display_name(partner)} start talking."
             )
 
+    def _resolve_player_attack_with_dice(
+        self,
+        target_npc: NPC,
+        weapon_name: str,
+        damage_dice_str: str,
+        damage_bonus: int,
+        melee_skill: int,
+    ) -> str:
+        """Resolve a player attack on dice, in the shape the LLM path returns.
+
+        Mirrors npc_attempt_attack_player exactly: d20 + melee skill against the
+        target's armour class, natural 20 crits for double damage. Returns the
+        same JSON the adjudicating model would, so the caller's hit/damage/
+        narrative handling stays the single path.
+        """
+        target_ac = 10 + getattr(target_npc, "defense_bonus", 0)
+        d20_roll = random.randint(1, 20)
+        target_display = self.get_entity_display_name(target_npc)
+
+        if d20_roll != 20 and d20_roll + melee_skill < target_ac:
+            return json.dumps({
+                "hit": False,
+                "damage_dealt": 0,
+                "narrative_feedback": f"Your {weapon_name.lower()} whistles past {target_display}.",
+            })
+
+        try:
+            num_dice, die_type = map(int, str(damage_dice_str).lower().split("d"))
+            base_damage = sum(random.randint(1, die_type) for _ in range(num_dice))
+        except (ValueError, AttributeError):
+            base_damage = 1
+
+        total_damage = max(1, base_damage + damage_bonus)
+        if d20_roll == 20:
+            total_damage *= 2
+            narrative = f"CRITICAL HIT! You catch {target_display} clean with your {weapon_name.lower()}."
+        else:
+            narrative = f"You strike {target_display} with your {weapon_name.lower()}."
+
+        return json.dumps({
+            "hit": True,
+            "damage_dealt": total_damage,
+            "narrative_feedback": narrative,
+        })
+
     def player_attempt_attack(self, target_npc: NPC):
         if not target_npc:
             self.add_message_to_chat_log("No target selected for attack.")
@@ -9475,11 +9919,16 @@ class World:
         attack_landed = False
 
         if not response_str:
-            self.add_message_to_chat_log("Your attack seems to have no effect (LLM Comms Error).")
-            if not target_npc.combat.is_hostile_to_player and not target_npc.is_dead:
-                target_npc.combat.is_hostile_to_player = True
-                self.add_message_to_chat_log(f"{target_name} becomes hostile due to your aggression!")
-            return
+            # Roll it instead. The player's swing was the only combat path in
+            # the game adjudicated purely by the LLM - every other one, NPC on
+            # player and NPC on NPC, resolves on dice - so with no LLM reachable
+            # the player simply could not hurt anything: measured, forty attacks
+            # left an unarmoured villager on full health while their own attacks
+            # took the player from 35 to 2. Same mechanics the NPCs use, so an
+            # unreachable model changes the flavour text and nothing else.
+            response_str = self._resolve_player_attack_with_dice(
+                target_npc, player_weapon_name, weapon_dice_str, weapon_damage_bonus, player_melee_skill
+            )
 
         try:
             response_json = json.loads(response_str)
@@ -10820,8 +11269,9 @@ class World:
             # Also check if PLAYER witnesses it (if player is not subject)
             player_saw = False
             if subject_id != self.player.id:
-                if self.player_fov_map[location[1], location[0]]:
-                    player_saw = True
+                if 0 <= location[0] < WORLD_WIDTH and 0 <= location[1] < WORLD_HEIGHT:
+                    if self.player_fov_map[location[1], location[0]]:
+                        player_saw = True
 
             if valid_witnesses or player_saw:
                 new_event.public_knowledge = True
@@ -11634,8 +12084,13 @@ class World:
 
                                     if new_tree:
                                         chunk.tiles[y_local][x_local] = new_tree
-                                        # Also update the global transparency map for FOV
-                                        self.transparency_map[world_x, world_y] = True # Trees are not transparent
+                                        # Also update the global transparency map for FOV.
+                                        # [y, x]: transparency_map is (WORLD_HEIGHT, WORLD_WIDTH),
+                                        # as every other write to it assumes. Indexed the other way
+                                        # this marked the wrong tile opaque, and threw IndexError
+                                        # outright once a tree grew at an x past WORLD_HEIGHT - the
+                                        # right third of the map.
+                                        self.transparency_map[world_y, world_x] = True # Trees are not transparent
 
 
                         # Sapling growth into tree
@@ -11657,7 +12112,7 @@ class World:
 
                                 if new_tree:
                                     chunk.tiles[y_local][x_local] = new_tree
-                                    self.transparency_map[world_x, world_y] = True # Update transparency map
+                                    self.transparency_map[world_y, world_x] = True # Update transparency map
 
                         # Crop growth
                         elif tile.name == "Growing Wheat":
@@ -11704,6 +12159,46 @@ class World:
                     for item_key, qty in consumes.items():
                         village.demand[item_key] = village.demand.get(item_key, 0) + 5 # Baseline demand of 5 for each required resource
 
+    def _village_spawn_spots(self, village: Village, fallback_center: tuple[int, int], count: int) -> list[tuple[int, int]]:
+        """Distinct spawn tiles fanning out from a village centre, one per resident.
+
+        For the residents who do not get a house. They used to all be dropped
+        on their chunk's centre tile - every one of them on the same square, a
+        stack of a dozen-odd villagers that no later system pulled apart.
+
+        This runs during macro generation, before a single tile of the chunk is
+        painted, so it can only reason about geometry: it stays out of building
+        footprints and never repeats a tile. That is enough to break up the
+        stack; _settle_npcs_into_daily_routines re-checks everyone against real
+        terrain once the chunk has tiles and moves them to where their routine
+        actually wants them.
+        """
+        center_x, center_y = self._get_village_anchor_coords(village) or fallback_center
+        spots: list[tuple[int, int]] = []
+        for radius in range(max(1, CHUNK_SIZE // 2)):
+            if len(spots) >= count:
+                break
+            ring = []
+            for offset_y in range(-radius, radius + 1):
+                for offset_x in range(-radius, radius + 1):
+                    # Only the tiles this radius newly reaches.
+                    if max(abs(offset_x), abs(offset_y)) != radius:
+                        continue
+                    x, y = center_x + offset_x, center_y + offset_y
+                    if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
+                        continue
+                    if any(building.contains_global_coords(x, y) for building in village.buildings):
+                        continue
+                    ring.append((x, y))
+            random.shuffle(ring)
+            spots.extend(ring)
+
+        # A village hemmed in by the world edge can run short; those residents
+        # fall back to the centre and the settling pass spreads them later.
+        while len(spots) < count:
+            spots.append((center_x, center_y))
+        return spots[:count]
+
     def _populate_village_npcs(self, chunk: Chunk, village: Village, chunk_coord_x: int, chunk_coord_y: int): # Added chunk_coord_x, chunk_coord_y
         """Populates a village with NPCs, assigning them homes and potentially jobs."""
         # chunk_global_start_x and chunk_global_start_y are now implicitly handled by Building.global_center_x/y
@@ -11718,10 +12213,24 @@ class World:
         residential_buildings = [b for b in village.buildings if b.category == "residential"]
         workplace_buildings = [b for b in village.buildings if "workplace" in b.category] # e.g., "civic_workplace", "commercial_workplace"
 
-        available_homes = list(residential_buildings)
+        available_homes = []
+        for home in residential_buildings:
+            available_homes.extend([home] * 3)
         available_workplaces = list(workplace_buildings)
         random.shuffle(available_homes)
         random.shuffle(available_workplaces)
+
+        # Villages generate far more residents than houses, so most of this
+        # loop's NPCs get no home. One spot each, rather than all of them on
+        # the chunk centre.
+        homeless_spawn_spots = self._village_spawn_spots(
+            village,
+            (
+                chunk_coord_x * CHUNK_SIZE + CHUNK_SIZE // 2,
+                chunk_coord_y * CHUNK_SIZE + CHUNK_SIZE // 2,
+            ),
+            num_npcs,
+        )
 
         for i in range(num_npcs):
             # npc_data = {
@@ -11763,16 +12272,14 @@ class World:
             try:
                 # Assign home
                 if not available_homes:
-                    # self.add_message_to_chat_log("Warning: No available homes for new NPC.")
-                    # Create NPC without a home, or handle differently
                     home_building = None
-                    npc_x = chunk_coord_x * CHUNK_SIZE + CHUNK_SIZE // 2
-                    npc_y = chunk_coord_y * CHUNK_SIZE + CHUNK_SIZE // 2
+                    npc_x, npc_y = homeless_spawn_spots[i]
                 else:
                     home_building = available_homes.pop(0)
-                    # Place NPC at the global center of their home building
-                    npc_x = home_building.global_center_x
-                    npc_y = home_building.global_center_y
+                    # Inside their own home, but not on the centre tile if the
+                    # player - who starts in one of these houses - is already
+                    # standing on it.
+                    npc_x, npc_y = self._resident_spawn_position(home_building)
 
                 # Ensure NPC is within world bounds (still good practice)
                 npc_x = max(0, min(WORLD_WIDTH - 1, npc_x))
@@ -11940,12 +12447,76 @@ class World:
                 self.add_message_to_chat_log(
                     f"Generated Villager: {npc.name} (Wealth: {npc.economic.wealth_level}, Prof: {npc.economic.profession}). "
                     f"Home: {home_building.building_type if home_building else 'N/A'}. "
-                    f"Work: {work_building.building_type if work_building else 'N/A'}."
+                    f"Work: {work_building.building_type if work_building else 'N/A'}.",
+                    category=message_log.DEBUG_CATEGORY,
                 )
 
             except IndexError: # Ran out of homes or workplaces
                 self.add_message_to_chat_log(f"Could not place NPC {npc_data.get('name', 'Unknown')} due to lack of available buildings.")
 
+        self._seed_village_marriages(village)
+
+    def _seed_village_marriages(self, village: Village) -> int:
+        """Marry some of a new village's adults to each other.
+
+        _simulate_village_population_lifecycle requires an actual married couple
+        before anyone can be born - deliberately, so that children have real
+        parents rather than appearing out of a random pairing. But world
+        generation created nobody married, and the only way to become married is
+        the live courtship pipeline, which needs a villager to be in an active
+        chunk, roll a 1% leisure check, and then build a relationship past 70.
+
+        So a generated village had 33 adults of childbearing age, no couples, and
+        no route to any: measured across 60 in-game days, zero births, zero
+        deaths, median age frozen. A village that has existed before the player
+        arrived should already have families in it - that is world-building, not
+        something the simulation should have to derive from nothing.
+
+        Returns the number of couples made.
+        """
+        residents = [
+            npc for npc in self.village_npcs
+            if not npc.physical.is_dead and self._get_npc_settlement(npc) is village
+        ]
+        eligible = [
+            npc for npc in residents
+            if MARRIAGE_SEED_MIN_AGE <= int(getattr(npc, "age", 0) or 0) <= MARRIAGE_SEED_MAX_AGE
+            and not (npc.social.family_ties or {}).get("partner_id")
+        ]
+        if len(eligible) < 2:
+            return 0
+
+        # Pair across genders where the village allows it, so seeded couples can
+        # actually produce the children the lifecycle expects of them.
+        women = [npc for npc in eligible if str(getattr(npc, "gender", "")).lower() == "female"]
+        men = [npc for npc in eligible if str(getattr(npc, "gender", "")).lower() == "male"]
+
+        # Its own RNG stream, per _chunk_rng's reasoning: drawing from the
+        # module-level `random` here would shift every later draw in world
+        # generation, so adding this step silently changed the layout of every
+        # seeded world - which is exactly what broke two unrelated tests that
+        # rely on World(seed=123) producing a particular map.
+        chunk_coords = getattr(village, "chunk_coords", None) or (0, 0)
+        rng = self._chunk_rng(chunk_coords[0], chunk_coords[1], "village_marriages")
+        rng.shuffle(women)
+        rng.shuffle(men)
+
+        couples = 0
+        for wife, husband in zip(women, men):
+            if rng.random() > MARRIAGE_SEED_RATE:
+                continue
+            self._marry_npcs(wife, husband)
+            couples += 1
+        return couples
+
+    def _marry_npcs(self, first: NPC, second: NPC) -> None:
+        """Record a marriage between two NPCs, the same way courtship does."""
+        first.social.family_ties["partner_id"] = second.id
+        first.social.family_ties["spouse_id"] = second.id
+        second.social.family_ties["partner_id"] = first.id
+        second.social.family_ties["spouse_id"] = first.id
+        first.social.relationships[second.id] = max(first.social.relationships.get(second.id, 0), 80)
+        second.social.relationships[first.id] = max(second.social.relationships.get(first.id, 0), 80)
 
     def apply_animation_cue(self, cue: str, *, interaction=None, result=None) -> None:
         if cue == "build" and hasattr(self, "visual_effects") and interaction is not None:
@@ -13644,7 +14215,10 @@ class World:
             # If the response is a valid JSON, use it. Otherwise, fallback to placeholder.
             decoration_data = json.loads(llm_response)
         except json.JSONDecodeError:
-            self.add_message_to_chat_log(f"LLM failed to provide valid JSON for {building.building_type} interior. Using placeholder.")
+            self.add_message_to_chat_log(
+                f"LLM failed to provide valid JSON for {building.building_type} interior. Using placeholder.",
+                category=message_log.DEBUG_CATEGORY,
+            )
             decoration_data = {"decorations": []}
             if building.building_type == "house":
                 decoration_data["decorations"].append({"type": "bed_simple", "x": 1, "y": 1})
@@ -13713,7 +14287,27 @@ class World:
             llm_response = self._call_llm_for_worldgen(prompt)
             try:
                 npc_data = json.loads(llm_response)
+            except (json.JSONDecodeError, TypeError):
+                # _call_llm_for_worldgen returns "" by design - world generation
+                # is meant to stay local and fast. Villager creation handles that
+                # with a fallback and carries on; this one wrapped the whole
+                # merchant in the try, so the parse failed first and no merchant
+                # was ever built. Every world had zero traveling merchants, which
+                # took inter-village trade, caravan arrivals and the rumours they
+                # carry with them.
+                gender = random.choice(["male", "female"])
+                npc_data = {
+                    "name": "%s %s" % (
+                        random.choice(FAMILY_FIRST_NAMES.get(gender, FAMILY_FIRST_NAMES["male"])),
+                        random.choice(FAMILY_LAST_NAMES),
+                    ),
+                    "dialogue": ["Looking for a deal?"],
+                    "personality": "worldly, business-savvy, friendly",
+                    "family_ties": "none",
+                    "attitude_to_player": "neutral",
+                }
 
+            try:
                 merchant = NPC(
                     x=start_x,
                     y=start_y,
@@ -13826,6 +14420,15 @@ class World:
 
             spawn_tile = self._get_spawn_tile_for_building(home_building)
             if spawn_tile is not None:
+                # That tile is the house's centre, which is also where its first
+                # resident is seated, so step aside rather than start the game
+                # standing inside a relative.
+                self._ensure_entity_positions_current()
+                occupant_id = self.entity_positions.get(spawn_tile)
+                if occupant_id is not None and occupant_id != self.player.id:
+                    nudged_x, nudged_y = self._find_best_adjacent_tile(spawn_tile[0], spawn_tile[1], self.player)
+                    if nudged_x is not None:
+                        spawn_tile = (nudged_x, nudged_y)
                 self._update_entity_position(self.player, *spawn_tile)
                 return
 
@@ -13935,6 +14538,37 @@ class World:
 
         print("Warning: No passable starting tile found within the safe margin. Player may be stuck.")
 
+    def _resident_spawn_position(self, building: Building) -> tuple[int, int]:
+        """A tile inside `building` that nobody living there is already standing on.
+
+        The player's relatives all share the one house and were all seated on
+        its centre tile - on top of each other and on top of the player. This
+        walks the footprint outwards from the centre instead.
+
+        Geometric, like _village_spawn_spots and for the same reason: families
+        are created during macro generation, before the chunk has any tiles to
+        test for walkability. The settling pass sorts out anyone who lands on a
+        wall once the chunk is painted.
+        """
+        taken = {(resident.x, resident.y) for resident in building.residents}
+        player = getattr(self, "player", None)
+        if player is not None and building.contains_global_coords(player.x, player.y):
+            taken.add((player.x, player.y))
+
+        center_x, center_y = building.global_center_x, building.global_center_y
+        for radius in range(max(building.width, building.height) + 1):
+            for offset_y in range(-radius, radius + 1):
+                for offset_x in range(-radius, radius + 1):
+                    # Only the tiles this radius newly reaches.
+                    if max(abs(offset_x), abs(offset_y)) != radius:
+                        continue
+                    x, y = center_x + offset_x, center_y + offset_y
+                    if not building.contains_global_coords(x, y):
+                        continue
+                    if (x, y) not in taken:
+                        return x, y
+        return center_x, center_y
+
     def _create_family_npc(self, role: str, last_name: str, home_building: Building, family_ties: dict):
         """Helper to create a family member NPC."""
         # Determine age and gender based on role
@@ -13985,9 +14619,10 @@ class World:
         family_ties = dict(family_ties)
         family_ties.setdefault("relation_to_player", role.lower())
 
+        spawn_x, spawn_y = self._resident_spawn_position(home_building)
         npc = NPC(
-            x=home_building.global_center_x,
-            y=home_building.global_center_y,
+            x=spawn_x,
+            y=spawn_y,
             name=npc_data.get("name") or fallback_name,
             dialogue=npc_data.get("dialogue", ["Welcome home."]),
             personality=npc_data.get("personality", "friendly"),
@@ -14239,7 +14874,66 @@ class World:
                                 if 0 <= world_x < WORLD_WIDTH and 0 <= world_y < WORLD_HEIGHT:
                                     self.transparency_map[world_y, world_x] = not den_def.get("blocks_fov", False)
 
-    def _is_wildlife_spawn_tile_suitable(self, species_key: str, chunk: Chunk, world_x: int, world_y: int) -> bool:
+    def _get_settlement_extent(self, village: Village) -> tuple[int, int, int, int] | None:
+        """Bounding box of a village's built area: buildings and public spaces.
+
+        Not cached, because construction adds buildings during play and a stale
+        box would quietly shrink the settlement back to its founding footprint.
+        """
+        min_x = min_y = max_x = max_y = None
+        for building in getattr(village, "buildings", []):
+            corners = (
+                (building.global_origin_x, building.global_origin_y),
+                (building.global_origin_x + building.width - 1, building.global_origin_y + building.height - 1),
+            )
+            for point_x, point_y in corners:
+                min_x = point_x if min_x is None else min(min_x, point_x)
+                min_y = point_y if min_y is None else min(min_y, point_y)
+                max_x = point_x if max_x is None else max(max_x, point_x)
+                max_y = point_y if max_y is None else max(max_y, point_y)
+        for coords_list in getattr(village, "interaction_points", {}).values():
+            for point_x, point_y in coords_list:
+                min_x = point_x if min_x is None else min(min_x, point_x)
+                min_y = point_y if min_y is None else min(min_y, point_y)
+                max_x = point_x if max_x is None else max(max_x, point_x)
+                max_y = point_y if max_y is None else max(max_y, point_y)
+        if min_x is None:
+            return None
+        return min_x, min_y, max_x, max_y
+
+    def _get_settlement_spawn_exclusions(self, chunk_x: int, chunk_y: int, buffer_tiles: int) -> list[tuple[int, int, int, int]]:
+        """Settlement footprints, grown by `buffer_tiles`, that spawns in this chunk could land in.
+
+        The old check only looked at the spawning chunk's own village, so a wolf
+        placed one tile the far side of a chunk boundary counted as wilderness
+        and turned up at the edge of town. Villages in the neighbouring chunks
+        are considered too.
+        """
+        exclusions: list[tuple[int, int, int, int]] = []
+        for neighbour_y in range(chunk_y - 1, chunk_y + 2):
+            for neighbour_x in range(chunk_x - 1, chunk_x + 2):
+                if not (0 <= neighbour_x < self.chunk_width and 0 <= neighbour_y < self.chunk_height):
+                    continue
+                village = getattr(self.chunks[neighbour_y][neighbour_x], "village", None)
+                if village is None:
+                    continue
+                extent = self._get_settlement_extent(village)
+                if extent is None:
+                    continue
+                min_x, min_y, max_x, max_y = extent
+                exclusions.append(
+                    (min_x - buffer_tiles, min_y - buffer_tiles, max_x + buffer_tiles, max_y + buffer_tiles)
+                )
+        return exclusions
+
+    def _is_wildlife_spawn_tile_suitable(
+        self,
+        species_key: str,
+        chunk: Chunk,
+        world_x: int,
+        world_y: int,
+        settlement_exclusions: list[tuple[int, int, int, int]] | None = None,
+    ) -> bool:
         tile = self.get_tile_at(world_x, world_y)
         if tile is None or not getattr(tile, "passable", False):
             return False
@@ -14255,26 +14949,36 @@ class World:
         self._ensure_entity_positions_current()
         if self.entity_positions.get((world_x, world_y)) is not None:
             return False
-        village = getattr(chunk, "village", None)
-        if village is not None:
-            for building in getattr(village, "buildings", []):
-                if abs(world_x - building.global_center_x) + abs(world_y - building.global_center_y) <= 8:
-                    return False
-            for coords_list in getattr(village, "interaction_points", {}).values():
-                for point_x, point_y in coords_list:
-                    if abs(world_x - point_x) + abs(world_y - point_y) <= 8:
-                        return False
+        if settlement_exclusions is None:
+            settlement_exclusions = self._get_settlement_spawn_exclusions(
+                world_x // CHUNK_SIZE, world_y // CHUNK_SIZE, self._wildlife_settlement_buffer(species_key)
+            )
+        for min_x, min_y, max_x, max_y in settlement_exclusions:
+            if min_x <= world_x <= max_x and min_y <= world_y <= max_y:
+                return False
         return True
+
+    @staticmethod
+    def _wildlife_settlement_buffer(species_key: str) -> int:
+        """How far outside a settlement this species will first appear."""
+        species_def = WILDLIFE_SPECIES.get(species_key, {})
+        return int(species_def.get("settlement_buffer", DEFAULT_SETTLEMENT_BUFFER))
 
     def _find_wildlife_spawn_tiles(self, species_key: str, chunk: Chunk, chunk_x: int, chunk_y: int, limit: int = 12) -> list[tuple[int, int]]:
         candidates: list[tuple[int, int]] = []
         if not chunk.tiles:
             return candidates
+        # Resolved once for the whole chunk rather than per tile - the box test
+        # below then costs the same as the old per-building distance loop did
+        # for a single building.
+        settlement_exclusions = self._get_settlement_spawn_exclusions(
+            chunk_x, chunk_y, self._wildlife_settlement_buffer(species_key)
+        )
         for y_local in range(CHUNK_SIZE):
             for x_local in range(CHUNK_SIZE):
                 world_x = chunk_x * CHUNK_SIZE + x_local
                 world_y = chunk_y * CHUNK_SIZE + y_local
-                if self._is_wildlife_spawn_tile_suitable(species_key, chunk, world_x, world_y):
+                if self._is_wildlife_spawn_tile_suitable(species_key, chunk, world_x, world_y, settlement_exclusions):
                     candidates.append((world_x, world_y))
         # Per-species stream so one species' placement doesn't shift another's.
         self._chunk_rng(chunk_x, chunk_y, f"wildlife_tiles:{species_key}").shuffle(candidates)
@@ -14545,6 +15249,41 @@ class World:
                         break
 
             if not valid_candidates:
+                # Nothing in the sparse offset list fit and twenty random darts
+                # missed, so scan the chunk properly before giving up.
+                #
+                # This is what actually starved the trades. Measured over 24
+                # generated villages the chunk was only 35.7% occupied by roads
+                # and building footprints, and yet the carpenter's shop, church
+                # and guard tower placed *never*, the clinic in one village out
+                # of 24, the library in four and the farm in five. The offset
+                # list above is 67 hand-picked spots spiralling out from
+                # (CHUNK_SIZE//4, CHUNK_SIZE//4) - one corner - out of 1600
+                # positions, with gaps between radius 5, 8, 12, 16, 20 and 24
+                # that nothing ever looks in. Buildings were not failing for
+                # want of room; they were failing for want of looking.
+                #
+                # Integral image so each rectangle test is O(1) instead of
+                # O(area) - a full scan is 1600 candidate positions and this
+                # runs once per building that would otherwise not exist at all.
+                integral = [[0] * (CHUNK_SIZE + 1) for _ in range(CHUNK_SIZE + 1)]
+                for i in range(CHUNK_SIZE):
+                    row_running = 0
+                    for j in range(CHUNK_SIZE):
+                        row_running += layout_grid[i][j]
+                        integral[i + 1][j + 1] = integral[i][j + 1] + row_running
+                for scan_y in range(1, CHUNK_SIZE - total_h - 1):
+                    for scan_x in range(1, CHUNK_SIZE - total_w - 1):
+                        occupied = (
+                            integral[scan_y + total_h][scan_x + total_w]
+                            - integral[scan_y][scan_x + total_w]
+                            - integral[scan_y + total_h][scan_x]
+                            + integral[scan_y][scan_x]
+                        )
+                        if occupied == 0:
+                            valid_candidates.append((scan_x, scan_y))
+
+            if not valid_candidates:
                 return None
 
             # 4. Score valid candidates based on bias
@@ -14623,6 +15362,10 @@ class World:
             general_store.building_inventory["healing_salve"] = random.randint(3, 8)
             general_store.building_inventory["wooden_plank"] = random.randint(10, 30)
             general_store.building_inventory["raw_log"] = random.randint(5, 15)
+            general_store.work_zone_tiles["counter"] = [(general_store.global_origin_x + general_store.width // 2, general_store.global_origin_y + 2)]
+            general_store.work_zone_tiles["shelves"] = [(general_store.global_origin_x + 1, general_store.global_origin_y + 2)]
+            general_store.work_zone_tiles["crates"] = [(general_store.global_origin_x + general_store.width - 2, general_store.global_origin_y + general_store.height - 2)]
+            general_store.work_zone_tiles["storefront"] = [(general_store.global_origin_x + 2, general_store.global_origin_y + general_store.height - 2)]
 
         # Tavern
         tavern = try_place_building("tavern", "commercial_workplace", 9, 7, max_workers=3)
@@ -14633,8 +15376,16 @@ class World:
             tavern.building_inventory["water_flask"] = random.randint(8, 20)
             tavern.building_inventory["apple"] = random.randint(8, 18)
             tavern.work_zone_tiles["counter"] = [(tavern.global_origin_x + tavern.width // 2, tavern.global_origin_y + 2)]
+            tavern.work_zone_tiles["tables"] = [(tavern.global_origin_x + 2, tavern.global_origin_y + tavern.height - 2)]
+            tavern.work_zone_tiles["cellar"] = [(tavern.global_origin_x + tavern.width - 2, tavern.global_origin_y + tavern.height - 2)]
+            tavern.work_zone_tiles["patron_area"] = [(tavern.global_origin_x + tavern.width - 2, tavern.global_origin_y + 2)]
 
         # Houses (Prioritized so every village always has residential dwellings for residents and player family)
+        # Housing first. See VILLAGE_LAYOUT_NOTE: the chunk cannot hold
+        # everything, and homes are load-bearing - villagers without one have no
+        # settling anchor and no household, and the birth system needs a home to
+        # put a child in. Putting the trades first was measured and produced
+        # villages with no houses at all.
         for _ in range(random.randint(3, 5)):
             house = try_place_building("house", "residential", random.randint(5, 7), random.randint(5, 7))
             if house:
@@ -14664,6 +15415,9 @@ class World:
             sheriff.building_inventory["money"] = random.randint(80, 200)
             sheriff.building_inventory["rusty_sword"] = random.randint(2, 4)
             sheriff.building_inventory["leather_jerkin"] = random.randint(1, 3)
+            sheriff.work_zone_tiles["office_desk"] = [(sheriff.global_origin_x + 2, sheriff.global_origin_y + 2)]
+            sheriff.work_zone_tiles["guard_post"] = [(sheriff.global_origin_x + sheriff.width // 2, sheriff.global_origin_y + sheriff.height - 2)]
+            sheriff.work_zone_tiles["jail_cell"] = [(sheriff.global_origin_x + sheriff.width - 2, sheriff.global_origin_y + 2)]
 
         # Lumber Mill
         lumber_mill = try_place_building("lumber_mill", "industrial_workplace", 7, 7, 1, CHUNK_SIZE - 8, max_workers=4)
@@ -14677,12 +15431,15 @@ class World:
             # Add dummy global coords for internal zones based on offset
             lumber_mill.work_zone_tiles["log_pile_area"] = [(lumber_mill.global_origin_x + 1, lumber_mill.global_origin_y + lumber_mill.height - 3)]
             lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
+            lumber_mill.work_zone_tiles["manager_spot"] = [(lumber_mill.global_origin_x + lumber_mill.width - 2, lumber_mill.global_origin_y + 2)]
 
         # Carpenter
         carpenter = try_place_building("carpenter_shop", "industrial_workplace", 7, 6, max_workers=2)
         if carpenter:
             carpenter.building_inventory["money"] = random.randint(60, 150)
             carpenter.building_inventory["wooden_plank"] = random.randint(15, 30)
+            carpenter.work_zone_tiles["workbench"] = [(carpenter.global_origin_x + 2, carpenter.global_origin_y + 2)]
+            carpenter.work_zone_tiles["storage_area"] = [(carpenter.global_origin_x + carpenter.width - 2, carpenter.global_origin_y + carpenter.height - 2)]
 
         # Windmill
         windmill = try_place_building("mill", "industrial_workplace", 7, 7, CHUNK_SIZE - 8, CHUNK_SIZE - 8, max_workers=2)
@@ -14714,6 +15471,8 @@ class World:
         blacksmith = try_place_building("blacksmith_shop", "industrial_workplace", 7, 6, road_x + 2, road_y + 2, max_workers=2)
         if blacksmith:
             blacksmith.building_inventory["money"] = random.randint(80, 220)
+            blacksmith.building_inventory["iron_ore"] = random.randint(15, 30)
+            blacksmith.building_inventory["coal"] = random.randint(10, 25)
             blacksmith.building_inventory["iron_ingot"] = random.randint(6, 14)
             blacksmith.building_inventory["stone_chunk"] = random.randint(10, 25)
             blacksmith.building_inventory["axe_stone"] = random.randint(2, 4)
@@ -14746,6 +15505,7 @@ class World:
 
         # Library
         try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
+
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
         self._initialize_economy(chunk.village)
@@ -15077,8 +15837,16 @@ class World:
         return chunk.tiles[local_y][local_x]
 
     def get_building_at(self, x, y):
+        # Bounds-checked like get_tile_at. Without this, an off-map coordinate
+        # either raised IndexError - which is how a right click on the status
+        # panel used to kill the game - or, for a negative one, silently wrapped
+        # around to a chunk on the far side of the world.
+        if not (0 <= x < WORLD_WIDTH and 0 <= y < WORLD_HEIGHT):
+            return None
         chunk_x, chunk_y = x // CHUNK_SIZE, y // CHUNK_SIZE
         local_x, local_y = x % CHUNK_SIZE, y % CHUNK_SIZE
+        if not (0 <= chunk_x < self.chunk_width and 0 <= chunk_y < self.chunk_height):
+            return None
         chunk = self.chunks[chunk_y][chunk_x]
         if chunk.poi_type == "village" and chunk.village:
             for building in chunk.village.buildings:
@@ -15346,10 +16114,34 @@ class World:
             # Note: Do not remove the player, even if dead.
 
     def _tick_world_item_inventories(self):
-        """Advance spoilage/aging for non-player object-backed world inventories."""
+        """Advance spoilage/aging for every object-backed inventory in the world.
+
+        Carried food used to be immortal. Buildings and the ground ticked here,
+        but nothing ever ticked what a person had on them, so the same loaf
+        rotted in a pantry and kept forever in a pocket. (The one function that
+        would have covered packs, _update_inventory_spoilage, has no caller at
+        all - and it also walks building inventories, so calling it now would
+        spoil those twice over.)
+
+        Rates are the per-day figures from data/items.py, converted once in
+        entities.items.per_tick_spoilage_chance: 2% a day for bread, 20% for raw
+        meat, half a percent for smoked. Preserving food is now worth doing.
+        """
         for inventory in self.items_on_map.values():
             if hasattr(inventory, "process_tick"):
                 inventory.process_tick()
+
+        player_inventory = getattr(getattr(self, "player", None), "economic", None)
+        player_inventory = getattr(player_inventory, "inventory", None)
+        if hasattr(player_inventory, "process_tick"):
+            player_inventory.process_tick()
+
+        for npc in self.all_npcs:
+            if getattr(getattr(npc, "physical", None), "is_dead", False):
+                continue
+            carried = getattr(getattr(npc, "economic", None), "npc_inventory", None)
+            if hasattr(carried, "process_tick"):
+                carried.process_tick()
 
         for building in self.buildings_by_id.values():
             inventory = getattr(building, "building_inventory", None)
@@ -16332,12 +17124,200 @@ class World:
             npc.economic.money += wage
             npc.schedule.last_paid_day = current_day
 
+    # Tasks the routine settling pass is allowed to overwrite. Anything outside
+    # this set - a conversation, a medical detour, combat, a journey between
+    # settlements - is deliberate state another system put the NPC into, and
+    # relocating them out of it would silently cancel that system's work.
+    ROUTINE_SETTLE_TASKS = frozenset({
+        TaskType.IDLE,
+        TaskType.WANDERING,
+        TaskType.AT_HOME,
+        TaskType.AT_WORK,
+        TaskType.GOING_TO_WORK,
+        TaskType.GOING_HOME,
+        TaskType.LOOKING_FOR_WORK,
+        "idle_confused",
+        "",
+    })
+
+    # How far from the village centre a resident with nowhere in particular to
+    # be may end up loitering.
+    ROUTINE_LOITER_RADIUS = 6
+
+    def _get_npc_settlement(self, npc: NPC) -> Village | None:
+        """Resolve an NPC's village, preferring their buildings over map coordinates."""
+        for building_id in (npc.schedule.home_building_id, npc.schedule.work_building_id):
+            if not building_id:
+                continue
+            building = self.buildings_by_id.get(building_id)
+            settlement = self.get_settlement_by_id(getattr(building, "settlement_id", None))
+            if settlement is not None:
+                return settlement
+        return self._get_village_for_npc(npc, by_coords=True)
+
+    def _get_npc_loitering_anchor(self, npc: NPC) -> tuple[int, int] | None:
+        """A spot around the village centre for a resident with nowhere to be."""
+        village = self._get_npc_settlement(npc)
+        if village is None:
+            return None
+        center = self._get_village_anchor_coords(village)
+        if center is None:
+            return None
+        radius = self.ROUTINE_LOITER_RADIUS
+        return (
+            center[0] + random.randint(-radius, radius),
+            center[1] + random.randint(-radius, radius),
+        )
+
+    def _get_npc_routine_anchor(self, npc: NPC, is_work_time: bool) -> tuple[tuple[int, int] | None, str]:
+        """Where an NPC's routine puts them right now, and the task that goes with it."""
+        if is_work_time:
+            if npc.economic.profession == "Child":
+                parent = self._find_trackable_parent(npc)
+                if parent is not None:
+                    return (parent.x, parent.y), "following_parent"
+            elif npc.schedule.work_building_id:
+                work_building = self.buildings_by_id.get(npc.schedule.work_building_id)
+                if work_building is not None:
+                    return get_work_anchor_coords(self, npc, work_building), TaskType.AT_WORK
+        elif npc.schedule.home_building_id:
+            home_coords = self._get_building_global_center_coords(npc.schedule.home_building_id)
+            if home_coords:
+                return home_coords, TaskType.AT_HOME
+
+        return self._get_npc_loitering_anchor(npc), TaskType.IDLE
+
+    def _find_unclaimed_tile_near(
+        self,
+        x: int,
+        y: int,
+        claimed: set[tuple[int, int]],
+        *,
+        prefer: tuple[int, int] | None = None,
+        radius: int = 6,
+    ) -> tuple[int, int]:
+        """Nearest walkable tile to (x, y) that this settling pass has not handed out yet.
+
+        Rings are searched outwards and a tile is picked at random within the
+        first ring with any room, so a workplace's staff fan out around it
+        instead of queueing off towards one corner. `prefer` wins whenever it
+        turns up in that ring, which keeps a villager who is already standing
+        somewhere sensible from being shuffled to an equivalent tile.
+
+        Falls back to the requested tile when nothing is free, which is also what
+        happens over ungenerated terrain - wake_entity re-resolves a dormant
+        NPC's tile against real terrain once their chunk goes active.
+        """
+        x = max(0, min(WORLD_WIDTH - 1, int(x)))
+        y = max(0, min(WORLD_HEIGHT - 1, int(y)))
+        for search_radius in range(radius + 1):
+            candidates = []
+            for candidate_y in range(y - search_radius, y + search_radius + 1):
+                for candidate_x in range(x - search_radius, x + search_radius + 1):
+                    # Only the ring this iteration newly reaches; inner tiles
+                    # were already offered on an earlier pass.
+                    if max(abs(candidate_x - x), abs(candidate_y - y)) != search_radius:
+                        continue
+                    if (candidate_x, candidate_y) in claimed:
+                        continue
+                    if not (0 <= candidate_x < WORLD_WIDTH and 0 <= candidate_y < WORLD_HEIGHT):
+                        continue
+                    tile = self.get_tile_at(candidate_x, candidate_y)
+                    if tile is None or not getattr(tile, "passable", False):
+                        continue
+                    candidates.append((candidate_x, candidate_y))
+            if candidates:
+                if prefer in candidates:
+                    return prefer
+                return random.choice(candidates)
+        return x, y
+
+    def _settle_npcs_into_daily_routines(self) -> int:
+        """
+        Put every village NPC where their routine says they should be for the
+        current time of day, on a tile of their own, with the matching task.
+
+        World generation seats a villager on their home building's centre, but
+        villages generate far more residents than houses, so most have no home
+        and fall back to a single per-village tile. That leaves the population
+        stacked on a handful of tiles with nobody near their workplace, and the
+        pre-simulation tick loop cannot dig them out: it skips dormant NPCs -
+        most of the map, since only chunks near the player are active - and
+        affords the rest roughly fifty movement ticks for a whole simulated day.
+
+        So this pass places rather than walks. Nothing is on screen during world
+        generation, so only the end state matters, and a direct placement reaches
+        it in one step per NPC instead of a pathfinding search per tile. Dormant
+        NPCs are covered too: _update_entity_position keeps their macro_x/macro_y
+        in sync, and wake_entity re-resolves the tile against real terrain once
+        their chunk goes active, so an approximate placement is self-correcting.
+
+        Returns the number of NPCs that were actually moved.
+        """
+        current_time_in_day = self.game_time % DAY_LENGTH_TICKS
+        is_work_time = (
+            DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
+            <= current_time_in_day
+            < DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
+        )
+
+        self._ensure_entity_positions_current()
+        # Every tile spoken for in the layout being built, so the pass cannot
+        # recreate the stack it exists to undo. Seeded with the player and
+        # everything this pass does not place (animals, travellers).
+        claimed: set[tuple[int, int]] = set(self.entity_positions.keys())
+
+        # Children trail a parent, so adults take their posts first - otherwise a
+        # child anchors to wherever its parent was standing in the spawn pile.
+        candidates = sorted(
+            (npc for npc in self.village_npcs if not npc.physical.is_dead),
+            key=lambda npc: npc.economic.profession == "Child",
+        )
+
+        moved = 0
+        for npc in candidates:
+            if npc.schedule.current_task not in self.ROUTINE_SETTLE_TASKS:
+                continue
+            if getattr(getattr(npc, "travel", None), "is_traveling", False):
+                continue
+
+            anchor, task = self._get_npc_routine_anchor(npc, is_work_time)
+            if anchor is None:
+                continue
+
+            # Release this NPC's own square, so one already standing in the right
+            # place is allowed to stay put.
+            if self.entity_positions.get((npc.x, npc.y)) == npc.id:
+                claimed.discard((npc.x, npc.y))
+
+            spot = self._find_unclaimed_tile_near(anchor[0], anchor[1], claimed, prefer=(npc.x, npc.y))
+            claimed.add(spot)
+
+            if (npc.x, npc.y) != spot:
+                self._update_entity_position(npc, spot[0], spot[1])
+                npc.render_x = float(spot[0])
+                npc.render_y = float(spot[1])
+                moved += 1
+
+            # Any path computed before the move leads back to the old position.
+            npc.schedule.current_path = []
+            npc.schedule.current_destination_coords = None
+            self._reset_npc_path_blocking(npc)
+            npc.schedule.current_task = task
+
+        self._mark_entity_positions_dirty()
+        return moved
+
     def _pre_simulate_world(self) -> None:
         """
         Run a lightweight pre-simulation after world generation to spread NPCs
         into their daily routines before the player takes control.
         NPCs follow schedules, walk to workplaces, and scatter across the village.
         """
+        # Settle first, so the ticks below run against a plausible village rather
+        # than one heap of villagers per settlement.
+        self._settle_npcs_into_daily_routines()
+
         hours = PRE_SIMULATION_HOURS
         ticks_per_hour = max(1, DAY_LENGTH_TICKS // 24)
         total_ticks = int(hours * ticks_per_hour)
@@ -16350,14 +17330,20 @@ class World:
             tick += step
 
             # Run NPC schedule logic for all active NPCs
+            current_time_in_day = self.game_time % DAY_LENGTH_TICKS
             for npc in list(self.village_npcs):
                 if npc.physical.is_dead or getattr(npc, "is_sleeping", False):
                     continue
                 # Give each NPC a chance to pick a daily routine
-                run_npc_humanoid_scheduling_flow(self, npc)
+                run_npc_humanoid_scheduling_flow(self, npc, current_time_in_day)
 
             # Process NPC movement
             self._update_npc_movement()
+
+        # Settle again on the way out. The loop only has movement ticks enough
+        # for the handful of NPCs in active chunks, so without this the player
+        # takes control with those NPCs frozen partway along a path.
+        self._settle_npcs_into_daily_routines()
 
         # After pre-simulation, ensure the player's surroundings are still valid
         self.ensure_player_surroundings_generated()
@@ -17454,26 +18440,40 @@ class World:
         sub_task_sequence = profession_data.get("default_sub_task_sequence", [])
         produced_anything = False
 
+        # The consume/produce block below used to sit after a `break`, inside the
+        # tile-harvest branch - unreachable. The only thing any off-screen worker
+        # could produce was wheat, at a farm, from the fallback further down. So
+        # settlements the player was not standing in ate their stores and rotted
+        # the rest while their bakers, smiths and miners made nothing.
         for sub_task_id in sub_task_sequence:
             sub_task_data = get_sub_task_data(npc.economic.profession, sub_task_id) or {}
-            consumes = sub_task_data.get("consumes_item_from_workplace", {})
+            consumes = sub_task_data.get("consumes_item_from_workplace") or {}
             if any(building.building_inventory.get(item_key, 0) < quantity for item_key, quantity in consumes.items()):
                 continue
-            produces = sub_task_data.get("produces_item_at_workplace", {})
-            if sub_task_data.get("produces_item_at_workplace_from_tile_harvest") and getattr(building, "building_type", "") == "farm":
+
+            produces = sub_task_data.get("produces_item_at_workplace") or {}
+            harvests_tiles = bool(sub_task_data.get("produces_item_at_workplace_from_tile_harvest"))
+            if harvests_tiles and getattr(building, "building_type", "") != "farm":
+                continue
+
+            for item_key, quantity in consumes.items():
+                remaining = building.building_inventory.get(item_key, 0) - quantity
+                if remaining <= 0:
+                    building.building_inventory.pop(item_key, None)
+                else:
+                    building.building_inventory[item_key] = remaining
+
+            if harvests_tiles:
                 building.building_inventory["wheat"] = building.building_inventory.get("wheat", 0) + 1
+            for item_key, quantity in produces.items():
+                building.building_inventory[item_key] = building.building_inventory.get(item_key, 0) + quantity
+
+            if produces or harvests_tiles:
                 produced_anything = True
                 break
-                for item_key, quantity in consumes.items():
-                    rem = building.building_inventory.get(item_key, 0) - quantity
-                    if rem <= 0:
-                        building.building_inventory.pop(item_key, None)
-                    else:
-                        building.building_inventory[item_key] = rem
-                for item_key, quantity in produces.items():
-                    building.building_inventory[item_key] = building.building_inventory.get(item_key, 0) + quantity
-                produced_anything = True
-                break
+            # A step that only draws stock - a farmer sowing seed - is the front
+            # of a chain, not the end of one. Keep walking the sequence so the
+            # step it feeds gets its turn in the same abstract hour.
 
         if not produced_anything and getattr(building, "building_type", "") == "farm":
             building.building_inventory["wheat"] = building.building_inventory.get("wheat", 0) + 1
@@ -17504,6 +18504,8 @@ class World:
 
         if not self._is_sleeping_work_hour():
             return
+
+        self._run_abstract_labour_market(sleeping_npcs)
 
         for building_id, workers in building_workers.items():
             building = self.buildings_by_id.get(building_id)
@@ -17692,7 +18694,18 @@ class World:
                                 village.village_relationships[other_village.id] = max(-100, current_rel - 5)
                                 other_village.village_relationships[village.id] = max(-100, current_rel - 5)
 
-                            # Declare war if relationships fall too low
+                            # Declare war if relationships fall too low.
+                            # WAR_THRESHOLD_NOTE: measured over 120 simulated days
+                            # across four villages, this never fired once -
+                            # relationships bottomed out at -17 against the -50 needed,
+                            # because the -5 nudge above only lands on a 5% daily roll
+                            # and trade pulls the same numbers back up (some pairs
+                            # reached +100). The machinery downstream is sound: forcing
+                            # a war does surface the declaration to the player, offers
+                            # "Offer Mercenary Services" on that village's officials,
+                            # and issues a real contract. So this is a tuning question -
+                            # how often should neighbours actually come to blows - and
+                            # is left as a deliberate choice rather than guessed at.
                             if village.village_relationships.get(other_village.id, 0) < -50:
                                 if other_village.id not in village.at_war_with:
                                     village.at_war_with.add(other_village.id)
@@ -17841,6 +18854,25 @@ class World:
                 del supply[item_key]
             supply[rots_into] = supply.get(rots_into, 0) + lost
 
+    def _village_population_capacity(self, village) -> int:
+        """How many people a village can hold before births stop.
+
+        A flat MAX_NPCS_PER_VILLAGE (15) sat below what generation actually
+        produces: _populate_village_npcs sizes a village between its building
+        count and twice that, so villages of 17 are ordinary and three of four
+        started at or over the cap. The ceiling meant to stop unbounded growth
+        was instead stopping all growth, in most villages, from the first day.
+
+        Tying it to the buildings gives the number a meaning - a settlement
+        houses and employs as many people as it has structures for - and lets a
+        village that builds more actually grow. Judgment call, flagged rather
+        than chosen silently: the headroom below is what decides pacing, and is
+        worth revisiting alongside the 5%-a-day birth rate the original author
+        also left for later.
+        """
+        buildings = len(getattr(village, "buildings", []) or [])
+        return max(MAX_NPCS_PER_VILLAGE, buildings * 2 + VILLAGE_GROWTH_HEADROOM)
+
     def _simulate_village_population_lifecycle(self, village, village_npcs, location):
         """
         Runs daily birth and old-age death simulation for a single village.
@@ -17893,7 +18925,7 @@ class World:
           asked.
         """
         # --- Birth Simulation ---
-        if len(village_npcs) < MAX_NPCS_PER_VILLAGE:
+        if len(village_npcs) < self._village_population_capacity(village):
             married_couples = self._find_married_couples_eligible_for_birth(village_npcs)
             if married_couples and random.random() < 0.05: # 5% chance of a birth event per day
                 parent1, parent2 = random.choice(married_couples)
@@ -18375,10 +19407,18 @@ class World:
             # had reduces_hunger/reduces_thirst/cures_sickness (no
             # heal_amount) would raise UnboundLocalError.
             consumed = False
+            # Whether the player was told anything specific. Without this the
+            # generic fallback at the end fires on top of a precise refusal, so
+            # declining to eat when full read as "You are not hungry enough to
+            # eat the Bread." followed immediately by "You can't figure out how
+            # to use the Bread right now." Only visible now that the inventory
+            # can actually reach this code.
+            explained = False
             heal_amount = on_use_dict.get("heal_amount")
             if heal_amount:
                 if self.player.combat.hp >= self.player.combat.max_hp:
                     self.add_message_to_chat_log("You are already at full health!")
+                    explained = True
                 else:
                     self.player.combat.hp = min(self.player.combat.max_hp, self.player.combat.hp + heal_amount)
                     self.player.remove_item(item_key, 1)
@@ -18395,6 +19435,7 @@ class World:
                     consumed = True
                 else:
                     self.add_message_to_chat_log(f"You don't feel sick enough to need the {item_def.get('name', item_key)}.")
+                    explained = True
 
             reduces_hunger_amount = on_use_dict.get("reduces_hunger")
             if reduces_hunger_amount:
@@ -18407,6 +19448,7 @@ class World:
                     update_player_needs_system(self, initial_setup=True) # Update status messages immediately
                 else:
                     self.add_message_to_chat_log(f"You are not hungry enough to eat the {item_def['name']}.")
+                    explained = True
 
 
             reduces_thirst_amount = on_use_dict.get("reduces_thirst")
@@ -18420,9 +19462,10 @@ class World:
                     update_player_needs_system(self, initial_setup=True) # Update status messages immediately
                 else:
                     self.add_message_to_chat_log(f"You are not thirsty enough for the {item_def.get('name', item_key)}.")
+                    explained = True
 
-            if consumed:
-                return # Action taken
+            if consumed or explained:
+                return # Action taken, or the player has already been told why not
 
         # Fallback if no specific use effect handled
         self.add_message_to_chat_log(f"You can't figure out how to use the {item_def.get('name', item_key)} right now.")
@@ -18594,6 +19637,23 @@ class World:
             self.add_message_to_chat_log(f"You caught a {fish_caught}!")
         else:
             self.add_message_to_chat_log("You didn't catch anything.")
+
+    def find_water_near(self, x: int, y: int, radius: int = 2) -> tuple[int, int] | None:
+        """The nearest water tile within `radius`, including (x, y) itself.
+
+        A fishing spot is a bank tile beside the water rather than the water
+        itself, so anything that wants to fish from where an NPC is standing
+        has to look one or two tiles out.
+        """
+        for ring in range(max(0, radius) + 1):
+            for offset_y in range(-ring, ring + 1):
+                for offset_x in range(-ring, ring + 1):
+                    if max(abs(offset_x), abs(offset_y)) != ring:
+                        continue
+                    tile = self.get_tile_at(x + offset_x, y + offset_y)
+                    if tile is not None and getattr(tile, "name", None) in ("Water", "Deep Water"):
+                        return x + offset_x, y + offset_y
+        return None
 
     def npc_attempt_fish(self, npc, water_x, water_y):
         """Handles an NPC's attempt to fish."""

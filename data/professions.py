@@ -138,15 +138,20 @@ PROFESSIONS = {
         "display_name": "Merchant",
         "wage": 20,
         "description": "Buys and sells goods at a store or market.",
-        "work_building_categories": ["General Store", "Market Stall"],
-        "sub_tasks": [],
-        "default_sub_task_sequence": []
+        "work_building_categories": ["General Store", "Market Stall", "general_store"],
+        "sub_tasks": [
+            {"id": "tend_counter", "display_name": "Tending Counter", "duration_ticks": 100, "target_zone_tag": "counter", "action_verb": "tending counter"},
+            {"id": "organize_shelves", "display_name": "Organizing Shelves", "duration_ticks": 60, "target_zone_tag": "shelves", "action_verb": "organizing goods"},
+            {"id": "inspect_crates", "display_name": "Inspecting Inventory", "duration_ticks": 50, "target_zone_tag": "crates", "action_verb": "counting inventory"},
+            {"id": "sweep_shop", "display_name": "Sweeping Floor", "duration_ticks": 40, "target_zone_tag": "storefront", "action_verb": "sweeping"}
+        ],
+        "default_sub_task_sequence": ["tend_counter", "organize_shelves", "inspect_crates", "sweep_shop"]
     },
     "Lumber Mill Foreman": {
         "display_name": "Lumber Mill Foreman",
         "wage": 25,
         "description": "Manages the operations at the lumber mill.",
-        "work_building_categories": ["Lumber Mill"],
+        "work_building_categories": ["Lumber Mill", "lumber_mill"],
         "sub_tasks": [],
         "default_sub_task_sequence": []
     },
@@ -156,9 +161,9 @@ PROFESSIONS = {
         "description": "Maintains peace and order, patrols designated areas.",
         "work_building_categories": ["Guardhouse", "Barracks", "Town Hall"],
         "sub_tasks": [
-            {"id": "patrol_area", "display_name": "Patrolling", "duration_ticks": 200,
+            {"id": "patrol_area", "display_name": "Patrolling", "duration_ticks": 120,
              "target_zone_tag": "patrol_route", "action_verb": "patrolling"},
-            {"id": "stand_guard", "display_name": "Standing Guard", "duration_ticks": 150,
+            {"id": "stand_guard", "display_name": "Standing Guard", "duration_ticks": 90,
              "target_zone_tag": "guard_post", "action_verb": "standing guard"}
         ],
         "default_sub_task_sequence": ["patrol_area", "stand_guard"]
@@ -167,16 +172,42 @@ PROFESSIONS = {
         "display_name": "Sheriff",
         "wage": 35,
         "description": "Upholds the law and manages town security.",
-        "work_building_categories": ["Sheriff's Office", "Town Hall"],
+        "work_building_categories": ["Sheriff's Office", "Town Hall", "sheriff_office"],
         "sub_tasks": [
-            {"id": "patrol_town", "display_name": "Patrolling Town", "duration_ticks": 250,
+            {"id": "patrol_town", "display_name": "Patrolling Town", "duration_ticks": 150,
              "target_zone_tag": "town_patrol_route", "action_verb": "patrolling"},
-            {"id": "office_work", "display_name": "Office Work", "duration_ticks": 180,
+            {"id": "office_work", "display_name": "Office Work", "duration_ticks": 100,
              "target_zone_tag": "office_desk", "action_verb": "doing paperwork"},
             {"id": "arrest_player", "display_name": "Arresting a Criminal",
-             "duration_ticks": 100, "target_zone_tag": "jail_cell", "action_verb": "arresting"}
+             "duration_ticks": 80, "target_zone_tag": "jail_cell", "action_verb": "arresting"}
         ],
         "default_sub_task_sequence": ["patrol_town", "office_work"]
+    },
+    "Deputy": {
+        "display_name": "Deputy",
+        "wage": 25,
+        "description": "Assists the Sheriff with patrols and law enforcement.",
+        "work_building_categories": ["Sheriff's Office", "Town Hall", "sheriff_office"],
+        "sub_tasks": [
+            {"id": "patrol_town", "display_name": "Patrolling Streets", "duration_ticks": 120,
+             "target_zone_tag": "town_patrol_route", "action_verb": "patrolling"},
+            {"id": "stand_guard", "display_name": "Station Guard", "duration_ticks": 90,
+             "target_zone_tag": "guard_post", "action_verb": "standing watch"}
+        ],
+        "default_sub_task_sequence": ["patrol_town", "stand_guard"]
+    },
+    "Militia": {
+        "display_name": "Militia",
+        "wage": 18,
+        "description": "Volunteer citizen soldier defending the settlement.",
+        "work_building_categories": ["Guardhouse", "Barracks", "Town Hall"],
+        "sub_tasks": [
+            {"id": "patrol_area", "display_name": "Patrolling Perimeter", "duration_ticks": 120,
+             "target_zone_tag": "patrol_route", "action_verb": "patrolling"},
+            {"id": "stand_guard", "display_name": "Watch Duty", "duration_ticks": 90,
+             "target_zone_tag": "guard_post", "action_verb": "standing watch"}
+        ],
+        "default_sub_task_sequence": ["patrol_area", "stand_guard"]
     },
     "Carpenter": {
         "display_name": "Carpenter",
@@ -184,10 +215,10 @@ PROFESSIONS = {
         "description": "Builds and repairs wooden structures and furniture.",
         "work_building_categories": ["Carpenter Shop"],
         "sub_tasks": [
-            {"id": "fetch_wood", "display_name": "Fetching Wood", "duration_ticks": 100,
+            {"id": "fetch_wood", "display_name": "Fetching Wood", "duration_ticks": 80,
              "target_zone_tag": "lumber_mill", "action_verb": "fetching wood"},
             {"id": "craft_furniture", "display_name": "Crafting Furniture",
-             "duration_ticks": 200, "target_zone_tag": "workbench",
+             "duration_ticks": 120, "target_zone_tag": "workbench",
              "action_verb": "crafting furniture"}
         ],
         "default_sub_task_sequence": ["fetch_wood", "craft_furniture"]
@@ -201,14 +232,14 @@ PROFESSIONS = {
             {
                 "id": "fetch_wheat",
                 "display_name": "Fetching Wheat",
-                "duration_ticks": 120,
+                "duration_ticks": 80,
                 "target_zone_tag": "farm",
                 "action_verb": "fetching wheat"
             },
             {
                 "id": "mill_flour",
                 "display_name": "Milling Flour",
-                "duration_ticks": 150,
+                "duration_ticks": 100,
                 "target_zone_tag": "grinding_stone",
                 "action_verb": "milling flour",
                 "consumes_item_from_workplace": {"wheat": 1},
@@ -226,14 +257,14 @@ PROFESSIONS = {
             {
                 "id": "fetch_flour",
                 "display_name": "Fetching Flour",
-                "duration_ticks": 120,
+                "duration_ticks": 80,
                 "target_zone_tag": "mill",
                 "action_verb": "fetching flour"
             },
             {
                 "id": "bake_bread",
                 "display_name": "Baking Bread",
-                "duration_ticks": 180,
+                "duration_ticks": 120,
                 "target_zone_tag": "oven",
                 "action_verb": "baking bread",
                 "consumes_item_from_workplace": {"flour": 1},
@@ -246,9 +277,14 @@ PROFESSIONS = {
         "display_name": "Tavern Keeper",
         "wage": 25,
         "description": "Runs the local tavern, serving drinks and food.",
-        "work_building_categories": ["Tavern"],
-        "sub_tasks": [],
-        "default_sub_task_sequence": []
+        "work_building_categories": ["Tavern", "tavern"],
+        "sub_tasks": [
+            {"id": "tend_bar", "display_name": "Tending Bar", "duration_ticks": 90, "target_zone_tag": "counter", "action_verb": "pouring drinks"},
+            {"id": "clean_tables", "display_name": "Wiping Tables", "duration_ticks": 50, "target_zone_tag": "tables", "action_verb": "cleaning tables"},
+            {"id": "restock_cellar", "display_name": "Checking Kegs", "duration_ticks": 60, "target_zone_tag": "cellar", "action_verb": "checking supplies"},
+            {"id": "chat_patrons", "display_name": "Greeting Guests", "duration_ticks": 60, "target_zone_tag": "patron_area", "action_verb": "chatting with guests"}
+        ],
+        "default_sub_task_sequence": ["tend_bar", "clean_tables", "restock_cellar", "chat_patrons"]
     },
     "Hunter": {
         "display_name": "Hunter",

@@ -5,6 +5,33 @@ from entities.items import Inventory, ItemReference
 from simulation.systems.interaction import ActionIntent
 
 
+def bare_tile_near(world, origin, radius=12):
+    """A nearby position that resolves to a plain tile and nothing else.
+
+    Both tests below used to take the tile immediately east of the player and
+    assume it was clear ground. That is incidental: it depends on where village
+    generation happens to put the player and who happens to be standing next to
+    them, and it stopped being true when building placement changed - the player
+    now spawns in a house with a villager to the east, so the tile resolved as an
+    actor and the tests failed for a reason unrelated to what they check.
+
+    Searched in Manhattan rings, not square ones, so the nearest hit is an
+    orthogonal neighbour where one exists. Range checks on player commands measure
+    Manhattan distance, so a diagonal neighbour is already out of reach at range 1
+    and would come back disabled as "too_far".
+    """
+    ox, oy = origin
+    for r in range(1, radius):
+        for dx in range(-r, r + 1):
+            dy_span = r - abs(dx)
+            for dy in ({-dy_span, dy_span} if dy_span else {0}):
+                pos = (ox + dx, oy + dy)
+                selection = world.resolve_selection_target(pos)
+                if selection and selection.get("target_type") == "tile":
+                    return pos
+    raise AssertionError(f"no bare tile within {radius} of {origin}")
+
+
 class TestRuntimeHardening(unittest.TestCase):
     def test_hunger_override_can_find_item_reference_food(self):
         world = World(seed=123)
@@ -41,7 +68,7 @@ class TestRuntimeHardening(unittest.TestCase):
 
     def test_inventory_backed_ground_items_resolve_and_inspect_as_resource(self):
         world = World(seed=123)
-        pos = (world.player.x + 1, world.player.y)
+        pos = bare_tile_near(world, (world.player.x, world.player.y))
         inv = Inventory()
         inv.add_item_reference(ItemReference("processed_meat"))
         world.items_on_map[pos] = inv
@@ -56,7 +83,7 @@ class TestRuntimeHardening(unittest.TestCase):
     def test_contextual_chop_command_routes_to_interaction_resolver(self):
         world = World(seed=123)
         player = world.player
-        pos = (player.x + 1, player.y)
+        pos = bare_tile_near(world, (player.x, player.y))
         tile = world.get_tile_at(*pos)
         tile.properties = dict(getattr(tile, "properties", {}) or {}, is_tree=True)
 

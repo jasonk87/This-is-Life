@@ -100,14 +100,33 @@ class TestUntreatedIllnessWorsening(unittest.TestCase):
         self.assertEqual(npc.physical.sickness, min(100, 80 + illness.WORSENING_SICKNESS_GAIN))
         self.assertLess(npc.combat.hp, hp_before)
 
-    def test_no_worsening_off_the_interval_tick(self):
-        npc = self._make_npc(sickness=80)
-        self.world.game_time = illness.WORSENING_INTERVAL_TICKS + 1  # off-cadence
+    def test_worsening_is_rate_limited_rather_than_every_tick(self):
+        """Asserted as elapsed time, not as boundary alignment.
 
-        with patch("simulation.systems.illness.random.random", return_value=0.0):
+        This used to set game_time one tick past the interval and assert nothing
+        happened - which was true, and was the bug: the check only ever fired
+        when the clock landed exactly on a multiple, and game_time jumps whenever
+        the player sleeps or takes a costly action. An illness stopped
+        progressing entirely once the clock drifted off the boundaries. What the
+        test is really protecting is that worsening is rate-limited, so that is
+        what it now checks.
+        """
+        npc = self._make_npc(sickness=80)
+        self.world.game_time = illness.WORSENING_INTERVAL_TICKS
+
+        with patch("simulation.systems.illness.random.random", return_value=0.99):
+            update_entity_illness(self.world, npc)
+        after_first = npc.physical.sickness
+        self.assertGreater(after_first, 80, "the illness never worsened at all")
+
+        self.world.game_time += 1
+        with patch("simulation.systems.illness.random.random", return_value=0.99):
             update_entity_illness(self.world, npc)
 
-        self.assertEqual(npc.physical.sickness, 80)
+        self.assertEqual(
+            npc.physical.sickness, after_first,
+            "the illness worsened again one tick later, so it is not rate-limited",
+        )
 
     def test_unlucky_damage_roll_still_worsens_meter_without_damage(self):
         npc = self._make_npc(sickness=80)
@@ -135,16 +154,28 @@ class TestContagionSpread(unittest.TestCase):
             npc.physical.status_effects.append(SICK_STATUS_EFFECT)
         return npc
 
-    def test_off_cadence_tick_does_nothing(self):
+    def test_contagion_is_rate_limited_rather_than_every_tick(self):
+        """See the worsening test above for why this is no longer asserted as
+        landing exactly on a boundary."""
         sick = self._make_npc(0, 0, sick=True)
         healthy = self._make_npc(1, 0)
         self.world.village_npcs = [sick, healthy]
-        self.world.game_time = illness.CONTAGION_CHECK_INTERVAL_TICKS + 1
+        self.world.game_time = illness.CONTAGION_CHECK_INTERVAL_TICKS
 
         with patch("simulation.systems.illness.random.random", return_value=0.0):
             spread_contagion(self.world)
+        after_first = healthy.physical.sickness
 
-        self.assertEqual(healthy.physical.sickness, 0)
+        healthy.physical.sickness = 0
+        self.world.game_time += 1
+        with patch("simulation.systems.illness.random.random", return_value=0.0):
+            spread_contagion(self.world)
+
+        self.assertGreater(after_first, 0, "contagion never ran at all")
+        self.assertEqual(
+            healthy.physical.sickness, 0,
+            "contagion ran again one tick later, so it is not rate-limited",
+        )
 
     def test_nearby_healthy_npc_can_be_infected(self):
         sick = self._make_npc(0, 0, sick=True)

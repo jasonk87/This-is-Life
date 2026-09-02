@@ -20,8 +20,9 @@ Three faults compounded here, and each hid the next:
 
 import unittest
 
-from data.professions import PROFESSIONS
+from data.professions import PROFESSIONS, get_sub_task_data
 from engine import World
+from simulation.systems.work import update_npc_work_sub_tasks
 
 
 class TestPathGeometry(unittest.TestCase):
@@ -96,12 +97,24 @@ class TestPathGeometry(unittest.TestCase):
 
 
 class TestWorkChainAdvances(unittest.TestCase):
-    """A profession's sequence has to be a sequence, not its first step on repeat."""
+    """A profession's sequence has to be a sequence, not its first step on repeat.
 
-    @classmethod
-    def setUpClass(cls):
-        cls.world = World(player_first_name="Tester")
-        cls.world._pre_simulate_world()
+    A world per test, deliberately. These shared one, and the first test below
+    runs nine hundred world updates on it - so by the time the second test picked
+    a worker, that worker had been through most of a working day and might have
+    changed job, gone home or died. It failed about one run in six for reasons
+    that had nothing to do with what it checks.
+    """
+
+    # Seeded. Now that a seeded world is reproducible (see
+    # test_simulation_determinism) a test can pick one where its precondition
+    # actually holds, instead of generating a fresh village each run and skipping
+    # whenever that village has no workplace with a reachable second station.
+    SEED = 1
+
+    def setUp(self):
+        self.world = World(seed=self.SEED)
+        self.world._pre_simulate_world()
 
     def test_a_worker_runs_more_than_the_opening_step(self):
         world = self.world
@@ -136,19 +149,22 @@ class TestWorkChainAdvances(unittest.TestCase):
             + str({npc.economic.profession: sorted(seen[npc.id]) for npc in workers if seen[npc.id]}),
         )
 
-    def test_the_sequence_index_moves_on_after_a_step_finishes(self):
-        """Directly: the next search must not start on the step just completed."""
-        world = self.world
+    def _ready_worker(self, world):
+        """A non-owner worker with a multi-step job, standing at their workplace.
+
+        Not an owner: update_npc_work_sub_tasks injects management steps for an
+        owner who has staff, which is a different path with its own cursor rules.
+        """
         worker = next(
             npc
             for npc in world.village_npcs
-            if npc.schedule.work_building_id
+            if not npc.physical.is_dead
+            and npc.schedule.work_building_id in world.buildings_by_id
+            and getattr(world.buildings_by_id[npc.schedule.work_building_id], "owner_id", None) != npc.id
             and len(PROFESSIONS.get(npc.economic.profession, {}).get("default_sub_task_sequence", [])) > 1
         )
-        sequence = PROFESSIONS[worker.economic.profession]["default_sub_task_sequence"]
         building = world.buildings_by_id[worker.schedule.work_building_id]
-
-        from simulation.systems.work import update_npc_work_sub_tasks
+        sequence = PROFESSIONS[worker.economic.profession]["default_sub_task_sequence"]
 
         worker.is_sleeping = False
         world._update_entity_position(worker, building.global_center_x, building.global_center_y)
@@ -156,12 +172,79 @@ class TestWorkChainAdvances(unittest.TestCase):
         worker.current_sub_task = sequence[0]
         worker.sub_task_target_coords = (worker.x, worker.y)
         worker.sub_task_timer = 0
+        # The first thing update_npc_work_sub_tasks does is return early if this
+        # worker is inside a validation back-off window, and whether one is
+        # pending depends on what pre-simulation did. Left to chance it decided
+        # the result about one run in six.
+        worker._work_validation_retry_after_tick = 0
+        return worker, building, sequence
+
+    def test_the_cursor_steps_past_a_finished_step_when_another_one_can_run(self):
+        """The actual contract, which is narrower than it first looks.
+
+        Finishing a step advances the cursor past it, and the search then walks
+        forward for a step that can actually run. It does NOT promise to leave
+        the finished step - if nothing else is viable it comes back round, which
+        is correct and is the test below. An earlier version of this asserted the
+        cursor simply must not be 0 afterwards, and failed about one run in seven
+        on a Farmer whose farm had nothing to work with.
+        """
+        world = self.world
+        worker, building, sequence = self._ready_worker(world)
+
+        # Stock the workplace with everything every step consumes, so viability
+        # is decided by the sequence rather than by what this village happens to
+        # have in store.
+        for task_id in sequence:
+            data = get_sub_task_data(worker.economic.profession, task_id) or {}
+            for item_key, needed in (data.get("consumes_item_from_workplace", {}) or {}).items():
+                building.building_inventory[item_key] = int(needed) + 10
+
+        others_runnable = [
+            task_id for task_id in sequence[1:]
+            if world._find_target_coords_for_sub_task(
+                worker, building, get_sub_task_data(worker.economic.profession, task_id) or {}
+            )
+        ]
+        if not others_runnable:
+            self.skipTest(
+                f"no step after the first has a reachable station in this "
+                f"{building.building_type} - nothing to advance to"
+            )
 
         update_npc_work_sub_tasks(world, worker)
 
         self.assertNotEqual(
-            worker.current_sub_task, sequence[0],
-            "the completed step was picked again straight away",
+            worker.current_sub_task_sequence_index, 0,
+            f"finished step 0 of {len(sequence)} with {others_runnable} runnable, "
+            f"and the cursor stayed on the step just completed "
+            f"({worker.economic.profession})",
+        )
+
+    def test_the_cursor_comes_back_round_when_nothing_else_can_run(self):
+        """The other half of the contract, stated so it is not mistaken for the bug.
+
+        A worker whose workplace cannot supply any later step should repeat the
+        one step it can do, not stall. Stepping past the finished step is about
+        where the *search* starts, not a promise to never return to it.
+        """
+        world = self.world
+        worker, building, sequence = self._ready_worker(world)
+
+        for task_id in sequence[1:]:
+            data = get_sub_task_data(worker.economic.profession, task_id) or {}
+            for item_key in (data.get("consumes_item_from_workplace", {}) or {}):
+                building.building_inventory.pop(item_key, None)
+
+        update_npc_work_sub_tasks(world, worker)
+
+        self.assertIsNotNone(
+            worker.current_sub_task_sequence_index,
+            "the worker was left with no cursor at all",
+        )
+        self.assertIn(
+            worker.current_sub_task_sequence_index, range(len(sequence)),
+            "the cursor left the sequence entirely",
         )
 
 

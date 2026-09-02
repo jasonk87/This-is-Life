@@ -37,6 +37,9 @@ class GossipRequest:
     target_name: str
     fallback_text: str
     submitted_at: float
+    # The game tick this was queued on, when the caller knows it. Optional so
+    # that anything constructing a request without a world still works.
+    submitted_at_tick: int | None = None
     metadata: dict | None = None
 
 
@@ -61,12 +64,21 @@ class AsyncLLMGossipService:
         endpoint: str = DEFAULT_GOSSIP_OLLAMA_ENDPOINT,
         model: str = DEFAULT_GOSSIP_OLLAMA_MODEL,
         response_timeout_seconds: float = 0.75,
+        response_timeout_ticks: int = 20,
         request_timeout_seconds: float = 3.0,
         max_pending: int = 32,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.response_timeout_seconds = max(0.05, float(response_timeout_seconds))
+        # How long to wait in game ticks, when the caller tells us what the game
+        # clock says. Waiting on the wall clock made the whole simulation
+        # unreproducible: whether a pending line of gossip fell back on this tick
+        # or the next depended on how fast the machine was running, and that
+        # changed how much of the random stream each tick consumed. It also tied
+        # how chatty the village is to the frame rate. The wall clock stays as
+        # the default for any caller that does not pass a tick.
+        self.response_timeout_ticks = max(1, int(response_timeout_ticks))
         self.request_timeout_seconds = max(0.1, float(request_timeout_seconds))
         self.max_pending = max(1, int(max_pending))
         self._request_ids = itertools.count(1)
@@ -79,7 +91,7 @@ class AsyncLLMGossipService:
         self._worker = threading.Thread(target=self._worker_loop, name="llm-gossip", daemon=True)
         self._worker.start()
 
-    def submit(self, *, speaker, memory_event, subject_name: str, target_name: str = "") -> bool:
+    def submit(self, *, speaker, memory_event, subject_name: str, target_name: str = "", now_ticks: int | None = None) -> bool:
         request_key = (getattr(speaker, "id", None), getattr(memory_event, "id", None))
         if request_key[0] is None or request_key[1] is None:
             return False
@@ -99,6 +111,7 @@ class AsyncLLMGossipService:
             target_name=str(target_name or ""),
             fallback_text=fallback_text,
             submitted_at=time.monotonic(),
+            submitted_at_tick=None if now_ticks is None else int(now_ticks),
             metadata=None,
         )
 
@@ -121,7 +134,7 @@ class AsyncLLMGossipService:
             return False
         return True
 
-    def submit_chronicle(self, *, scribe, memory_events, building_id, title_hint: str = "") -> bool:
+    def submit_chronicle(self, *, scribe, memory_events, building_id, title_hint: str = "", now_ticks: int | None = None) -> bool:
         event_ids = tuple(str(getattr(event, "id", "")) for event in memory_events if getattr(event, "id", ""))
         if getattr(scribe, "id", None) is None or len(event_ids) < 2:
             return False
@@ -146,6 +159,7 @@ class AsyncLLMGossipService:
             target_name="",
             fallback_text=fallback_text,
             submitted_at=time.monotonic(),
+            submitted_at_tick=None if now_ticks is None else int(now_ticks),
             metadata={
                 "building_id": building_id,
                 "memory_ids": list(event_ids),
@@ -173,14 +187,17 @@ class AsyncLLMGossipService:
             return False
         return True
 
-    def poll_completed(self) -> list[GossipResult]:
+    def poll_completed(self, now_ticks: int | None = None) -> list[GossipResult]:
         results: list[GossipResult] = []
         now = time.monotonic()
         expired_results: list[GossipResult] = []
 
         with self._lock:
             for request_id, request in list(self._pending.items()):
-                if now - request.submitted_at < self.response_timeout_seconds:
+                if request.submitted_at_tick is not None and now_ticks is not None:
+                    if int(now_ticks) - request.submitted_at_tick < self.response_timeout_ticks:
+                        continue
+                elif now - request.submitted_at < self.response_timeout_seconds:
                     continue
                 expired_results.append(self._make_result(request, request.fallback_text, used_fallback=True))
                 self._pending.pop(request_id, None)

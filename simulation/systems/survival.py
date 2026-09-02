@@ -14,6 +14,17 @@ from config import (
 )
 
 
+def _periods(world, key: str, interval: int, *, max_catch_up: int = 100) -> int:
+    """How many `interval`-tick periods have elapsed, catching up after a jump.
+
+    See World.periods_elapsed. Falls back to the old exact-boundary test for the
+    stand-in worlds some tests build, which have no such method.
+    """
+    periods_elapsed = getattr(world, "periods_elapsed", None)
+    if periods_elapsed is not None:
+        return periods_elapsed(key, interval, max_catch_up=max_catch_up)
+    return 1 if int(getattr(world, "game_time", 0)) % max(1, interval) == 0 else 0
+
 def update_entity_temperature(world, entity, *, search_radius: int | None = None, update_world_ambient: bool = False) -> None:
     """Calculate ambient temperature and advance one entity's thermal state."""
     season_name = world.seasons[world.current_season_index]
@@ -73,7 +84,9 @@ def update_entity_temperature(world, entity, *, search_radius: int | None = None
 def apply_temperature_effects(world, entity, *, is_player: bool = False) -> None:
     """Apply periodic thermal damage and messaging."""
     ticks_for_temp_damage = DAY_LENGTH_TICKS // 25
-    if world.game_time % ticks_for_temp_damage != 0:
+    who = "player" if is_player else getattr(entity, "id", id(entity))
+    ticks_due = _periods(world, f"temp_damage:{who}", ticks_for_temp_damage, max_catch_up=12)
+    if ticks_due <= 0:
         return
 
     # apply_hostility=False on both: this is environmental/status-effect
@@ -83,11 +96,11 @@ def apply_temperature_effects(world, entity, *, is_player: bool = False) -> None
     if "Freezing" in entity.physical.status_effects:
         if is_player:
             world.add_message_to_chat_log("You are freezing cold!")
-        entity.take_damage(1, world=world, apply_hostility=False)
+        entity.take_damage(ticks_due, world=world, apply_hostility=False)
     elif "Overheating" in entity.physical.status_effects:
         if is_player:
             world.add_message_to_chat_log("You are burning up!")
-        entity.take_damage(1, world=world, apply_hostility=False)
+        entity.take_damage(ticks_due, world=world, apply_hostility=False)
 
 
 def update_player_wetness(world) -> None:
@@ -101,9 +114,10 @@ def update_player_wetness(world) -> None:
         player.physical.is_wet = True
         player.physical.wetness_timer = max(player.physical.wetness_timer, DAY_LENGTH_TICKS // 10)
 
-    if player.physical.is_wet and world.game_time % (DAY_LENGTH_TICKS // 20) == 0:
+    drying = _periods(world, "player_wetness", DAY_LENGTH_TICKS // 20)
+    if player.physical.is_wet and drying:
         if world.weather != "rain" or player.physical.is_sheltered:
-            player.physical.wetness_timer -= 1
+            player.physical.wetness_timer -= drying
             if player.physical.wetness_timer <= 0:
                 player.physical.is_wet = False
                 world.add_message_to_chat_log("You have dried off.")
@@ -117,16 +131,25 @@ def update_player_needs(world, *, initial_setup: bool = False) -> None:
     ticks_for_starvation_damage = DAY_LENGTH_TICKS // 20
 
     if not initial_setup:
-        if world.game_time % ticks_for_hunger_increase == 0:
-            player.physical.hunger = min(player.physical.max_hunger, player.physical.hunger + 5)
-        if world.game_time % ticks_for_thirst_increase == 0:
-            player.physical.thirst = min(player.physical.max_thirst, player.physical.thirst + 7)
+        hunger_ticks = _periods(world, "player_hunger", ticks_for_hunger_increase)
+        if hunger_ticks:
+            player.physical.hunger = min(
+                player.physical.max_hunger, player.physical.hunger + 5 * hunger_ticks
+            )
+        thirst_ticks = _periods(world, "player_thirst", ticks_for_thirst_increase)
+        if thirst_ticks:
+            player.physical.thirst = min(
+                player.physical.max_thirst, player.physical.thirst + 7 * thirst_ticks
+            )
 
     if player.physical.hunger >= player.physical.max_hunger * 0.9:
         player.physical.hunger_level_msg = "Starving"
-        if not initial_setup and world.game_time % ticks_for_starvation_damage == 0:
+        starving_ticks = 0 if initial_setup else _periods(
+            world, "player_starvation", ticks_for_starvation_damage, max_catch_up=12
+        )
+        if starving_ticks:
             world.add_message_to_chat_log("You are weak from starvation!")
-            player.take_damage(1)
+            player.take_damage(starving_ticks)
     elif player.physical.hunger >= player.physical.max_hunger * 0.7:
         player.physical.hunger_level_msg = "Very Hungry"
     elif player.physical.hunger >= player.physical.max_hunger * 0.5:

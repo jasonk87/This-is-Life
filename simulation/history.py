@@ -4,9 +4,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 import uuid
 
+from simulation.ids import new_id
+
 
 def _new_history_id() -> str:
-    return str(uuid.uuid4())
+    return new_id()
 
 
 @dataclass(slots=True)

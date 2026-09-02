@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import config
+from simulation.systems import aging
 import engine
 from engine import NPC, World
 
@@ -157,13 +158,26 @@ class TestPopulationLifecycle(unittest.TestCase):
         self.assertEqual(len(couples), 1)
         self.assertEqual({couples[0][0].id, couples[0][1].id}, {npc_a.id, npc_b.id})
 
+    def _advance_one_year(self):
+        """Run the ageing system across a calendar year boundary.
+
+        These two tests used to set game_time to a single day and expect
+        everyone to be a year older, which is what the ageing bug did: a year
+        of life per day of play, 112 times too fast, and enough to empty a
+        village inside two months. They are about the coming-of-age transition,
+        not about the clock, so they now advance an actual year.
+        """
+        self.world.game_time = config.DAY_LENGTH_TICKS
+        self.world._update_npc_ages()          # establishes the current year
+        self.world.game_time = aging.DAYS_PER_YEAR * config.DAY_LENGTH_TICKS
+        self.world._update_npc_ages()          # the year turns over
+
     def test_child_transitions_to_adult_profession_at_eighteen(self):
         child = self._make_npc("Child Test", age=17)
         self.world._set_entity_profession(child, "Child", reason="test_setup")
         self.world.village_npcs.append(child)
-        self.world.game_time = config.DAY_LENGTH_TICKS
 
-        self.world._update_npc_ages()
+        self._advance_one_year()
 
         self.assertEqual(child.age, 18)
         self.assertEqual(child.economic.profession, "Unemployed")
@@ -172,12 +186,22 @@ class TestPopulationLifecycle(unittest.TestCase):
         child = self._make_npc("Young Child", age=10)
         self.world._set_entity_profession(child, "Child", reason="test_setup")
         self.world.village_npcs.append(child)
-        self.world.game_time = config.DAY_LENGTH_TICKS
 
-        self.world._update_npc_ages()
+        self._advance_one_year()
 
         self.assertEqual(child.age, 11)
         self.assertEqual(child.economic.profession, "Child")
+
+    def test_a_child_does_not_have_a_birthday_every_day(self):
+        child = self._make_npc("Slowly Growing", age=10)
+        self.world._set_entity_profession(child, "Child", reason="test_setup")
+        self.world.village_npcs.append(child)
+
+        for day in range(1, 31):
+            self.world.game_time = day * config.DAY_LENGTH_TICKS
+            self.world._update_npc_ages()
+
+        self.assertEqual(child.age, 10, "a month of play aged a child")
 
     def test_death_runs_for_players_nearby_village_not_just_distant_ones(self):
         """Regression test for the abstraction gap where birth/death only

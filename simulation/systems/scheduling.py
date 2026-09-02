@@ -20,6 +20,13 @@ from presentation import message_log
 from simulation.systems.utility_ai import evaluate_needs_utility
 
 
+# How far a villager without a home will walk to reach the tavern before simply
+# bedding down where they are. Roughly half a chunk: far enough that anyone in
+# or near the village centre still uses the inn, short enough that the far edge
+# of the settlement does not spend the whole night on the road.
+ROUGH_SLEEPING_LODGING_RANGE = 20
+
+
 def _is_coordinate_pair(coords) -> bool:
     return (
         isinstance(coords, (tuple, list))
@@ -1076,7 +1083,24 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
         if npc.schedule.current_task not in [TaskType.SLEEPING, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
             if npc.schedule.current_task in [TaskType.AT_WORK, TaskType.GOING_TO_WORK]:
                 npc.clear_work_sub_task_state(reset_sequence=True)
-            home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id) if npc.schedule.home_building_id else world._find_nearest_tavern(npc)
+            # Someone with no home of their own is sent to the tavern as an inn.
+            # That is the right idea and stays, but it does not scale: a village
+            # generates far more residents than houses (measured: 12 of 76 have a
+            # home), so most of the settlement converges on one building. Sampled
+            # through the night, villagers with a home were sleeping 63% of the
+            # time while those without spent 63% of it in going_home - walking,
+            # not resting, and not recovering.
+            #
+            # So the tavern is only lodging if it is close enough to reach. Past
+            # that, sleep rough where you are, which is what already happens when
+            # there is no lodging at all a few lines below.
+            home_building_obj = world.buildings_by_id.get(npc.schedule.home_building_id) if npc.schedule.home_building_id else None
+            if home_building_obj is None and not npc.schedule.home_building_id:
+                lodging = world._find_nearest_tavern(npc)
+                if lodging is not None:
+                    walk = abs(npc.x - lodging.global_center_x) + abs(npc.y - lodging.global_center_y)
+                    if walk <= ROUGH_SLEEPING_LODGING_RANGE:
+                        home_building_obj = lodging
             if home_building_obj:
                 sleep_spot_coords = home_building_obj.interaction_points.get("sleep_spot")
                 if not sleep_spot_coords:

@@ -187,7 +187,13 @@ class TestAgriculturalSystem(unittest.TestCase):
         growth_needed = growing_def['properties']['growth_needed']
         updates_needed = (growth_needed // watering_increment) + 1
 
+        # Advance the clock between waterings. This loop used to call
+        # _update_weather repeatedly with game_time parked at 0, which watered the
+        # crop on every single call because 0 is a multiple of the interval. Crops
+        # are now watered once per elapsed hour of rain rather than once per call
+        # that happens to land on a boundary, so the hours have to actually pass.
         for _ in range(updates_needed):
+            self.world.game_time += config.DAY_LENGTH_TICKS // 24
             self.world._update_weather()
 
         # Verify progress has been made

@@ -16,8 +16,16 @@ from tcod_compat import tcod
 
 
 def _rendered_rows(console) -> list[str]:
+    """Read a console built by main.create_console(), which is order="C".
+
+    Those buffers are shaped (height, width) and indexed [y, x]. This file used
+    to build its own order="F" consoles and index [x, y], which is correct for
+    that layout but exercises the renderer against a console the game never
+    draws into - the same mismatch that hid a buffer-order crash past screen
+    column 56 until test_render_stress went looking for it.
+    """
     return [
-        "".join(chr(console.ch[x, y]) if console.ch[x, y] else " " for x in range(SCREEN_WIDTH))
+        "".join(chr(console.ch[y, x]) if console.ch[y, x] else " " for x in range(SCREEN_WIDTH))
         for y in range(SCREEN_HEIGHT)
     ]
 
@@ -31,7 +39,7 @@ class TestPlayerIdentityIsVisible(unittest.TestCase):
         cls.first_name = "Aldric"
 
     def _draw_world(self):
-        console = tcod.console.Console(SCREEN_WIDTH, SCREEN_HEIGHT, order="F")
+        console = main.create_console()
         camera_x, camera_y = main._get_camera_origin(self.world)
         console_renderer.draw(console, self.world, camera_x, camera_y, menu_fade_ratio=1.0)
         return _rendered_rows(console)
@@ -53,7 +61,7 @@ class TestPlayerIdentityIsVisible(unittest.TestCase):
         )
 
     def test_the_character_sheet_leads_with_the_character(self):
-        console = tcod.console.Console(SCREEN_WIDTH, SCREEN_HEIGHT, order="F")
+        console = main.create_console()
         console_renderer.draw_info_menu(console, self.world)
         rows = _rendered_rows(console)
         for expected in ("Name", self.first_name, "Profession", "Coin"):
@@ -67,7 +75,7 @@ class TestControlsAreDiscoverable(unittest.TestCase):
     """The keys existed only in a help menu you had to know a key to open."""
 
     def test_the_status_legend_lists_the_main_keys(self):
-        console = tcod.console.Console(SCREEN_WIDTH, SCREEN_HEIGHT, order="F")
+        console = main.create_console()
         console_renderer._draw_status_legend(
             console, console_renderer.MAP_WIDTH, console_renderer.STATUS_PANEL_WIDTH
         )

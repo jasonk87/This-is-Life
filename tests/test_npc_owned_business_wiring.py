@@ -17,6 +17,17 @@ class TestNPCOwnedBusinessWiring(unittest.TestCase):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
         self.world = World(seed=123)
+        # Only the candidate each test builds should be considered. _run patches
+        # _get_village_for_npc to return this village for everybody, so the whole
+        # generated population would otherwise be weighed for eligibility too -
+        # and these tests then depend on no generated villager happening to be a
+        # non-unemployed, 300-coin, wealth-aspiring one. Under seed 123 that was
+        # true until an unrelated change to village generation shifted the random
+        # stream, at which point one villager qualified and the four
+        # "not eligible" tests failed for a reason that had nothing to do with
+        # their candidate. It also makes the eligible case deterministic: with a
+        # stray qualifying NPC, random.choice could pick the wrong founder.
+        self.world.village_npcs.clear()
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(12, 12)]}
         self.world.chunks[0][0].village = self.village

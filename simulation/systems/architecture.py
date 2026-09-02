@@ -90,7 +90,12 @@ BUILDING_ARCHETYPES = {
         BlueprintVariant("house_rich", 8, 8, ["bedroom", "dining"], ["storage"], 4, [], "rich"),
     ]),
     "common_house": BuildingArchetype("common_house", "residential", (25, 49), ["shared_sleeping"], ["dining", "storage"], ["middle"], [
-        BlueprintVariant("common_house_base", 6, 6, ["shared_sleeping"], ["dining", "storage"], 2, [], "middle")
+        # Yard 0. A common house is shared lodging on the village street, not a
+        # farmstead with a garden, and the yard is invisible spacing rather than
+        # anything that gets drawn. At yard 2 it claimed 10x10 and could only fit
+        # by displacing the mine and half the blacksmiths; at 0 it claims its own
+        # 6x6 and takes leftover ground instead of a trade's slot.
+        BlueprintVariant("common_house_base", 6, 6, ["shared_sleeping"], ["dining", "storage"], 0, [], "middle")
     ]),
     "large_house": BuildingArchetype("large_house", "residential", (49, 81), ["bedroom", "bedroom", "dining"], ["storage", "office"], ["rich"], [
         BlueprintVariant("large_house_middle", 8, 8, ["bedroom", "bedroom", "dining"], ["storage"], 4, [], "middle"),

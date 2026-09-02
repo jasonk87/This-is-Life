@@ -101,8 +101,12 @@ def test_environmental_sensory_cues_emission():
     chunk.tiles[min(CHUNK_SIZE - 1, ly + 1)][lx] = tile
 
     world.game_time = 80
-    initial_entries = len(world.chat_log_entries)
+    # Cleared rather than counted. chat_log_entries is capped at 100 and world
+    # generation fills it with debug lines, so once it is full "the length went
+    # up" can never be true no matter how many cues are emitted - appending pops
+    # the oldest and leaves the count at 100.
+    world.chat_log_entries.clear()
     emit_environmental_sensory_cues(world)
-    assert len(world.chat_log_entries) > initial_entries
+    assert world.chat_log_entries, "no sensory cue was emitted beside a hot oven"
     latest_msg = world.chat_log_entries[-1].text
     assert "bread" in latest_msg.lower() or "aroma" in latest_msg.lower()

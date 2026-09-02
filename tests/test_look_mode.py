@@ -24,6 +24,19 @@ def _key(sym):
     return tcod.event.KeyDown(sym=sym, scancode=0, mod=0)
 
 
+# Consoles here come from main.create_console(), never built inline.
+#
+# These tests used to construct tcod.console.Console(..., order="F") and then
+# index the result as console.bg[y, x]. The game builds its console with
+# order="C", where the buffers are shaped (height, width, 3) and [y, x] is
+# correct; under order="F" they are shaped (width, height, 3) and the same
+# subscript reads a different cell entirely. So the assertions were checking a
+# transposed buffer against a console the game never uses, and whether they
+# happened to hold depended on where the cursor was and what the world had
+# generated - which is why they passed in isolation and failed about one full
+# run in two.
+
+
 class TestLookCursor(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -75,7 +88,7 @@ class TestLookCursor(unittest.TestCase):
 
     def test_cursor_is_painted_onto_the_map(self):
         world = self.world
-        console = tcod.console.Console(SCREEN_WIDTH, SCREEN_HEIGHT, order="F")
+        console = main.create_console()
         camera_x, camera_y = main._get_camera_origin(world)
         rect = console_renderer._world_to_screen_rect(
             world, camera_x, camera_y, world.look_cursor_x, world.look_cursor_y
@@ -93,7 +106,7 @@ class TestLookCursor(unittest.TestCase):
     def test_nothing_is_painted_when_not_looking(self):
         world = self.world
         world.game_state = "PLAYING"
-        console = tcod.console.Console(SCREEN_WIDTH, SCREEN_HEIGHT, order="F")
+        console = main.create_console()
         camera_x, camera_y = main._get_camera_origin(world)
         rect = console_renderer._world_to_screen_rect(
             world, camera_x, camera_y, world.look_cursor_x, world.look_cursor_y
@@ -172,13 +185,17 @@ class TestHelpMenu(unittest.TestCase):
         self.assertEqual(controls["Look Around"], "L")
 
     def test_the_panel_is_tall_enough_for_every_control(self):
-        console = tcod.console.Console(SCREEN_WIDTH, SCREEN_HEIGHT, order="F")
+        console = main.create_console()
         console_renderer.draw_help_menu(console)
 
         rendered = set()
         for y in range(SCREEN_HEIGHT):
+            # [y, x]: create_console builds order="C" buffers, shaped
+            # (height, width). This read [x, y] back when the console here was
+            # built inline as order="F", which was right for that console and is
+            # wrong for the one the game actually draws into.
             row = "".join(
-                chr(console.ch[x, y]) if console.ch[x, y] else " " for x in range(SCREEN_WIDTH)
+                chr(console.ch[y, x]) if console.ch[y, x] else " " for x in range(SCREEN_WIDTH)
             )
             rendered.add(row.strip())
         for action, key in console_renderer.HELP_CONTROLS:

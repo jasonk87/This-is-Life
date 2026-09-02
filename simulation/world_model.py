@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 import uuid
 
+from simulation.ids import new_id
+
 from data.decorations import DECORATION_ITEM_DEFINITIONS
 from data.items import ITEM_DEFINITIONS
 from entities.items import Inventory, ItemReference
@@ -11,7 +13,7 @@ from entities.items import Inventory, ItemReference
 
 class Building:
     def __init__(self, x, y, width, height, building_type="house", category="residential", global_chunk_x_start=0, global_chunk_y_start=0, variant_id=None):
-        self.id = str(uuid.uuid4())
+        self.id = new_id()
         self.x = x
         self.y = y
         self.width = width
@@ -248,7 +250,7 @@ class ConstructionBlueprint:
     assigned_workers: list[int] = field(default_factory=list)
     active_tasks: list[str] = field(default_factory=list)
     territory_claim_id: str | None = None
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     deposited_inventory: Inventory = field(default_factory=Inventory)
     variant_id: str | None = None
     components: list[ConstructionComponent] = field(default_factory=list)
@@ -287,7 +289,7 @@ class ConstructionBlueprint:
                     comp_mats = {k: v for k, v in comp_mats.items() if v > 0}
 
                     comp = ConstructionComponent(
-                        id=str(uuid.uuid4()),
+                        id=new_id(),
                         type="foundation",
                         x=self.x + cx,
                         y=self.y + cy,
@@ -396,7 +398,7 @@ class LandClaim:
     active: bool = True
     priority: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
 
     def all_tiles(self) -> set[tuple[int, int]]:
         return set(self.claimed_tiles) | set(self.reserved_tiles)
@@ -485,7 +487,7 @@ class Stockpile:
         quantity = max(1, int(quantity))
         if self.available_quantity(item_key) < quantity:
             return None
-        reservation_id = str(uuid.uuid4())
+        reservation_id = new_id()
         self.reservations[reservation_id] = {
             "reservation_id": reservation_id,
             "item_key": item_key,
@@ -533,7 +535,7 @@ class HaulTask:
     destination_x: int
     destination_y: int
     quantity: int = 1
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     assigned_entity_id: int | None = None
     status: str = "open"
     component_id: str | None = None
@@ -547,7 +549,7 @@ class DeliveryTask:
     destination_building_id: str
     item_key: str
     quantity: int
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     assigned_entity_id: int | None = None
     status: str = "open" # open, claimed, going_to_source, carrying, going_to_destination, complete, failed
     created_tick: int = 0
@@ -560,14 +562,14 @@ class EmploymentTask:
     profession_role: str
     daily_wage: int
     poster_entity_id: int | None = None
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     assigned_entity_id: int | None = None
     status: str = "open"
 
 
 @dataclass
 class TownEconomicNeed:
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     type: str = "shortage" # shortage, surplus, service
     target_key: str = "" # e.g. "wood", "blacksmith"
     severity: int = 1 # 1-100
@@ -632,7 +634,7 @@ class ProductionTask:
     dependency_depth: int = 0
     dependency_reason: str | None = None
     last_dependency_eval_tick: int = 0
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
 
 
 @dataclass
@@ -704,7 +706,7 @@ class PoliticalWarrant:
     issuer_id: int | None
     cost: int
     issued_day: int
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     status: str = "active"
 
 
@@ -900,7 +902,7 @@ class TownBoard:
 
 class Village:
     def __init__(self, primary_biome: str | None = None, chunk_coords: tuple[int, int] | None = None, region_id: str | None = None):
-        self.id = str(uuid.uuid4())
+        self.id = new_id()
         self.buildings = []
         self.lore = "No lore generated yet."
         self.interaction_points = {}
@@ -932,7 +934,7 @@ class Village:
 
 class Ruin:
     def __init__(self, primary_biome: str | None = None, chunk_coords: tuple[int, int] | None = None, region_id: str | None = None):
-        self.id = str(uuid.uuid4())
+        self.id = new_id()
         self.lore = "The origins of this place are lost to time."
         self.primary_biome = primary_biome
         self.chunk_coords = chunk_coords
@@ -944,7 +946,7 @@ class Ruin:
 class Region:
     name: str
     primary_biome: str
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_id())
     chunk_coords: set[tuple[int, int]] = field(default_factory=set)
     village_ids: set[str] = field(default_factory=set)
     ruin_ids: set[str] = field(default_factory=set)

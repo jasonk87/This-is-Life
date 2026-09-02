@@ -88,24 +88,51 @@ def update_entity_illness(world, entity) -> None:
 
     # Natural immune clearance: resting in bed accelerates recovery
     is_resting = getattr(getattr(entity, "schedule", None), "current_task", "") in ["resting_in_bed", "sleeping"]
-    if is_resting and physical.sickness > 0 and world.game_time > 0 and world.game_time % 60 == 0:
-        physical.sickness = max(0, physical.sickness - 2)
+    who = getattr(entity, "id", id(entity))
+    resting_ticks = _periods(world, f"illness_rest:{who}", 60) if is_resting else 0
+    if resting_ticks and physical.sickness > 0:
+        physical.sickness = max(0, physical.sickness - 2 * resting_ticks)
         if physical.sickness <= 0 and SICK_STATUS_EFFECT in physical.status_effects:
             recover_from_sickness(entity)
             world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)} has recovered from their illness.")
 
-    if physical.sickness >= SICKNESS_THRESHOLD_SICK and world.game_time % WORSENING_INTERVAL_TICKS == 0:
-        physical.sickness = min(physical.max_sickness, physical.sickness + WORSENING_SICKNESS_GAIN)
+    worsening_ticks = _periods(
+        world, f"illness_worsen:{who}", WORSENING_INTERVAL_TICKS, max_catch_up=12
+    )
+    if physical.sickness >= SICKNESS_THRESHOLD_SICK and worsening_ticks:
+        physical.sickness = min(
+            physical.max_sickness,
+            physical.sickness + WORSENING_SICKNESS_GAIN * worsening_ticks,
+        )
         if random.random() < WORSENING_DAMAGE_CHANCE:
             world.add_message_to_chat_log(f"{world.get_entity_display_name(entity)}'s illness is taking a toll...")
             entity.take_damage(1, world=world, apply_hostility=False)
 
 
+def _periods(world, key: str, interval: int, *, max_catch_up: int = 100) -> int:
+    """How many `interval`-tick periods have elapsed, catching up after a jump.
+
+    See World.periods_elapsed. These used to be `game_time % interval == 0`,
+    which only fires when the clock lands exactly on a boundary - and it jumps
+    whenever the player sleeps or takes a costly action. An illness that only
+    worsens on exact boundaries stops progressing the moment the clock drifts
+    off them, and resting through the night cured nothing.
+
+    Falls back to the old test for the stand-in worlds some tests build.
+    """
+    periods_elapsed = getattr(world, "periods_elapsed", None)
+    if periods_elapsed is not None:
+        return periods_elapsed(key, interval, max_catch_up=max_catch_up)
+    return 1 if int(getattr(world, "game_time", 0)) % max(1, interval) == 0 else 0
+
 def spread_contagion(world) -> None:
     """Proximity-based contagion pass across the player and all village
     NPCs. Periodic rather than per-tick (see CONTAGION_CHECK_INTERVAL_TICKS)
     to keep the O(sick * nearby) scan cheap."""
-    if world.game_time % CONTAGION_CHECK_INTERVAL_TICKS != 0:
+    # One pass per elapsed interval, not "only on exact boundaries". Contagion is
+    # a sampled check rather than an accumulating amount, so a jump that covers
+    # several intervals still only runs it once - what matters is that it runs.
+    if not _periods(world, "contagion", CONTAGION_CHECK_INTERVAL_TICKS):
         return
 
     contacts = [c for c in [world.player, *world.village_npcs] if c is not None]

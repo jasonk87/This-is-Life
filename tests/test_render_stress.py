@@ -48,6 +48,13 @@ class TestRenderStress(unittest.TestCase):
         world = self.world
         world.zoom_index = state["zoom_index"]
         world.game_time = state["game_time"]
+        # Setting game_time alone does not change the light level: the tick loop
+        # calls _update_light_level_and_fov, and nothing else does. Without this
+        # every case below rendered at whatever level the world was last left in
+        # - which for a fresh world is DAY - so a test named "at every time of
+        # day" spent its whole run in daylight, the one condition its own
+        # docstring says hides lighting faults.
+        world._update_light_level_and_fov()
         world.game_state = state["game_state"]
         world.mouse_x, world.mouse_y = state["mouse"]
         world._update_entity_position(world.player, *state["player"])
@@ -99,6 +106,37 @@ class TestRenderStress(unittest.TestCase):
                         everything_visible=True,
                         fade=1.0,
                     )
+
+    def test_the_time_of_day_cases_really_are_different_times_of_day(self):
+        """Guards the harness itself.
+
+        _draw used to set game_time and nothing else, and the light level only
+        moves when _update_light_level_and_fov is called. Every case below ran in
+        daylight while claiming to walk the clock, so the tints and the low-light
+        paths were never rendered once.
+        """
+        seen = []
+        for eighth in range(8):
+            self._draw(
+                zoom_index=0,
+                game_time=int(DAY_LENGTH_TICKS * eighth / 8),
+                game_state="PLAYING",
+                mouse=(10, 10),
+                player=(self.world.player.x, self.world.player.y),
+                everything_visible=True,
+                fade=1.0,
+            )
+            seen.append(self.world.current_light_level_name)
+
+        self.assertGreaterEqual(
+            len(set(seen)), 3,
+            f"walking a whole day only ever produced these light levels: {set(seen)}",
+        )
+        self.assertIn("DAY", seen)
+        self.assertTrue(
+            {"NIGHT", "PITCH BLACK"} & set(seen),
+            f"never got dark at any point in the day: {seen}",
+        )
 
     def test_every_menu_state(self):
         for game_state in GAME_STATES:

@@ -19,6 +19,7 @@ from simulation.activity import (
     ensure_activity_state,
     start_activity,
 )
+from simulation.ids import new_id, reset_ids
 from entities.base import (
     CombatStats,
     DireWolf,
@@ -28,6 +29,9 @@ from entities.base import (
     PhysicalState,
     Schedule,
     SocialState,
+    next_entity_id,
+    reserve_entity_ids_above,
+    reset_entity_ids,
     roll_appearance,
 ) # Added DireWolf
 from entities.animal import Animal
@@ -112,16 +116,121 @@ from config import (
 DAILY_GOVERNANCE_TICK_OFFSET = 360
 
 # --- Village layout pressure ---
-# VILLAGE_LAYOUT_NOTE: a 40x40 chunk with its roads cannot hold every building
-# _generate_village_structure asks for. Measured over sixteen villages with the
-# original ordering (houses first): the clinic and carpenter's shop were never
-# placed once, and the mill, library, farm and mine only sometimes - so Healer,
-# Carpenter and Scribe were professions no generated world ever contained.
-# Reordering only moves the shortage: houses first starves the trades, trades
-# first starves housing. A real fix is a scale decision - bigger village chunks,
-# smaller building footprints, or villages that specialise in a subset of trades
-# and differ from one another - and is left for a deliberate choice rather than
-# guessed at here.
+# VILLAGE_LAYOUT_NOTE: this note used to say the chunk was simply too small and
+# that a real fix was a scale decision. That was wrong, and worth recording as
+# wrong. Most of the shortage was how the chunk was being spent, not how big it
+# was. Three faults, all in try_place_building:
+#
+#   * A building that found no room was abandoned after checking 67 hand-picked
+#     offsets spiralling out from one corner - 4% of the 1600 positions in the
+#     chunk - plus 20 random darts. It now scans properly before giving up.
+#   * A yard was reserved exclusively, so two neighbours each paid for the gap
+#     between them. Nothing draws a yard - fenced_yard_size is read in exactly
+#     two places and both are reservations - so neighbours now share it.
+#   * A road counted as a building, costing every structure a full yard of
+#     setback from both roads in a chunk the roads already quarter. A yard may
+#     now lie across a street; a footprint still may not.
+#
+# Measured over 24 generated villages, before and after: clinic 4% -> 100%,
+# library 17% -> 100%, farm 21% -> 100%, mill 38% -> 100%, mine 42% -> 100%,
+# blacksmith 88% -> 100%, bakery 92% -> 100%, houses 96% -> 100%. Healer and
+# Scribe are professions a generated world can now contain.
+#
+# What is left really is a scale limit, and it is now bounded precisely. A 40x40
+# chunk holds thirteen buildings. Generation asks for fifteen, so two must miss,
+# and which two is decided by ordering. Measured over 56 villages, before and
+# after, on identical seeds:
+#
+#   before: 9.88 buildings per village. mill 41%, mine 36%, farm 16%, library
+#     16%, clinic 4%, carpenter 0%, and 0-1 homes.
+#   after: 13.00 buildings per village. Everything at 100% except the clinic and
+#     the carpenter shop, which place in none, and still 1 home.
+#
+# The two that miss are not arbitrary. Only a claim with a yard ever fails now -
+# order barely matters to the rest - and a village has room for exactly two of
+# them. The tavern takes one. The second is a straight choice between a house and
+# the clinic: asked before the houses the clinic places in all 56 villages and
+# housing drops to zero, asked after it places in none. Housing wins because it
+# is load-bearing - a villager without a home has no settling anchor and no
+# household, and the birth system needs somewhere to put a child - so this costs
+# the Healer, and the clinic goes from 4% to 0%. That is the one place this work
+# made something rarer, and it is a deliberate trade for +3.1 buildings a village.
+#
+# The farm and the library are ordered just after the houses for the same reason
+# in reverse: they cost almost nothing (8x6, no yard) and were asked last, which
+# had dropped them to 2 and 4 villages in 56 once everything before them started
+# succeeding. The farm is the head of the food chain, so that mattered.
+#
+# Buying back the clinic or the carpenter means a bigger village chunk, smaller
+# footprints, or villages that specialise and differ from one another. That is a
+# deliberate choice about scale, not something to guess at here.
+#
+# Housing was the other cost, and most of it has since been bought back. This
+# note used to record "one home per village" as acceptable. Measuring what it did
+# to the villagers showed it was not: only 12 of 76 had a home, and sampled
+# through the night those without one spent 63% of it walking towards the tavern
+# the scheduler sends them to, rather than sleeping. Two changes, neither of
+# which takes a slot from any trade:
+#
+#   * common_house is now generated. It was already defined in
+#     simulation/systems/architecture.py, with shared_sleeping rooms and a
+#     residential category, and nothing ever asked for one. Asked last, after
+#     every trade has its slot, and with its yard set to 0 so it claims its own
+#     6x6 and fits on leftover ground - at yard 2 it claimed 10x10 and could only
+#     fit by displacing the mine (100% of villages to 14%) and half the
+#     blacksmiths.
+#   * a villager whose only lodging is too far to reach now beds down where they
+#     are rather than walking all night (ROUGH_SLEEPING_LODGING_RANGE, in
+#     simulation/systems/scheduling.py).
+#
+# Measured over 56 villages: still 13 buildings and every trade at 100%, homes
+# per village 1.00 -> 2.20, villagers with a home 16% -> 77%. The rest sleep
+# rough, which beats pacing until dawn and is still not good; more houses remains
+# the real answer.
+#
+# butcher_shop was added on the same principle and audited out the same way: it
+# is mapped to Butcher in BUILDING_ROLE_RULES, the profession has a real work
+# step, and generation never asked for one, so no world could contain a Butcher.
+# It has no blueprint variant either, so it claims its bare 6x5. Asked after
+# every established trade and before the common houses, it places in every
+# village and displaces none of them.
+#
+# The two are in tension and the balance was measured rather than guessed. The
+# butcher takes ground the common houses would have used, and at six attempts
+# housing fell from 56% to 29% - one lost common house is ten beds. Ten attempts
+# restores it, because a common house only ever takes ground nothing else wanted.
+#
+# Still defined and never generated, from the same audit: fishing_hut
+# (Fisherman), hunting_lodge (Hunter), guard_post (Militia), plus barracks,
+# city_hall, large_house, lumber_shed, shack and storage_building which have no
+# profession attached. The three with professions need work zones this chunk
+# cannot supply on its own, so they are a bigger job than an extra
+# try_place_building call. The fishing hut was measured before being ruled out:
+# water exists in the world (a whole chunk of it) but none of the four generated
+# villages had a single water tile anywhere in its chunk, so a fishing hut would
+# be a workplace whose Fisherman could never fish. That needs villages to be
+# sited with regard to terrain, or water generated near them - a worldgen
+# question, not a placement one.
+#
+# Separately: church and guard_tower have no try_place_building call at all, so
+# no amount of packing will produce them. They are building types the rest of
+# the game refers to but generation never asks for.
+
+# --- How long an elected office is held before it is contested again ---
+# One season. Long enough that an election is an event rather than background
+# noise, short enough that a player can realistically stand for office inside a
+# normal run. PoliticalOffice.last_elected_day already existed to support this
+# and nothing read it, so offices were decided once at world creation and never
+# again.
+ELECTION_TERM_DAYS = DAYS_PER_SEASON
+
+# --- How many villagers a dwelling sleeps ---
+# A house is a family home. A common house is shared lodging - the building type
+# exists in simulation/systems/architecture.py with "shared_sleeping" rooms and
+# was never generated until now - so it takes the overflow that would otherwise
+# have no home at all and be sent to sleep in the tavern.
+HOUSE_OCCUPANCY = 3
+COMMON_HOUSE_OCCUPANCY = 10
 
 # --- Village growth headroom ---
 # How many people a village may add beyond the upper bound generation itself
@@ -283,6 +392,7 @@ from simulation.social_scene import (
 from simulation.careers import (
     CareerState,
     PROFESSION_TRACKS,
+    BUILDING_ROLE_RULES,
     entity_has_any_profession,
     entity_has_capability,
     entity_has_profession,
@@ -627,7 +737,9 @@ class Player:
         self.first_name = "Player"
         self.char = get_human_sprite(is_player=True)
         self.color = COLORS["player_fg"]
-        self.id = id(self)  # Simple unique ID for player
+        # Not id(self) - see entities/base.next_entity_id. A memory address is
+        # reissued the moment the object behind it is freed.
+        self.id = next_entity_id()
 
         # Components
         self.physical = PhysicalState()
@@ -1018,6 +1130,14 @@ class World:
     def __init__(self, seed=None, player_first_name: str | None = None):
         if seed is not None:
             random.seed(seed)
+        # Entity ids restart with each world so that a seed reproduces the same
+        # village. See entities/base.reset_entity_ids.
+        reset_entity_ids()
+        # And so do the ids of everything that is not an entity - villages,
+        # buildings, claims, records. These were uuid4, which ignores the seed,
+        # and several code paths order by them, so the same seed used to place
+        # the same villagers in a different village each run. See simulation/ids.
+        reset_ids(seed if seed is not None else "unseeded")
         # Retained so terrain generation can derive its own per-chunk RNG
         # rather than drawing from the module-level `random` - see
         # _chunk_rng. When no seed is given we draw one now, so a world is
@@ -1041,6 +1161,10 @@ class World:
         self.text = WorldTextFormatter(self)
         self.generator = WorldGenerator(self.chunk_width, self.chunk_height, seed=seed)
         self.atlas = WorldAtlas()
+        # Day number each daily system last ran for; see begin_new_day.
+        self._daily_gate_days: dict[str, int] = {}
+        # Tick each sub-daily system last fired on; see periods_elapsed.
+        self._periodic_gate_ticks: dict[str, int] = {}
         self.history = HistoryLedger(event_limit=200)
         self.records = ChronicleArchive(self.history)
         self.knowledge_system = KnowledgeSystem(self.records)
@@ -1308,6 +1432,21 @@ class World:
         self._gossip_llm_service = AsyncLLMGossipService()
         self.chunk_manager = ChunkManager(CHUNK_SIZE, self.chunk_width, self.chunk_height)
         self.world_seed = getattr(self, "world_seed", 0)
+        # Entity ids come from a counter that restarts with the process, so a
+        # world loaded from disk has to push it past whatever it already
+        # contains - otherwise the next entity born would be issued an id some
+        # existing villager is already using. See entities/base.next_entity_id.
+        highest_id = 0
+        for entity in [getattr(self, "player", None), *getattr(self, "village_npcs", []), *getattr(self, "npcs", [])]:
+            entity_id = getattr(entity, "id", None)
+            if isinstance(entity_id, int) and entity_id > highest_id:
+                highest_id = entity_id
+        reserve_entity_ids_above(highest_id)
+        # A fresh id series for anything created after loading. The world already
+        # carries ids from its own generation and the counter behind them starts
+        # over with the process, so without a new prefix the next building placed
+        # could take an id a village is already using.
+        reset_ids()
         # Saves written before the log carried categories only have the
         # plain string list, so rebuild the display model from it.
         if not getattr(self, "chat_log_entries", None):
@@ -2134,7 +2273,21 @@ class World:
         voters = [self.player] + adult_citizens
         for office_name, office in self.politics.offices.items():
             current_holder = self.get_office_holder(office_name)
-            if current_holder is not None and not force:
+            # An office comes up for election again when its term is out.
+            # Without this the whole political system was settled on day zero and
+            # frozen: measured over 120 days - more than a full in-game year -
+            # neither office ever changed hands, and last_elected_day was written
+            # once and read by nothing. The player is in `candidates` and always
+            # was, so they could only ever hold office by winning the very first
+            # election, on the day they arrive with no standing and no job. That
+            # left Adjust Taxes, Issue Bounty and Issue Arrest Warrant as player
+            # actions no ordinary game could reach.
+            #
+            # The sitting holder stands again like anyone else, so this is a term
+            # limit on the office rather than on the person.
+            term_served = current_day - office.last_elected_day
+            term_expired = office.last_elected_day >= 0 and term_served >= ELECTION_TERM_DAYS
+            if current_holder is not None and not force and not term_expired:
                 continue
 
             # Each voter independently scores every candidate and casts one
@@ -2272,7 +2425,12 @@ class World:
         current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
         if self.politics.last_governance_day >= current_day:
             return
-        if self.game_time % DAY_LENGTH_TICKS != DAILY_GOVERNANCE_TICK_OFFSET:
+        # At or after the offset, rather than exactly on it. The offset exists so
+        # governance happens at a set hour, not so it happens only when the clock
+        # lands on one tick - and game_time jumps when the player sleeps or takes
+        # a costly action. last_governance_day above already stops it repeating,
+        # so this stays once a day while surviving a clock that skips the tick.
+        if (self.game_time % DAY_LENGTH_TICKS) < DAILY_GOVERNANCE_TICK_OFFSET:
             return
 
         self.evaluate_elections()
@@ -2740,6 +2898,30 @@ class World:
             if npc.schedule.work_building_id == building.id and not npc.physical.is_dead
         )
 
+    def _building_can_employ(self, building) -> bool:
+        """Whether this building is somewhere a villager can hold a post.
+
+        Employment is gated almost everywhere on "workplace" being in the
+        category string, and the capital hall and the jail are registered as
+        plain "civic". Both declare worker capacity - three and two - and both
+        map to a real role in BUILDING_ROLE_RULES, capital_hall to Town Official
+        and jail to Guard. So both stood in every single village with posts
+        nobody could ever be hired into, and Town Official and Guard were
+        professions the game defines and never fills: measured over six worlds,
+        zero of either, before and after fourteen simulated days.
+
+        Deliberately not fixed by relabelling those two as civic_workplace. The
+        category is also read for interior generation and for territory claims,
+        where "workplace" in the category is what makes a claim a business rather
+        than the settlement core - and the capital hall is the settlement core.
+        """
+        if "workplace" in str(getattr(building, "category", "")):
+            return True
+        return (
+            bool(getattr(building, "max_workers", 0))
+            and str(getattr(building, "building_type", "")) in BUILDING_ROLE_RULES
+        )
+
     def _find_open_post_for(self, npc: NPC) -> Building | None:
         """The best vacancy in this villager's own settlement, if there is one."""
         village = self._get_npc_settlement(npc)
@@ -2748,7 +2930,7 @@ class World:
         best_building = None
         best_score = None
         for building in village.buildings:
-            if "workplace" not in str(getattr(building, "category", "")):
+            if not self._building_can_employ(building):
                 continue
             if self._is_player_owned_workplace(building):
                 continue
@@ -4173,7 +4355,7 @@ class World:
 
     def _update_npc_relationships_dynamic(self):
         """Periodically updates NPC relationships based on interactions, personality, and random chance."""
-        if self.game_time % DAY_LENGTH_TICKS != 0: # Run once a day
+        if not self.begin_new_day("npc_relationships", skip_first_day=False):
             return
 
         for npc in self.village_npcs:
@@ -6620,9 +6802,92 @@ class World:
                     self._hire_npc_from_employment_task(member, task)
         self.share_abstract_rumors_with_settlement(leader, destination)
 
+    def periods_elapsed(self, gate_key: str, interval_ticks: int, *, max_catch_up: int = 100) -> int:
+        """How many whole `interval_ticks` periods have passed since this last fired.
+
+        The companion to begin_new_day, for the systems that run on some interval
+        shorter than a day. They all used to ask `game_time % interval == 0`,
+        which tests for landing exactly on a boundary rather than for time having
+        passed - and game_time jumps. A player action costs its own ticks and
+        lying down to sleep advances a third of a day in one step.
+
+        For the daily systems that meant a skipped day. Here it means a skipped
+        *need*. Measured over 4800 ticks - eight hours - of game time reached
+        three ways: ticking one at a time took the player from 0 to 15 hunger and
+        35 thirst; taking it as a single sleep left hunger at 0 and thirst at 7;
+        and stepping in 577s, which never lands on a boundary, left both at 0.
+        Sleeping through the night was free, and a save whose clock had drifted
+        off the boundaries stopped making the player hungry at all.
+
+        Returns a count rather than a boolean so a caller can apply what was
+        missed instead of silently dropping it. `max_catch_up` bounds that: a
+        huge jump should not deliver hundreds of points of starvation damage in
+        one tick.
+        """
+        gates = getattr(self, "_periodic_gate_ticks", None)
+        if gates is None:
+            # Also covers saves pickled before this existed.
+            gates = self._periodic_gate_ticks = {}
+        interval = max(1, int(interval_ticks))
+        now = int(self.game_time)
+        last = gates.get(gate_key)
+        if last is None:
+            # A key being seen for the first time is treated as due right now,
+            # not as starting a fresh countdown. The old boundary test fired
+            # within one interval of anything becoming relevant - an entity
+            # falling ill, a world starting up - and deferring that first firing
+            # by a whole interval would be a quieter behaviour change than the
+            # one being fixed.
+            last = now - interval
+        elif last > now:
+            # The clock went backwards (a save loaded over a longer session).
+            gates[gate_key] = now
+            return 0
+        count = (now - last) // interval
+        if count <= 0:
+            return 0
+        gates[gate_key] = last + count * interval
+        return min(int(count), max(1, int(max_catch_up)))
+
+    def begin_new_day(self, gate_key: str, *, skip_first_day: bool = True) -> bool:
+        """True once per in-game day for `gate_key`, however game_time got there.
+
+        Daily systems used to ask `game_time % DAY_LENGTH_TICKS == 0`, which
+        tests for landing exactly on midnight rather than for a day having
+        passed - and game_time does not only advance by one. A player action
+        costs its own ticks (simulation/systems/tick.py and main.py both add
+        `action_cost - 1`), and lying down to sleep jumps a third of a day in a
+        single step.
+
+        Measured over twenty simulated days, counting village-days of macro
+        simulation that actually ran out of eighty: stepping one tick at a time
+        ran 80; sleeping in exact eight-hour jumps ran 80, because a third of a
+        day still divides a day; alternating ordinary play with sleep ran 28;
+        and sleeping followed by any single action ran 0. That last one is the
+        one that matters - once the offset stops being a multiple it never
+        becomes one again, so births, deaths, ageing, the economy, trade
+        caravans, diplomacy and governance all stop happening for the rest of
+        that save, silently.
+
+        Keyed per system so one caller cannot consume another's turn.
+        `skip_first_day` keeps the callers that deliberately did nothing at
+        game_time 0 behaving as they did.
+        """
+        gates = getattr(self, "_daily_gate_days", None)
+        if gates is None:
+            # Also covers saves pickled before this existed.
+            gates = self._daily_gate_days = {}
+        day = self.game_time // max(1, DAY_LENGTH_TICKS)
+        if skip_first_day and day <= 0:
+            return False
+        if gates.get(gate_key) == day:
+            return False
+        gates[gate_key] = day
+        return True
+
     def process_macro_daily_tick(self) -> None:
         current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
-        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+        if not self.begin_new_day("macro_daily"):
             return
         if current_day <= self.last_macro_daily_day:
             return
@@ -6879,7 +7144,7 @@ class World:
 
     def create_stockpile(self, x: int, y: int, *, accepted_item_types: set[str] | list[str] | tuple[str, ...] | None = None, max_item_count: int = 100, owner_id=None, faction_id: str | None = None, village_id: str | None = None, stockpile_id: str | None = None) -> Stockpile:
         stockpile = Stockpile(
-            stockpile_id=stockpile_id or str(uuid.uuid4()),
+            stockpile_id=stockpile_id or new_id(),
             x=int(x),
             y=int(y),
             accepted_item_types=set(accepted_item_types or set()),
@@ -8765,7 +9030,7 @@ class World:
             self._set_trade_money_balance(building, random.randint(80, 180))
 
     def _sync_building_employment_tasks(self, building: Building | None) -> None:
-        if building is None or "workplace" not in str(getattr(building, "category", "")):
+        if building is None or not self._building_can_employ(building):
             return
         if getattr(building, "owner_id", None) is not None:
             return
@@ -10482,12 +10747,7 @@ class World:
 
         # Merchant inventory snapshot: (item_key, quantity, price_to_buy_at)
         # Merchant inventory is likely in their work building
-        merchant_inventory_source = {}
-        merchant_building = self.buildings_by_id.get(merchant_npc.schedule.work_building_id)
-        if merchant_building and merchant_building.building_type in ["general_store", "mill"]:
-            merchant_inventory_source = merchant_building.building_inventory
-        else: # Fallback to NPC's personal inventory if no store or not a store
-            merchant_inventory_source = self.trade_ui_npc_target.economic.npc_inventory
+        merchant_inventory_source = self._merchant_stock(merchant_npc)
 
         for item_key, quantity in merchant_inventory_source.items():
             if item_key == "money": continue # Don't list merchant's money as a sellable item
@@ -10524,6 +10784,45 @@ class World:
         self.trade_ui_player_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
         self.trade_ui_merchant_inventory_snapshot.sort(key=lambda x: ITEM_DEFINITIONS.get(x[0], {}).get("name", x[0]))
 
+    # Categories whose stock a worker will sell to the player. Places of
+    # business: shops, workshops, mills, farms, stores. Deliberately not
+    # civic_workplace - the sheriff is not retailing the town's swords and the
+    # library is not selling its books.
+    RETAIL_WORKPLACE_CATEGORIES = (
+        "commercial_workplace",
+        "industrial_workplace",
+        "agricultural_workplace",
+        "storage_workplace",
+    )
+
+    # The two building types that always sold their stock, recognised by name as
+    # well as by category. Category is the rule; this is the floor. Several tests
+    # stand a shop in with SimpleNamespace(building_type="general_store", ...)
+    # and no category at all, and a shop that has always retailed should not stop
+    # doing so because of a missing attribute on a stand-in.
+    ALWAYS_RETAIL_BUILDING_TYPES = ("general_store", "mill")
+
+    def _merchant_stock(self, merchant_npc):
+        """The inventory a merchant actually trades out of.
+
+        This used to be an allowlist of exactly two building types,
+        ["general_store", "mill"], written out twice - once to build the trade
+        UI and once to settle the transaction. Everyone else traded from their
+        own pockets while the shop they were standing in stayed full: measured on
+        a generated world, 1250 of the 1799 goods on staffed shop shelves could
+        not be bought, including 302 at the blacksmith, 211 at the tavern and 146
+        of bread at the bakery.
+        """
+        building = self.buildings_by_id.get(
+            getattr(getattr(merchant_npc, "schedule", None), "work_building_id", None)
+        )
+        if building is not None and (
+            getattr(building, "category", "") in self.RETAIL_WORKPLACE_CATEGORIES
+            or getattr(building, "building_type", "") in self.ALWAYS_RETAIL_BUILDING_TYPES
+        ):
+            return building.building_inventory
+        return merchant_npc.economic.npc_inventory
+
     def handle_trade_action(self):
         """Processes a buy or sell action from the trade UI."""
         if not self.trade_ui_active or not self.trade_ui_npc_target:
@@ -10533,12 +10832,10 @@ class World:
         merchant_building = self.buildings_by_id.get(merchant_npc.schedule.work_building_id)
         merchant_village = self._get_village_for_npc(merchant_npc)
 
-        # Determine merchant's actual inventory (store or personal)
-        merchant_true_inventory = {}
-        if merchant_building and merchant_building.building_type in ["general_store", "mill"]:
-            merchant_true_inventory = merchant_building.building_inventory
-        else:
-            merchant_true_inventory = merchant_npc.economic.npc_inventory
+        # The same source the trade UI listed from - see _merchant_stock. These
+        # were two separate copies of one allowlist, which is how they came to
+        # disagree with the rest of the economy.
+        merchant_true_inventory = self._merchant_stock(merchant_npc)
 
         merchant_money = merchant_true_inventory.get("money", 0)
 
@@ -11227,6 +11524,44 @@ class World:
         except requests.exceptions.RequestException as e:
             return ""
 
+    def _is_local_news(self, location: tuple[int, int] | None) -> bool:
+        """Whether something happening at `location` is news the player could have.
+
+        The world already maintains this distinction for its level-of-detail
+        system: chunks around the player are active and simulated in detail,
+        everything else is abstracted. That line is the right one for the message
+        log too - the player is standing in one village and cannot hear about a
+        stranger changing jobs three chunks away.
+
+        The history ledger still records everything either way. This only decides
+        what reaches the four-line panel the player actually reads.
+        """
+        if location is None:
+            return False
+        try:
+            chunk_coords = (int(location[0]) // CHUNK_SIZE, int(location[1]) // CHUNK_SIZE)
+        except (TypeError, ValueError, IndexError):
+            return False
+        active = self._get_active_chunks()
+        if active:
+            return chunk_coords in active
+
+        # No chunk manager - a stand-in world, as several tests build. Fall back
+        # to plain distance, and if even that cannot be worked out, say it out
+        # loud. Failing open matters: the old behaviour was to announce
+        # everything, so anything this cannot classify should stay announced
+        # rather than being silently swallowed.
+        player = getattr(self, "player", None)
+        if player is None:
+            return True
+        try:
+            return max(
+                abs(int(location[0]) - int(player.x)),
+                abs(int(location[1]) - int(player.y)),
+            ) <= CHUNK_SIZE
+        except (TypeError, ValueError, AttributeError):
+            return True
+
     def log_event(
         self,
         event_type: str,
@@ -11323,6 +11658,7 @@ class World:
                 memory_event=memory_event,
                 subject_name=subject_name or "Someone",
                 target_name=target_name,
+                now_ticks=self.game_time,
             )
         )
 
@@ -11342,6 +11678,7 @@ class World:
             memory_events=memory_events,
             building_id=building_id,
             title_hint=title_hint,
+            now_ticks=self.game_time,
         )
         if not submitted:
             return False
@@ -11410,7 +11747,11 @@ class World:
         if gossip_service is None or not hasattr(gossip_service, "poll_completed"):
             return
 
-        for result in gossip_service.poll_completed():
+        # Pass the game clock so pending gossip falls back after a fixed number
+        # of ticks rather than a fixed number of real seconds - see
+        # services/llm_gossip. Waiting on the wall clock left the whole tick loop
+        # unreproducible from a seed.
+        for result in gossip_service.poll_completed(now_ticks=self.game_time):
             if getattr(result, "request_type", "gossip") == "chronicle":
                 self._finish_chronicle_draft(result)
                 continue
@@ -11473,6 +11814,12 @@ class World:
             birth_record.location,
             event=birth_record,
         )
+        # A child being born in the village the player is standing in is worth a
+        # line. Births reached the history ledger and the event system but never
+        # the player's log, so the one piece of good news the settlement produces
+        # was the one thing they could not be told about.
+        if self._is_local_news(location):
+            self.add_message_to_chat_log(description, category="social")
         create_public_event_seed_from_record(self, birth_record)
         return birth_record
 
@@ -12005,8 +12352,10 @@ class World:
 
             self.weather_change_timer = random.randint(DAY_LENGTH_TICKS // 2, DAY_LENGTH_TICKS * 2)
 
-        # Process weather effects periodically, not every tick
-        if self.game_time % (DAY_LENGTH_TICKS // 24) == 0:
+        # Process weather effects periodically, not every tick. Once per elapsed
+        # hour rather than only on the exact hour: a field should not go unwatered
+        # through a night of rain because the player slept past the boundary.
+        if self.periods_elapsed("weather_effects", DAY_LENGTH_TICKS // 24):
             if self.weather == "rain":
                 self._water_crops()
 
@@ -12211,11 +12560,14 @@ class World:
             num_npcs = 0
 
         residential_buildings = [b for b in village.buildings if b.category == "residential"]
-        workplace_buildings = [b for b in village.buildings if "workplace" in b.category] # e.g., "civic_workplace", "commercial_workplace"
+        workplace_buildings = [b for b in village.buildings if self._building_can_employ(b)]
 
+        # A house holds a family; a common house is shared lodging and holds far
+        # more, which is the whole reason for building one.
         available_homes = []
         for home in residential_buildings:
-            available_homes.extend([home] * 3)
+            beds = COMMON_HOUSE_OCCUPANCY if home.building_type == "common_house" else HOUSE_OCCUPANCY
+            available_homes.extend([home] * beds)
         available_workplaces = list(workplace_buildings)
         random.shuffle(available_homes)
         random.shuffle(available_workplaces)
@@ -12676,7 +13028,7 @@ class World:
         return False
 
     def create_workshop_runtime(self, x: int, y: int, *, workshop_type: str = "sawbench", workshop_id: str | None = None) -> WorkshopRuntimeState:
-        wid = workshop_id or str(uuid.uuid4())
+        wid = workshop_id or new_id()
         workshop = WorkshopRuntimeState(workshop_id=wid, workshop_type=workshop_type, x=int(x), y=int(y))
         self.workshops_by_id[wid] = workshop
         trace_log = getattr(self, "interaction_trace_log", None)
@@ -12744,7 +13096,7 @@ class World:
 
     def _record_decision_explanation(self, *, explanation_type: str, decision: str, primary_reason: str, task: ProductionTask | None = None, actor=None, source_entity_id=None, target_entity_id=None, contributing_factors: dict | None = None, score_snapshot: dict | None = None, created_from: str = "runtime") -> str:
         tick = int(getattr(self, "game_time", 0) or 0)
-        explanation_id = str(uuid.uuid4())
+        explanation_id = new_id()
         rec = DecisionExplanation(
             explanation_id=explanation_id,
             tick=tick,
@@ -13074,7 +13426,21 @@ class World:
             elif t == "tile":
                 sheltered, exp_mod, rec_mod, sid = self.get_shelter_exposure_modifier(pos)
                 warm = [cf.campfire_id for cf in getattr(self, "campfires_by_id", {}).values() if cf.lit and abs(cf.x-pos[0])+abs(cf.y-pos[1]) <= getattr(cf, "warmth_radius", 4)]
-                payload.update({"display_name": f"Tile {pos}", "sheltered": sheltered, "shelter_id": sid, "exposure_modifier": exp_mod, "recovery_modifier": rec_mod, "warmth_sources": warm})
+                # Name the building as well as the coordinates. Inspecting the
+                # floor of the bakery used to report "Tile (201, 61)" and nothing
+                # else, so a player could stand in a shop and have no way to know
+                # it was one.
+                inside = self.get_building_at(pos[0], pos[1])
+                inside_type = getattr(inside, "building_type", None) if inside else None
+                readable = str(inside_type).replace("_", " ").title() if inside_type else None
+                payload.update({
+                    "display_name": f"{readable} {pos}" if readable else f"Tile {pos}",
+                    "building_type": inside_type,
+                    "building_id": getattr(inside, "id", None) if inside else None,
+                    "sheltered": sheltered, "shelter_id": sid,
+                    "exposure_modifier": exp_mod, "recovery_modifier": rec_mod,
+                    "warmth_sources": warm,
+                })
             elif t == "tree":
                 payload.update({"display_name": f"Tree {pos}", "is_tree": True})
             if include_commands and selection:
@@ -13162,7 +13528,7 @@ class World:
         return task
 
     def create_reserve_target(self, *, target_type: str = "stockpile_item", target_entity_id: str | None = None, linked_item_type: str = "raw_log", desired_quantity: int = 4, minimum_quantity: int = 1, priority: int = 2) -> ReserveTarget:
-        reserve_id = str(uuid.uuid4())
+        reserve_id = new_id()
         target = ReserveTarget(
             reserve_target_id=reserve_id,
             target_type=target_type,
@@ -13177,7 +13543,7 @@ class World:
         return target
 
     def create_campfire_runtime(self, x: int, y: int, *, fuel_item_type: str = "raw_log", fuel_quantity: int = 4, max_fuel_quantity: int = 10, minimum_fuel_quantity: int = 2, burn_rate_per_tick: int = 1) -> CampfireRuntimeState:
-        campfire_id = str(uuid.uuid4())
+        campfire_id = new_id()
         cf = CampfireRuntimeState(campfire_id=campfire_id, x=int(x), y=int(y), fuel_item_type=fuel_item_type, fuel_quantity=max(0, int(fuel_quantity)), max_fuel_quantity=max(1, int(max_fuel_quantity)), minimum_fuel_quantity=max(0, int(minimum_fuel_quantity)), burn_rate_per_tick=max(1, int(burn_rate_per_tick)))
         self.campfires_by_id[campfire_id] = cf
         rt = self.create_reserve_target(target_type="campfire_fuel", target_entity_id=campfire_id, linked_item_type=fuel_item_type, desired_quantity=cf.max_fuel_quantity, minimum_quantity=cf.minimum_fuel_quantity, priority=4)
@@ -13186,7 +13552,7 @@ class World:
         return cf
 
     def create_shelter_zone(self, positions: list[tuple[int, int]], *, shelter_type: str = "basic", exposure_reduction_modifier: float = 0.6, recovery_modifier: float = 1.2) -> str:
-        sid = str(uuid.uuid4())
+        sid = new_id()
         erm = max(0.2, min(1.0, float(exposure_reduction_modifier)))
         rm = max(1.0, min(2.0, float(recovery_modifier)))
         self.shelter_zones_by_id[sid] = {"shelter_id": sid, "positions": set((int(x), int(y)) for x, y in positions), "shelter_type": shelter_type, "exposure_reduction_modifier": erm, "recovery_modifier": rm, "active": True}
@@ -14055,8 +14421,21 @@ class World:
             if task.retry_count > 8:
                 self._warn_simulation_validation("production_task_excessive_retries", (task.id, task.retry_count), "Production task is retrying excessively.", metadata={"task_id": task.id, "retry_count": task.retry_count})
 
+    # How long a villager stays quiet between remarks, in game ticks rather than
+    # in seconds off the wall clock. Roughly twenty minutes to an hour of game
+    # time, which is about what the old 10-30 real seconds worked out to at the
+    # rate the tick loop actually runs.
+    AMBIENT_SPEECH_GAP_TICKS = (240, 720)
+
     def _handle_npc_speech(self):
-        current_time = time.time()
+        # Game time, not wall clock. This used to read time.time() and let a
+        # villager speak once 10 to 30 real-world seconds had passed, which made
+        # how talkative the village is a function of how fast the machine runs -
+        # and in a turn-based game, a player who sat thinking for half a minute
+        # got a chorus on their next keypress. It also made the whole tick loop
+        # unreproducible: whether this branch fires changes how much of the
+        # random stream each tick consumes, so two runs from one seed diverge.
+        current_time = self.game_time
         player_rep = self.player.social.reputation  # Get player rep once
 
         # Ensure self.npcs and self.village_npcs are initialized
@@ -14085,7 +14464,7 @@ class World:
             if task_key in self._background_llm_tasks:
                 continue
 
-            if current_time - npc.last_speech_time > random.randint(10, 30):
+            if current_time - npc.last_speech_time > random.randint(*self.AMBIENT_SPEECH_GAP_TICKS):
                 if not self._is_npc_llm_relevant_to_player(npc):
                     self._cancel_background_llm_task(task_key)
                     npc.last_speech_time = current_time
@@ -14646,7 +15025,7 @@ class World:
         # Assign a random job in the village if available
         village = self._get_village_for_npc(npc, by_coords=True)
         if village:
-            potential_jobs = [b for b in village.buildings if "workplace" in b.category]
+            potential_jobs = [b for b in village.buildings if self._building_can_employ(b)]
             vacant_jobs = []
             for b in potential_jobs:
                 workers = sum(1 for n in self.village_npcs if n.schedule.work_building_id == b.id)
@@ -15068,17 +15447,23 @@ class World:
 
         # Layout strategy:
         # Use a temporary layout grid to manage collision during generation
-        layout_grid = [[0 for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)] # 0 = empty, 1 = occupied/road
+        # Cell meanings. A road is kept distinct from a building because a yard
+        # may lie across a street - the yard is invisible spacing between
+        # neighbours and a street already separates them - while a footprint may
+        # not. Lumping the two together as "occupied" cost every building a full
+        # yard of setback from both roads, in a chunk the roads already quarter.
+        EMPTY, BLOCKED, YARD, ROAD = 0, 1, 2, 3
+        layout_grid = [[EMPTY for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
         # Main road down the middle
         road_y = CHUNK_SIZE // 2
         for x in range(CHUNK_SIZE):
-            layout_grid[road_y][x] = 1
+            layout_grid[road_y][x] = ROAD
 
         # Cross road
         road_x = CHUNK_SIZE // 2
         for y in range(CHUNK_SIZE):
-            layout_grid[y][road_x] = 1
+            layout_grid[y][road_x] = ROAD
 
         # Place well at center
         global_well_x = chunk_global_start_x + road_x
@@ -15154,35 +15539,69 @@ class World:
             total_w = width + yard_size * 2
             total_h = height + yard_size * 2
 
-            # 1. Try exact hint first (existing exact behavior)
+            # --- Yards are spacing, not scenery ---
+            # A "fenced yard" is never drawn. fenced_yard_size is read in exactly
+            # two places in the whole codebase and both are reservations, so the
+            # ring around a building is invisible ground that exists only to keep
+            # neighbours apart. Reserving it exclusively was ruinously expensive:
+            # a middle house is 7x7 inside a 13x13 claim, so four houses took 42%
+            # of a 40x40 chunk. Measured over 24 villages the carpenter shop never
+            # placed once, the clinic once, the library four times and the farm
+            # five - which is why Healer, Carpenter and Scribe were professions no
+            # generated world ever contained.
+            #
+            # So let two neighbours share the gap between them. A footprint must
+            # clear every other footprint, every road and every neighbour yard;
+            # only the yard ring itself may overlap another yard. The visible gap
+            # between two buildings becomes max(yard_a, yard_b) rather than
+            # yard_a + yard_b - still spaced, at roughly half the cost.
+            def _fits(bx: int, by: int) -> bool:
+                if bx < 1 or by < 1:
+                    return False
+                if bx + total_w > CHUNK_SIZE - 1 or by + total_h > CHUNK_SIZE - 1:
+                    return False
+                for i in range(total_h):
+                    row = layout_grid[by + i]
+                    in_footprint_row = yard_size <= i < yard_size + height
+                    for j in range(total_w):
+                        cell = row[bx + j]
+                        if cell == EMPTY:
+                            continue
+                        if in_footprint_row and yard_size <= j < yard_size + width:
+                            return False  # the building itself needs bare ground
+                        if cell == BLOCKED:
+                            return False  # a yard may cross a road or another yard, never a building
+                return True
+
+            def _mark(bx: int, by: int) -> None:
+                for i in range(total_h):
+                    row = layout_grid[by + i]
+                    in_footprint_row = yard_size <= i < yard_size + height
+                    for j in range(total_w):
+                        if in_footprint_row and yard_size <= j < yard_size + width:
+                            row[bx + j] = BLOCKED
+                        elif row[bx + j] == 0:
+                            row[bx + j] = YARD
+
+            def _place(start_x: int, start_y: int):
+                _mark(start_x, start_y)
+                building = Building(
+                    start_x + yard_size, start_y + yard_size, width, height,
+                    building_type=b_type, category=category,
+                    global_chunk_x_start=chunk_global_start_x,
+                    global_chunk_y_start=chunk_global_start_y, variant_id=variant_id,
+                )
+                building.max_workers = max_workers
+                chunk.village.add_building(building)
+                self.atlas.register_building(building)
+                return building
+
+            # 1. Try exact hint first
             if x_hint is not None and y_hint is not None:
-                # Hint centers on the building, check layout taking yard into account
-                start_x = max(1, x_hint - yard_size)
-                start_y = max(1, y_hint - yard_size)
-
-                if 0 <= start_x < CHUNK_SIZE - total_w and 0 <= start_y < CHUNK_SIZE - total_h:
-                    overlap = False
-                    for i in range(total_h):
-                        for j in range(total_w):
-                            if layout_grid[start_y + i][start_x + j] == 1:
-                                overlap = True
-                                break
-                        if overlap: break
-                    if not overlap:
-                        # Mark territory and building footprint
-                        for i in range(total_h):
-                            for j in range(total_w):
-                                layout_grid[start_y + i][start_x + j] = 1
-
-                        # Actual building coordinates (inside the yard)
-                        bx = start_x + yard_size
-                        by = start_y + yard_size
-                        building = Building(bx, by, width, height, building_type=b_type, category=category,
-                                            global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y, variant_id=variant_id)
-                        building.max_workers = max_workers
-                        chunk.village.add_building(building)
-                        self.atlas.register_building(building)
-                        return building
+                hint_x = max(1, x_hint - yard_size)
+                hint_y = max(1, y_hint - yard_size)
+                if _fits(hint_x, hint_y):
+                    return _place(hint_x, hint_y)
 
             bias = _get_building_placement_bias(b_type, category, wealth_tier)
 
@@ -15210,78 +15629,57 @@ class World:
 
             valid_candidates = []
             for dx, dy in offsets:
-                bx = center_x + dx
-                by = center_y + dy
-
-                # Check bounds
-                if not (1 <= bx < CHUNK_SIZE - total_w - 1 and 1 <= by < CHUNK_SIZE - total_h - 1):
-                    continue
-
-                # Check collision
-                overlap = False
-                for i in range(total_h):
-                    for j in range(total_w):
-                        if layout_grid[by + i][bx + j] == 1:
-                            overlap = True
-                            break
-                    if overlap: break
-
-                if not overlap:
-                    valid_candidates.append((bx, by))
+                if _fits(center_x + dx, center_y + dy):
+                    valid_candidates.append((center_x + dx, center_y + dy))
 
             if not valid_candidates:
                 # Fallback to random placement attempts if all deterministic offsets fail
-                for attempt in range(20):
-                    bx = random.randint(1, CHUNK_SIZE - total_w - 1)
-                    by = random.randint(1, CHUNK_SIZE - total_h - 1)
-                    # Check bounds
-                    if not (1 <= bx < CHUNK_SIZE - total_w - 1 and 1 <= by < CHUNK_SIZE - total_h - 1):
-                        continue
-                    overlap = False
-                    for i in range(total_h):
-                        for j in range(total_w):
-                            if layout_grid[by + i][bx + j] == 1:
-                                overlap = True
-                                break
-                        if overlap: break
-                    if not overlap:
-                        valid_candidates.append((bx, by))
-                        break
+                high_x = CHUNK_SIZE - total_w - 1
+                high_y = CHUNK_SIZE - total_h - 1
+                if high_x >= 1 and high_y >= 1:
+                    for attempt in range(20):
+                        bx = random.randint(1, high_x)
+                        by = random.randint(1, high_y)
+                        if _fits(bx, by):
+                            valid_candidates.append((bx, by))
+                            break
 
             if not valid_candidates:
                 # Nothing in the sparse offset list fit and twenty random darts
-                # missed, so scan the chunk properly before giving up.
-                #
-                # This is what actually starved the trades. Measured over 24
-                # generated villages the chunk was only 35.7% occupied by roads
-                # and building footprints, and yet the carpenter's shop, church
-                # and guard tower placed *never*, the clinic in one village out
-                # of 24, the library in four and the farm in five. The offset
-                # list above is 67 hand-picked spots spiralling out from
-                # (CHUNK_SIZE//4, CHUNK_SIZE//4) - one corner - out of 1600
-                # positions, with gaps between radius 5, 8, 12, 16, 20 and 24
-                # that nothing ever looks in. Buildings were not failing for
-                # want of room; they were failing for want of looking.
-                #
-                # Integral image so each rectangle test is O(1) instead of
-                # O(area) - a full scan is 1600 candidate positions and this
-                # runs once per building that would otherwise not exist at all.
-                integral = [[0] * (CHUNK_SIZE + 1) for _ in range(CHUNK_SIZE + 1)]
+                # missed, so scan the chunk properly before giving up. That list is
+                # 67 hand-picked spots spiralling out from one corner, out of 1600
+                # positions, with gaps between radius 5, 8, 12, 16, 20 and 24 that
+                # nothing ever looks in - so a building could be abandoned with room
+                # to spare. Two integral images make each rectangle test O(1): one
+                # counts hard obstacles across the whole claim, one counts anything
+                # at all across the footprint inside it.
+                int_blocked = [[0] * (CHUNK_SIZE + 1) for _ in range(CHUNK_SIZE + 1)]
+                int_any = [[0] * (CHUNK_SIZE + 1) for _ in range(CHUNK_SIZE + 1)]
                 for i in range(CHUNK_SIZE):
-                    row_running = 0
+                    run_blocked = run_any = 0
                     for j in range(CHUNK_SIZE):
-                        row_running += layout_grid[i][j]
-                        integral[i + 1][j + 1] = integral[i][j + 1] + row_running
+                        cell = layout_grid[i][j]
+                        if cell == BLOCKED:
+                            run_blocked += 1
+                        if cell:
+                            run_any += 1
+                        int_blocked[i + 1][j + 1] = int_blocked[i][j + 1] + run_blocked
+                        int_any[i + 1][j + 1] = int_any[i][j + 1] + run_any
+
+                def _rect_sum(table, x0, y0, w, h):
+                    return table[y0 + h][x0 + w] - table[y0][x0 + w] - table[y0 + h][x0] + table[y0][x0]
+
                 for scan_y in range(1, CHUNK_SIZE - total_h - 1):
                     for scan_x in range(1, CHUNK_SIZE - total_w - 1):
-                        occupied = (
-                            integral[scan_y + total_h][scan_x + total_w]
-                            - integral[scan_y][scan_x + total_w]
-                            - integral[scan_y + total_h][scan_x]
-                            + integral[scan_y][scan_x]
-                        )
-                        if occupied == 0:
-                            valid_candidates.append((scan_x, scan_y))
+                        if _rect_sum(int_blocked, scan_x, scan_y, total_w, total_h):
+                            continue
+                        # Unconditional: a building with no yard at all still needs
+                        # bare ground under it. Guarding this on yard_size put
+                        # libraries, which reserve no yard, in the middle of the
+                        # road - int_blocked deliberately does not count roads.
+                        if _rect_sum(int_any, scan_x + yard_size, scan_y + yard_size, width, height):
+                            continue
+                        valid_candidates.append((scan_x, scan_y))
 
             if not valid_candidates:
                 return None
@@ -15327,21 +15725,7 @@ class World:
                     best_candidate = (bx, by)
 
             # 5. Place building
-            final_bx, final_by = best_candidate
-            for i in range(total_h):
-                for j in range(total_w):
-                    layout_grid[final_by + i][final_bx + j] = 1
-
-            # Determine actual building coordinates inside the yard reservation
-            actual_bx = final_bx + yard_size
-            actual_by = final_by + yard_size
-
-            building = Building(actual_bx, actual_by, width, height, building_type=b_type, category=category,
-                                global_chunk_x_start=chunk_global_start_x, global_chunk_y_start=chunk_global_start_y, variant_id=variant_id)
-            building.max_workers = max_workers
-            chunk.village.add_building(building)
-            self.atlas.register_building(building)
-            return building
+            return _place(best_candidate[0], best_candidate[1])
 
         # --- Generate Buildings ---
 
@@ -15380,6 +15764,7 @@ class World:
             tavern.work_zone_tiles["cellar"] = [(tavern.global_origin_x + tavern.width - 2, tavern.global_origin_y + tavern.height - 2)]
             tavern.work_zone_tiles["patron_area"] = [(tavern.global_origin_x + tavern.width - 2, tavern.global_origin_y + 2)]
 
+
         # Houses (Prioritized so every village always has residential dwellings for residents and player family)
         # Housing first. See VILLAGE_LAYOUT_NOTE: the chunk cannot hold
         # everything, and homes are load-bearing - villagers without one have no
@@ -15393,6 +15778,41 @@ class World:
                 house.building_inventory["apple"] = random.randint(1, 4)
                 house.building_inventory["water_flask"] = random.randint(1, 2)
                 house.building_inventory["money"] = random.randint(10, 30)
+
+        # The farm and the library are asked for straight after the houses and
+        # before anything that reserves a yard, because they are the cheapest buildings in the village - 8x6
+        # apiece, no yard at all - and they used to be asked last. Being last cost
+        # them everything once the packing above started succeeding: measured over
+        # 56 villages the farm fell to 2 and the library to 4, because by the time
+        # they asked there was nothing left to have. The farm is the head of the
+        # whole food chain - wheat to the mill, flour to the bakery, bread to
+        # everyone - so a village without one has an economy that cannot feed
+        # itself.
+        # Farm
+        farm = try_place_building("farm", "agricultural_workplace", 8, 6, max_workers=3)
+        if farm:
+            farm.building_inventory["money"] = random.randint(60, 150)
+            farm.building_inventory["wheat_seeds"] = random.randint(15, 35)
+            farm.building_inventory["wheat"] = random.randint(6, 18)
+            farm.building_inventory["apple"] = random.randint(5, 12)
+            # Logic for field patch
+            field_width, field_height = 5, 5
+            field_x = farm.x + 2
+            field_y = farm.y + farm.height + 1
+            # Ensure field fits in chunk
+            if field_y + field_height < CHUNK_SIZE:
+                farm.work_zone_tiles["field_patch"] = [
+                    (chunk_global_start_x + field_x + rx, chunk_global_start_y + field_y + ry)
+                    for ry in range(field_height) for rx in range(field_width)
+                ]
+                # Mark field in grid to prevent others
+                for ry in range(field_height):
+                    for rx in range(field_width):
+                        if 0 <= field_y + ry < CHUNK_SIZE and 0 <= field_x + rx < CHUNK_SIZE:
+                            layout_grid[field_y + ry][field_x + rx] = 1
+
+        # Library
+        try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
 
         # Clinic
         clinic = try_place_building("clinic", "civic_workplace", 7, 6, road_x - 10, road_y - 8, max_workers=2)
@@ -15480,31 +15900,67 @@ class World:
             blacksmith.work_zone_tiles["forge"] = [(blacksmith.global_origin_x + 1, blacksmith.global_origin_y + 1)]
             blacksmith.work_zone_tiles["anvil"] = [(blacksmith.global_origin_x + 5, blacksmith.global_origin_y + 4)]
 
-        # Farm
-        farm = try_place_building("farm", "agricultural_workplace", 8, 6, max_workers=3)
-        if farm:
-            farm.building_inventory["money"] = random.randint(60, 150)
-            farm.building_inventory["wheat_seeds"] = random.randint(15, 35)
-            farm.building_inventory["wheat"] = random.randint(6, 18)
-            farm.building_inventory["apple"] = random.randint(5, 12)
-            # Logic for field patch
-            field_width, field_height = 5, 5
-            field_x = farm.x + 2
-            field_y = farm.y + farm.height + 1
-            # Ensure field fits in chunk
-            if field_y + field_height < CHUNK_SIZE:
-                farm.work_zone_tiles["field_patch"] = [
-                    (chunk_global_start_x + field_x + rx, chunk_global_start_y + field_y + ry)
-                    for ry in range(field_height) for rx in range(field_width)
-                ]
-                # Mark field in grid to prevent others
-                for ry in range(field_height):
-                    for rx in range(field_width):
-                        if 0 <= field_y + ry < CHUNK_SIZE and 0 <= field_x + rx < CHUNK_SIZE:
-                            layout_grid[field_y + ry][field_x + rx] = 1
+        # Asked last on purpose. Asking for them early cost the mine (100% of
+        # villages down to 14%) and half the blacksmiths, which breaks the ore
+        # chain; asked after every trade has its slot they take what is left,
+        # and what is left is enough because a 10x10 claim fits where the 13x13
+        # of another house would not.
+        # Butcher: a trade the game defines and no world contained. butcher_shop
+        # is mapped to Butcher in BUILDING_ROLE_RULES and the profession has a
+        # real work step needing a workbench, but generation never asked for one,
+        # so Butcher was a profession that could not exist. It has no blueprint
+        # variant, so it claims its bare 6x5 and takes leftover ground rather than
+        # a slot from an established trade - which is why it is asked here, after
+        # everything else, and before the common houses.
+        butcher = try_place_building("butcher_shop", "commercial_workplace", 6, 5, max_workers=2)
+        if butcher:
+            butcher.building_inventory["money"] = random.randint(60, 150)
+            butcher.building_inventory["raw_meat"] = random.randint(4, 12)
+            butcher.building_inventory["smoked_meat"] = random.randint(2, 8)
+            butcher.work_zone_tiles["workbench"] = [
+                (butcher.global_origin_x + 2, butcher.global_origin_y + 2)
+            ]
+            butcher.work_zone_tiles["storage_area"] = [
+                (butcher.global_origin_x + butcher.width - 2, butcher.global_origin_y + butcher.height - 2)
+            ]
 
-        # Library
-        try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
+        # Hunter's lodge. Hunter is another profession the game defines and no
+        # world contained: hunting_lodge maps to Hunter in BUILDING_ROLE_RULES and
+        # generation never asked for one. Like the butcher it has no blueprint
+        # variant, so it claims its bare 6x5 and takes leftover ground rather than
+        # a slot from an established trade.
+        #
+        # Its work needs no zone this chunk cannot supply: scouting picks its own
+        # waypoints, butchering finds the nearest corpse, and the storage area is
+        # declared here. Corpses come from the ecology - predators kill prey - so
+        # a Hunter turns what dies in the woods into meat for the butcher.
+        lodge = try_place_building("hunting_lodge", "commercial_workplace", 6, 5, max_workers=2)
+        if lodge:
+            lodge.building_inventory["money"] = random.randint(40, 120)
+            lodge.building_inventory["raw_meat"] = random.randint(2, 6)
+            lodge.work_zone_tiles["storage_area"] = [
+                (lodge.global_origin_x + lodge.width - 2, lodge.global_origin_y + lodge.height - 2)
+            ]
+
+        # Common houses last: shared lodging, and the only thing in this chunk that
+        # scales with the population rather than with the number of families.
+        #
+        # A village generates far more residents than it has houses - measured on
+        # a generated world, 12 of 76 villagers had a home - because a house
+        # reserves 13x13 and only one ever fits. The scheduler sends everyone else
+        # to the tavern, which then has to be the bedroom of the whole
+        # settlement. common_house was already defined in
+        # simulation/systems/architecture.py, with shared_sleeping rooms and a
+        # residential category, and generation simply never asked for one. It
+        # reserves 10x10 rather than 13x13, so it fits where another house would
+        # not.
+        for _ in range(10):
+            common_house = try_place_building("common_house", "residential", 6, 6)
+            if common_house:
+                common_house.building_inventory["bread"] = random.randint(2, 6)
+                common_house.building_inventory["water_flask"] = random.randint(2, 5)
+
+
 
 
         self._populate_village_npcs(chunk, chunk.village, chunk_coord_x, chunk_coord_y)
@@ -16101,7 +16557,7 @@ class World:
 
     def _cleanup_dead_entities(self):
         """Periodically removes dead NPCs to maintain performance."""
-        if self.game_time % 100 == 0:
+        if self.periods_elapsed("dead_entity_cleanup", 100):
             dead_entities = [npc for npc in self.all_npcs if npc.physical.is_dead]
             if dead_entities:
                 for npc in dead_entities:
@@ -16906,7 +17362,7 @@ class World:
         and natural decay.
         """
         # Run periodically (e.g., once a day)
-        if self.game_time % DAY_LENGTH_TICKS != 0:
+        if not self.begin_new_day("reputation", skip_first_day=False):
             return
 
         # 1. Decay fame/infamy for all entities
@@ -16934,8 +17390,7 @@ class World:
 
     def _update_inventory_spoilage(self):
         """Checks for food spoilage in all inventories once per day."""
-        # Only run once per day
-        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+        if not self.begin_new_day("inventory_spoilage"):
             return
 
         # Helper to process a specific inventory dict
@@ -17414,8 +17869,7 @@ class World:
         # Logic runs if it's exactly the start of a day (after day 0)
         # Or if force-called in tests where game_time is set manually to a multiple.
 #         # print(f"DEBUG: _update_npc_careers called at game_time {self.game_time}. DAY_LENGTH_TICKS={DAY_LENGTH_TICKS}")
-        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
-             # print("DEBUG: Skipping career update (wrong time).")
+        if not self.begin_new_day("npc_careers"):
              return
 
         self._pay_daily_company_wages()
@@ -17653,7 +18107,19 @@ class World:
         npc.economic.days_unemployed = 0
         npc.economic.work_performance = 50 # Reset performance
 
-        self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has been hired as a {new_profession}.")
+        # Only if it happened where the player is. This line used to be written
+        # for every hire anywhere in the world, which was harmless while hiring
+        # was rare - but the labour market now fills posts across every village,
+        # and measured over thirty days it took 52 of the 100 slots in the
+        # player's log with strangers taking jobs in villages they have never
+        # visited. The employment record below is the world's memory of it and
+        # is written either way.
+        if self._is_local_news((npc.x, npc.y)):
+            # No explicit category: the classifier already files this the way it
+            # always did, and a test pins the exact call.
+            self.add_message_to_chat_log(
+                f"{self.get_entity_display_name(npc)} has been hired as a {new_profession}."
+            )
 
         # Social Boost: Gratitude to Boss
         boss = self._find_boss_for_npc(npc, work_building)
@@ -18177,7 +18643,7 @@ class World:
 
     def _update_player_career(self):
         """Updates the player's career status daily using standardized NPC logic."""
-        if self.game_time == 0 or self.game_time % DAY_LENGTH_TICKS != 0:
+        if not self.begin_new_day("player_career"):
             return
 
         if not self.player.economic.job_building_id:
@@ -18525,8 +18991,8 @@ class World:
         Runs a lightweight simulation for off-screen villages to simulate high-level events
         like births, deaths, and economic production/consumption, creating a living history.
         """
-        # This should not run on every single tick. Let's run it once per day.
-        if self.game_time % DAY_LENGTH_TICKS != 0:
+        # Once per day - see begin_new_day for why this is not an equality test.
+        if not self.begin_new_day("abstract_simulation", skip_first_day=False):
             return
 
         player_chunk_x = self.player.x // CHUNK_SIZE
@@ -19262,8 +19728,9 @@ class World:
                         for item_key, quantity in building.building_inventory.items():
                             village.supply[item_key] = village.supply.get(item_key, 0) + quantity
 
-                    # Run advanced macroscopic simulation if tick aligns
-                    if self.game_time % 100 == 0:
+                    # Once per elapsed interval, keyed per village so the first
+                    # one does not consume the turn for the rest.
+                    if self.periods_elapsed(f"village_economy:{village.id}", 100):
                         simulate_village_economy(self, village)
 
     def get_dynamic_price(self, item_key: str, village: Village, merchant: NPC | None = None) -> int:

@@ -9,6 +9,65 @@ from dataclasses import dataclass, field
 from typing import Any
 from config import DAY_LENGTH_TICKS, DEFAULT_SPEECH_VOLUME, DEFAULT_HEARING_RADIUS
 
+# --- Entity identity ---
+# Entities used to take `id(self)` as their id. That is a memory address, and
+# CPython hands the same address straight back out once an object is freed:
+# creating 6000 NPCs while letting them fall out of scope produced 119 distinct
+# ids and 5881 collisions.
+#
+# In a running game the dead are cleared out every hundred ticks and children are
+# born, so a newborn could be issued the id of a villager who died minutes
+# earlier - and everything in this game that remembers a person remembers an id.
+# Relationship scores, family ties, quest givers, warrants, employment records
+# and witness lists would all quietly transfer to whoever inherited the address.
+#
+# A counter instead. Saves written before this hold address-sized ids, which are
+# far above anything this counter will reach in a session, and World.__setstate__
+# advances it past whatever a loaded world already contains so a save made after
+# this change cannot collide with entities created after loading it.
+_next_entity_id = 1
+
+
+def next_entity_id() -> int:
+    """A process-unique id that is never reused, unlike id(self)."""
+    global _next_entity_id
+    issued = _next_entity_id
+    _next_entity_id = issued + 1
+    return issued
+
+
+def reset_entity_ids() -> None:
+    """Start numbering again for a freshly generated world.
+
+    Ids only have to be unique inside one world, and restarting per world is what
+    makes a seeded world build the same villagers: the counter is process-global,
+    so without this the second world built in a session numbers its people
+    differently from the first.
+
+    Loading a save does not go through World.__init__, so __setstate__ calls
+    reserve_entity_ids_above instead.
+    """
+    global _next_entity_id
+    _next_entity_id = 1
+
+
+def reserve_entity_ids_above(highest_seen: int) -> None:
+    """Make sure future ids clear `highest_seen`, after loading a save.
+
+    Only ever moves forward. An earlier version replaced the counter outright,
+    so reserving a floor *below* where it already stood wound it backwards onto
+    ids that were already in use - which is the very thing this whole change
+    exists to prevent.
+    """
+    global _next_entity_id
+    try:
+        floor = int(highest_seen)
+    except (TypeError, ValueError):
+        return
+    if floor >= _next_entity_id:
+        _next_entity_id = floor + 1
+
+
 # Judgment call (see CombatStats.hostility_grace_expires_tick / NPC.take_damage):
 # how long incidental (non-deliberate) hostility lingers before it's eligible
 # to decay in World._decay_incidental_npc_hostility. A few in-game hours -
@@ -468,7 +527,7 @@ class NPC:
         self.age = random.randint(18, 65)
         self.gender = random.choice(["male", "female"])
         self.char = get_human_sprite(gender=self.gender, profession="Unemployed", age=self.age)
-        self.color, self.speed, self.id = (0, 255, 0), 1, id(self)
+        self.color, self.speed, self.id = (0, 255, 0), 1, next_entity_id()
 
         self.dialogue = dialogue if dialogue is not None else ["Hello!"]
         self.player_id = player_id

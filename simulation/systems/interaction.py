@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+
+from simulation.ids import new_id
 from typing import Any
 
 from config import CHUNK_SIZE
@@ -34,7 +36,7 @@ class ActionResult:
 
 class ActiveInteraction:
     def __init__(self, intent: ActionIntent):
-        self.interaction_id: str = str(uuid.uuid4())
+        self.interaction_id: str = new_id()
         self.actor_id: str | int = intent.actor_id
         self.action_type: str = intent.action_type
         self.target_id: str | int | None = intent.target_id

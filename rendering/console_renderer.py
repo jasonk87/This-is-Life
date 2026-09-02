@@ -707,6 +707,16 @@ def _is_sheltered_from_weather(world, world_x, world_y):
 def _get_focus_summary(world):
     standing_tile = world.get_tile_at(world.player.x, world.player.y)
     standing_on = standing_tile.name if standing_tile else "Unknown"
+    # Name the building as well as the floor. A player standing in the bakery was
+    # told "Wood Floor" - the building's identity only appeared if they happened
+    # to hover the mouse over it - which matters more now that a shop will sell
+    # you what is on its shelves: you have to be able to tell you are in one.
+    inside = getattr(world, "get_building_at", lambda _x, _y: None)(
+        world.player.x, world.player.y
+    )
+    building_name = _format_hover_building_name(inside)
+    if building_name:
+        standing_on = f"{standing_on} - {building_name}"
     nearby = _get_visible_nearby_entities(world, limit=1)
     if nearby:
         distance, entity = nearby[0]
@@ -1161,6 +1171,45 @@ LIGHT_LEVEL_TINTS = {
 }
 
 
+# Per-channel color wash for the time of year, composed with the time-of-day
+# wash above. The seasons are load-bearing in the simulation - they set the base
+# temperature an entity is measured against, decide which weather is possible,
+# scale what a Farmer harvests and gate animal mating - but the only place a
+# season reached the player was one word in the HUD, so a winter that can freeze
+# you looked exactly like summer. Deliberately gentler than LIGHT_LEVEL_TINTS,
+# because the two multiply: winter at night should read as a cold night, not as
+# a blue screen.
+SEASON_TINTS = {
+    "Spring": (0.98, 1.05, 0.97),
+    "Summer": (1.04, 1.01, 0.93),
+    "Autumn": (1.09, 0.98, 0.87),
+    "Winter": (0.95, 0.99, 1.08),
+}
+
+
+def current_season_name(world):
+    """The world's season, or "" if it has none.
+
+    Guarded because the renderer is called with stand-in worlds in the tests,
+    and an unguarded attribute read here would fail them for a reason that has
+    nothing to do with what they check.
+    """
+    seasons = getattr(world, "seasons", None)
+    index = getattr(world, "current_season_index", None)
+    if not seasons or not isinstance(index, int):
+        return ""
+    if 0 <= index < len(seasons):
+        return str(seasons[index])
+    return ""
+
+
+def _season_tint_array(season_name):
+    multipliers = SEASON_TINTS.get(season_name)
+    if multipliers is None:
+        return np.ones(3, dtype=np.float32)
+    return np.asarray(multipliers, dtype=np.float32)
+
+
 def _tint_for_light_level(color, light_level_name):
     """Apply the time-of-day color wash for `light_level_name` to `color`.
 
@@ -1286,7 +1335,12 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     fg_scale = 0.55 + (0.45 * light)
     bg_scale = 0.45 + (0.55 * light)
 
-    level_tint = _light_level_tint_array(light_level_name)
+    # Time of day and time of year wash the view together. Composed here rather
+    # than applied as a second pass so that the firelight blend below still
+    # overrides both: a hearth in January should look like a hearth.
+    level_tint = _light_level_tint_array(light_level_name) * _season_tint_array(
+        current_season_name(world)
+    )
     # Where a warm source dominates, blend the cool night wash toward that
     # source's color - this is what makes firelight read as fire rather
     # than as "slightly less dark".

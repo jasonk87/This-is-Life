@@ -324,7 +324,14 @@ PROFESSIONS = {
                 "action_verb": "scouting"
             }
         ],
-        "default_sub_task_sequence": ["scout_area", "hunt_animals"] # butchering is dynamic
+        # Butchering and depositing are in the sequence now. The comment this
+        # replaces said butchering was "dynamic", but nothing scheduled it:
+        # ButcherCarcassSubTaskCommand is written, registered and tested, and a
+        # Hunter never reached it, so hunting produced no meat at all.
+        # hunt_animals stays even though it targets a "wilderness" zone that has
+        # no resolver - the work chain skips a step it cannot find a station for
+        # and moves on, so it costs nothing and keeps the intent visible.
+        "default_sub_task_sequence": ["scout_area", "hunt_animals", "butcher_carcass", "deposit_meat"]
     },
     "Butcher": {
         "display_name": "Butcher",

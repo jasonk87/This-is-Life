@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import uuid
 
+from simulation.ids import new_id
+
 from config import DAY_LENGTH_TICKS
 
 @dataclass
@@ -41,7 +43,7 @@ def create_harmful_incident(
     witness_ids: list[int] | None = None,
 ) -> HarmfulIncident:
     incident = HarmfulIncident(
-        id=f"harm_{uuid.uuid4().hex[:12]}",
+        id=f"harm_{new_id()}",
         attacker_id=attacker_id,
         target_id=target_id,
         location=location,

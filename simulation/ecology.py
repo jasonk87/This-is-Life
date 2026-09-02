@@ -365,11 +365,20 @@ class EcologySystem:
         for region in getattr(getattr(world, "atlas", None), "regions_by_id", {}).values():
             self.ensure_region_wildlife(region)
 
-        if world.game_time % 1000 == 0:
+        # How many regeneration periods have gone by, not "is the clock exactly on
+        # one". game_time jumps when the player sleeps, so a forest could go a
+        # whole night without growing anything back - and on a clock that had
+        # drifted off the boundary, never grow anything back at all.
+        periods_elapsed = getattr(world, "periods_elapsed", None)
+        if periods_elapsed is not None:
+            regrowth = periods_elapsed("ecology_regrowth", 1000, max_catch_up=24)
+        else:
+            regrowth = 1 if int(getattr(world, "game_time", 0)) % 1000 == 0 else 0
+        if regrowth:
             for region_id, resources in self.regional_resources.items():
-                resources["wood"] += 5
-                resources["forage"] += 10
-                resources["game"] += 2
+                resources["wood"] += 5 * regrowth
+                resources["forage"] += 10 * regrowth
+                resources["game"] += 2 * regrowth
                 resources["wood"] = min(resources["wood"], 2000)
                 resources["forage"] = min(resources["forage"], 1000)
                 resources["game"] = min(resources["game"], 500)

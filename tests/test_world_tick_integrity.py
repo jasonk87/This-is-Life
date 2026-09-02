@@ -43,8 +43,31 @@ class TestTransparencyMapIndexing(unittest.TestCase):
             self.world.transparency_map[WORLD_WIDTH - 1, 0] = True
 
     def test_a_tree_maturing_in_the_right_hand_map_columns_does_not_crash(self):
-        """The tree-growth path is what hit this in play."""
+        """The tree-growth path is what hit this in play.
+
+        The chunk is generated here rather than hoped for. Chunks are made lazily
+        around the player, so whether any exists east of WORLD_HEIGHT depended on
+        where the player happened to spawn - and this skipped whenever they
+        started in the west, which is most of the time. Those columns are the
+        entire point of the test: they are the ones the old [x, y] order could
+        not address.
+        """
         world = self.world
+        first_far_column = (WORLD_HEIGHT // CHUNK_SIZE) + 1
+        self.assertLess(
+            first_far_column, len(world.chunks[0]),
+            "the world is no longer wider than it is tall; this test's premise is stale",
+        )
+        for chunk_y in (0, len(world.chunks) // 2):
+            chunk = world.chunks[chunk_y][first_far_column]
+            if not chunk.is_terrain_generated:
+                world._generate_chunk_detail(chunk, first_far_column, chunk_y)
+
+        # Planted onto whatever tiles are there, rather than looking for ones
+        # that already carry properties. Which biome generates out east varies,
+        # and requiring an existing properties dict meant the loop sometimes
+        # found nothing and the test passed having exercised nothing. A fresh
+        # dict per tile, so this cannot write into a shared tile definition.
         planted = 0
         for chunk_y, row in enumerate(world.chunks):
             for chunk_x, chunk in enumerate(row):
@@ -55,8 +78,9 @@ class TestTransparencyMapIndexing(unittest.TestCase):
                 for local_y in range(CHUNK_SIZE):
                     for local_x in range(CHUNK_SIZE):
                         tile = chunk.tiles[local_y][local_x]
-                        if tile is None or not getattr(tile, "properties", None):
+                        if tile is None:
                             continue
+                        tile.properties = dict(getattr(tile, "properties", None) or {})
                         tile.name = "Sapling"
                         tile.properties["growth_timer"] = 1
                         tile.properties["evolves_to"] = "oak"
@@ -68,8 +92,11 @@ class TestTransparencyMapIndexing(unittest.TestCase):
             if planted >= 3:
                 break
 
-        if not planted:
-            self.skipTest("no generated chunk past WORLD_HEIGHT in this world")
+        self.assertGreaterEqual(
+            planted, 3,
+            "found no tiles at all in the far-east columns, so the crash this "
+            "pins was never exercised",
+        )
         world._update_world_environment()
 
 

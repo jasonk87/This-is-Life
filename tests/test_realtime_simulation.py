@@ -5,11 +5,12 @@ from config import SECONDS_PER_GAME_TICK
 from engine import World, NPC
 from main import handle_playing_input
 import tcod.event
+from tests.world_cache import fresh_world
 
 
 class TestRealtimeSimulation(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=42)
+        self.world = fresh_world(seed=42, pre_simulate=False)
         self.world.is_paused = False
         self.world.simulation_speed = 1.0
 

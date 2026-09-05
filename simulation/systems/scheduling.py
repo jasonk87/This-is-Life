@@ -1032,6 +1032,69 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
     is_at_home = _is_inside_building(world, npc, npc.schedule.home_building_id)
     is_at_work = _is_inside_building(world, npc, npc.schedule.work_building_id)
 
+    # A worker sent somewhere by their own job is still working.
+    #
+    # is_at_work means "standing inside the workplace", so any sub-task whose
+    # station is elsewhere looked like truancy: the work system pathed the NPC
+    # out, this policy saw them outside their building and sent them back, and
+    # neither ever won. Traced on a blacksmith, the whole of their working life
+    # was a ten-tick walk toward the ore, a flip to GOING_TO_WORK, a ten-tick
+    # walk back, idle, repeat - and not one sub-task ever completed.
+    #
+    # It is every production chain that begins by fetching: the baker's
+    # fetch_flour, the blacksmith's fetch_ore, the miller's fetch_wheat. Over two
+    # simulated days the baker, blacksmith, miller, farmer, woodcutter, hunter
+    # and lumber mill foreman completed zero work steps between them, while the
+    # trades whose first step is inside their own building - healer, merchant,
+    # tavern keeper, miner, butcher - worked normally.
+    #
+    # Same shape as the medical exclusion in World._run_humanoid_schedule_logic:
+    # one policy overwriting a task another system is in the middle of.
+    # Two narrow cases, and only these. Holding a sub-task is not enough, and
+    # neither is merely being headed somewhere.
+    #
+    # A healer carrying an unfinished preparing_salves while the foraging policy
+    # walks them into the woods still needs the ordinary "get back to work" rule
+    # to bring them home. Measured on the same seed: a guard that asked only
+    # whether a sub-task existed took the healer from 19 completed steps to
+    # none, oscillating between foraging and going-to-work and arriving at
+    # neither. So the travelling case additionally requires that the work system
+    # is the thing currently driving this NPC - current_task AT_WORK - rather
+    # than some other policy that has taken them over.
+    _station = getattr(npc, "sub_task_target_coords", None)
+    _has_sub_task = bool(getattr(npc, "current_sub_task", None) and _station)
+
+    def _beside_the_station(spot) -> bool:
+        """Standing on the station, or near enough to work it.
+
+        Some stations cannot be stood on at all. A tree is impassable and is
+        chopped from the square beside it, so the work system paths to a
+        neighbouring tile while the sub-task target stays the tree itself.
+        Comparing the destination to the station exactly therefore said "not on
+        an errand" for every woodcutter in the world, and the work-hours rule
+        marched them back to the mill: measured, they held chop_trees for most
+        of their shift, walked towards a tree, were turned around, and felled
+        nothing at all in fifteen hundred ticks. The work system's own arrival
+        test allows a distance of one, so this matches it.
+        """
+        if not spot or spot[0] is None:
+            return False
+        return (
+            abs(spot[0] - _station[0]) <= 1
+            and abs(spot[1] - _station[1]) <= 1
+        )
+
+    travelling_to_station = bool(
+        _has_sub_task
+        and npc.schedule.current_task == TaskType.AT_WORK
+        and _beside_the_station(tuple(npc.schedule.current_destination_coords or ()) or None)
+    )
+    # Standing on the station counts however they got there: the work sub-task
+    # system only runs for an NPC whose task is AT_WORK, so a worker who arrived
+    # and fell through to idle would otherwise never be looked at again.
+    standing_at_station = bool(_has_sub_task and _beside_the_station((npc.x, npc.y)))
+    on_work_errand = travelling_to_station or standing_at_station
+
     work_start_tick = DAY_LENGTH_TICKS * WORK_START_TIME_RATIO
     work_end_tick = DAY_LENGTH_TICKS * WORK_END_TIME_RATIO
     sleep_start_tick = DAY_LENGTH_TICKS * (22.0 / 24.0)
@@ -1152,13 +1215,25 @@ def update_npc_daily_goal_policy(world, npc, current_time_in_day: int) -> None:
                     if dest_x is not None:
                         new_task_label = "playing_with_friends"
                         destination_coords = (dest_x, dest_y)
-        elif npc.schedule.work_building_id and not is_at_work and npc.schedule.current_task != TaskType.GOING_TO_WORK:
+        elif (
+            npc.schedule.work_building_id
+            and not is_at_work
+            and not on_work_errand
+            and npc.schedule.current_task != TaskType.GOING_TO_WORK
+        ):
             work_building_obj = world.buildings_by_id.get(npc.schedule.work_building_id)
             if work_building_obj:
                 new_task_label = TaskType.GOING_TO_WORK
                 raw_anchor = get_work_anchor_coords(world, npc, work_building_obj)
                 destination_coords = find_dispersed_destination_coords(world, raw_anchor, radius=2, requesting_entity=npc, building=work_building_obj)
-        elif npc.schedule.work_building_id and is_at_work:
+        elif npc.schedule.work_building_id and (is_at_work or on_work_errand):
+            # on_work_errand belongs here as much as is_at_work does. The work
+            # sub-task system only runs for an NPC whose task is AT_WORK, so a
+            # worker who reached a station outside their building and then fell
+            # through every branch to idle was never looked at again: traced on
+            # the blacksmith, they walked the whole way to the ore, arrived,
+            # went idle holding a full 120-tick timer that nothing would ever
+            # count down, and were eventually wandered off by a social policy.
             npc.schedule.current_task = TaskType.AT_WORK
         elif npc.economic.profession.lower() == "unemployed":
             # Activity commitment lock: persist active daytime tasks instead of rapidly discarding

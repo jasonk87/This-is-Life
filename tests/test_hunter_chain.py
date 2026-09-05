@@ -18,12 +18,30 @@ costs nothing and keeps the intent legible for whoever implements it.
 
 The chain now runs into the butcher shop added alongside it: a corpse becomes raw
 meat, and raw meat is what a Butcher processes.
+
+Adding the lodge also woke a system that had never run. engine.py carries a full
+hunting implementation - prey finding, pursuit, a dropoff building, offscreen
+abstraction - all gated on _is_hunter_role, which asks whether an NPC's
+profession is Hunter. No world had one, so none of it ever executed.
+
+What works and what does not, measured rather than assumed:
+
+* Offscreen hunting fires and produces. Called from the abstract simulation for
+  villages away from the player, it returns meat for every village with a hunter.
+* Onscreen hunting does not. Animals exist as entities only near the player and
+  keep clear of settlements, so a hunter standing at their lodge finds no prey -
+  measured, 27 animals in the world and none within sixty tiles of the lodge.
+  The ecology's own population model says there are thousands; those are regional
+  counts, not entities, which is the same level-of-detail split that lets distant
+  villagers sleep. A hunter who walks out to find prey is a feature this does not
+  claim to have built.
 """
 
 import unittest
 
 from data.professions import PROFESSIONS, get_sub_task_data
 from engine import World
+from tests.world_cache import fresh_world
 from simulation.systems.work import update_npc_work_sub_tasks
 from tile_types import Tile
 
@@ -31,9 +49,13 @@ from tile_types import Tile
 class TestTheHunterHasSomewhereToWork(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.world = World(seed=5)
+        cls.world = fresh_world(seed=5, pre_simulate=False)
 
     def test_a_lodge_is_built(self):
+        """In this seed's world. A lodge lands in about half of villages - it and
+        the clinic compete for the same leftover ground and the clinic goes first
+        (see VILLAGE_LAYOUT_NOTE) - so this is seeded rather than assuming every
+        village has one."""
         lodges = [
             b for b in self.world.buildings_by_id.values()
             if b.building_type == "hunting_lodge"
@@ -82,8 +104,7 @@ class TestACarcassBecomesMeat(unittest.TestCase):
     """
 
     def setUp(self):
-        self.world = World(seed=5)
-        self.world._pre_simulate_world()
+        self.world = fresh_world(seed=5)
         self.lodge = next(
             (b for b in self.world.buildings_by_id.values()
              if b.building_type == "hunting_lodge"),
@@ -152,6 +173,55 @@ class TestACarcassBecomesMeat(unittest.TestCase):
             self.hunter.current_sub_task,
             "the hunter was given no step to work on at all",
         )
+
+
+class TestOffscreenHuntingProduces(unittest.TestCase):
+    """The path that actually feeds the village.
+
+    Villages away from the player hunt abstractly rather than by walking an NPC
+    into the woods. This is the half of the system that works, and it did nothing
+    at all until a village could employ a Hunter.
+    """
+
+    def setUp(self):
+        self.world = fresh_world(seed=5)
+
+    def _a_village_with_a_hunter(self):
+        for row in self.world.chunks:
+            for chunk in row:
+                village = getattr(chunk, "village", None)
+                if village is None:
+                    continue
+                hunters = [
+                    n for n in self.world.village_npcs
+                    if self.world._is_hunter_role(n)
+                    and self.world._get_village_for_npc(n) is village
+                ]
+                if hunters:
+                    return village, hunters
+        return None, []
+
+    def test_a_village_employs_a_hunter_at_all(self):
+        village, hunters = self._a_village_with_a_hunter()
+        self.assertIsNotNone(village, "no village in this world employs a hunter")
+        self.assertTrue(hunters)
+
+    def test_hunting_returns_something(self):
+        village, hunters = self._a_village_with_a_hunter()
+        if village is None:
+            self.skipTest("no village in this world employs a hunter")
+        produced = self.world._process_offscreen_hunting_for_village(village, hunters)
+        self.assertGreater(
+            produced, 0,
+            "a village with a hunter and a stocked region produced no meat",
+        )
+
+    def test_a_village_without_hunters_produces_nothing(self):
+        """The gate is the profession, which is what had never existed."""
+        village, _ = self._a_village_with_a_hunter()
+        if village is None:
+            self.skipTest("no village in this world employs a hunter")
+        self.assertEqual(self.world._process_offscreen_hunting_for_village(village, []), 0)
 
 
 if __name__ == "__main__":

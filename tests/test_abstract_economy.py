@@ -13,6 +13,9 @@ import unittest
 import engine
 from engine import Building, World
 from entities.base import NPC
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 def _worker(profession: str) -> NPC:
@@ -99,8 +102,12 @@ class TestOffscreenSettlementsProduce(unittest.TestCase):
         self.assertGreater(len(dormant_with_jobs), 0, "no off-screen workers to check")
 
     def test_something_somewhere_is_produced_off_screen(self):
+        # Three hundred ticks, not an eighth of a day. Measured, the first
+        # settlement produces something within 150 - the longer run cost 143
+        # seconds of the suite to reach the same conclusion it had already
+        # reached in ten.
         before = self._village_stock()
-        for _ in range(engine.DAY_LENGTH_TICKS // 8):
+        for _ in range(300):
             self.world.update()
         after = self._village_stock()
 
@@ -113,7 +120,7 @@ class TestOffscreenSettlementsProduce(unittest.TestCase):
         gained.pop("rotten_food", None)
         self.assertTrue(
             gained,
-            "no settlement produced anything over three simulated hours",
+            "no settlement produced anything over three hundred ticks",
         )
 
 

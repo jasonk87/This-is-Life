@@ -3,13 +3,14 @@ from unittest.mock import MagicMock
 
 import engine
 from engine import NPC, Building, World
+from tests.world_cache import fresh_world
 
 
 class TestVacateOfficesHeldBy(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=97)
+        self.world = fresh_world(seed=97, pre_simulate=False)
 
     def _make_npc(self, name="Officeholder"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -58,7 +59,7 @@ class TestJailingVacatesOffice(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=101)
+        self.world = fresh_world(seed=101, pre_simulate=False)
         self.world._change_map_tile = MagicMock()
         self.world._update_entity_position = MagicMock(side_effect=lambda e, x, y: (setattr(e, "x", x), setattr(e, "y", y)))
 
@@ -137,7 +138,7 @@ class TestPlayerJailingVacatesOfficeAndDoesNotCrash(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=103)
+        self.world = fresh_world(seed=103, pre_simulate=False)
         self.world._change_map_tile = MagicMock()
 
     def test_serve_jail_time_completes_without_crashing(self):
@@ -177,7 +178,7 @@ class TestVacatedOfficeStopsSalary(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=107)
+        self.world = fresh_world(seed=107, pre_simulate=False)
 
     def test_pay_daily_civic_salaries_skips_a_vacated_office(self):
         town_hall = Building(0, 0, 6, 6, building_type="town_hall", category="civic")

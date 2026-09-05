@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import engine
 from engine import Village, World
+from tests.world_cache import fresh_world
 
 
 class TestDecayVillageFoodSupply(unittest.TestCase):
@@ -16,7 +17,7 @@ class TestDecayVillageFoodSupply(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=83)
+        self.world = fresh_world(seed=83, pre_simulate=False)
 
     def test_decay_reduces_perishable_stock_and_adds_rotten_food(self):
         village = Village()
@@ -113,7 +114,7 @@ class TestDecayWiredIntoDailyAbstractSimulation(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=89)
+        self.world = fresh_world(seed=89, pre_simulate=False)
 
     def test_village_supply_decays_on_the_daily_abstract_simulation_tick(self):
         village = None

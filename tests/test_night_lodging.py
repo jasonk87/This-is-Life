@@ -29,9 +29,13 @@ import unittest
 
 from config import DAY_LENGTH_TICKS
 from engine import World
+from tests.world_cache import fresh_world
 from simulation.systems import scheduling
 from simulation.systems.scheduling import run_npc_humanoid_scheduling_flow
 from simulation.systems.task_types import TaskType
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 NIGHT = int(DAY_LENGTH_TICKS * 0.95)
 SLEEP_TASKS = {TaskType.SLEEPING, TaskType.GOING_TO_BED, TaskType.AT_HOME}
@@ -192,14 +196,21 @@ class TestTheVillageActuallyRests(unittest.TestCase):
     far a villager will walk to reach the inn.
     """
 
-    SEED = 4242
-    TICKS = 600
+    # Seed 4242 no longer works for this: once shared lodging and the clinic
+    # rework landed, that world houses everyone who is awake at night and the
+    # comparison had nothing to measure - it skipped on "0 and 0 observations".
+    # Seed 2 still leaves about fifteen villagers without a bed, which is what
+    # this is about. A good sign for the village and an awkward one for the test.
+    SEED = 2
+    # 400 per arm rather than 600. Both arms sample only the back half, so this
+    # still watches two hundred ticks of settled night behaviour each, and the
+    # test was the slowest in the suite at seventy-three seconds.
+    TICKS = 400
 
     def _resting_share_of_the_unhoused(self, lodging_range):
         from simulation.systems.tick import run_world_tick
 
-        world = World(seed=self.SEED)
-        world._pre_simulate_world()
+        world = fresh_world(seed=self.SEED)
         world.game_time = NIGHT
         world._update_light_level_and_fov()
 

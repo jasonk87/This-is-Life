@@ -4,6 +4,7 @@ from unittest import mock
 import engine
 from engine import NPC, World
 from entities.base import TRAIT_DRIFT_ACTIVATION_THRESHOLD, TRAIT_DRIFT_MAX_ACTIVE_TRAITS
+from tests.world_cache import fresh_world
 
 
 class TestTraitDriftMechanism(unittest.TestCase):
@@ -13,7 +14,7 @@ class TestTraitDriftMechanism(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=501)
+        self.world = fresh_world(seed=501, pre_simulate=False)
 
     def _npc(self, name="NPC", personality="villager"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)
@@ -89,7 +90,7 @@ class TestJailReleaseTraitDrift(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=502)
+        self.world = fresh_world(seed=502, pre_simulate=False)
         self.world._change_map_tile = mock.MagicMock()
         self.world._update_entity_position = mock.MagicMock(
             side_effect=lambda e, x, y: (setattr(e, "x", x), setattr(e, "y", y))
@@ -181,7 +182,7 @@ class TestJailReleaseSeverityByCrimeKind(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=509)
+        self.world = fresh_world(seed=509, pre_simulate=False)
         self.world._change_map_tile = mock.MagicMock()
         self.world._update_entity_position = mock.MagicMock(
             side_effect=lambda e, x, y: (setattr(e, "x", x), setattr(e, "y", y))
@@ -286,7 +287,7 @@ class TestIllnessRecoveryTraitDrift(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=503)
+        self.world = fresh_world(seed=503, pre_simulate=False)
 
     def _npc(self, name="NPC", personality="villager"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)
@@ -322,7 +323,7 @@ class TestBereavementTraitDrift(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=504)
+        self.world = fresh_world(seed=504, pre_simulate=False)
 
     def _npc(self, name="NPC", personality="villager"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)
@@ -396,7 +397,7 @@ class TestCrimeVictimizationTraitDrift(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=505)
+        self.world = fresh_world(seed=505, pre_simulate=False)
 
     def _npc(self, name="NPC", personality="villager"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)
@@ -459,7 +460,7 @@ class TestDriftFlowsThroughToExistingGates(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=506)
+        self.world = fresh_world(seed=506, pre_simulate=False)
 
     def _npc(self, name="NPC", personality="villager"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)

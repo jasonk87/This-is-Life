@@ -6,6 +6,7 @@ import config
 import engine
 from engine import NPC, World
 from simulation.world_model import Village
+from tests.world_cache import fresh_world
 
 
 class TestVillageDirectionDescription(unittest.TestCase):
@@ -21,7 +22,7 @@ class TestVillageDirectionDescription(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=3001)
+        self.world = fresh_world(seed=3001, pre_simulate=False)
         self.player_chunk_x = self.world.player.x // config.CHUNK_SIZE
         self.player_chunk_y = self.world.player.y // config.CHUNK_SIZE
 
@@ -88,7 +89,7 @@ class TestAbstractSimulationDiplomacyNotifications(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=3002)
+        self.world = fresh_world(seed=3002, pre_simulate=False)
         self.world.game_time = config.DAY_LENGTH_TICKS
 
     def _make_npc(self, name):
@@ -241,7 +242,7 @@ class TestTradeSessionPriceConditionsNote(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=3003)
+        self.world = fresh_world(seed=3003, pre_simulate=False)
         self.merchant = NPC(0, 0, name="Merchant", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
         self.merchant.economic.profession = "Merchant"
         self.merchant.schedule.work_building_id = "shop_1"

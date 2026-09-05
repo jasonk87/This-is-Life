@@ -26,11 +26,12 @@ import unittest
 from config import DAY_LENGTH_TICKS
 from engine import World
 from simulation.systems import survival
+from tests.world_cache import fresh_world
 
 
 class TestPeriodsElapsed(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=808)
+        self.world = fresh_world(seed=808, pre_simulate=False)
         self.world.game_time = 0
 
     def test_a_new_key_is_due_immediately(self):
@@ -95,7 +96,7 @@ class TestPeriodsElapsed(unittest.TestCase):
 
 def _needs_after(step, total_ticks=DAY_LENGTH_TICKS // 3):
     """Player hunger and thirst after `total_ticks` of game time, taken in `step`s."""
-    world = World(seed=808)
+    world = fresh_world(seed=808, pre_simulate=False)
     world.game_time = 0
     world.player.physical.hunger = 0
     world.player.physical.thirst = 0
@@ -133,7 +134,7 @@ class TestSleepingThroughTheNightIsNotFree(unittest.TestCase):
 
 class TestStarvationStillBites(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=808)
+        self.world = fresh_world(seed=808, pre_simulate=False)
         self.world.game_time = 0
         self.player = self.world.player
         self.player.physical.hunger = self.player.physical.max_hunger

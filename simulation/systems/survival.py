@@ -3,6 +3,7 @@
 from __future__ import annotations
 from simulation.systems.task_types import TaskType
 
+from entities.metabolism import body_equilibrium_temperature
 from config import (
     BIOME_TEMPERATURE_MODIFIERS,
     CHUNK_SIZE,
@@ -24,6 +25,10 @@ def _periods(world, key: str, interval: int, *, max_catch_up: int = 100) -> int:
     if periods_elapsed is not None:
         return periods_elapsed(key, interval, max_catch_up=max_catch_up)
     return 1 if int(getattr(world, "game_time", 0)) % max(1, interval) == 0 else 0
+
+# Warmed to about this, at most, by any fire. Comfortable is 20C.
+HEAT_SOURCE_COMFORT_CEILING = 30.0
+
 
 def update_entity_temperature(world, entity, *, search_radius: int | None = None, update_world_ambient: bool = False) -> None:
     """Calculate ambient temperature and advance one entity's thermal state."""
@@ -50,7 +55,16 @@ def update_entity_temperature(world, entity, *, search_radius: int | None = None
                         if heat_bonus > heat_source_bonus:
                             heat_source_bonus = heat_bonus
 
-    ambient_temp_at_entity = ambient_temp + heat_source_bonus
+    # A fire warms you to comfortable; it does not cook you. Without this a
+    # blacksmith standing at their own forge on a summer day reaches an ambient
+    # of 49C and starts taking heat damage for doing their job.
+    if heat_source_bonus > 0:
+        ambient_temp_at_entity = min(
+            ambient_temp + heat_source_bonus,
+            max(ambient_temp, HEAT_SOURCE_COMFORT_CEILING),
+        )
+    else:
+        ambient_temp_at_entity = ambient_temp
     if update_world_ambient:
         world.ambient_temperature = ambient_temp_at_entity
 
@@ -66,7 +80,9 @@ def update_entity_temperature(world, entity, *, search_radius: int | None = None
     if getattr(entity.physical, "is_wet", False):
         total_insulation *= 0.5
 
-    target_temp_equilibrium = ambient_temp_at_entity + total_insulation
+    target_temp_equilibrium = body_equilibrium_temperature(
+        ambient_temp_at_entity, total_insulation
+    )
     temp_diff = target_temp_equilibrium - entity.physical.temperature
     entity.physical.temperature += temp_diff * 0.05
 

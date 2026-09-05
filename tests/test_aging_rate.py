@@ -23,6 +23,10 @@ import unittest
 from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
 from engine import World
 from simulation.systems import aging
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 class TestTheYearMatchesTheWorldCalendar(unittest.TestCase):
@@ -32,12 +36,12 @@ class TestTheYearMatchesTheWorldCalendar(unittest.TestCase):
     def test_the_world_has_exactly_that_many_seasons(self):
         """If the world ever gains or loses a season, the year length here has
         to move with it or ageing silently drifts against the calendar."""
-        self.assertEqual(len(World(seed=3).seasons), aging.SEASONS_PER_YEAR)
+        self.assertEqual(len(fresh_world(seed=3, pre_simulate=False).seasons), aging.SEASONS_PER_YEAR)
 
 
 class TestAgeingCadence(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=3)
+        self.world = fresh_world(seed=3, pre_simulate=False)
         self.world.game_time = 0
         self.npcs = [n for n in self.world.all_npcs if not n.physical.is_dead][:25]
         self.assertTrue(self.npcs, "no living NPCs to age")

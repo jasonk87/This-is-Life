@@ -15,6 +15,7 @@ import config
 from simulation.systems import survival
 from tcod_compat import tcod
 import tile_types
+from tests.world_cache import fresh_world
 
 class TestTemperatureSystem(unittest.TestCase):
     def setUp(self):
@@ -24,7 +25,7 @@ class TestTemperatureSystem(unittest.TestCase):
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
         # Seeded so the generated world doesn't vary with ambient global
         # random state (see the note in tests/test_interactions.py).
-        self.world = World(seed=4103)
+        self.world = fresh_world(seed=4103, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -158,7 +159,7 @@ class TestAgriculturalSystem(unittest.TestCase):
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
         # Seeded so the generated world doesn't vary with ambient global
         # random state (see the note in tests/test_interactions.py).
-        self.world = World(seed=4103)
+        self.world = fresh_world(seed=4103, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -217,7 +218,7 @@ class TestClothProductionSystem(unittest.TestCase):
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
-        self.world = World(seed=1) # Use a fixed seed
+        self.world = fresh_world(seed=1, pre_simulate=False) # Use a fixed seed
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -300,7 +301,7 @@ class TestPlayerFarming(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World(seed=123) # Use a consistent seed for placement
+        self.world = fresh_world(seed=123, pre_simulate=False) # Use a consistent seed for placement
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -393,7 +394,7 @@ class TestQuestSystem(unittest.TestCase):
             "wealth_level": "poor", "combat_behavior": "cowardly", "base_attack_name": "pleading"
         }
         self.mock_call_llm.return_value = json.dumps(self.mock_npc_data)
-        self.world = World(seed=101)
+        self.world = fresh_world(seed=101, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -556,7 +557,7 @@ class TestSkillProgressionHooks(unittest.TestCase):
             "name": "Test NPC", "personality": "test", "dialogue": ["Hi"],
             "wealth_level": "average", "combat_behavior": "defensive", "base_attack_name": "fists"
         })
-        self.world = World(seed=17)
+        self.world = fresh_world(seed=17, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -599,7 +600,7 @@ class TestLockpickChestLooting(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        self.world = World(seed=21)
+        self.world = fresh_world(seed=21, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -657,7 +658,7 @@ class TestFearSystem(unittest.TestCase):
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
         # Use a fixed seed for any remaining randomness
-        self.world = World(seed=1337)
+        self.world = fresh_world(seed=1337, pre_simulate=False)
         self.world.current_season_index = 1 # Summer, to ensure neutral temperature
 
     def tearDown(self):
@@ -934,7 +935,7 @@ class TestCraftingVisualFeedback(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = {"name": "Test NPC", "personality": "test", "dialogue": ["Hi"]}
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World(seed=1)
+        self.world = fresh_world(seed=1, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()

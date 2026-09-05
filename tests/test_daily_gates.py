@@ -26,11 +26,15 @@ import unittest
 
 from config import DAY_LENGTH_TICKS
 from engine import World
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 class TestBeginNewDay(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=11)
+        self.world = fresh_world(seed=11, pre_simulate=False)
         self.world.game_time = 0
 
     def test_it_fires_once_per_day(self):

@@ -3,6 +3,7 @@ import unittest
 
 import engine
 from engine import World
+from tests.world_cache import fresh_world
 
 
 class TestPathfindingTileCostCache(unittest.TestCase):
@@ -16,7 +17,7 @@ class TestPathfindingTileCostCache(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=901)
+        self.world = fresh_world(seed=901, pre_simulate=False)
 
     def test_cache_starts_empty_and_populates_on_use(self):
         self.assertEqual(self.world._pathfinding_tile_cost_cache, {})

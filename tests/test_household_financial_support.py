@@ -2,6 +2,7 @@ import unittest
 
 import engine
 from engine import NPC, World
+from tests.world_cache import fresh_world
 
 
 class TestGetSpouse(unittest.TestCase):
@@ -11,7 +12,7 @@ class TestGetSpouse(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=301)
+        self.world = fresh_world(seed=301, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -61,7 +62,7 @@ class TestHouseholdAvailableMoney(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=302)
+        self.world = fresh_world(seed=302, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -104,7 +105,7 @@ class TestDrawHouseholdSupport(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=303)
+        self.world = fresh_world(seed=303, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -165,7 +166,7 @@ class TestBuyFoodUsesHouseholdSupport(unittest.TestCase):
         engine.ENABLE_LLM_CONNECTION = False
         # Seeded so the generated world doesn't vary with ambient global
         # random state (see the note in tests/test_interactions.py).
-        self.world = World(seed=4102)
+        self.world = fresh_world(seed=4102, pre_simulate=False)
 
     def test_broke_npc_can_still_buy_food_via_a_wealthy_spouse(self):
         from unittest.mock import patch
@@ -219,7 +220,7 @@ class TestExecuteBuyFoodUsesHouseholdSupport(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=304)
+        self.world = fresh_world(seed=304, pre_simulate=False)
 
     def test_broke_npc_buys_food_via_spousal_support(self):
         from unittest.mock import patch, MagicMock
@@ -287,7 +288,7 @@ class TestUtilityAIHouseholdViability(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=305)
+        self.world = fresh_world(seed=305, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -367,7 +368,7 @@ class TestHouseholdTheftDeterrent(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=306)
+        self.world = fresh_world(seed=306, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -430,7 +431,7 @@ class TestHouseholdWealthDeterrentFlipsHungerDecision(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=307)
+        self.world = fresh_world(seed=307, pre_simulate=False)
 
     def _npc(self, name="NPC", personality="villager"):
         return NPC(0, 0, name=name, dialogue=["Hi"], personality=personality, player_id=self.world.player.id)

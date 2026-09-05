@@ -3,6 +3,30 @@ import unittest
 from unittest.mock import patch
 
 from engine import World
+from tests.world_cache import fresh_world
+
+
+def stand_on_open_ground(world, span=1):
+    """Put the player somewhere they can actually walk east and west.
+
+    Movement tests measure what a step costs, and handle_player_movement returns
+    0 when the step is refused. Where the player spawns is not their subject: the
+    game puts them in their family home, and once shared lodging was added to
+    village generation that home became a common house with a wall to the east,
+    so every one of these tests was measuring a blocked move.
+    """
+    player = world.player
+    for radius in range(1, 60):
+        for dx, dy in ((radius, 0), (-radius, 0), (0, radius), (0, -radius),
+                       (radius, radius), (-radius, -radius)):
+            x, y = player.x + dx, player.y + dy
+            tiles = [world.get_tile_at(x + step, y) for step in range(-span, span + 1)]
+            if all(t is not None and t.passable for t in tiles):
+                if any(world.get_building_at(x + step, y) for step in range(-span, span + 1)):
+                    continue
+                world._update_entity_position(player, x, y)
+                return x, y
+    raise AssertionError("found no open ground near the player to walk on")
 
 
 class TestWeatherMovementCostMultiplier(unittest.TestCase):
@@ -26,7 +50,7 @@ class TestWeatherMovementCostMultiplier(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        self.world = World(seed=17)
+        self.world = fresh_world(seed=17, pre_simulate=False)
 
     def test_multiplier_is_1_for_clear_weather(self):
         self.world.weather = "clear"
@@ -63,6 +87,7 @@ class TestWeatherMovementCostMultiplier(unittest.TestCase):
     def test_riding_movement_cost_also_respects_snow(self):
         from engine import NPC
 
+        stand_on_open_ground(self.world)
         animal = NPC(self.world.player.x, self.world.player.y, name="Horse", dialogue=["Neigh"], personality="villager", player_id=self.world.player.id)
         self.world.npcs.append(animal)
         self.world.player.state.is_riding = True

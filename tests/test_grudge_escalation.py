@@ -9,6 +9,7 @@ from simulation.systems.scheduling import (
     GRUDGE_SABOTAGE_SEVERITY_THRESHOLD,
     run_npc_grudge_escalation_policy,
 )
+from tests.world_cache import fresh_world
 
 
 class TestGrudgeEscalationEligibility(unittest.TestCase):
@@ -19,7 +20,7 @@ class TestGrudgeEscalationEligibility(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=401)
+        self.world = fresh_world(seed=401, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -102,7 +103,7 @@ class TestGrudgeEscalationGossip(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=402)
+        self.world = fresh_world(seed=402, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -141,7 +142,7 @@ class TestGrudgeEscalationSabotage(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=403)
+        self.world = fresh_world(seed=403, pre_simulate=False)
 
     def _npc(self, name="NPC"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)

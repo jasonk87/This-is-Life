@@ -870,6 +870,8 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Examine": lambda: world.add_message_to_chat_log(world.inspect_tile(target_x, target_y)),
         "Cook": lambda: world.player_attempt_cook(target_x, target_y),
         "Smoke Meat": lambda: world.player_attempt_smoke(target_x, target_y),
+        "Light Fire": lambda: world.player_attempt_light_fire(target_x, target_y),
+        "Extinguish Fire": lambda: world.player_attempt_extinguish_fire(target_x, target_y),
         "Forge": lambda: world.player_attempt_forge(target_x, target_y),
         "Read": lambda: world.player_attempt_read_book(entity_data),
         "Offer Mercenary Services": lambda: world.player_attempt_mercenary_contract(entity_data),

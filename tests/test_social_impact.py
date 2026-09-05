@@ -11,6 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from engine import World, Building, NPC, Player
 from config import DAY_LENGTH_TICKS, CHUNK_SIZE
 from runtime_compat import np
+from tests.world_cache import fresh_world
 
 class TestSocialImpact(unittest.TestCase):
     def setUp(self):
@@ -22,7 +23,7 @@ class TestSocialImpact(unittest.TestCase):
             # We need to mock the chunk grid to match the dimensions calculated by World.__init__
             # If WORLD_WIDTH == CHUNK_SIZE, then chunk_width = 1
             mock_init_chunks.return_value = [[MagicMock()]] # 1x1 chunk grid
-            self.world = World(seed=42)
+            self.world = fresh_world(seed=42, pre_simulate=False)
 
         # Mock Ollama to avoid network calls
         self.world._call_llm = MagicMock(return_value="{}")

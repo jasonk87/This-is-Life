@@ -4,6 +4,7 @@ import engine
 from config import DAY_LENGTH_TICKS
 from engine import NPC, World
 from entities.social import KnowledgeComponent, MemoryEvent
+from tests.world_cache import fresh_world
 
 
 class TestCrimeReputationScoring(unittest.TestCase):
@@ -62,7 +63,7 @@ class TestCrimeReputationScoring(unittest.TestCase):
         the same path engine.py's crime-witnessing code uses."""
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
 
         suspect = NPC(world.player.x, world.player.y, name="Suspect", dialogue=["Hi"], personality="villager", player_id=world.player.id)
         witness = NPC(world.player.x, world.player.y, name="Witness", dialogue=["Hi"], personality="villager", player_id=world.player.id)

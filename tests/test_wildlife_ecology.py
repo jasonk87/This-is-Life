@@ -5,6 +5,7 @@ from simulation.ecology import RegionalWildlifePopulation, WILDLIFE_SPECIES
 from simulation.world_model import Village
 from tile_types import Tile
 from data.tiles import TILE_DEFINITIONS
+from tests.world_cache import fresh_world
 
 
 class TestWildlifeEcologyFoundation(unittest.TestCase):
@@ -12,7 +13,7 @@ class TestWildlifeEcologyFoundation(unittest.TestCase):
         import engine
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=321)
+        self.world = fresh_world(seed=321, pre_simulate=False)
         self.world.npcs = []
         self.world.village_npcs = []
         self.world.player.x = 2

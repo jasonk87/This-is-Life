@@ -22,7 +22,11 @@ import unittest
 
 from data.professions import PROFESSIONS, get_sub_task_data
 from engine import World
+from tests.world_cache import fresh_world
 from simulation.systems.work import update_npc_work_sub_tasks
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 class TestPathGeometry(unittest.TestCase):
@@ -113,8 +117,7 @@ class TestWorkChainAdvances(unittest.TestCase):
     SEED = 1
 
     def setUp(self):
-        self.world = World(seed=self.SEED)
-        self.world._pre_simulate_world()
+        self.world = fresh_world(seed=self.SEED)
 
     def test_a_worker_runs_more_than_the_opening_step(self):
         world = self.world
@@ -134,8 +137,11 @@ class TestWorkChainAdvances(unittest.TestCase):
                 npc.is_sleeping = False
                 world._update_entity_position(npc, building.global_center_x, building.global_center_y)
 
+        # Four hundred updates rather than nine hundred: measured, the first
+        # workers reach a second step by 200, and the extra five hundred were
+        # costing the suite a minute to confirm what it already knew.
         seen = {npc.id: set() for npc in workers}
-        for _ in range(900):
+        for _ in range(400):
             world.update()
             for npc in workers:
                 sub_task = getattr(npc, "current_sub_task", None)

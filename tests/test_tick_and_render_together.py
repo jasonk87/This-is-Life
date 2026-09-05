@@ -26,9 +26,15 @@ from config import MAP_HEIGHT, MAP_WIDTH
 from engine import World
 from rendering import console_renderer as cr
 from simulation.systems.tick import run_world_tick
+import pytest
 
-TICKS = 900
-DRAW_EVERY = 60
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
+
+# 600 ticks, drawing every 40 - the same fifteen frames as before across a
+# shorter run. The point is to draw a world that has been running, not to run it
+# for a particular length of time, and the setup was costing a minute.
+TICKS = 600
+DRAW_EVERY = 40
 ZOOMS = (0, 1, 2)
 
 

@@ -23,6 +23,7 @@ from data.items import ITEM_DEFINITIONS
 import config
 from tcod_compat import tcod
 import tile_types
+from tests.world_cache import fresh_world
 
 class TestMainInputHelpers(unittest.TestCase):
     def test_normalize_player_first_name_keeps_short_clean_input(self):
@@ -33,7 +34,7 @@ class TestMainInputHelpers(unittest.TestCase):
         self.assertEqual(main.normalize_player_first_name("1234!!!"), "Player")
 
     def test_new_world_starts_at_configured_initial_time(self):
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
 
         self.assertEqual(world.game_time, config.INITIAL_TIME_OF_DAY)
 
@@ -855,7 +856,14 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        world = World(seed=17)
+        world = fresh_world(seed=17, pre_simulate=False)
+        # Somewhere the step is actually allowed. handle_player_movement returns
+        # 0 for a refused move, and the player spawns in their family home - a
+        # common house with a wall to the east once shared lodging was added to
+        # village generation - so this was measuring a blocked move rather than a
+        # dust burst.
+        from tests.test_weather_movement import stand_on_open_ground
+        stand_on_open_ground(world)
         origin_x, origin_y = world.player.x, world.player.y
 
         with patch("engine.random.random", return_value=0.0):  # force the dust roll to succeed
@@ -879,7 +887,7 @@ class TestConsoleRendererVisualEffects(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        world = World(seed=17)
+        world = fresh_world(seed=17, pre_simulate=False)
 
         with patch("engine.random.random", return_value=0.99):  # force the dust roll to fail
             world.handle_player_movement(1, 0)
@@ -1996,7 +2004,7 @@ class TestDialogueStateRegression(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        self.world = World(seed=11)
+        self.world = fresh_world(seed=11, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -2083,7 +2091,7 @@ class TestDialogueStateRegression(unittest.TestCase):
         self.assertEqual(npc_target.get_display_name(viewer=self.world.player, include_relationship=True), "Mother (Farmer)")
 
     def test_world_assigns_player_family_last_name_to_full_name(self):
-        world = World(seed=11, player_first_name="Ada")
+        world = fresh_world(seed=11, player_first_name='Ada', pre_simulate=False)
 
         self.assertTrue(world.player.name.startswith("Ada "))
         self.assertEqual(world.player.name.split()[-1], world.player.social.family_ties["last_name"])
@@ -2220,7 +2228,7 @@ class TestMenuItemIcons(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        self.real_world = World(seed=17)
+        self.real_world = fresh_world(seed=17, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()

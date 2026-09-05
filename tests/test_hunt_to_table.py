@@ -8,6 +8,10 @@ from data.decorations import DECORATION_ITEM_DEFINITIONS
 from simulation.systems.work import update_npc_work_sub_tasks
 from tile_types import Tile
 import config
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 class TestHuntToTable(unittest.TestCase):
     def setUp(self):
@@ -27,7 +31,7 @@ class TestHuntToTable(unittest.TestCase):
                         chunk.biome = "plains"
                         chunk.tiles = [[MagicMock(passable=True, properties={}, name="Plains") for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
                 mock_init_chunks.return_value = mock_chunks
-                self.world = World(seed=1)
+                self.world = fresh_world(seed=1, pre_simulate=False)
 
         self.world.transparency_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), True, order="C")
         self.world.current_fov_radius = 50

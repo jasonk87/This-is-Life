@@ -11,6 +11,7 @@ from presentation.ambient_speech import (
 )
 from simulation.systems.tick import emit_environmental_sensory_cues
 from main import execute_smart_interaction
+from tests.world_cache import fresh_world
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +23,7 @@ def disable_llm():
 
 def test_acoustic_eavesdropping_falloff():
     """Verify acoustic clarity depends on distance to speaker."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     player = world.player
 
     # Close speech (within 3 paces)
@@ -52,7 +53,7 @@ def test_acoustic_eavesdropping_falloff():
 
 def test_smart_interaction_workstations():
     """Verify smart interaction works on grinding stones and baking ovens."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     player = world.player
     from config import CHUNK_SIZE
 
@@ -86,7 +87,7 @@ def test_smart_interaction_workstations():
 
 def test_environmental_sensory_cues_emission():
     """Verify nearby ovens/forges/fires produce natural sensory atmosphere messages."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     player = world.player
     from config import CHUNK_SIZE
 

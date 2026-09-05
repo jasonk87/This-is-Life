@@ -6,6 +6,7 @@ import engine
 from engine import World, Building, NPC
 from entities.social import AspirationType
 from simulation.world_model import Village
+from tests.world_cache import fresh_world
 
 
 class TestNPCOwnedBusinessWiring(unittest.TestCase):
@@ -16,7 +17,7 @@ class TestNPCOwnedBusinessWiring(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=123)
+        self.world = fresh_world(seed=123, pre_simulate=False)
         # Only the candidate each test builds should be considered. _run patches
         # _get_village_for_npc to return this village for everybody, so the whole
         # generated population would otherwise be weighed for eligibility too -

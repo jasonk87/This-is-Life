@@ -4,6 +4,10 @@ from runtime_compat import np
 from engine import World, Event, NPC, Animal
 from entities.base import DireWolf
 from config import NPC_SCHEDULE_UPDATE_INTERVAL, WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 class TestKnowledgeTravel(unittest.TestCase):
     def setUp(self):
@@ -38,7 +42,7 @@ class TestKnowledgeTravel(unittest.TestCase):
 
                 mock_init_chunks.return_value = mock_chunks
 
-                self.world = World(seed=1)
+                self.world = fresh_world(seed=1, pre_simulate=False)
 
         # Setup simplified FOV for testing
         self.world.transparency_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), True)

@@ -5,6 +5,7 @@ import engine
 from engine import NPC, World
 from entities.items import ItemReference, REPAIR_DURABILITY_FLOOR_FRACTION, REPAIR_WEAR_PER_REPAIR_FRACTION
 from simulation.careers import entity_has_capability
+from tests.world_cache import fresh_world
 
 
 class TestItemReferenceRepair(unittest.TestCase):
@@ -105,7 +106,7 @@ class TestPlayerArmorRepair(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=5001)
+        self.world = fresh_world(seed=5001, pre_simulate=False)
         self.player = self.world.player
         self.player.world_ref = self.world
 
@@ -181,7 +182,7 @@ class TestRepairInteractionEndToEnd(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=5002)
+        self.world = fresh_world(seed=5002, pre_simulate=False)
         self.player = self.world.player
         self.player.world_ref = self.world
         self.blacksmith = NPC(

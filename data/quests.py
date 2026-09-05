@@ -42,7 +42,13 @@ QUEST_DEFINITIONS = {
         "title": "Herbal Remedy",
         "description": "The village healer needs specific herbs for a remedy.",
         "type": "fetch",
-        "item_to_fetch_key": "herb_generic",
+        # medicinal_herb, not herb_generic. Nothing in the world produces
+        # herb_generic - it exists only as something the player can plant if they
+        # already have some - so a fetch quest for five of them could not be
+        # completed. medicinal_herb is the herb this system actually uses: the
+        # Healer forages it and the clinic stocks it, which also means a player
+        # can buy it from the very person asking.
+        "item_to_fetch_key": "medicinal_herb",
         "item_fetch_count": 5,
         "quest_giver_id_or_role": "Healer",
         "reward_money": 30,

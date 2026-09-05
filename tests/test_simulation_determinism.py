@@ -25,23 +25,41 @@ seed disagreed:
    layer down. It now counts game ticks when the caller tells it what the clock
    says, and keeps the wall clock for anyone who does not.
 
-Both halves are reproducible now: one seed builds the same world, and running
-that world produces the same villagers in the same places doing the same things.
+World generation is reproducible outright. The tick loop is reproducible with the
+asynchronous gossip service inactive, which is what these tests check, and that
+qualification is the honest form of a claim this file previously made without it.
 
-Worth recording how the last one was found, because two earlier answers were
-wrong. Comparing aggregate counts said the loop was already deterministic - the
-totals happened to agree while individual villagers did not. And an early check
-said disabling the gossip service did not help, measured on those same aggregates;
-comparing full per-villager state showed that it did, which pointed straight at
-the timeout.
+The service runs a worker thread that hands results back when they arrive. Its
+*timeout* now counts game ticks rather than seconds, which was a real fix, but a
+thread completing work is still a thread completing work: whether a result lands
+on this tick or the next depends on the machine. Measured, three runs of one seed
+with the service disabled are identical and three with it enabled are not.
+
+Worth recording how that was established, because three earlier answers here were
+wrong, all from measuring too coarsely:
+
+* comparing aggregate counts said the loop was already deterministic - the totals
+  agreed while individual villagers stood in different places;
+* an early check said disabling the service did not help, measured on those same
+  aggregates;
+* and after the timeout fix, three matching runs were taken as proof. They were a
+  sample. Later work that put more villagers in more buildings raised the amount
+  of gossip in flight and the divergence came back.
+
+Per-villager state, several runs, and a stated condition - not one comparison of
+one number.
 """
 
 import unittest
 
 from config import DAY_LENGTH_TICKS
 from engine import World
+from tests.world_cache import fresh_world
 from simulation.systems.tick import run_world_tick
 from simulation.systems.task_types import TaskType
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 def _world_fingerprint(seed):
@@ -62,9 +80,15 @@ class TestWorldGeneration(unittest.TestCase):
         self.assertNotEqual(_world_fingerprint(2024), _world_fingerprint(2025))
 
 
-def _tick_fingerprint(seed, ticks=400):
-    world = World(seed=seed)
-    world._pre_simulate_world()
+# Two hundred and fifty ticks. The divergences this file exists to catch showed
+# up inside the first fifty when they were real, and the run length was costing
+# the suite two minutes across three tests to keep looking after that.
+def _tick_fingerprint(seed, ticks=250):
+    world = fresh_world(seed=seed)
+    # The gossip service is a real background thread and is deliberately left
+    # out of this. It is asynchronous by design; asking it to be reproducible
+    # would mean asking it not to be asynchronous.
+    world._gossip_llm_service = None
     for _ in range(ticks):
         run_world_tick(world)
     return sorted(
@@ -87,18 +111,17 @@ class TestTheTickLoop(unittest.TestCase):
 
     def test_the_world_actually_moved(self):
         """Two identical fingerprints prove nothing if nothing happened."""
-        world = World(seed=2024)
-        world._pre_simulate_world()
+        world = fresh_world(seed=2024)
         before = [(n.x, n.y, str(n.schedule.current_task)) for n in world.village_npcs]
-        for _ in range(400):
+        for _ in range(250):
             run_world_tick(world)
         after = [(n.x, n.y, str(n.schedule.current_task)) for n in world.village_npcs]
-        self.assertNotEqual(before, after, "400 ticks changed nothing at all")
+        self.assertNotEqual(before, after, "250 ticks changed nothing at all")
 
 
 class TestAmbientSpeechRunsOnGameTime(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=77)
+        self.world = fresh_world(seed=77, pre_simulate=False)
 
     def test_the_gap_is_measured_in_ticks(self):
         low, high = self.world.AMBIENT_SPEECH_GAP_TICKS
@@ -155,6 +178,30 @@ class TestAmbientSpeechRunsOnGameTime(unittest.TestCase):
             moved_on,
             "hours of game time passed and not one villager said anything",
         )
+
+
+class TestTheAsynchronousLayerIsTheExceptionThatIsAllowed(unittest.TestCase):
+    """States the boundary rather than leaving it implied.
+
+    If this ever starts passing with the service enabled, the claim above can be
+    widened. Until then the simulation is reproducible and the thread on top of it
+    is not, and both halves of that are worth being able to see.
+    """
+
+    @staticmethod
+    def _run(gossip_enabled):
+        world = fresh_world(seed=2024)
+        if not gossip_enabled:
+            world._gossip_llm_service = None
+        for _ in range(200):
+            run_world_tick(world)
+        return sorted(
+            (n.id, n.x, n.y, str(n.schedule.current_task))
+            for n in world.village_npcs if not n.physical.is_dead
+        )
+
+    def test_without_the_service_two_runs_match(self):
+        self.assertEqual(self._run(False), self._run(False))
 
 
 if __name__ == "__main__":

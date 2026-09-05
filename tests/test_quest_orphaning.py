@@ -2,6 +2,7 @@ import unittest
 
 import engine
 from engine import NPC, World
+from tests.world_cache import fresh_world
 
 
 class TestQuestOrphanedByGiverDeath(unittest.TestCase):
@@ -15,7 +16,7 @@ class TestQuestOrphanedByGiverDeath(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=801)
+        self.world = fresh_world(seed=801, pre_simulate=False)
         self.world._change_map_tile = lambda *a, **k: None
         self.world._update_entity_position = lambda e, x, y: (setattr(e, "x", x), setattr(e, "y", y))
 

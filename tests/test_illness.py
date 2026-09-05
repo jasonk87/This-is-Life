@@ -14,13 +14,14 @@ from simulation.systems.illness import (
     update_entity_illness,
 )
 from simulation.systems.medical import update_npc_medical_state
+from tests.world_cache import fresh_world
 
 
 class TestSicknessMeterAndStatus(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=41)
+        self.world = fresh_world(seed=41, pre_simulate=False)
 
     def _make_npc(self, name="Patient", sickness=0):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -82,7 +83,7 @@ class TestUntreatedIllnessWorsening(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=43)
+        self.world = fresh_world(seed=43, pre_simulate=False)
 
     def _make_npc(self, sickness=SICKNESS_THRESHOLD_SICK):
         npc = NPC(0, 0, name="Patient", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -144,7 +145,7 @@ class TestContagionSpread(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=47)
+        self.world = fresh_world(seed=47, pre_simulate=False)
         self.world.game_time = illness.CONTAGION_CHECK_INTERVAL_TICKS  # on-cadence
 
     def _make_npc(self, x, y, sick=False):
@@ -262,7 +263,7 @@ class TestMedicalSystemHandlesSickness(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=53)
+        self.world = fresh_world(seed=53, pre_simulate=False)
         self.world._update_entity_temperature = MagicMock()
         self.world._apply_temperature_effects = MagicMock()
         self.world._update_npc_fov = MagicMock()
@@ -356,7 +357,7 @@ class TestPlayerUsesHerbalRemedy(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=59)
+        self.world = fresh_world(seed=59, pre_simulate=False)
 
     def test_using_herbal_remedy_cures_sick_player(self):
         self.world.player.physical.status_effects.append(SICK_STATUS_EFFECT)

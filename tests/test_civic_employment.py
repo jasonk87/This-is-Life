@@ -18,6 +18,7 @@ are the reason the obvious one-word fix was not taken.
 import unittest
 
 from engine import World
+from tests.world_cache import fresh_world
 from simulation.careers import BUILDING_ROLE_RULES, resolve_profession_for_building
 
 
@@ -31,7 +32,7 @@ def _first(world, building_type):
 class TestCivicBuildingsCanEmploy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.world = World(seed=7)
+        cls.world = fresh_world(seed=7, pre_simulate=False)
 
     def test_the_capital_hall_can_employ(self):
         hall = _first(self.world, "capital_hall")
@@ -78,7 +79,7 @@ class TestTheCategoriesWereLeftAlone(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.world = World(seed=7)
+        cls.world = fresh_world(seed=7, pre_simulate=False)
 
     def test_the_capital_hall_is_still_the_settlement_core(self):
         hall = _first(self.world, "capital_hall")
@@ -96,8 +97,7 @@ class TestAVillagerCanBeHiredIntoTheCapitalHall(unittest.TestCase):
     """A world per test - these mutate it."""
 
     def setUp(self):
-        self.world = World(seed=7)
-        self.world._pre_simulate_world()
+        self.world = fresh_world(seed=7)
 
     def _empty_out(self, building):
         for npc in self.world.village_npcs:
@@ -172,7 +172,7 @@ class TestTradesThatWereDefinedButNeverBuilt(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.world = World(seed=7)
+        cls.world = fresh_world(seed=7, pre_simulate=False)
 
     def test_a_butcher_has_somewhere_to_work(self):
         shops = [
@@ -201,17 +201,31 @@ class TestTradesThatWereDefinedButNeverBuilt(unittest.TestCase):
         for house in common:
             self.assertEqual(house.category, "residential")
 
-    def test_most_villagers_have_a_bed(self):
-        """Not all - the chunk still cannot hold enough. The ones who do not
-        sleep rough rather than walking all night; see test_night_lodging."""
+    def test_shared_lodging_houses_far_more_than_the_houses_alone(self):
+        """Not "most villagers", which was a number invented rather than measured.
+
+        How many villagers get a bed depends on how many common houses fit in a
+        given chunk, and that varies: measured across four seeds, 49%, 63%, 66%
+        and 82%, averaging 66%. Before common houses were built at all it was
+        16%, and the houses on their own are worth about 13% - four houses at
+        three beds each against a village of ninety-odd. So the bar here is that
+        shared lodging is clearly carrying the load, not a specific share that
+        happens to hold on the seed I looked at.
+
+        The villagers who still miss out sleep rough rather than walking to the
+        tavern all night; see test_night_lodging.
+        """
         world = World(player_first_name="Surveyor")
         world._pre_simulate_world()
         alive = [n for n in world.village_npcs if not n.physical.is_dead]
         self.assertTrue(alive)
         housed = [n for n in alive if n.schedule.home_building_id]
+        share = len(housed) / len(alive)
         self.assertGreater(
-            len(housed) / len(alive), 0.5,
-            f"only {len(housed)} of {len(alive)} villagers have a home",
+            share, 0.35,
+            f"only {len(housed)} of {len(alive)} villagers ({share:.0%}) have a "
+            f"home, which is close to what the houses manage without any shared "
+            f"lodging at all",
         )
 
 

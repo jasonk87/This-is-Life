@@ -3,6 +3,7 @@ import unittest
 from engine import NPC, World
 from entities.items import Inventory, ItemReference
 from simulation.systems.interaction import ActionIntent
+from tests.world_cache import fresh_world
 
 
 def bare_tile_near(world, origin, radius=12):
@@ -34,7 +35,7 @@ def bare_tile_near(world, origin, radius=12):
 
 class TestRuntimeHardening(unittest.TestCase):
     def test_hunger_override_can_find_item_reference_food(self):
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
         npc = NPC(10, 10, name="Hungry NPC")
         world.village_npcs.append(npc)
 
@@ -49,7 +50,7 @@ class TestRuntimeHardening(unittest.TestCase):
         self.assertEqual(target["coords"], (11, 10))
 
     def test_validation_warning_keys_aggregate_repeated_survival_warnings(self):
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
 
         world._warn_simulation_validation(
             "survival_override_no_valid_target",
@@ -67,7 +68,7 @@ class TestRuntimeHardening(unittest.TestCase):
         self.assertEqual(len(world.validation_warnings), 1)
 
     def test_inventory_backed_ground_items_resolve_and_inspect_as_resource(self):
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
         pos = bare_tile_near(world, (world.player.x, world.player.y))
         inv = Inventory()
         inv.add_item_reference(ItemReference("processed_meat"))
@@ -81,7 +82,7 @@ class TestRuntimeHardening(unittest.TestCase):
         self.assertTrue(payload["edible"])
 
     def test_contextual_chop_command_routes_to_interaction_resolver(self):
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
         player = world.player
         pos = bare_tile_near(world, (player.x, player.y))
         tile = world.get_tile_at(*pos)
@@ -98,7 +99,7 @@ class TestRuntimeHardening(unittest.TestCase):
         self.assertEqual(result.intent.action_type, "chop_tree")
 
     def test_eating_interaction_accepts_inventory_item_reference(self):
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
         player = world.player
         pos = (player.x, player.y)
         inv = Inventory()

@@ -6,6 +6,7 @@ import engine
 from engine import NPC, World
 from simulation.systems.scheduling import update_npc_daily_goal_policy
 from simulation.world_model import Village
+from tests.world_cache import fresh_world
 
 
 class TestChildFollowsParentDuringWorkHours(unittest.TestCase):
@@ -19,7 +20,7 @@ class TestChildFollowsParentDuringWorkHours(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=4001)
+        self.world = fresh_world(seed=4001, pre_simulate=False)
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(30, 30)]}
         self.world.chunks[0][0].village = self.village
@@ -110,7 +111,7 @@ class TestChildPlaysAtTownSquareDuringLeisure(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=4002)
+        self.world = fresh_world(seed=4002, pre_simulate=False)
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(30, 30)]}
         self.world.chunks[0][0].village = self.village

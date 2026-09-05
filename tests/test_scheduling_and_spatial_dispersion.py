@@ -6,13 +6,14 @@ from simulation.systems.scheduling import find_dispersed_destination_coords, upd
 from simulation.systems.survival import check_emergency_npc_sustenance, update_npc_survival
 from simulation.systems.task_types import TaskType
 from simulation.world_model import Village
+from tests.world_cache import fresh_world
 
 
 class TestSchedulingAndSpatialDispersion(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=9001)
+        self.world = fresh_world(seed=9001, pre_simulate=False)
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(30, 30)]}
         self.world.villages = [self.village]

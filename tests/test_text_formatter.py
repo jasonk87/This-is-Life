@@ -1,11 +1,12 @@
 import unittest
 
 import engine
+from tests.world_cache import fresh_world
 
 
 class TextFormatterTests(unittest.TestCase):
     def setUp(self):
-        self.world = engine.World(seed=3, player_first_name="Ada")
+        self.world = fresh_world(seed=3, player_first_name='Ada', pre_simulate=False)
         self.formatter = self.world.text
 
     def test_weather_changed_uses_definition_name(self):

@@ -26,6 +26,10 @@ import unittest
 
 from config import DAY_LENGTH_TICKS
 from engine import World
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 DAYS = 30
 SEED = 8675309
@@ -34,8 +38,7 @@ SEED = 8675309
 class TestAVillageSurvivesAMonth(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        world = World(seed=SEED)
-        world._pre_simulate_world()
+        world = fresh_world(seed=SEED)
         cls.start = cls._snapshot(world)
 
         for day in range(1, DAYS + 1):

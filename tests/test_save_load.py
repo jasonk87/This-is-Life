@@ -17,6 +17,7 @@ from data.items import ITEM_DEFINITIONS
 import config
 from tcod_compat import tcod
 import tile_types
+from tests.world_cache import fresh_world
 
 class TestSaveLoadSystem(unittest.TestCase):
     def setUp(self):
@@ -24,15 +25,13 @@ class TestSaveLoadSystem(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World(seed=999)
+        self.world = fresh_world(seed=999, pre_simulate=False)
         self.test_save_file = "test_save.sav"
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
         if os.path.exists(f"saves/{self.test_save_file}"):
             os.remove(f"saves/{self.test_save_file}")
-        if os.path.exists("saves") and not os.listdir("saves"):
-            os.rmdir("saves")
 
     def test_save_and_load(self):
         # Modify world state

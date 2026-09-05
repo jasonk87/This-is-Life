@@ -20,6 +20,44 @@ def _needs_treatment(entity) -> bool:
     return any(effect in entity.physical.status_effects for effect in TREATABLE_STATUS_EFFECTS)
 
 
+def _settle_finished_forage(world, npc) -> bool:
+    """Pay out a foraging walk that has finished, whatever state it ended in.
+
+    This used to be keyed on catching the healer mid-flight: current_task still
+    "foraging_for_herbs" and the remaining path down to one step. Movement
+    consumes that last step and sets the task to IDLE itself, and it runs first,
+    so the window was never observed. Traced on a healer, they walked the full
+    twenty tiles, arrived, went idle, and their medicinal_herb count stayed at
+    zero - whereupon the policy sent them straight back out to a fresh random
+    spot. Foraging never once produced a herb, and herbs are the only input to
+    both remedies, so every salve and every herbal remedy in the game came from
+    a clinic's starting stock and could never be replaced.
+
+    It also has to run before the healer picks their next task, not after: on
+    the arrival tick that chooser would otherwise overwrite the target with a
+    new random one, and the arrival would be lost again.
+    """
+    forage_target = getattr(npc, "forage_target_coords", None)
+    if forage_target is None:
+        return False
+    reached = (npc.x, npc.y) == tuple(forage_target)
+    walk_finished = not npc.schedule.current_path
+    if not (reached or walk_finished):
+        return False
+
+    world.add_message_to_chat_log(
+        f"{world.get_entity_display_name(npc)} foraged some medicinal herbs."
+    )
+    gathered = random.randint(2, 4)
+    inventory = npc.economic.npc_inventory
+    inventory["medicinal_herb"] = inventory.get("medicinal_herb", 0) + gathered
+    npc.forage_target_coords = None
+    if npc.schedule.current_task == "foraging_for_herbs":
+        npc.schedule.current_task = TaskType.IDLE
+        npc.schedule.current_destination_coords = None
+    return True
+
+
 def update_npc_medical_state(world, npc) -> None:
     """Advance one NPC's medical/injury/treatment task logic."""
     if "broken_leg" in npc.physical.status_effects:
@@ -75,6 +113,9 @@ def update_npc_medical_state(world, npc) -> None:
                     npc.schedule.current_destination_coords = None
 
     if npc.economic.profession == "Healer":
+        _settle_finished_forage(world, npc)
+
+    if npc.economic.profession == "Healer":
         if npc.schedule.current_task not in ["treating_patient", "foraging_for_herbs", "crafting_medical_supplies"]:
             patients = [p for p in world.all_npcs if not p.physical.is_dead and _needs_treatment(p)]
             if patients:
@@ -106,6 +147,9 @@ def update_npc_medical_state(world, npc) -> None:
                         target_x = max(0, min(WORLD_WIDTH - 1, int(npc.x + math.cos(angle) * dist)))
                         target_y = max(0, min(WORLD_HEIGHT - 1, int(npc.y + math.sin(angle) * dist)))
                         npc.schedule.current_destination_coords = (target_x, target_y)
+                        # Remembered separately from the task, because the task
+                        # is not what the payout can be keyed on - see below.
+                        npc.forage_target_coords = (target_x, target_y)
                         path = world.calculate_path(npc.x, npc.y, target_x, target_y)
                         if path:
                             npc.schedule.current_path = path
@@ -128,15 +172,6 @@ def update_npc_medical_state(world, npc) -> None:
                             npc.task_timer = 5
                             npc.schedule.current_destination_coords = (npc.x, npc.y)
 
-    if npc.economic.profession == "Healer":
-        if npc.schedule.current_task == "foraging_for_herbs":
-            if not npc.schedule.current_path or len(npc.schedule.current_path) <= 1:
-                world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} foraged some medicinal herbs.")
-                amt = random.randint(2, 4)
-                npc.economic.npc_inventory["medicinal_herb"] = npc.economic.npc_inventory.get("medicinal_herb", 0) + amt
-                npc.schedule.current_task = TaskType.IDLE
-                npc.schedule.current_destination_coords = None
-
         elif npc.schedule.current_task == "crafting_medical_supplies":
             if npc.schedule.current_destination_coords and (npc.x, npc.y) == npc.schedule.current_destination_coords:
                 if not hasattr(npc, "task_timer") or npc.task_timer <= 0:
@@ -148,9 +183,15 @@ def update_npc_medical_state(world, npc) -> None:
                         remedy = getattr(npc, "task_context_data", None) or {}
                         remedy_item = remedy.get("remedy", "healing_salve")
                         remedy_label = "herbal remedy" if remedy_item == "herbal_remedy" else "healing salve"
+                        # Inventory drops a key the moment it reaches zero, so
+                        # reading it back after the decrement raises. Third time
+                        # this pattern has bitten (the bakery's last sack of
+                        # flour, the healer's last salve, now the last two
+                        # herbs); it was unreachable until foraging started
+                        # producing herbs at all.
                         npc.economic.npc_inventory["medicinal_herb"] -= 2
-                        if npc.economic.npc_inventory["medicinal_herb"] <= 0:
-                            del npc.economic.npc_inventory["medicinal_herb"]
+                        if npc.economic.npc_inventory.get("medicinal_herb", 0) <= 0:
+                            npc.economic.npc_inventory.pop("medicinal_herb", None)
                         npc.craft_item(remedy_item, 1)
                         world.add_message_to_chat_log(f"{world.get_entity_display_name(npc)} crafted a {remedy_label}.")
                     npc.schedule.current_task = TaskType.IDLE
@@ -193,8 +234,16 @@ def update_npc_medical_state(world, npc) -> None:
                     for _, remedy_item in treated:
                         if npc.economic.npc_inventory.get(remedy_item, 0) >= 1:
                             npc.economic.npc_inventory[remedy_item] -= 1
-                            if npc.economic.npc_inventory[remedy_item] <= 0:
-                                del npc.economic.npc_inventory[remedy_item]
+                            # Read it back with .get. Inventory drops a key the
+                            # moment its quantity reaches zero, so spending the
+                            # healer's last salve removed the key and the next
+                            # line raised KeyError - crashing the tick that
+                            # treated the patient. The same fault was fixed in
+                            # World._produce_sub_task_output; this copy only
+                            # became reachable once villages generated a clinic
+                            # and could employ a Healer to spend anything.
+                            if npc.economic.npc_inventory.get(remedy_item, 0) <= 0:
+                                npc.economic.npc_inventory.pop(remedy_item, None)
                             break
 
                 ailment_summary = " and ".join(name for name, _ in treated) if treated else "ailment"

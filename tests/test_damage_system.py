@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock
 import engine
 from entities.base import NPC
+from tests.world_cache import fresh_world
 
 class TestLocalizedDamage(unittest.TestCase):
     def test_localized_damage_broken_leg(self):
@@ -31,7 +32,7 @@ class TestLocalizedDamage(unittest.TestCase):
         random.choice = original_choice
 
     def test_player_broken_leg_movement_cooldown(self):
-        world = engine.World(seed=13)
+        world = fresh_world(seed=13, pre_simulate=False)
         player = world.player
         player.physical.status_effects.append("broken_leg")
 

@@ -237,10 +237,45 @@ def get_roles_for_building(building_type: str) -> list[str]:
     return roles
 
 
+def _clear_work_in_progress(entity) -> None:
+    """Drop whatever the old trade was part way through.
+
+    Work state is keyed on the profession: update_npc_work_sub_tasks looks the
+    current step up with get_sub_task_data(profession, step), so a step left
+    over from a previous trade resolves to nothing and the worker stalls holding
+    it. Traced on a villager the careers system moved from Blacksmith to
+    Woodcutter: their profession said Woodcutter, their workplace was the lumber
+    mill, and they spent the rest of the run pursuing "fetch_ore" towards the
+    mine - a step their new trade does not have. Their whole shift produced two
+    completed steps in three thousand ticks.
+
+    Changing trade means putting down what you were carrying.
+    """
+    for attribute, value in (
+        ("current_sub_task", None),
+        ("sub_task_target_coords", None),
+        ("sub_task_timer", 0),
+        ("current_sub_task_sequence_index", 0),
+        ("_work_validation_retry_after_tick", 0),
+    ):
+        if hasattr(entity, attribute):
+            setattr(entity, attribute, value)
+
+    activity = getattr(entity, "current_activity", None)
+    if activity is not None and str(getattr(activity, "activity_type", "")).startswith("work:"):
+        entity.current_activity = None
+
+
 def set_entity_profession(entity, profession: str, reason: str = "", game_time: int | None = None):
     normalized = normalize_profession(profession)
+    previous = normalize_profession(getattr(getattr(entity, "economic", None), "profession", None))
     if hasattr(entity, "economic"):
         entity.economic.profession = normalized
+    # Only on an actual change of trade. Callers that re-assert the same
+    # profession - and there are several, including tests holding a role
+    # steady - must not have a worker's progress wiped every time they do.
+    if normalized != previous:
+        _clear_work_in_progress(entity)
     if hasattr(entity, "career"):
         entity.career.set_role(normalized, reason=reason, game_time=game_time)
     ai_brain = getattr(entity, "ai_brain", None)

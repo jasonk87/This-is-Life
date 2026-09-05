@@ -26,6 +26,7 @@ from simulation.systems.scheduling import (
 from tcod_compat import tcod
 import tile_types
 from entities.items import Inventory, ItemReference
+from tests.world_cache import fresh_world
 
 class TestWorldInteractionActions(unittest.TestCase):
     def setUp(self):
@@ -48,7 +49,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         # the social-reaction tests below pass when this file was run alone
         # and fail in a full-suite run, with the culprit appearing to move
         # between runs.
-        self.world = World(seed=20250808)
+        self.world = fresh_world(seed=20250808, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -2086,7 +2087,17 @@ class TestWorldInteractionActions(unittest.TestCase):
         with patch.object(self.world, "_find_nearest_building_of_type", return_value=None), \
              patch.object(self.world, "_get_village_for_npc", return_value=None), \
              patch("entities.items.random.random", return_value=0.5):
-            handled = update_npc_work_sub_tasks(self.world, foreman)
+            # Driven straight at the supply chain, which is the mechanism
+            # this test is about: a worker turning their workplace's stock
+            # into goods by recipe, with the crafter recorded.
+            # update_npc_work_sub_tasks only falls through to it for a
+            # profession with no sub-tasks of its own, and Lumber Mill
+            # Foreman qualified only by having no work defined at all. It
+            # has a trade now - sorting timber, milling planks into
+            # processed lumber, tallying stock - so going through the work
+            # loop would test which professions happen to be empty rather
+            # than testing the supply chain.
+            handled = self.world._attempt_workplace_supply_chain_actions(foreman, lumber_mill)
 
         crafted_item = lumber_mill.building_inventory.get_item_reference("wooden_plank")
         self.assertTrue(handled)
@@ -2397,7 +2408,7 @@ class TestNPCBehaviorSystem(unittest.TestCase):
         mock_npc_data = { "name": "Test NPC", "personality": "test", "dialogue": ["Hi"] }
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
-        self.world = World(seed=0)
+        self.world = fresh_world(seed=0, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()

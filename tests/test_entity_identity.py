@@ -54,9 +54,13 @@ class TestIdsAreNotAddresses(unittest.TestCase):
     def test_ids_survive_their_owners_being_collected(self):
         """The actual bug, reproduced. Nothing here holds a reference to the
         NPCs, so their addresses are free to be handed out again."""
+        # Fifty rounds is a thousand entities. The bug this pins produced 119
+        # distinct ids out of 6000 - a collision rate near 98% - so a thousand is
+        # overwhelming evidence, and the original two hundred rounds cost the
+        # suite two minutes to be more overwhelming still.
         seen = set()
         collisions = 0
-        for round_number in range(200):
+        for round_number in range(50):
             batch = [NPC(0, 0, name=f"n{round_number}_{i}") for i in range(20)]
             for npc in batch:
                 if npc.id in seen:
@@ -66,7 +70,7 @@ class TestIdsAreNotAddresses(unittest.TestCase):
             gc.collect()
 
         self.assertEqual(collisions, 0, f"{collisions} entities shared an id")
-        self.assertEqual(len(seen), 200 * 20)
+        self.assertEqual(len(seen), 50 * 20)
 
     def test_the_player_gets_one_too(self):
         world = World(seed=17)
@@ -128,8 +132,6 @@ class TestLoadingASaveDoesNotReissueIds(unittest.TestCase):
         path = os.path.join("saves", self.save_name)
         if os.path.exists(path):
             os.remove(path)
-        if os.path.isdir("saves") and not os.listdir("saves"):
-            os.rmdir("saves")
 
     def test_someone_born_after_loading_gets_a_fresh_id(self):
         self.assertTrue(save_game(self.world, self.save_name))
@@ -240,8 +242,6 @@ class TestASeededWorldIsReproducible(unittest.TestCase):
             path = _os.path.join("saves", save_name)
             if _os.path.exists(path):
                 _os.remove(path)
-            if _os.path.isdir("saves") and not _os.listdir("saves"):
-                _os.rmdir("saves")
 
 
 if __name__ == "__main__":

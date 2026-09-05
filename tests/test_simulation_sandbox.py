@@ -6,6 +6,7 @@ from unittest.mock import patch
 from tools.simulation_scenarios import SCENARIOS, ScenarioResult, SimulationTrace, run_scenario
 from tools.asset_workbench import preview_animal, preview_blueprint, preview_character
 from tools.simulation_snapshot import SnapshotConfig, render_snapshot
+from tests.world_cache import fresh_world
 
 
 class TestSimulationSandbox(unittest.TestCase):
@@ -64,7 +65,7 @@ class TestSimulationSandbox(unittest.TestCase):
 
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
         farm = Building(0, 0, 5, 5, building_type="farm", category="agricultural_workplace")
         worker = NPC(0, 0, name="Validator")
         worker.economic.profession = "Farmer"
@@ -86,7 +87,7 @@ class TestSimulationSandbox(unittest.TestCase):
 
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        world = World(seed=123)
+        world = fresh_world(seed=123, pre_simulate=False)
         workplace = Building(0, 0, 5, 5, building_type="workshop", category="commercial_workplace")
         world.buildings_by_id[workplace.id] = workplace
         worker = NPC(0, 0, name="Bad Task Worker")

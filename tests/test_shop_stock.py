@@ -20,6 +20,7 @@ import unittest
 from types import SimpleNamespace
 
 from engine import World
+from tests.world_cache import fresh_world
 
 
 class TestWhichBuildingsSellTheirStock(unittest.TestCase):
@@ -135,7 +136,7 @@ class TestAStandInShopStillSells(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.world = World(seed=31)
+        cls.world = fresh_world(seed=31, pre_simulate=False)
 
     def test_a_general_store_with_no_category_still_sells_its_stock(self):
         shop = SimpleNamespace(

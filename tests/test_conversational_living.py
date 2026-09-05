@@ -3,6 +3,7 @@
 import pytest
 import engine
 from engine import World, NPC
+from tests.world_cache import fresh_world
 
 
 @pytest.fixture(autouse=True)
@@ -14,7 +15,7 @@ def disable_llm():
 
 def test_conversational_family_domestic_needs():
     """Verify family members talk about real household needs like low pantry food."""
-    world = World(seed=55)
+    world = fresh_world(seed=55, pre_simulate=False)
     player = world.player
 
     mother_id = player.social.family_ties.get("mother_id")
@@ -41,7 +42,7 @@ def test_conversational_family_domestic_needs():
 
 def test_conversational_workplace_wage_labor():
     """Verify player can ask craftsmen for work and receive honest wages without quests."""
-    world = World(seed=55)
+    world = fresh_world(seed=55, pre_simulate=False)
     player = world.player
 
     # Create a blacksmith NPC
@@ -58,7 +59,7 @@ def test_conversational_workplace_wage_labor():
 
 def test_conversational_sharing_provisions():
     """Verify player can hand food/firewood to an NPC via conversation."""
-    world = World(seed=55)
+    world = fresh_world(seed=55, pre_simulate=False)
     player = world.player
 
     neighbor = NPC(player.x + 1, player.y, name="Old Neighbor", personality="kind")
@@ -73,7 +74,7 @@ def test_conversational_sharing_provisions():
 
 def test_outlaw_campsite_generation():
     """Verify authentic outlaw camps generate with real NPCs, campfires, and chests."""
-    world = World(seed=77)
+    world = fresh_world(seed=77, pre_simulate=False)
 
     # Find an outlaw camp chunk or generate one directly
     outlaw_camp_chunk = None

@@ -79,8 +79,26 @@ def simulate_village_survival(seed: int, ticks_to_run: int = 1000, verbose: bool
         "average_final_thirst": 0.0,
         "max_final_hunger": 0,
         "max_final_thirst": 0,
+        # Attrition, which deaths alone cannot show over a short run.
+        #
+        # This function defaults to 1000 ticks and the suite calls it with 300 -
+        # half a game hour. Environmental damage lands once every 576 ticks, so
+        # no villager can lose even one point of health in that window, let
+        # alone die. That is how a settled thermal bug that took a village from
+        # 116 alive to 16 in two simulated days passed a test whose whole
+        # purpose was to assert that nobody dies.
+        #
+        # Thermal distress is the leading indicator and it appears within about
+        # 120 ticks, so a 300-tick run can see it clearly even though it can
+        # never see the death it leads to.
+        "thermal_distress": 0,
+        "health_lost": 0,
         "success": True,
         "errors": [],
+    }
+
+    starting_health = {
+        npc.id: getattr(npc.combat, "hp", 0) for npc in villagers
     }
 
     # Simulation loop
@@ -121,6 +139,17 @@ def simulate_village_survival(seed: int, ticks_to_run: int = 1000, verbose: bool
         stats["average_final_thirst"] = round(sum(n.physical.thirst for n in alive_villagers) / len(alive_villagers), 1)
         stats["max_final_hunger"] = max(n.physical.hunger for n in alive_villagers)
         stats["max_final_thirst"] = max(n.physical.thirst for n in alive_villagers)
+
+    stats["thermal_distress"] = sum(
+        1 for npc in alive_villagers
+        if "Freezing" in npc.physical.status_effects
+        or "Overheating" in npc.physical.status_effects
+    )
+    stats["health_lost"] = sum(
+        max(0, starting_health.get(npc.id, 0) - getattr(npc.combat, "hp", 0))
+        for npc in alive_villagers
+    )
+    stats["season"] = world.seasons[world.current_season_index]
 
     if stats["deaths"] > 0:
         stats["success"] = False

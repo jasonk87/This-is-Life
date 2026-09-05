@@ -142,5 +142,17 @@ CONSTRUCTION_RECIPES = {
         "source": "decoration",
         "materials": {"raw_log": 2, "wooden_plank": 2},
         "description": "Preserve meat by smoking it."
+    },
+    # The loom is the one workstation with recipes behind it and no way to get
+    # one. Three items require it, no building in a generated world contains
+    # one, and no profession weaves - so cloth, a tunic and a hooded cowl were
+    # written, costed and unreachable. It follows stone_anvil and bookshelf
+    # exactly: craftable as an item, and until now not placeable as a tile.
+    "loom": {
+        "name": "Loom",
+        "tile_def_key": "loom", # From DECORATION_ITEM_DEFINITIONS
+        "source": "decoration",
+        "materials": {"wooden_plank": 10},
+        "description": "A frame for weaving cloth."
     }
 }

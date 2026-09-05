@@ -14,7 +14,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from config import CHUNK_SIZE
-from engine import Tile, World
+from engine import TILE_DEFINITIONS, Tile, World
 from work_subtasks import create_completed_work_sub_task_commands
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -169,10 +169,6 @@ class TestMenuAndWorldAgree(unittest.TestCase):
             self.assertIn(action, names)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFishermenCatchFish(unittest.TestCase):
     """The Fisherman profession worked a full day and the village never saw a fish."""
 
@@ -226,3 +222,99 @@ class TestFishermenCatchFish(unittest.TestCase):
         if world.find_water_near(npc.x, npc.y) is not None:
             self.skipTest("that corner of this world has water in it")
         self.assertFalse(self.commands["fish_at_spot"].execute(world, npc, building, {}))
+
+
+class TestAFireCanBeLit(unittest.TestCase):
+    """A fire pit is described as providing "warmth and light" and could do
+    neither.
+
+    The unlit tile carries becomes_lit and an interaction_hint of light_fire;
+    nothing read either one, so a player could follow the construction recipe,
+    build a fire pit, and stand next to a cold ring of stones with no option but
+    Examine. It is not only comfort: the lit tile is workstation_type "fire",
+    which is what all four cooking recipes require, and no other tile in a
+    generated world carried it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.world = World(player_first_name="Tester")
+
+    def _tile(self, x, y, key):
+        from data.decorations import DECORATION_ITEM_DEFINITIONS
+
+        self.world.get_tile_at(x, y)
+        self.world._change_map_tile((x, y), DECORATION_ITEM_DEFINITIONS[key])
+        return self.world.get_tile_at(x, y)
+
+    def test_an_unlit_pit_offers_lighting(self):
+        tile = Tile(
+            char="#", color=(1, 1, 1), passable=True, name="Simple Fire Pit",
+            properties={"interaction_hint": "light_fire", "becomes_lit": "fire_pit_lit"},
+        )
+        actions = self.world._get_actions_for_entity(
+            {"type": "tile", "data": tile, "name": tile.name}
+        )
+        self.assertIn("Light Fire", actions)
+
+    def test_a_lit_fire_offers_putting_it_out(self):
+        tile = Tile(
+            char="#", color=(1, 1, 1), passable=False, name="Lit Fire Pit",
+            properties={"extinguishes_to": "fire_pit_simple"},
+        )
+        actions = self.world._get_actions_for_entity(
+            {"type": "tile", "data": tile, "name": tile.name}
+        )
+        self.assertIn("Extinguish Fire", actions)
+
+    def test_lighting_needs_fuel(self):
+        player = self.world.player
+        x, y = player.x + 2, player.y
+        self._tile(x, y, "fire_pit_simple")
+        while player.has_item("raw_log", 1):
+            player.remove_item("raw_log", 1)
+
+        self.world.player_attempt_light_fire(x, y)
+
+        self.assertEqual(self.world.get_tile_at(x, y).name, "Simple Fire Pit")
+
+    def test_lighting_produces_heat_and_a_cooking_station(self):
+        player = self.world.player
+        x, y = player.x + 3, player.y
+        self._tile(x, y, "fire_pit_simple")
+        player.add_item("raw_log", 1)
+
+        self.world.player_attempt_light_fire(x, y)
+
+        tile = self.world.get_tile_at(x, y)
+        self.assertTrue(tile.properties.get("heat_source"), "a lit fire gives no heat")
+        self.assertEqual(
+            tile.properties.get("workstation_type"), "fire",
+            "a lit fire is not a cooking station, so the cooking recipes stay unreachable",
+        )
+
+    def test_putting_it_out_gives_back_the_pit(self):
+        player = self.world.player
+        x, y = player.x + 4, player.y
+        self._tile(x, y, "fire_pit_simple")
+        player.add_item("raw_log", 1)
+        self.world.player_attempt_light_fire(x, y)
+
+        self.world.player_attempt_extinguish_fire(x, y)
+
+        self.assertEqual(self.world.get_tile_at(x, y).name, "Simple Fire Pit")
+
+    def test_lighting_something_that_is_not_a_fire_does_nothing(self):
+        player = self.world.player
+        x, y = player.x + 5, player.y
+        self.world._change_map_tile((x, y), TILE_DEFINITIONS["plains"])
+        player.add_item("raw_log", 1)
+        before = self.world.get_tile_at(x, y).name
+
+        self.world.player_attempt_light_fire(x, y)
+
+        self.assertEqual(self.world.get_tile_at(x, y).name, before)
+
+
+if __name__ == "__main__":
+    unittest.main()

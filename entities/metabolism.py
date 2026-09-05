@@ -6,6 +6,35 @@ from dataclasses import dataclass
 from entities.pickle_compat import dataclass_setstate
 
 
+# A body is not the air around it.
+#
+# Both copies of this model - here and in simulation/systems/survival.py - set
+# the target body temperature to `ambient + insulation`, which is the
+# temperature of the air, not of a person standing in it. Nothing in the game
+# reaches the 35-38.5C band that counts as healthy: the warmest season modifier
+# is Summer at 25 and the default insulation is 2. Measured on a Spring day,
+# an NPC's body temperature fell from 37.0 to 17.0 within about 120 ticks and
+# stayed there, permanently "Freezing". Freezing costs 1 HP per 576 ticks - 25
+# a day against 35 max HP - so every villager in the world was dying of cold on
+# a mild spring afternoon, and a two-day run took a village from 116 to 16.
+#
+# A body holds itself near 37 and the environment pushes it off that mark, so
+# that is what this computes. The coupling is deliberately weak: ordinary
+# weather is survivable, and it takes real cold (a winter night, a mountain, a
+# snowfield) or real heat (a desert at midday in summer) to move someone out of
+# the safe band.
+NORMAL_BODY_TEMPERATURE = 37.0
+COMFORTABLE_AMBIENT = 20.0
+AMBIENT_COUPLING = 0.10
+
+
+def body_equilibrium_temperature(ambient_temperature: float, insulation: float) -> float:
+    """The body temperature someone settles at in this air, with this clothing."""
+    return NORMAL_BODY_TEMPERATURE + (
+        (ambient_temperature + insulation - COMFORTABLE_AMBIENT) * AMBIENT_COUPLING
+    )
+
+
 @dataclass
 class MetabolismComponent:
     hunger: int = 0
@@ -43,7 +72,9 @@ class MetabolismComponent:
         if wet_penalty:
             total_insulation *= 0.5
 
-        target_temp_equilibrium = ambient_temperature + total_insulation
+        target_temp_equilibrium = body_equilibrium_temperature(
+            ambient_temperature, total_insulation
+        )
         temp_diff = target_temp_equilibrium - self.temperature
         self.temperature += temp_diff * 0.05
 

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import engine
 from engine import NPC, Player, World
 from entities.animal import Animal
+from tests.world_cache import fresh_world
 
 
 class TestAccrueCrimeBounty(unittest.TestCase):
@@ -13,7 +14,7 @@ class TestAccrueCrimeBounty(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=7)
+        self.world = fresh_world(seed=7, pre_simulate=False)
 
     def _make_npc(self, name="Suspect"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -58,7 +59,7 @@ class TestTheftCrimeHook(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=11)
+        self.world = fresh_world(seed=11, pre_simulate=False)
 
     def test_caught_stealing_adds_theft_bounty(self):
         from simulation.systems.utility_ai import _execute_steal_food
@@ -147,7 +148,7 @@ class TestNpcAttemptAttackNpcCrimeAndArrest(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=17)
+        self.world = fresh_world(seed=17, pre_simulate=False)
         self.world.player_fov_map = MagicMock()
         self.world.player_fov_map.__getitem__ = MagicMock(return_value=False)
 
@@ -225,7 +226,7 @@ class TestFindWantedNpcInSight(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=23)
+        self.world = fresh_world(seed=23, pre_simulate=False)
 
     def _make_npc(self, name, x, y, profession="Farmer", bounty=0, jailed=False, dead=False):
         npc = NPC(x, y, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -287,7 +288,7 @@ class TestServeNpcJailTime(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=29)
+        self.world = fresh_world(seed=29, pre_simulate=False)
 
     def _make_npc(self, name="Suspect", x=0, y=0, bounty=150):
         npc = NPC(x, y, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -346,7 +347,7 @@ class TestJailTimeTicksDownDuringScheduleUpdate(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=31)
+        self.world = fresh_world(seed=31, pre_simulate=False)
         self.world._update_entity_temperature = MagicMock()
         self.world._apply_temperature_effects = MagicMock()
         self.world._update_npc_fov = MagicMock()
@@ -385,7 +386,7 @@ class TestMurderAddsBounty(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=37)
+        self.world = fresh_world(seed=37, pre_simulate=False)
 
     def test_witnessed_npc_murder_adds_bounty_to_killer(self):
         killer = NPC(2, 2, name="Killer", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)

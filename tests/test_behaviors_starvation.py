@@ -4,6 +4,7 @@ from unittest import mock
 import engine
 from engine import NPC, World
 from entities.behaviors import StarvationBehavior
+from tests.world_cache import fresh_world
 
 
 class TestStarvationBehaviorSetsIsDead(unittest.TestCase):
@@ -17,7 +18,7 @@ class TestStarvationBehaviorSetsIsDead(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=701)
+        self.world = fresh_world(seed=701, pre_simulate=False)
 
     def _starving_npc(self):
         npc = NPC(0, 0, name="Starving", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)

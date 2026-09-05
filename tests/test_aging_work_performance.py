@@ -12,6 +12,7 @@ from simulation.careers import (
     WORK_PERFORMANCE_AGE_FLOOR,
 )
 from simulation.systems.work import update_npc_work_sub_tasks
+from tests.world_cache import fresh_world
 
 
 class TestAgeWorkPerformanceCeiling(unittest.TestCase):
@@ -67,7 +68,7 @@ class TestAgeCeilingAppliedDuringWork(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=4001)
+        self.world = fresh_world(seed=4001, pre_simulate=False)
 
     def _make_worker(self, age, starting_performance):
         worker = NPC(

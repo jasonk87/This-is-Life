@@ -5,6 +5,10 @@ from engine import World, NPC, Animal
 from data.animals import ANIMAL_DEFINITIONS
 from data.tiles import TILE_DEFINITIONS
 from config import WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 class TestEcosystem(unittest.TestCase):
     def setUp(self):
@@ -27,7 +31,7 @@ class TestEcosystem(unittest.TestCase):
                                 t.passable = True
                                 t.properties = {}
                 mock_init_chunks.return_value = mock_chunks
-                self.world = World(seed=1)
+                self.world = fresh_world(seed=1, pre_simulate=False)
 
         self.world.transparency_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), True)
 

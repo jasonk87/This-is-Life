@@ -5,6 +5,7 @@ from unittest.mock import patch
 from engine import World, Building, ItemReference
 from simulation.world_model import Village, TownEconomicNeed
 from tile_types import Tile
+from tests.world_cache import fresh_world
 
 
 class TestTerritorialLandClaims(unittest.TestCase):
@@ -12,7 +13,7 @@ class TestTerritorialLandClaims(unittest.TestCase):
         import engine
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=77)
+        self.world = fresh_world(seed=77, pre_simulate=False)
         self.world.chunk_width = 1
         self.world.chunk_height = 1
         self.village = Village()

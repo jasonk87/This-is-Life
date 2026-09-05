@@ -5,6 +5,9 @@ import engine
 from engine import World
 from simulation.systems.tick import run_world_tick
 from tools.simulate_settlement_survival import simulate_village_survival
+from tests.world_cache import fresh_world
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +19,7 @@ def disable_llm():
 
 def test_settlement_day0_stocking_invariants():
     """Verify that village buildings and residents are seeded with honest starter provisions and tools."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     assert len(world.villages) > 0
 
     target_village = world._get_village_for_npc(world.player) or world.villages[0]
@@ -70,7 +73,21 @@ def test_settlement_day0_stocking_invariants():
 
 @pytest.mark.parametrize("seed", [1, 2, 7])
 def test_settlement_autonomous_survival(seed: int):
-    """Verify that an active settlement survives autonomously without starvation deaths."""
+    """Verify that an active settlement survives autonomously without starvation deaths.
+
+    300 ticks is half a game hour. That is long enough to see villagers eat,
+    drink, work and sleep, and it is nowhere near long enough to see one die:
+    environmental damage lands once per 576 ticks, so not a single point of it
+    can be dealt inside this window. The death assertions below are therefore a
+    crash-and-obvious-breakage net, not a survival measurement, and it is worth
+    being plain about that - a thermal bug that took a village from 116 alive to
+    16 within two simulated days passed this test untouched.
+
+    The thermal-distress assertion is what makes a run this short able to see
+    that class of fault at all: body temperature converges within roughly 120
+    ticks, so if the model is putting healthy villagers into Freezing on a mild
+    day it is visible here immediately, long before it kills anybody.
+    """
     result = simulate_village_survival(seed=seed, ticks_to_run=300, verbose=False)
 
     assert result["success"] is True, f"Simulation failed on seed {seed}: {result.get('errors')}"
@@ -78,3 +95,14 @@ def test_settlement_autonomous_survival(seed: int):
     assert result["survival_rate"] == 1.0
     assert result["average_final_hunger"] <= 50.0
     assert result["average_final_thirst"] <= 50.0
+
+    if result.get("season") != "Winter":
+        assert result["thermal_distress"] == 0, (
+            f"{result['thermal_distress']} of {result['surviving_villagers']} villagers are "
+            f"freezing or overheating in {result.get('season')} on seed {seed} - they are on "
+            f"a timer, not stable"
+        )
+    assert result["health_lost"] == 0, (
+        f"villagers lost {result['health_lost']} health between them in half a game hour "
+        f"on seed {seed}, which does not stop just because the test does"
+    )

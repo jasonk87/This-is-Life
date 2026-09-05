@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import engine
 from entities.base import CombatStats, Equipment, PhysicalState, SocialState
+from tests.world_cache import fresh_world
 
 
 def test_player_uses_shared_simulation_components():
@@ -17,7 +18,7 @@ def test_player_uses_shared_simulation_components():
 
 
 def test_world_update_delegates_to_tick_system():
-    world = engine.World(seed=1)
+    world = fresh_world(seed=1, pre_simulate=False)
 
     with patch("engine.run_world_tick") as run_world_tick:
         world.update()

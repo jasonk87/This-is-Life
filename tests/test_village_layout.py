@@ -33,7 +33,7 @@ from engine import World
 ALWAYS_EXPECTED = [
     "capital_hall", "general_store", "tavern", "house", "jail",
     "sheriff_office", "lumber_mill", "mill", "bakery", "mine",
-    "blacksmith_shop", "farm", "library", "butcher_shop", "hunting_lodge",
+    "blacksmith_shop", "farm", "library", "butcher_shop", "clinic",
 ]
 
 # Deliberately not asserted on, and each for its own reason:
@@ -41,10 +41,11 @@ ALWAYS_EXPECTED = [
 #     time it does. A scale decision, recorded in VILLAGE_LAYOUT_NOTE.
 #   church, guard_tower - no try_place_building call exists at all, so no amount
 #     of packing produces them. Asserting on these would encode a gap as expected.
-#   clinic - a village has room for exactly two buildings that reserve a yard.
-#     The tavern takes one and a house takes the other, and housing wins that
-#     contest because it is load-bearing. See VILLAGE_LAYOUT_NOTE.
-NOT_YET_PLACED = ["clinic", "carpenter_shop", "church", "guard_tower"]
+#   hunting_lodge, carpenter_shop - both live on leftover ground behind the
+#     clinic and the butcher, so they land in about half and a fifth of villages
+#     respectively rather than all of them. See VILLAGE_LAYOUT_NOTE.
+#   church, guard_tower - still no try_place_building call at all.
+NOT_YET_PLACED = ["hunting_lodge", "carpenter_shop", "church", "guard_tower"]
 
 
 def _villages(world):

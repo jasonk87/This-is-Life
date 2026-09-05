@@ -5,6 +5,7 @@ from unittest.mock import patch
 from engine import World, Building, NPC, ItemReference
 from entities.items import Inventory
 from simulation.world_model import Village
+from tests.world_cache import fresh_world
 
 
 class TestConstructionFoundation(unittest.TestCase):
@@ -12,7 +13,7 @@ class TestConstructionFoundation(unittest.TestCase):
         import engine
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=123)
+        self.world = fresh_world(seed=123, pre_simulate=False)
         self.world.village_npcs.clear()
         self.world.npcs.clear()
         self.village = Village()

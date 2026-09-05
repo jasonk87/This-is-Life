@@ -2,6 +2,7 @@ import unittest
 from entities.base import NPC
 from engine import World
 from simulation.systems.task_types import TaskType
+from tests.world_cache import fresh_world
 
 class TestAutonomyAudit(unittest.TestCase):
     def test_autonomy_audit_updates_counters_and_npc_state(self):
@@ -11,7 +12,7 @@ class TestAutonomyAudit(unittest.TestCase):
         engine.ENABLE_LLM_CONNECTION = False
 
         # We also need to mock `all_npcs` chain or simply use `world` properly
-        world = World(seed=42)
+        world = fresh_world(seed=42, pre_simulate=False)
 
         npc = NPC(10, 10, name="Test NPC")
         world.npcs = [npc]

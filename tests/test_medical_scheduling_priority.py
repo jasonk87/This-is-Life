@@ -5,6 +5,7 @@ import engine
 from engine import NPC, Building, World
 from simulation.systems.illness import SICK_STATUS_EFFECT
 from simulation.systems.medical import update_npc_medical_state
+from tests.world_cache import fresh_world
 
 
 class TestMedicalTasksExcludedFromWorkOverride(unittest.TestCase):
@@ -20,7 +21,7 @@ class TestMedicalTasksExcludedFromWorkOverride(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=71)
+        self.world = fresh_world(seed=71, pre_simulate=False)
         # Land squarely inside work hours (WORK_START/END_TIME_RATIO are
         # 0.333/0.708 of DAY_LENGTH_TICKS), well clear of both edges.
         self.world.game_time = int(engine.DAY_LENGTH_TICKS * 0.5)

@@ -6,6 +6,7 @@ import engine
 from engine import NPC, World, SCHEDULED_EVENT_DEFINITIONS
 from simulation.systems.scheduling import update_npc_daily_goal_policy
 from simulation.world_model import Village
+from tests.world_cache import fresh_world
 
 
 class TestScheduledEventDispatcher(unittest.TestCase):
@@ -19,7 +20,7 @@ class TestScheduledEventDispatcher(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=6001)
+        self.world = fresh_world(seed=6001, pre_simulate=False)
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(30, 30)]}
         self.world.villages = [self.village]
@@ -154,7 +155,7 @@ class TestFestivalDrawsCrowdDuringLeisure(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=6002)
+        self.world = fresh_world(seed=6002, pre_simulate=False)
         self.village = Village()
         self.village.interaction_points = {"town_square_center": [(30, 30)]}
         self.world.villages = [self.village]

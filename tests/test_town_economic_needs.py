@@ -4,12 +4,13 @@ from simulation.world_model import Village
 from simulation.systems.economy import _update_village_economic_needs
 from entities.base import NPC
 import engine
+from tests.world_cache import fresh_world
 
 class TestTownEconomicNeeds(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=42)
+        self.world = fresh_world(seed=42, pre_simulate=False)
         self.village = Village()
         self.world.villages.append(self.village)
 

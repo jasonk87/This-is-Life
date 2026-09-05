@@ -26,19 +26,18 @@ from config import DAY_LENGTH_TICKS
 from engine import World
 from save_manager import load_game, save_game
 from simulation.systems import aging
+from tests.world_cache import fresh_world
 
 
 class TestDailyClocksSurviveASave(unittest.TestCase):
     def setUp(self):
-        self.world = World(seed=4242)
+        self.world = fresh_world(seed=4242, pre_simulate=False)
         self.save_name = "test_clock_save.sav"
 
     def tearDown(self):
         path = os.path.join("saves", self.save_name)
         if os.path.exists(path):
             os.remove(path)
-        if os.path.isdir("saves") and not os.listdir("saves"):
-            os.rmdir("saves")
 
     def _round_trip(self):
         self.assertTrue(save_game(self.world, self.save_name), "the world did not save")

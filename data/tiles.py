@@ -265,6 +265,20 @@ TILE_DEFINITIONS["tall_grass"]["properties"]["yields_on_pass_through"] = {
     "chance": 0.1
 }
 
+# The common herb grows wild, because otherwise it does not grow at all.
+# herb_generic is consumed by the torch recipe - it is the oil-soaked rag half
+# of "a stick with oil-soaked rags" - and the only way to obtain one was to
+# plant one, which requires already having one. Nothing in the world produced
+# the first. Flowers are the obvious source and were pure decoration until now,
+# and this reuses the same pass-through yield tall grass already uses for wheat
+# seeds rather than inventing a mechanism.
+TILE_DEFINITIONS["flower"]["properties"] = TILE_DEFINITIONS["flower"].get("properties", {})
+TILE_DEFINITIONS["flower"]["properties"]["yields_on_pass_through"] = {
+    "item_key": "herb_generic",
+    "quantity": [1, 2],
+    "chance": 0.15
+}
+
 TILE_DEFINITIONS["stump_generic"] = {
     "char": WORLD_TILE_SPRITES["stump_generic"],
     "color": (101, 67, 33),  # Brownish, like a cut log

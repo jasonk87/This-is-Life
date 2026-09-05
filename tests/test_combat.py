@@ -14,6 +14,7 @@ from data.items import ITEM_DEFINITIONS
 import config
 from tcod_compat import tcod
 import tile_types
+from tests.world_cache import fresh_world
 
 class TestPredatorPreyAI(unittest.TestCase):
     def setUp(self):
@@ -24,7 +25,7 @@ class TestPredatorPreyAI(unittest.TestCase):
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
 
         # Use a fixed seed for deterministic world generation
-        self.world = World(seed=42)
+        self.world = fresh_world(seed=42, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -133,7 +134,7 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
             "combat_behavior": "defensive",
             "base_attack_name": "fists",
         })
-        self.world = World(seed=7)
+        self.world = fresh_world(seed=7, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -245,7 +246,7 @@ class TestNpcFovIndexRegression(unittest.TestCase):
             "personality": "neutral",
             "dialogue": ["..."],
         })
-        self.world = World(seed=13)
+        self.world = fresh_world(seed=13, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()
@@ -295,7 +296,7 @@ class TestNpcFovIndexRegression(unittest.TestCase):
 
 class TestCombatMemory(unittest.TestCase):
     def setUp(self):
-        self.world = engine.World(seed=13)
+        self.world = fresh_world(seed=13, pre_simulate=False)
 
     def test_deterministic_combat_memory_logging(self):
         attacker = engine.NPC(x=10, y=10, name="Attacker")
@@ -347,7 +348,7 @@ class TestPlayerAttackDamageClamp(unittest.TestCase):
         self.mock_call_llm = self.mock_ollama_patcher.start()
         mock_npc_data = {"name": "Test NPC", "personality": "test", "dialogue": ["Hi"]}
         self.mock_call_llm.return_value = json.dumps(mock_npc_data)
-        self.world = World(seed=61)
+        self.world = fresh_world(seed=61, pre_simulate=False)
 
     def tearDown(self):
         self.mock_ollama_patcher.stop()

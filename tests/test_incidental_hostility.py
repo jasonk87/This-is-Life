@@ -6,6 +6,7 @@ from engine import NPC, World
 from entities.base import NPC_HOSTILITY_GRACE_TICKS
 from simulation.systems.illness import SICK_STATUS_EFFECT, WORSENING_INTERVAL_TICKS
 from simulation.systems.survival import apply_temperature_effects
+from tests.world_cache import fresh_world
 
 
 class TestTakeDamageHostilityFlag(unittest.TestCase):
@@ -20,7 +21,7 @@ class TestTakeDamageHostilityFlag(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=61)
+        self.world = fresh_world(seed=61, pre_simulate=False)
 
     def _make_npc(self, name="Villager"):
         npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -114,7 +115,7 @@ class TestDecayIncidentalNpcHostility(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=63)
+        self.world = fresh_world(seed=63, pre_simulate=False)
         self.world.player.x = 500
         self.world.player.y = 500
 

@@ -2,11 +2,12 @@ import pytest
 from unittest.mock import patch
 from engine import World
 from entities.base import NPC
+from tests.world_cache import fresh_world
 
 
 def test_mobile_conversation_follow():
     """NPC A follows NPC B when within follow range, with random always succeeding."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
 
     # NPC A and B
     a = NPC(x=10, y=10, name="A")
@@ -51,7 +52,7 @@ def test_mobile_conversation_follow():
 
 def test_mobile_conversation_drop_when_far():
     """NPC A gives up following when partner is too far (> 6 tiles)."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
 
     a = NPC(x=10, y=10, name="A")
     b = NPC(x=20, y=20, name="B")
@@ -74,7 +75,7 @@ def test_mobile_conversation_drop_when_far():
 
 def test_urgent_tasks_override_mobile_conversations():
     """NPC stuck in urgent task (e.g. fleeing) does not switch to follow."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
 
     a = NPC(x=10, y=10, name="A")
     a.schedule.current_task = "fleeing_from_player"

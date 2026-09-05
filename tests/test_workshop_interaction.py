@@ -19,6 +19,7 @@ from unittest import mock
 
 import engine
 from simulation.world_model import WorkshopRuntimeState
+from tests.world_cache import fresh_world
 
 
 def _make_workshop(workshop_id="ws_test", **overrides):
@@ -43,7 +44,7 @@ class TestWorkshopReserveWithStaleInteractionId(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = engine.World(seed=770)
+        self.world = fresh_world(seed=770, pre_simulate=False)
         self.world.game_time = 1000
 
         # Give the World a bare-bones interaction_resolver.
@@ -97,7 +98,7 @@ class TestWorkshopClobberGuard(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = engine.World(seed=780)
+        self.world = fresh_world(seed=780, pre_simulate=False)
         self.world.game_time = 1000
         self.world.interaction_resolver = SimpleNamespace(active_interactions={})
 

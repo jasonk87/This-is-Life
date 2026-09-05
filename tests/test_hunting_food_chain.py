@@ -4,6 +4,10 @@ from engine import World, NPC, Building, Chunk, ChunkManager
 from simulation.world_model import Village
 from tile_types import Tile
 from data.tiles import TILE_DEFINITIONS
+from tests.world_cache import fresh_world
+import pytest
+
+pytestmark = pytest.mark.slow  # long simulation run; see pytest.ini
 
 
 class TestHuntingFoodChainFoundation(unittest.TestCase):
@@ -11,7 +15,7 @@ class TestHuntingFoodChainFoundation(unittest.TestCase):
         import engine
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=444)
+        self.world = fresh_world(seed=444, pre_simulate=False)
         self.world.npcs = []
         self.world.village_npcs = []
         self.world.player.x = 1

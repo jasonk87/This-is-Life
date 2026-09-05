@@ -122,10 +122,22 @@ BUILDING_ARCHETYPES = {
         BlueprintVariant("lumber_shed_base", 6, 6, ["workshop"], ["storage"], 2, ["logs"], "poor")
     ]),
     "carpenter_shop": BuildingArchetype("carpenter_shop", "industrial", (36, 64), ["workshop"], ["storage"], ["middle"], [
-        BlueprintVariant("carpenter_shop_base", 7, 7, ["workshop"], ["storage"], 3, ["lumber"], "middle")
+        # Yard 0 and a 6x5, like the clinic, the butcher and the lodge. At a 13x13
+        # claim it never placed in any village ever measured; a workshop on the
+        # village street does not need a garden either.
+        BlueprintVariant("carpenter_shop_base", 6, 5, ["workshop"], ["storage"], 0, ["lumber"], "middle")
     ]),
     "clinic": BuildingArchetype("clinic", "medical", (36, 64), ["clinic_room", "office"], ["storage"], ["middle"], [
-        BlueprintVariant("clinic_base", 7, 7, ["clinic_room", "office"], ["storage"], 2, [], "middle")
+        # Yard 0, like the common house and for the same reason. At 2 the clinic
+        # claimed 11x11 and could only fit by taking the one yarded slot a house
+        # needs - so a village had a clinic or somewhere to live, never both.
+        # 6x5 = 30 tiles, below the (36, 64) floor area the archetype declares,
+        # so the room generator lays out nothing and the clinic would come out an
+        # empty box. That is handled where it belongs instead: decoration falls
+        # through to the simple path when the room generator places nothing, so
+        # the clinic is furnished at 30 tiles and keeps the small footprint that
+        # is the reason every village has one.
+        BlueprintVariant("clinic_base", 6, 5, ["clinic_room", "office"], ["storage"], 0, [], "middle")
     ])
 }
 

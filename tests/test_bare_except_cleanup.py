@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import engine
 from engine import World
 import main
+from tests.world_cache import fresh_world
 
 
 class TestFamilyNpcLlmJsonFallback(unittest.TestCase):
@@ -20,7 +21,7 @@ class TestFamilyNpcLlmJsonFallback(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=2020)
+        self.world = fresh_world(seed=2020, pre_simulate=False)
         self.home_building = next(iter(self.world.buildings_by_id.values()))
 
     def test_malformed_json_response_falls_back_to_default_npc_data(self):

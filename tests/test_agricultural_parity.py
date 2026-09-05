@@ -5,6 +5,7 @@ import engine
 from engine import World, Tile
 from data.tiles import TILE_DEFINITIONS
 from data.decorations import DECORATION_ITEM_DEFINITIONS
+from tests.world_cache import fresh_world
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +17,7 @@ def disable_llm():
 
 def test_player_and_npc_farming_cycle():
     """Test full cycle: till soil -> plant seeds -> crop growth -> harvest -> mill -> bake."""
-    world = World(seed=101)
+    world = fresh_world(seed=101, pre_simulate=False)
     player = world.player
 
     # Place a plain tile next to player

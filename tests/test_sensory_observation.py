@@ -11,6 +11,7 @@ from presentation.sensory_observation import (
 from main import execute_smart_interaction, handle_look_mode_input
 from types import SimpleNamespace
 from tcod_compat import tcod
+from tests.world_cache import fresh_world
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +24,7 @@ def disable_llm():
 def test_observe_npc_epistemic_stranger_vs_known():
     """Verify observe_entity respects epistemic knowledge boundaries: strangers are described
     by physical appearance and attire, while acquaintances and kin reveal their names and relations."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     player = world.player
 
     # 1. Stranger NPC (not met yet)
@@ -76,7 +77,7 @@ def set_tile(world, x, y, name, passable=True, properties=None):
 
 def test_observe_tile_sensory_details():
     """Verify observe_tile describes terrain, crops, containers, and workstations."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
 
     # 1. Growing crop tile
     set_tile(world, 10, 10, "Growing Wheat", True, {"growth_progress": 50, "growth_needed": 100})
@@ -98,7 +99,7 @@ def test_observe_tile_sensory_details():
 
 def test_get_tile_sensory_summary():
     """Verify one-line summary for HUD status bar."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
 
     # Workstation
     set_tile(world, 5, 5, "Grinding Stone", True, {"workstation_type": "grinding_stone"})
@@ -108,7 +109,7 @@ def test_get_tile_sensory_summary():
 
 def test_smart_interaction_door_and_crops():
     """Verify execute_smart_interaction performs intuitive in-world action on facing tile."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     player = world.player
 
     # Set facing tile to closed door with valid opens_to reference
@@ -126,7 +127,7 @@ def test_smart_interaction_door_and_crops():
 
 def test_look_mode_navigation():
     """Verify look mode moves cursor and provides sensory summaries."""
-    world = World(seed=42)
+    world = fresh_world(seed=42, pre_simulate=False)
     player = world.player
     world.game_state = "LOOK_MODE"
     world.look_cursor_x = player.x

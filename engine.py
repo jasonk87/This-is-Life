@@ -116,6 +116,20 @@ from config import (
 DAILY_GOVERNANCE_TICK_OFFSET = 360
 
 # --- Village layout pressure ---
+# How often the world-environment sweep runs, in ticks. See
+# World._update_world_environment: it is a whole-world tile scan and the
+# timers it advances move over minutes and days, so ten times a second was
+# sixty times more often than anything could observe.
+WORLD_ENVIRONMENT_TICK_INTERVAL = 60
+
+# How often the world is re-scanned for tiles holding loot. The containers
+# found are ticked every tick; only discovery of new ones waits.
+LOOT_TILE_RESCAN_INTERVAL = 60
+
+# How many trees a woodcutter will test for a walkable route before giving up
+# and widening their search. Each test is one pathfinding call.
+MAX_TREE_REACHABILITY_CHECKS = 8
+
 # VILLAGE_LAYOUT_NOTE: this note used to say the chunk was simply too small and
 # that a real fix was a scale decision. That was wrong, and worth recording as
 # wrong. Most of the shortage was how the chunk was being spent, not how big it
@@ -136,81 +150,44 @@ DAILY_GOVERNANCE_TICK_OFFSET = 360
 # blacksmith 88% -> 100%, bakery 92% -> 100%, houses 96% -> 100%. Healer and
 # Scribe are professions a generated world can now contain.
 #
-# What is left really is a scale limit, and it is now bounded precisely. A 40x40
-# chunk holds thirteen buildings. Generation asks for fifteen, so two must miss,
-# and which two is decided by ordering. Measured over 56 villages, before and
-# after, on identical seeds:
+# Every building generation asks for now places in at least some village. The
+# carpenter shop was the last holdout and went the same way as the clinic: it
+# reserved a yard, claimed 13x13, and appeared in none of 56 villages. At a bare
+# 6x5 it lands in about a fifth of them.
 #
-#   before: 9.88 buildings per village. mill 41%, mine 36%, farm 16%, library
-#     16%, clinic 4%, carpenter 0%, and 0-1 homes.
-#   after: 13.00 buildings per village. Everything at 100% except the clinic and
-#     the carpenter shop, which place in none, and still 1 home.
+# Where it is asked matters more than whether it fits. Left in its old place in
+# the running order, the smaller footprint let it succeed by taking the mine's
+# ground - the mine went from every village to none, and the mine feeds the
+# blacksmith. Asked after the established trades instead, it takes only leftover
+# ground and costs about four points of housing (67% to 62% across four seeds).
 #
-# The two that miss are not arbitrary. Only a claim with a yard ever fails now -
-# order barely matters to the rest - and a village has room for exactly two of
-# them. The tavern takes one. The second is a straight choice between a house and
-# the clinic: asked before the houses the clinic places in all 56 villages and
-# housing drops to zero, asked after it places in none. Housing wins because it
-# is load-bearing - a villager without a home has no settling anchor and no
-# household, and the birth system needs somewhere to put a child - so this costs
-# the Healer, and the clinic goes from 4% to 0%. That is the one place this work
-# made something rarer, and it is a deliberate trade for +3.1 buildings a village.
+# Measured over 56 villages, the arrangement now: 14.21 buildings per village,
+# every established trade at 100%, the carpenter at 21%, the hunter's lodge at
+# about half, and 62% of villagers with a home. Seventeen professions are active
+# in a village within a week.
 #
-# The farm and the library are ordered just after the houses for the same reason
-# in reverse: they cost almost nothing (8x6, no yard) and were asked last, which
-# had dropped them to 2 and 4 villages in 56 once everything before them started
-# succeeding. The farm is the head of the food chain, so that mattered.
+# Everything else the chunk was thought too small for turned out to be a
+# question of what a building claims rather than how big the chunk is. The
+# clinic is the clearest case and was wrong here for a long time. This note used
+# to record it as a straight loss - "housing wins because it is load-bearing, so
+# this costs the Healer" - and treated that as a decision about village scale.
+# It was not. The clinic reserved a yard, which made its claim 11x11, which meant
+# it competed for the single yarded slot a house needs and lost every time.
+# Nothing about a clinic on a village street needs a garden. At yard 0 and a 6x5
+# footprint it fits on leftover ground alongside the butcher and the hunter's
+# lodge, and a village gets all of it.
 #
-# Buying back the clinic or the carpenter means a bigger village chunk, smaller
-# footprints, or villages that specialise and differ from one another. That is a
-# deliberate choice about scale, not something to guess at here.
+# Measured over 56 villages, against the arrangement before this:
 #
-# Housing was the other cost, and most of it has since been bought back. This
-# note used to record "one home per village" as acceptable. Measuring what it did
-# to the villagers showed it was not: only 12 of 76 had a home, and sampled
-# through the night those without one spent 63% of it walking towards the tavern
-# the scheduler sends them to, rather than sleeping. Two changes, neither of
-# which takes a slot from any trade:
+#   buildings per village          13.00 -> 14.00
+#   clinic                         0% -> 100%
+#   villagers with a home          66% -> 83%
 #
-#   * common_house is now generated. It was already defined in
-#     simulation/systems/architecture.py, with shared_sleeping rooms and a
-#     residential category, and nothing ever asked for one. Asked last, after
-#     every trade has its slot, and with its yard set to 0 so it claims its own
-#     6x6 and fits on leftover ground - at yard 2 it claimed 10x10 and could only
-#     fit by displacing the mine (100% of villages to 14%) and half the
-#     blacksmiths.
-#   * a villager whose only lodging is too far to reach now beds down where they
-#     are rather than walking all night (ROUGH_SLEEPING_LODGING_RANGE, in
-#     simulation/systems/scheduling.py).
-#
-# Measured over 56 villages: still 13 buildings and every trade at 100%, homes
-# per village 1.00 -> 2.20, villagers with a home 16% -> 77%. The rest sleep
-# rough, which beats pacing until dawn and is still not good; more houses remains
-# the real answer.
-#
-# butcher_shop was added on the same principle and audited out the same way: it
-# is mapped to Butcher in BUILDING_ROLE_RULES, the profession has a real work
-# step, and generation never asked for one, so no world could contain a Butcher.
-# It has no blueprint variant either, so it claims its bare 6x5. Asked after
-# every established trade and before the common houses, it places in every
-# village and displaces none of them.
-#
-# The two are in tension and the balance was measured rather than guessed. The
-# butcher takes ground the common houses would have used, and at six attempts
-# housing fell from 56% to 29% - one lost common house is ten beds. Ten attempts
-# restores it, because a common house only ever takes ground nothing else wanted.
-#
-# Still defined and never generated, from the same audit: fishing_hut
-# (Fisherman), hunting_lodge (Hunter), guard_post (Militia), plus barracks,
-# city_hall, large_house, lumber_shed, shack and storage_building which have no
-# profession attached. The three with professions need work zones this chunk
-# cannot supply on its own, so they are a bigger job than an extra
-# try_place_building call. The fishing hut was measured before being ruled out:
-# water exists in the world (a whole chunk of it) but none of the four generated
-# villages had a single water tile anywhere in its chunk, so a fishing hut would
-# be a workplace whose Fisherman could never fish. That needs villages to be
-# sited with regard to terrain, or water generated near them - a worldgen
-# question, not a placement one.
+# The cost is the hunter's lodge, which drops to about half of villages: the two
+# are zero-sum against each other and the clinic goes first, because it is the
+# only source of a Healer and a Healer is the only source of either remedy and of
+# the whole treatment flow. Lodge-first was measured too and is worse on both
+# counts - a clinic in 58% of villages and 73% housed.
 #
 # Separately: church and guard_tower have no try_place_building call at all, so
 # no amount of packing will produce them. They are building types the rest of
@@ -230,7 +207,12 @@ ELECTION_TERM_DAYS = DAYS_PER_SEASON
 # was never generated until now - so it takes the overflow that would otherwise
 # have no home at all and be sent to sleep in the tavern.
 HOUSE_OCCUPANCY = 3
-COMMON_HOUSE_OCCUPANCY = 10
+# Sixteen, not ten. A common house is a bunkhouse - "shared_sleeping" is its
+# whole room list - and beds cost no ground, unlike another building. Wiring up
+# the butcher and the hunter's lodge took the leftover ground two common houses
+# would have used, and housing fell from 77% of villagers to 41%; asking for more
+# common houses did not help because there was nowhere left to put them.
+COMMON_HOUSE_OCCUPANCY = 16
 
 # --- Village growth headroom ---
 # How many people a village may add beyond the upper bound generation itself
@@ -4170,6 +4152,14 @@ class World:
         Prefers tiles closer to the entity if multiple are valid.
         """
         potential_spots = []
+        # Callers ask this on behalf of nobody in particular - "where could
+        # anyone stand next to the counter?" - and get_standable_tile_in_building
+        # passes entity=None to mean exactly that. Reading entity.id then raises,
+        # and it only ever surfaced once a building's centre tile was furniture
+        # and the fallback to this helper was actually taken.
+        entity_id = getattr(entity, "id", None)
+        origin_x = getattr(entity, "x", target_x)
+        origin_y = getattr(entity, "y", target_y)
         # Check cardinal directions first
         for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
             adj_x, adj_y = target_x + dx, target_y + dy
@@ -4184,13 +4174,15 @@ class World:
             # Check for occupancy
             occupied = False
             for npc in self.all_npcs:
-                if npc.id != entity.id and npc.x == adj_x and npc.y == adj_y and not npc.physical.is_dead:
+                if npc is None:
+                    continue
+                if npc.id != entity_id and npc.x == adj_x and npc.y == adj_y and not npc.physical.is_dead:
                     occupied = True
                     break
             if occupied:
                 continue
 
-            dist_sq = (entity.x - adj_x)**2 + (entity.y - adj_y)**2
+            dist_sq = (origin_x - adj_x)**2 + (origin_y - adj_y)**2
             potential_spots.append({'x': adj_x, 'y': adj_y, 'dist_sq': dist_sq})
 
         if not potential_spots:
@@ -4792,7 +4784,18 @@ class World:
                                              # made it materially worse since a working, untreated NPC also
                                              # never isolates and keeps spreading contagion at their job.
                                              "seeking_healer", "waiting_for_treatment", "resting_in_bed",
-                                             "treating_patient"]:
+                                             "treating_patient",
+                                             # The healer's own supply loop belongs here too, and was the
+                                             # one medical task left out. medical.py sends them out for
+                                             # herbs; the work-hours check overwrote that with
+                                             # GOING_TO_WORK a few ticks later; medical.py then re-picked
+                                             # a *fresh random* forage destination, so the walk restarted
+                                             # from scratch every time and they arrived nowhere. Traced on
+                                             # a healer, that oscillation ran for the whole observation
+                                             # window with the herb count never moving - and herbs are the
+                                             # only input to both remedies, so the treatment economy has
+                                             # been fed entirely by the clinic's starting stock.
+                                             "foraging_for_herbs", "crafting_medical_supplies"]:
 
             update_npc_environmental_tasks_system(self, npc)
 
@@ -4843,6 +4846,25 @@ class World:
         npc.schedule.game_time_last_updated = self.game_time
         return True
 
+    def _can_reach_to_work(self, npc, target: tuple[int, int]) -> bool:
+        """Whether this worker could get next to `target` to work on it."""
+        adjacent = self._find_best_adjacent_tile(target[0], target[1], npc)
+        if not adjacent or adjacent == (None, None) or adjacent[0] is None:
+            return False
+        if (npc.x, npc.y) == tuple(adjacent):
+            return True
+        return bool(self.calculate_path(npc.x, npc.y, adjacent[0], adjacent[1]))
+
+    def _has_free_neighbour(self, x: int, y: int) -> bool:
+        """Whether anything could stand beside this tile to work it."""
+        for neighbour_x, neighbour_y in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if not (0 <= neighbour_x < WORLD_WIDTH and 0 <= neighbour_y < WORLD_HEIGHT):
+                continue
+            tile = self.get_tile_at(neighbour_x, neighbour_y)
+            if tile is not None and getattr(tile, "passable", False):
+                return True
+        return False
+
     def _find_nearest_tree_for_chopping(self, npc: NPC, work_building: Building) -> tuple[int, int] | None:
         """
         Finds the nearest choppable tree for the NPC, using the NPC's dynamic search radius.
@@ -4853,6 +4875,7 @@ class World:
         center_x, center_y = work_building.global_center_x, work_building.global_center_y
         closest_tree_coords = None
         min_dist_sq = float('inf')
+        reachability_checks = 0
 
         # Iterate in expanding square rings around the building's center
         for r in range(search_radius + 1):
@@ -4880,6 +4903,21 @@ class World:
 
                 tile = self.get_tile_at(x, y)
                 if isinstance(tile, Tree) and tile.is_choppable:
+                    # A tree you cannot stand next to is not a tree you can chop.
+                    #
+                    # A tree tile is impassable - you work it from an adjacent
+                    # square - and this used to return the nearest one without
+                    # asking whether there was anywhere to stand. In woodland
+                    # the nearest tree is usually hemmed in by other trees, so
+                    # the work system pathed at an unreachable tile, gave up,
+                    # waited twenty ticks and chose the very same tree again.
+                    # Traced on a woodcutter: "path_unreachable chop_trees
+                    # (480, 357)" repeating for their entire shift, two completed
+                    # steps in three thousand ticks, and the village's timber
+                    # supply coming from nowhere.
+                    if not self._has_free_neighbour(x, y):
+                        continue
+
                     # Check if this tree is targeted by another NPC for chopping
                     is_targeted = False
                     for other_npc in self.village_npcs: # Check against all village NPCs
@@ -4897,8 +4935,18 @@ class World:
                         current_ring_closest_tree = (x, y)
 
             if current_ring_closest_tree:
-                # If we found a tree in this ring, it's the closest overall because we search radially.
-                return current_ring_closest_tree
+                # Closest in this ring, and the rings grow outward, so it is the
+                # closest overall - but only if the woodcutter can actually walk
+                # to it. A free neighbouring square is not the same as a
+                # reachable one: the tree that stalled a whole shift had a
+                # passable tile beside it, in a pocket of woodland with no way
+                # in. Confirm a route before committing, and keep looking
+                # outward if there is none.
+                if self._can_reach_to_work(npc, current_ring_closest_tree):
+                    return current_ring_closest_tree
+                reachability_checks += 1
+                if reachability_checks >= MAX_TREE_REACHABILITY_CHECKS:
+                    break
 
         npc.woodcutter_search_radius += 5
         return None
@@ -8400,6 +8448,10 @@ class World:
                 actions.append("Sleep")
             elif interaction_hint == "forge":
                 actions.append("Forge")
+            elif interaction_hint == "light_fire":
+                actions.append("Light Fire")
+            elif entity_data.properties.get("extinguishes_to"):
+                actions.append("Extinguish Fire")
             elif interaction_hint == "smoke" or entity_data.properties.get("workstation_type") == "smoking_rack":
                 # player_attempt_smoke and the menu's "Smoke Meat" entry both
                 # existed; nothing ever offered the action, so a smoking rack
@@ -8779,12 +8831,121 @@ class World:
             return center
         return entrance_candidate["inside"]
 
+    def _repair_sealed_work_zones(self, building: Building) -> int:
+        """Move a work zone that has ended up inside a wall onto open floor.
+
+        Work zone coordinates are written as fixed offsets from a building's
+        origin - "the anvil is at +5,+4" - while the footprint comes from a
+        blueprint that can be a different size. When the two disagree the zone
+        lands in masonry, the worker can never stand there, and the trade simply
+        stops: no error, no message, a smith who never smiths.
+
+        Only zones wholly inside their own building are touched, so a farm's
+        field patches and any other deliberately outdoor zone are left alone.
+        """
+        repaired = 0
+        occupied = self._building_work_zone_coords(building)
+        for tag, coordinates in list((getattr(building, "work_zone_tiles", None) or {}).items()):
+            if not coordinates:
+                continue
+            if not all(building.contains_global_coords(x, y) for x, y in coordinates):
+                continue
+            if any(
+                (tile := self.get_tile_at(x, y)) is not None and tile.passable
+                for x, y in coordinates
+            ):
+                continue
+
+            anchor_x, anchor_y = coordinates[0]
+            replacement = None
+            for radius in range(1, max(building.width, building.height) + 1):
+                for dy in range(-radius, radius + 1):
+                    for dx in range(-radius, radius + 1):
+                        if max(abs(dx), abs(dy)) != radius:
+                            continue
+                        spot = (anchor_x + dx, anchor_y + dy)
+                        if spot in occupied or not building.contains_global_coords(*spot):
+                            continue
+                        tile = self.get_tile_at(*spot)
+                        if tile is None or not tile.passable or "Door" in tile.name:
+                            continue
+                        replacement = spot
+                        break
+                    if replacement:
+                        break
+                if replacement:
+                    break
+
+            if replacement is None:
+                continue
+            building.work_zone_tiles[tag] = [replacement]
+            occupied.discard((anchor_x, anchor_y))
+            occupied.add(replacement)
+            repaired += 1
+        return repaired
+
+    def _furnish_workplace_fixtures(self, building: Building) -> int:
+        """Put the fixture a workplace is named for beside the spot it is worked at.
+
+        A blacksmith declares where its forge and its anvil are - they are work
+        zones, and the sub-task system sends smiths to them - and nothing ever
+        drew either one. Measured on one generated world, 15 of the 31 decoration
+        types appeared nowhere in it; some of those are simply rare rather than
+        unreachable, but the forge and the anvil had no generation path at all -
+        they exist as things a player can construct and nothing else. A forge is
+        a strong thing for a blacksmith to be missing.
+
+        Placed *next to* the zone rather than on it. Decorations are impassable
+        and a work zone is where the worker stands, so putting the forge on the
+        forge tile would shut the smith out of their own forge.
+        """
+        placed = 0
+        for tag, coordinates in list(getattr(building, "work_zone_tiles", {}).items()):
+            if tag not in DECORATION_ITEM_DEFINITIONS or not coordinates:
+                continue
+            zone_x, zone_y = coordinates[0]
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                spot_x, spot_y = zone_x + dx, zone_y + dy
+                if not building.contains_global_coords(spot_x, spot_y):
+                    continue
+                tile = self.get_tile_at(spot_x, spot_y)
+                if tile is None or not tile.passable:
+                    continue
+                if "Door" in tile.name or "Wall" in tile.name:
+                    continue
+                # Never bury another work zone under a fixture.
+                if any((spot_x, spot_y) in (other or []) for other in building.work_zone_tiles.values()):
+                    continue
+                if self._place_building_decoration_tile(building, tag, spot_x, spot_y):
+                    placed += 1
+                break
+        return placed
+
+    def _building_work_zone_coords(self, building: Building) -> set:
+        """Every tile this building expects a worker to be able to stand on."""
+        occupied = set()
+        for coordinates in (getattr(building, "work_zone_tiles", None) or {}).values():
+            for coordinate in (coordinates or []):
+                occupied.add(tuple(coordinate))
+        return occupied
+
     def _place_building_decoration_tile(self, building: Building, item_type: str, world_x: int, world_y: int) -> bool:
         decoration_tile_def = DECORATION_ITEM_DEFINITIONS.get(item_type)
         if decoration_tile_def is None:
             return False
         if not building.contains_global_coords(world_x, world_y):
             return False
+
+        # Furniture may not be dropped on a work zone. The decorators filled
+        # rooms without consulting them, and a work zone is the tile a worker
+        # walks to and stands on: measured on a generated world, every bakery
+        # oven, every forge, every anvil, every clinic bed and every alchemy
+        # station in the world was under a table, a workbench or a chest, with
+        # no reachable tile left - 20 of 102 zones sealed, and the professions
+        # that depend on them unable to reach their own stations.
+        if not decoration_tile_def.get("passable", False):
+            if (world_x, world_y) in self._building_work_zone_coords(building):
+                return False
 
         target_chunk_x = world_x // CHUNK_SIZE
         target_chunk_y = world_y // CHUNK_SIZE
@@ -10378,10 +10539,20 @@ class World:
 
         if killer_id == self.player.id:
             for quest_id, quest_data in self.player.knowledge.active_quests.items():
-                if quest_data.get("type") == "kill" and "target_faction_id" in quest_data:
-                    if getattr(dead_npc, "faction_id", getattr(dead_npc, "enemy_faction_id", None)) == quest_data["target_faction_id"]:
-                        quest_data["progress"] += 1
-                        self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})", category="quest")
+                if quest_data.get("type") != "kill":
+                    continue
+                # Two ways a kill can count. Faction was the only one checked,
+                # which is what the mercenary contract uses; the scripted wolf
+                # hunt identifies its quarry by name and so could never make
+                # progress however many dire wolves the player killed.
+                counts = False
+                if "target_faction_id" in quest_data:
+                    counts = getattr(dead_npc, "faction_id", getattr(dead_npc, "enemy_faction_id", None)) == quest_data["target_faction_id"]
+                elif quest_data.get("target_npc_name_prefix"):
+                    counts = str(getattr(dead_npc, "name", "")).startswith(quest_data["target_npc_name_prefix"])
+                if counts:
+                    quest_data["progress"] += 1
+                    self.add_message_to_chat_log(f"Quest Progress: Defeated target ({quest_data['progress']}/{quest_data['target_count']})", category="quest")
 
         if not isinstance(dead_npc, Animal):
             self._fail_quests_orphaned_by_death(dead_npc)
@@ -11012,6 +11183,37 @@ class World:
                     self.complete_quest(quest_id, npc_target)
                     return # End dialogue turn
 
+        # Scripted quest acceptance. Kept separate from the dynamic help-quest
+        # block below because the two carry their details differently - a help
+        # quest is an object on the NPC, a scripted one is an entry in
+        # QUEST_DEFINITIONS that only the offer knew about.
+        offered_quest_id = getattr(npc_target, "offered_quest_id", None)
+        if offered_quest_id and offered_quest_id in QUEST_DEFINITIONS:
+            quest_def = QUEST_DEFINITIONS[offered_quest_id]
+            if "accept" in player_input_text.lower() or "yes" in player_input_text.lower():
+                self.player.knowledge.active_quests[offered_quest_id] = {
+                    "title": quest_def.get("title", "Task"),
+                    "description": quest_def.get("description", ""),
+                    "type": quest_def.get("type", "fetch"),
+                    "quest_giver_id": npc_target.id,
+                    "item_to_fetch_key": quest_def.get("item_to_fetch_key"),
+                    "item_fetch_count": int(quest_def.get("item_fetch_count", 0) or 0),
+                    "target_npc_name_prefix": quest_def.get("target_npc_name_prefix"),
+                    "target_count": int(quest_def.get("target_count", 0) or 0),
+                    "progress": 0,
+                }
+                response = quest_def.get("dialogue_accept_npc_response", "Good. Come back when it's done.")
+                self.chat_ui_history.append((npc_display_name, response))
+                self.add_message_to_chat_log(
+                    f"Quest accepted: {quest_def.get('title', 'Task')}", category="quest"
+                )
+                npc_target.offered_quest_id = None
+                return
+            if "decline" in player_input_text.lower() or "no" in player_input_text.lower():
+                self.chat_ui_history.append((npc_display_name, "Suit yourself."))
+                npc_target.offered_quest_id = None
+                return
+
         # Quest acceptance/rejection
         if hasattr(npc_target, 'active_quest') and npc_target.active_quest:
             quest = npc_target.active_quest
@@ -11322,16 +11524,31 @@ class World:
             }
             self.chat_ui_history.append(("System", "The Foreman has offered you a job. Type 'yes' or 'accept' to take it."))
 
-        # --- Quest Offering Logic (Example: Sheriff offers "kill_wolves_01") ---
-        # This is a simplified trigger; more robust would be keyword matching or LLM intent.
-        if entity_has_profession(npc_target, "Sheriff") and "kill_wolves_01" not in self.player.knowledge.active_quests and \
-           "kill_wolves_01" not in self.player.knowledge.completed_quests:
-
-            quest_def = QUEST_DEFINITIONS.get("kill_wolves_01")
-            if quest_def:
-                offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
-                self.chat_ui_history.append((npc_display_name, offer_dialogue))
-                self.add_message_to_chat_log(f"Quest Offered: {quest_def['title']}", category="quest")
+        # --- Quest offering ---
+        # Driven by the definitions rather than one hard-coded pairing. This used
+        # to name kill_wolves_01 and the Sheriff in the code, so the other
+        # scripted quest in the game - a Healer asking for herbs - was never
+        # offered by anything. It had a giver role, dialogue and rewards and no
+        # code path to reach them. It went unnoticed because no village generated
+        # a clinic, so there was no Healer to notice it with.
+        for quest_id, quest_def in QUEST_DEFINITIONS.items():
+            giver_role = quest_def.get("quest_giver_id_or_role")
+            if not giver_role or not entity_has_profession(npc_target, giver_role):
+                continue
+            if quest_id in self.player.knowledge.active_quests:
+                continue
+            if quest_id in self.player.knowledge.completed_quests:
+                continue
+            offer_dialogue = quest_def.get("dialogue_offer", "I might have a task for you...")
+            self.chat_ui_history.append((npc_display_name, offer_dialogue))
+            self.add_message_to_chat_log(f"Quest Offered: {quest_def['title']}", category="quest")
+            # Remembered so the player can say yes. Offering used to be the whole
+            # of it: the dialogue appeared and nothing recorded that it had, so
+            # "accept" matched only the dynamic help-quest path and a scripted
+            # quest could never be taken. Neither of the game's two written
+            # quests had ever been playable.
+            npc_target.offered_quest_id = quest_id
+            break  # one offer per conversation
 
         if len(self.chat_ui_history) > self.chat_ui_max_history:
             self.chat_ui_history = self.chat_ui_history[-self.chat_ui_max_history:]
@@ -12403,7 +12620,26 @@ class World:
                                     self._change_map_tile((world_x, world_y), TILE_DEFINITIONS["plains"])
 
     def _update_world_environment(self):
-        """Handles time-based environmental changes like tree regrowth."""
+        """Handles time-based environmental changes like tree regrowth.
+
+        Gated, because this walks every tile of every generated chunk - about
+        19,200 of them - and it used to do that on every tick, ten times a
+        second, to decrement three timers that move over minutes and days.
+        Profiled over 120 ticks it was the second most expensive thing in the
+        loop and the source of most of the ten million hasattr calls in it.
+
+        The timers all move by one per tick, so running once per
+        WORLD_ENVIRONMENT_TICK_INTERVAL and advancing by that many keeps the
+        same real durations - a stump regrows and wheat ripens at the moment it
+        always did, to within one interval - for a sixtieth of the work.
+        """
+        steps = self.periods_elapsed(
+            "world_environment", WORLD_ENVIRONMENT_TICK_INTERVAL, max_catch_up=240
+        )
+        if steps <= 0:
+            return
+        advance = steps * WORLD_ENVIRONMENT_TICK_INTERVAL
+
         for y_chunk in range(self.chunk_height):
             for x_chunk in range(self.chunk_width):
                 chunk = self.chunks[y_chunk][x_chunk]
@@ -12416,7 +12652,7 @@ class World:
 
                         # Tree regrowth from stump
                         if hasattr(tile, 'regrowth_timer') and tile.regrowth_timer > 0:
-                            tile.regrowth_timer -= 1
+                            tile.regrowth_timer -= advance
                             if tile.regrowth_timer <= 0:
                                 if hasattr(tile, 'original_tree_type') and tile.original_tree_type:
                                     tree_type = tile.original_tree_type
@@ -12444,7 +12680,7 @@ class World:
 
                         # Sapling growth into tree
                         elif tile.name == "Sapling" and "growth_timer" in tile.properties:
-                            tile.properties["growth_timer"] -= 1
+                            tile.properties["growth_timer"] -= advance
                             if tile.properties["growth_timer"] <= 0:
                                 # Determine what kind of tree it becomes
                                 tree_type = tile.properties.get("evolves_to", "oak") # Default to oak
@@ -12466,7 +12702,7 @@ class World:
                         # Crop growth
                         elif tile.name == "Growing Wheat":
                             # Increment growth progress over time
-                            tile.properties["growth_progress"] += 1
+                            tile.properties["growth_progress"] += advance
                             if tile.properties["growth_progress"] >= tile.properties["growth_needed"]:
                                 evolves_to_key = tile.properties.get("evolves_to")
                                 if evolves_to_key:
@@ -14494,7 +14730,9 @@ class World:
                 building.x, building.y,
                 building.width, building.height
             )
+            placed_any = False
             for furn_x, furn_y, furn_role in generated.placed_furniture:
+                placed_any = True
                 item_type = furn_role
                 if item_type == "bed": item_type = "bed_simple"
                 elif item_type == "wooden_bed": item_type = "wooden_bed"
@@ -14506,7 +14744,15 @@ class World:
                 elif item_type == "desk": item_type = "wooden_table"
                 elif item_type == "shelf": item_type = "wall_shelf"
                 elif item_type == "bookshelf": item_type = "bookshelf"
-                elif item_type == "fireplace": item_type = "fire_pit_simple"
+                # A hearth, not an unlit pit in the middle of the floor. The
+                # room generator already places this role against a wall, which
+                # is what a fireplace is. It matters beyond looks: heat_source is
+                # read by the temperature system, by NPC warmth-seeking and by
+                # the sensory description, and a generated world contained four
+                # heat sources in total - all of them forges - so a villager's
+                # nearest source of warmth was None and none of that code could
+                # ever do anything.
+                elif item_type == "fireplace": item_type = "fireplace"
                 elif item_type == "workbench": item_type = "workbench"
                 elif item_type == "stone_anvil": item_type = "stone_anvil"
 
@@ -14532,8 +14778,18 @@ class World:
                     })
 
             self._ensure_building_entrance_integrity(building)
-            building.interior_decorated = True
-            return
+            if placed_any:
+                self._repair_sealed_work_zones(building)
+                self._furnish_workplace_fixtures(building)
+                building.interior_decorated = True
+                return
+            # Nothing fitted. The room-based generator lays rooms out inside the
+            # walls and gives up when there is not space for them, and it used to
+            # return regardless - so an archetype building smaller than its rooms
+            # was left an empty shell. A 6x5 clinic has a 4x3 interior and came
+            # out with no bed and no bench, while the butcher and the hunter's
+            # lodge, which have no archetype at all, were furnished by the simple
+            # path below. Fall through to it rather than leave the room bare.
 
         decoration_data = {'decorations': []}
         # if building.building_type == 'house':
@@ -14629,6 +14885,8 @@ class World:
             print(f"Error during placeholder decoration: {e}")
 
         self._ensure_building_entrance_integrity(building)
+        self._repair_sealed_work_zones(building)
+        self._furnish_workplace_fixtures(building)
         building.interior_decorated = True
 
     def _spawn_traveling_merchants(self):
@@ -15814,15 +16072,6 @@ class World:
         # Library
         try_place_building("library", "civic_workplace", 8, 6, max_workers=2)
 
-        # Clinic
-        clinic = try_place_building("clinic", "civic_workplace", 7, 6, road_x - 10, road_y - 8, max_workers=2)
-        if clinic:
-            clinic.building_inventory["money"] = random.randint(80, 200)
-            clinic.building_inventory["healing_salve"] = random.randint(5, 15)
-            clinic.building_inventory["medicinal_herb"] = random.randint(8, 20)
-            clinic.work_zone_tiles["medical_bed"] = [(clinic.global_origin_x + 1, clinic.global_origin_y + 1)]
-            clinic.work_zone_tiles["alchemy_station"] = [(clinic.global_origin_x + 5, clinic.global_origin_y + 1)]
-
         # Jail
         jail = try_place_building("jail", "civic", 7, 5, road_x + 2, road_y - 2, max_workers=2)
 
@@ -15853,14 +16102,6 @@ class World:
             lumber_mill.work_zone_tiles["splitting_area"] = lumber_mill.work_zone_tiles["log_pile_area"]
             lumber_mill.work_zone_tiles["manager_spot"] = [(lumber_mill.global_origin_x + lumber_mill.width - 2, lumber_mill.global_origin_y + 2)]
 
-        # Carpenter
-        carpenter = try_place_building("carpenter_shop", "industrial_workplace", 7, 6, max_workers=2)
-        if carpenter:
-            carpenter.building_inventory["money"] = random.randint(60, 150)
-            carpenter.building_inventory["wooden_plank"] = random.randint(15, 30)
-            carpenter.work_zone_tiles["workbench"] = [(carpenter.global_origin_x + 2, carpenter.global_origin_y + 2)]
-            carpenter.work_zone_tiles["storage_area"] = [(carpenter.global_origin_x + carpenter.width - 2, carpenter.global_origin_y + carpenter.height - 2)]
-
         # Windmill
         windmill = try_place_building("mill", "industrial_workplace", 7, 7, CHUNK_SIZE - 8, CHUNK_SIZE - 8, max_workers=2)
         if windmill:
@@ -15883,6 +16124,8 @@ class World:
             mine.building_inventory["money"] = random.randint(80, 200)
             mine.building_inventory["stone_chunk"] = random.randint(15, 35)
             mine.building_inventory["iron_ore"] = random.randint(8, 20)
+            # Coal to sell to the smiths from day one; the miners dig more.
+            mine.building_inventory["coal"] = random.randint(10, 20)
             mine.building_inventory["stone_pickaxe"] = random.randint(2, 5)
             mine.work_zone_tiles["mine_face"] = [(mine.global_origin_x + i, mine.global_origin_y + 1) for i in range(1, 7)]
             mine.work_zone_tiles["storage_area"] = [(mine.global_origin_x + 1, mine.global_origin_y + 4)]
@@ -15905,6 +16148,36 @@ class World:
         # chain; asked after every trade has its slot they take what is left,
         # and what is left is enough because a 10x10 claim fits where the 13x13
         # of another house would not.
+        # The clinic, first among the buildings that live on leftover ground.
+        #
+        # It reserves no yard and is a 6x5 like the butcher and the lodge, both
+        # changed from an 11x11 claim that could only fit by taking the single
+        # yarded slot a house needs - so a village had a clinic or somewhere to
+        # live, never both, and never had one.
+        #
+        # It goes first because the clinic and the hunter's lodge are zero-sum
+        # against each other and this way round is better on two counts,
+        # measured: clinic first gives a clinic in every village, a lodge in
+        # about half, and 83% of villagers housed; lodge first gives a lodge
+        # everywhere, a clinic in 58%, and 73% housed. The clinic is also worth
+        # more when it lands - it is the only source of a Healer, and a Healer is
+        # the only source of either remedy and of the entire treatment flow.
+        # which cost the Healer and with them both remedies and the whole
+        # treatment flow.
+        clinic = try_place_building("clinic", "civic_workplace", 7, 6, road_x - 10, road_y - 8, max_workers=2)
+        if clinic:
+            clinic.building_inventory["money"] = random.randint(80, 200)
+            clinic.building_inventory["healing_salve"] = random.randint(5, 15)
+            clinic.building_inventory["medicinal_herb"] = random.randint(8, 20)
+            clinic.work_zone_tiles["medical_bed"] = [(clinic.global_origin_x + 1, clinic.global_origin_y + 1)]
+            # Derived from the footprint rather than written as +5. The clinic
+            # was 7x7 when this was written and is 6x5 now, so +5 had become the
+            # east wall and every alchemy station in the world was inside it.
+            clinic.work_zone_tiles["alchemy_station"] = [
+                (clinic.global_origin_x + max(2, clinic.width - 2), clinic.global_origin_y + 1)
+            ]
+
+
         # Butcher: a trade the game defines and no world contained. butcher_shop
         # is mapped to Butcher in BUILDING_ROLE_RULES and the profession has a
         # real work step needing a workbench, but generation never asked for one,
@@ -15942,6 +16215,24 @@ class World:
                 (lodge.global_origin_x + lodge.width - 2, lodge.global_origin_y + lodge.height - 2)
             ]
 
+        # The carpenter's shop, last of the trades that live on leftover ground.
+        #
+        # It reserved a yard until now, so its claim was 13x13 and it placed in
+        # none of 56 villages - Carpenter was a profession no world contained. At
+        # a bare 6x5 it fits where the clinic and the butcher do.
+        #
+        # It is asked here rather than in its old place in the running order,
+        # which is where it used to sit. Left there, the smaller footprint let it
+        # succeed at the expense of the mine, which fell from every village to
+        # none - and the mine feeds the blacksmith. A trade that only places by
+        # taking the ore chain is not worth having.
+        carpenter = try_place_building("carpenter_shop", "industrial_workplace", 6, 5, max_workers=2)
+        if carpenter:
+            carpenter.building_inventory["money"] = random.randint(60, 150)
+            carpenter.building_inventory["wooden_plank"] = random.randint(15, 30)
+            carpenter.work_zone_tiles["workbench"] = [(carpenter.global_origin_x + 2, carpenter.global_origin_y + 2)]
+            carpenter.work_zone_tiles["storage_area"] = [(carpenter.global_origin_x + carpenter.width - 2, carpenter.global_origin_y + carpenter.height - 2)]
+
         # Common houses last: shared lodging, and the only thing in this chunk that
         # scales with the population rather than with the number of families.
         #
@@ -15954,7 +16245,7 @@ class World:
         # residential category, and generation simply never asked for one. It
         # reserves 10x10 rather than 13x13, so it fits where another house would
         # not.
-        for _ in range(10):
+        for _ in range(14):
             common_house = try_place_building("common_house", "residential", 6, 6)
             if common_house:
                 common_house.building_inventory["bread"] = random.randint(2, 6)
@@ -16031,6 +16322,16 @@ class World:
             self._draw_building(tiles, building, wall_type, floor_type)
             if not building.interior_decorated:
                 self.decorate_building_interior(building, chunk)
+
+        # Doors are cut while a building is drawn, and its neighbours are drawn
+        # afterwards. A building placed flush against an older one walls up the
+        # older one's doorway - measured, every bakery in every seed opened
+        # straight into the butcher shop's outer wall, so no baker could ever
+        # get inside and the bread chain was dead in all four villages. Now that
+        # every wall on the street exists, ask each building for an entrance
+        # again; one that still has a usable door keeps it.
+        for building in chunk.village.buildings:
+            self._ensure_building_entrance_integrity(building)
 
         # Render Well (if exists)
         if "well" in chunk.village.interaction_points:
@@ -16604,17 +16905,48 @@ class World:
             if hasattr(inventory, "process_tick"):
                 inventory.process_tick()
 
-        for row in self.chunks:
-            for chunk in row:
-                if not chunk or not chunk.tiles:
-                    continue
-                for tile_row in chunk.tiles:
-                    for tile in tile_row:
-                        if not tile or not getattr(tile, "properties", None):
-                            continue
-                        loot_inventory = tile.properties.get("loot")
-                        if hasattr(loot_inventory, "process_tick"):
-                            loot_inventory.process_tick()
+        # Loot lying in the world - a chest's contents, a corpse's pockets -
+        # spoils like anything else, but finding those tiles used to mean
+        # walking every tile of every generated chunk on every tick. That is
+        # about 19,200 tiles ten times a second to reach a handful of
+        # containers, and profiled after the environment sweep was fixed it was
+        # the single most expensive thing left in the loop, roughly half of it.
+        #
+        # The containers are re-discovered periodically and ticked every tick
+        # from that list, so spoilage rates are unchanged for every container
+        # the index knows about. The only thing that changes is how soon a
+        # newly created one is picked up - at worst one interval, during which
+        # a fresh corpse's pockets do not yet rot. Nothing observable waits on
+        # that.
+        for coords in self._loot_bearing_tiles():
+            tile = self.get_tile_at(*coords)
+            properties = getattr(tile, "properties", None) if tile else None
+            loot_inventory = properties.get("loot") if properties else None
+            if hasattr(loot_inventory, "process_tick"):
+                loot_inventory.process_tick()
+
+    def _loot_bearing_tiles(self):
+        """Coordinates of tiles holding a loot inventory, refreshed periodically."""
+        index = getattr(self, "_loot_tile_index", None)
+        if index is None or self.periods_elapsed(
+            "loot_tile_index", LOOT_TILE_RESCAN_INTERVAL, max_catch_up=1
+        ):
+            index = []
+            for chunk_y, row in enumerate(self.chunks):
+                for chunk_x, chunk in enumerate(row):
+                    if not chunk or not chunk.tiles:
+                        continue
+                    for local_y, tile_row in enumerate(chunk.tiles):
+                        for local_x, tile in enumerate(tile_row):
+                            if not tile or not getattr(tile, "properties", None):
+                                continue
+                            if hasattr(tile.properties.get("loot"), "process_tick"):
+                                index.append((
+                                    chunk_x * CHUNK_SIZE + local_x,
+                                    chunk_y * CHUNK_SIZE + local_y,
+                                ))
+            self._loot_tile_index = index
+        return index
 
     def _update_spatial_partitioning(self):
         """Updates the entity chunk map for quick spatial queries."""
@@ -20289,6 +20621,43 @@ class World:
             self.add_message_to_chat_log(f"You cook a {product_name}.")
         else:
              self.add_message_to_chat_log("Something went wrong with cooking.")
+
+    def player_attempt_light_fire(self, x: int, y: int):
+        """Light a laid fire.
+
+        The fire pit carries becomes_lit and the description "Provides warmth
+        and light", and nothing read either - so a player could build a fire pit
+        and then stand next to a cold ring of stones forever. Lighting it is what
+        turns it into a heat source, a light source and, because the lit tile
+        carries workstation_type "fire", the only place any of the four cooking
+        recipes can be used.
+        """
+        target_tile = self.get_tile_at(x, y)
+        lit_key = target_tile.properties.get("becomes_lit") if target_tile else None
+        lit_def = DECORATION_ITEM_DEFINITIONS.get(lit_key) if lit_key else None
+        if lit_def is None:
+            self.add_message_to_chat_log("There is nothing here to light.")
+            return
+
+        if not self.player.has_item("raw_log", 1):
+            self.add_message_to_chat_log("You need wood to get a fire going.")
+            return
+
+        self.player.remove_item("raw_log", 1)
+        self._change_map_tile((x, y), lit_def)
+        self.add_message_to_chat_log("The kindling catches and the fire takes.")
+
+    def player_attempt_extinguish_fire(self, x: int, y: int):
+        """Put a fire out. The lit tile names what it goes back to."""
+        target_tile = self.get_tile_at(x, y)
+        cold_key = target_tile.properties.get("extinguishes_to") if target_tile else None
+        cold_def = DECORATION_ITEM_DEFINITIONS.get(cold_key) if cold_key else None
+        if cold_def is None:
+            self.add_message_to_chat_log("There is no fire here to put out.")
+            return
+
+        self._change_map_tile((x, y), cold_def)
+        self.add_message_to_chat_log("You smother the fire. The embers die down.")
 
     def player_attempt_smoke(self, x: int, y: int):
         """Handles the player's attempt to smoke meat at a smoking rack."""

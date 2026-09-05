@@ -3,6 +3,7 @@ from unittest import mock
 
 import engine
 from engine import NPC, Building, MemoryEvent, World
+from tests.world_cache import fresh_world
 
 
 class TestScoreCandidateForVoter(unittest.TestCase):
@@ -13,7 +14,7 @@ class TestScoreCandidateForVoter(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=201)
+        self.world = fresh_world(seed=201, pre_simulate=False)
         self.jitter_patcher = mock.patch("engine.random.uniform", return_value=0.0)
         self.jitter_patcher.start()
         self.addCleanup(self.jitter_patcher.stop)
@@ -163,7 +164,7 @@ class TestEvaluateElectionsIndividualVoting(unittest.TestCase):
     def setUp(self):
         engine.ENABLE_OLLAMA_CONNECTION = False
         engine.ENABLE_LLM_CONNECTION = False
-        self.world = World(seed=211)
+        self.world = fresh_world(seed=211, pre_simulate=False)
         mock.patch("engine.random.uniform", return_value=0.0).start()
         self.addCleanup(mock.patch.stopall)
 

@@ -327,6 +327,7 @@ def create_completed_work_sub_task_commands():
         "butcher_carcass": ButcherCarcassSubTaskCommand(),
         "mine_ore": AddItemToNpcInventorySubTaskCommand("iron_ore", 1),
         "fetch_ore": PurchaseFromSupplierSubTaskCommand("_find_nearest_mine", "iron_ore", 5),
+        "fetch_coal": PurchaseFromSupplierSubTaskCommand("_find_nearest_mine", "coal", 3, deposit_to_work_building=True),
         "fetch_wood": FetchWoodSubTaskCommand(),
         "craft_furniture": WorkBuildingConversionSubTaskCommand("wooden_plank", 2, "wooden_chair", 1),
         "fetch_wheat": PurchaseFromSupplierSubTaskCommand("_find_nearest_farm", "wheat", 5, deposit_to_work_building=True, log_message="{npc} the Miller bought {quantity} wheat."),

@@ -199,60 +199,62 @@ def claim_from_record(record: Any) -> Claim:
     )
 
 
-# What a belief about somebody is worth to their standing, by how it was come
-# by. This is the evidence hierarchy: witnessed and official at the top, plain
-# hearsay well down it, and something half-heard across a room lower still.
+# What a belief about somebody is worth to their standing, by how it was come by.
+# This is the evidence hierarchy: seeing it yourself at the top, an official
+# record just under, plain hearsay well down, something half-heard lower still.
 #
-# Only beliefs that were *not* witnessed count here. Witnessing already feeds
-# reputation through known_memories and REPUTATION_EVENT_SCORES; counting the
-# same event twice would make seeing something worth double what it should be.
-# What is new is that being told about a crime now touches somebody's standing
-# at all - previously a village could be certain a man was a thief and think no
-# worse of him for it.
-HEARSAY_REPUTATION_WEIGHT = {
+# Witnessing counts at full weight here because nothing else counts it. That was
+# checked rather than assumed, after an earlier version excluded it to avoid
+# double-counting with known_memories: record_crime_event builds a history record
+# of type crime_witnessed and logs it, but no MemoryEvent is ever created for a
+# crime, so REPUTATION_EVENT_SCORES["crime_witnessed"] can never fire. Excluding
+# witnessed beliefs removed the only contribution there was, and five people
+# could watch an assault and think no worse of the attacker.
+#
+# If a crime ever does start producing a MemoryEvent as well, these two tables
+# would both fire and the penalty would be applied twice - see
+# TestNoDoubleCounting, which is there to notice.
+BELIEF_REPUTATION_WEIGHT = {
+    "witnessed": 1.0,
+    "personal": 1.0,
+    "traumatic": 1.0,
     "official_record": 0.9,
     "public_record": 0.9,
     "family": 0.6,
     "told": 0.35,
     "overheard": 0.2,
 }
-_DEFAULT_HEARSAY_WEIGHT = 0.25
+_DEFAULT_BELIEF_WEIGHT = 0.25
 
-# Until a second, independent person says the same thing, hearsay counts for
-# half of even that. This is the damping, and it is the whole reason the
-# feedback loop does not run away: distortion picks its scapegoat from people
-# the listener already dislikes, and if a single rumour could freely lower
-# somebody's standing then being disliked would make you more likely to be
-# blamed, which would make you more disliked. Requiring corroboration means one
-# person's grudge cannot compound on its own.
+# Until a second, independent person says the same thing, hearsay counts for half
+# of even that. This is the damping, and it is why the feedback loop does not run
+# away: distortion picks its scapegoat from people the listener already dislikes,
+# so if a single rumour could freely lower somebody's standing then being disliked
+# would make you likelier to be blamed, which would make you more disliked.
+# Requiring corroboration means one person's grudge cannot compound on its own.
 UNCORROBORATED_HEARSAY_FACTOR = 0.5
 
-# ...and only for the bottom tiers. An official record does not need a second
-# person to say the same thing before it counts; being written down is what it
-# has instead of a witness.
+# ...and only for the bottom tiers. Seeing something yourself needs no second
+# opinion, and an official record has being written down instead of a witness.
 CORROBORATION_REQUIRED_FOR = {"told", "overheard"}
 
-# Record types where the subject is the one at fault. Deaths and births are
-# deliberately absent: the subject of a death record is usually its victim.
 # Keyed on what the engine actually logs, checked against a running world rather
-# than assumed. The first version of this table guessed at "assault" and "theft";
-# the type the engine emits is combat_attack, so a village that produced six
-# violent acts in a game day registered none of them and nobody's standing moved
-# at all. Worth re-checking against a real run whenever a type is added here.
+# than assumed - twice now. record_crime_event produces records of type
+# crime_witnessed; combat_attack comes from the combat path. Earlier versions of
+# this table guessed at "assault", "theft" and "crime_recorded", so a village
+# that produced six violent acts in a day registered none of them.
 RECORD_REPUTATION_SCORES = {
     "murder": -50,
+    "crime_witnessed": -25,
     "combat_attack": -25,
-    "crime_recorded": -25,
     "unpaid_wages": -20,
 }
 
 
-def hearsay_reputation_weight(fact: Any) -> float:
-    """How much a second-hand belief is allowed to move somebody's standing."""
+def belief_reputation_weight(fact: Any) -> float:
+    """How much a belief about somebody is allowed to move their standing."""
     source_type = str(getattr(fact, "source_type", "") or "")
-    if source_type in {"witnessed", "personal", "traumatic"}:
-        return 0.0  # already counted as a memory; see the note above
-    weight = HEARSAY_REPUTATION_WEIGHT.get(source_type, _DEFAULT_HEARSAY_WEIGHT)
+    weight = BELIEF_REPUTATION_WEIGHT.get(source_type, _DEFAULT_BELIEF_WEIGHT)
     weight *= max(0.0, min(1.0, float(getattr(fact, "confidence", 0.0) or 0.0)))
     if source_type in CORROBORATION_REQUIRED_FOR and             len(tuple(getattr(fact, "heard_from_ids", ()) or ())) < 2:
         weight *= UNCORROBORATED_HEARSAY_FACTOR
@@ -977,7 +979,7 @@ class KnowledgeComponent:
             base_score = RECORD_REPUTATION_SCORES.get(str(getattr(fact, "record_type", "")), 0)
             if not base_score:
                 continue
-            weight = hearsay_reputation_weight(fact)
+            weight = belief_reputation_weight(fact)
             if weight <= 0.0:
                 continue
             if current_tick is not None:

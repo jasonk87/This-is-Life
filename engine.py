@@ -19942,13 +19942,14 @@ class World:
                 if npc.physical.is_dead or isinstance(npc, Animal) or (hasattr(event, 'subject_id') and event.subject_id == npc.id) or event.id in npc.knowledge.known_events:
                         continue
 
-                # Check if NPC can see the event's location
-                if npc.id in self.npc_fov_maps:
-                    fov_map = self.npc_fov_maps[npc.id]
-                    if 0 <= event_x < WORLD_WIDTH and 0 <= event_y < WORLD_HEIGHT:
-                        if fov_map[event_y, event_x]:
-                            # NPC witnessed the event. Add to their knowledge.
-                            self.knowledge_system.learn_event(npc, event)
+                # The same check _get_witnesses_to_action uses, and for the same
+                # reason: npc_fov_maps only exists for NPCs near the player, so
+                # reading it here meant this route could only ever notice events
+                # happening in front of the camera. Missed on the first pass
+                # through this bug because the two witness paths do not call
+                # each other.
+                if self._can_witness(npc, event_x, event_y):
+                    self.knowledge_system.learn_event(npc, event)
 
     def _process_npc_gossip_reaction(self):
         """Apply simple deterministic reactions to remembered social events."""

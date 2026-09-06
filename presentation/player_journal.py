@@ -31,6 +31,10 @@ from typing import Any
 # attacked Clara" is not a sentence: seeing something takes the bare verb,
 # being told about it takes the past tense.
 _ACTION_PHRASES = {
+    # crime_witnessed is the type record_crime_event actually produces.
+    # "crime_recorded" was assumed and is kept only because
+    # dialogue_surface maps it; checked against a running world.
+    "crime_witnessed": ("attacked", "attack"),
     "crime_recorded": ("attacked", "attack"),
     "combat_attack": ("attacked", "attack"),
     "entity_death": ("killed", "kill"),

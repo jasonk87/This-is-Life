@@ -297,12 +297,12 @@ def update_npc_environmental_tasks(world, npc) -> None:
             npc.schedule.current_task = TaskType.AT_HOME if getattr(npc.schedule, "home_building_id", None) and world.get_building_at(npc.x, npc.y) and getattr(world.get_building_at(npc.x, npc.y), "id", None) == npc.schedule.home_building_id else "sheltered_indoors"
             npc.schedule.current_path = []
         elif not npc_is_sheltered and npc.schedule.current_task not in ["seeking_shelter", "huddling_indoors"]:
-            npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING] else TaskType.IDLE
-            npc.schedule.current_task = "seeking_shelter"
             shelter_building = world.buildings_by_id.get(npc.schedule.home_building_id)
             if not shelter_building:
                 shelter_building = world._find_nearest_tavern(npc)
 
+            path = []
+            shelter_coords = None
             if shelter_building:
                 shelter_coords = (shelter_building.global_center_x, shelter_building.global_center_y)
                 tile = world.get_tile_at(shelter_coords[0], shelter_coords[1])
@@ -311,9 +311,24 @@ def update_npc_environmental_tasks(world, npc) -> None:
                     if adj and adj != (None, None):
                         shelter_coords = adj
                 path = world.calculate_path(npc.x, npc.y, shelter_coords[0], shelter_coords[1])
-                if path:
-                    npc.schedule.current_path = path
-                    npc.schedule.current_destination_coords = shelter_coords
+
+            # Only drop what they were doing for shelter they can actually reach,
+            # the same way the freezing branch above only commits to
+            # "huddling_indoors" once it has a path.
+            #
+            # Setting the task first and then finding nowhere to go was a
+            # livelock: the guard on this branch reads the task the villager is
+            # already in, so once they were "seeking_shelter" nothing
+            # re-evaluated, and someone with no home and no tavern stood still
+            # in the rain until the weather changed - not working, not eating,
+            # and not building the shelter they were missing. A settlement that
+            # had not put up a tavern yet stopped dead every time it rained.
+            # Getting wet beats standing in a field for two thousand ticks.
+            if path:
+                npc.schedule.previous_task = npc.schedule.current_task if npc.schedule.current_task not in [TaskType.IDLE, TaskType.WANDERING] else TaskType.IDLE
+                npc.schedule.current_task = "seeking_shelter"
+                npc.schedule.current_path = path
+                npc.schedule.current_destination_coords = shelter_coords
     elif not is_bad_weather and npc.schedule.current_task in ["seeking_shelter", "sheltered_indoors"]:
         npc.schedule.current_task = npc.schedule.previous_task or TaskType.IDLE
         npc.schedule.previous_task = None

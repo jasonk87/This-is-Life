@@ -13904,6 +13904,41 @@ class World:
         candidates.sort(key=lambda x: (x[0], x[1]))
         return candidates[0][1], candidates[0][2]
 
+    def _find_nearest_rest_target(self, actor) -> tuple[str | None, tuple[int, int] | None]:
+        """Somewhere worth resting: shelter first, then a lit campfire.
+
+        Shares the id vocabulary of _find_nearest_warmth_or_shelter_target so
+        that _is_valid_survival_target can check what this returns. Shelter wins
+        ties because it is worth more to a resting actor - see the recovery rate
+        in _apply_fatigue_override_behavior, where being sheltered is worth
+        sheltered_rest_bonus and being beside a fire only half that.
+
+        Until now this existed as a call site and nothing else.
+        _apply_fatigue_override_behavior has always asked for it, so every tick
+        on which an actor's fatigue pressure was the selected survival pressure
+        raised AttributeError and took run_world_tick down with it. The test
+        suite never routed through it; the sandbox's fatigue_rest_override
+        scenario did, and crashed. See tests/test_fatigue_rest_target.py.
+        """
+        candidates: list[tuple[int, int, str, tuple[int, int]]] = []
+        for sid, zone in sorted(self.shelter_zones_by_id.items(), key=lambda item: item[0]):
+            if not zone.get("active", True):
+                continue
+            positions = sorted(zone.get("positions", set()))
+            if not positions:
+                continue
+            best = min(positions, key=lambda p: abs(actor.x - p[0]) + abs(actor.y - p[1]))
+            candidates.append((abs(actor.x - best[0]) + abs(actor.y - best[1]), 0, f"shelter:{sid}", best))
+        for cf in sorted(self.campfires_by_id.values(), key=lambda c: c.campfire_id):
+            if not (cf.operational and cf.lit and cf.fuel_quantity > 0):
+                continue
+            pos = (int(cf.x), int(cf.y))
+            candidates.append((abs(actor.x - pos[0]) + abs(actor.y - pos[1]), 1, f"campfire:{cf.campfire_id}", pos))
+        if not candidates:
+            return None, None
+        candidates.sort(key=lambda c: (c[0], c[1], c[2]))
+        return candidates[0][2], candidates[0][3]
+
     def _cleanup_food_reservations(self, now: int | None = None) -> None:
         now = int(getattr(self, "game_time", 0) or 0) if now is None else int(now)
         kept = {}
@@ -14006,6 +14041,7 @@ class World:
             if tpos is None:
                 self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, "cold"), "No valid warmth/shelter target found.", actor=actor, metadata={"tick": now})
                 self._record_decision_explanation(explanation_type="cold_survival_no_target", decision="blocked", primary_reason="no_valid_warmth_or_shelter_target", actor=actor)
+                self._stand_down_survival_override(actor, now, "cold_exposure", "no_valid_warmth_or_shelter_target")
                 return
         if abs(actor.x - tpos[0]) <= 1 and abs(actor.y - tpos[1]) <= 1:
             self._record_production_task_trace("survival_override_waiting_for_recovery", ProductionTask(task_type="temperature", id=str(actor.id)), actor=actor, metadata={"target_id": tid, "target_position": tpos, "cold_exposure": exposure})
@@ -14020,10 +14056,15 @@ class World:
         if float(getattr(actor, "cold_exposure", 0.0) or 0.0) > float(getattr(self, "cold_override_threshold", 0.7)): rec -= 0.02
         rec = min(0.3, max(0.005, rec)); actor.fatigue_recovery_modifier = rec
         tid = getattr(actor, "survival_override_target_id", None); tpos = getattr(actor, "survival_override_target_position", None)
-        if tpos is None:
+        # Re-check the held target, not just whether one is set - the cold branch
+        # above does the same. A shelter that has been deactivated, or a campfire
+        # that has burned out, otherwise keeps an exhausted actor walking towards
+        # somewhere that is no longer worth arriving at.
+        if tpos is None or not self._is_valid_survival_target(tid, tpos):
             tid,tpos = self._find_nearest_rest_target(actor); actor.survival_override_target_id, actor.survival_override_target_position = tid,tpos
         if tpos is None:
             self._warn_simulation_validation("survival_override_no_valid_target", (actor.id, "fatigue"), "No valid rest target found.", actor=actor, metadata={"tick": now})
+            self._stand_down_survival_override(actor, now, "fatigue_rest", "no_valid_rest_target")
             return
         actor.current_rest_target_id = tid
         if abs(actor.x-tpos[0])<=1 and abs(actor.y-tpos[1])<=1:
@@ -14035,6 +14076,43 @@ class World:
             actor.resting_state = False
             if self._route_actor_toward_position(actor, tpos, reason="fatigue_override_route", task_id=getattr(actor, "survival_override_previous_task_id", None)):
                 self._record_production_task_trace("fatigue_override_route_started", ProductionTask(task_type="fatigue", id=str(actor.id)), actor=actor, metadata={"target_id": tid, "target_position": tpos, "fatigue": fatigue})
+
+    def _stand_down_survival_override(self, actor, now: int, pressure: str, reason: str) -> None:
+        """Give up an override that has nothing to aim at, and work in the meantime.
+
+        An active override scores the actor -9999 for every production task (see
+        _score_actor_for_task), so it takes them out of the labour pool entirely.
+        That is the right trade while they are walking towards food or a fire. It
+        is the wrong one when there is nothing to walk to: hunger only falls by
+        eating and cold only falls by getting warm, so an actor who cannot reach
+        either never recovers, and the override never lifts. They stop working
+        permanently - including the hauling, farming and campfire-building that
+        would have produced the thing they are missing. A village in a bad winter
+        or a bad harvest stops dead and cannot dig itself out.
+
+        So: stand down, take a cooldown, and look again shortly. Being hungry
+        while working beats being hungry while standing still.
+
+        The cooldown also stops this thrashing - without it the pressure is still
+        over threshold next tick and the override comes straight back.
+        """
+        actor.survival_override_active = False
+        actor.survival_override_reason = None
+        actor.survival_override_target_id = None
+        actor.survival_override_target_position = None
+        actor.resting_state = False
+        # Cleared as well as cooled down: advance_survival_overrides re-selects
+        # the previously active pressure without consulting the cooldown, so
+        # leaving this set would reinstate the override on the very next tick.
+        actor.active_survival_pressure = None
+        actor.survival_override_cooldown_until_tick = now + max(
+            1, int(getattr(self, "survival_override_stand_down_cooldown_ticks", 60)))
+        self._record_production_task_trace(
+            "survival_override_stood_down", ProductionTask(task_type="survival", id=str(actor.id)),
+            actor=actor, metadata={"pressure_type": pressure, "reason": reason, "tick": now})
+        self._record_decision_explanation(
+            explanation_type="survival_override_stood_down", decision="stood_down",
+            primary_reason=reason, actor=actor)
 
     def advance_survival_overrides(self) -> None:
         now = int(getattr(self, "game_time", 0) or 0)
@@ -14097,6 +14175,7 @@ class World:
                     if target is None:
                         self._warn_simulation_validation("hunger_no_edible_food", (actor.id, "no_food"), "No edible food found for hungry actor.", actor=actor, metadata={"tick": now}, cooldown_ticks=120)
                         self._record_decision_explanation(explanation_type="hunger_no_food_available", decision="blocked", primary_reason="no_edible_food_found", actor=actor)
+                        self._stand_down_survival_override(actor, now, "hunger", "no_edible_food_found")
                     else:
                         actor.hunger_target_food_id = target["food_id"]
                         if not self._reserve_food_for_actor(actor=actor, food_id=target["food_id"]):

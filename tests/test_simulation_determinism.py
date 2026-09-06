@@ -25,18 +25,34 @@ seed disagreed:
    layer down. It now counts game ticks when the caller tells it what the clock
    says, and keeps the wall clock for anyone who does not.
 
-World generation is reproducible outright. The tick loop is reproducible with the
-asynchronous gossip service inactive, which is what these tests check, and that
-qualification is the honest form of a claim this file previously made without it.
+5. The service still handed a result back on whichever tick its worker thread
+   happened to finish on. Fix 4 made *falling back* tick-based and left
+   *succeeding* on the wall clock, which was the same fault in the half of the
+   path nobody had looked at. It mattered because finishing a chronicle rolls
+   item quality from `random`: a result landing one tick earlier moved every
+   draw after it. Results are now held until the tick the request comes due on,
+   arrived or not. See services/llm_gossip.poll_completed.
 
-The service runs a worker thread that hands results back when they arrive. Its
-*timeout* now counts game ticks rather than seconds, which was a real fix, but a
-thread completing work is still a thread completing work: whether a result lands
-on this tick or the next depends on the machine. Measured, three runs of one seed
-with the service disabled are identical and three with it enabled are not.
+World generation is reproducible outright, and so is the tick loop - now with the
+gossip service running as well as without it. The qualification this file used to
+carry is gone because fix 5 removed its cause, not because the claim got louder.
 
-Worth recording how that was established, because three earlier answers here were
-wrong, all from measuring too coarsely:
+How fast the model answers still decides *what* a villager says - a request that
+beats its deadline carries the model's words, one that misses carries the
+fallback - and nothing downstream branches on which.
+
+Worth recording how fix 5 was established, because the obvious test does not
+establish it. Running the loop twice with the service enabled passes with the fix
+and without it: the jitter a worker thread has on this machine is milliseconds
+and a tick is far longer, so results land on the same tick either way and the
+end-to-end test cannot tell the two versions apart. What pins the mechanism is
+tests/test_gossip_release_timing.py, which drives arrival directly and, without
+the fix, releases at ticks 100, 105 and 119 where it should release at 120 three
+times. TestTheAsynchronousLayerNoLongerLeaksIntoTheSimulation below is kept as a
+guard on the property, not as evidence for it.
+
+Worth recording how the earlier ones were established too, because three answers
+here were wrong, all from measuring too coarsely:
 
 * comparing aggregate counts said the loop was already deterministic - the totals
   agreed while individual villagers stood in different places;
@@ -50,10 +66,13 @@ Per-villager state, several runs, and a stated condition - not one comparison of
 one number.
 """
 
+import random
+import time
 import unittest
 
 from config import DAY_LENGTH_TICKS
 from engine import World
+from services.llm_gossip import AsyncLLMGossipService
 from tests.world_cache import fresh_world
 from simulation.systems.tick import run_world_tick
 from simulation.systems.task_types import TaskType
@@ -180,28 +199,72 @@ class TestAmbientSpeechRunsOnGameTime(unittest.TestCase):
         )
 
 
-class TestTheAsynchronousLayerIsTheExceptionThatIsAllowed(unittest.TestCase):
-    """States the boundary rather than leaving it implied.
+class _JitteryGossipService(AsyncLLMGossipService):
+    """A service whose answers come back after a real, and varying, delay.
 
-    If this ever starts passing with the service enabled, the claim above can be
-    widened. Until then the simulation is reproducible and the thread on top of it
-    is not, and both halves of that are worth being able to see.
+    Standing in for a model that is quick on one run and slow on the next. The
+    jitter is drawn from its own unseeded Random so it differs between runs and
+    does not touch the global stream the simulation draws from - the whole point
+    is that two runs see *different* thread timing and reach the same world.
+    """
+
+    _jitter = random.Random()
+
+    def _generate_text(self, request):
+        time.sleep(self._jitter.uniform(0.0, 0.004))
+        return f"Word is {request.subject_name} had a hand in it."
+
+
+class TestTheAsynchronousLayerNoLongerLeaksIntoTheSimulation(unittest.TestCase):
+    """The boundary this file used to state as a limitation.
+
+    A result is now released on the tick its request came due rather than the
+    tick its thread happened to finish on, so how fast the model answers decides
+    what a villager says and not when anything happens.
+
+    This class guards that property; it does not demonstrate it. Measured, it
+    passes with the fix and without it, because the jitter a worker thread has
+    here is far shorter than a tick. tests/test_gossip_release_timing.py drives
+    arrival directly and does fail without the fix - that is the evidence, and
+    this is the thing that would notice if the property were lost some other way.
     """
 
     @staticmethod
     def _run(gossip_enabled):
         world = fresh_world(seed=2024)
-        if not gossip_enabled:
+        delivered = 0
+        if gossip_enabled:
+            service = _JitteryGossipService()
+            world._gossip_llm_service = service
+            poll = service.poll_completed
+
+            def counting_poll(now_ticks=None):
+                nonlocal delivered
+                results = poll(now_ticks=now_ticks)
+                delivered += len(results)
+                return results
+
+            service.poll_completed = counting_poll
+        else:
             world._gossip_llm_service = None
         for _ in range(200):
             run_world_tick(world)
-        return sorted(
+        state = sorted(
             (n.id, n.x, n.y, str(n.schedule.current_task))
             for n in world.village_npcs if not n.physical.is_dead
         )
+        return state, delivered
 
     def test_without_the_service_two_runs_match(self):
-        self.assertEqual(self._run(False), self._run(False))
+        self.assertEqual(self._run(False)[0], self._run(False)[0])
+
+    def test_with_the_service_two_runs_match(self):
+        first, first_delivered = self._run(True)
+        second, second_delivered = self._run(True)
+        # Without this the test could pass by never exercising the thread at all.
+        self.assertGreater(min(first_delivered, second_delivered), 0,
+                           "no gossip was delivered, so this proves nothing")
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

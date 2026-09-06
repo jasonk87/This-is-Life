@@ -86,6 +86,11 @@ class AsyncLLMGossipService:
         self._pending: dict[int, GossipRequest] = {}
         self._pending_keys: dict[tuple, int] = {}
         self._expired_request_ids: set[int] = set()
+        # Finished work waiting for its release tick. The worker puts results on
+        # _completed_queue the moment they are ready, which is a wall-clock
+        # event; holding them here until the deadline is what keeps delivery on
+        # a tick the seed decides rather than one the machine does.
+        self._arrived: dict[int, GossipResult] = {}
         self._request_queue: queue.Queue[GossipRequest | None] = queue.Queue(maxsize=self.max_pending)
         self._completed_queue: queue.Queue[GossipResult] = queue.Queue()
         self._worker = threading.Thread(target=self._worker_loop, name="llm-gossip", daemon=True)
@@ -119,7 +124,14 @@ class AsyncLLMGossipService:
             if request.request_key in self._pending_keys:
                 return False
             if len(self._pending) >= self.max_pending:
-                self._completed_queue.put(self._make_result(request, request.fallback_text, used_fallback=True))
+                # Nothing is queued for a rejected request. It was never
+                # registered as pending, so poll_completed would discard the
+                # result anyway - and delivering it would be worse than
+                # dropping it: queue_chronicle_draft only marks its memories
+                # pending when submit succeeds, so a fallback arriving for a
+                # rejected draft would finish a chronicle nobody started and
+                # award the scribe the book and the experience for it.
+                # `return False` is the whole contract.
                 return False
             self._pending[request.request_id] = request
             self._pending_keys[request.request_key] = request.request_id
@@ -130,7 +142,7 @@ class AsyncLLMGossipService:
             with self._lock:
                 self._pending.pop(request.request_id, None)
                 self._pending_keys.pop(request.request_key, None)
-            self._completed_queue.put(self._make_result(request, request.fallback_text, used_fallback=True))
+            # Nothing is queued here either, for the reason above.
             return False
         return True
 
@@ -172,7 +184,14 @@ class AsyncLLMGossipService:
             if request.request_key in self._pending_keys:
                 return False
             if len(self._pending) >= self.max_pending:
-                self._completed_queue.put(self._make_result(request, request.fallback_text, used_fallback=True))
+                # Nothing is queued for a rejected request. It was never
+                # registered as pending, so poll_completed would discard the
+                # result anyway - and delivering it would be worse than
+                # dropping it: queue_chronicle_draft only marks its memories
+                # pending when submit succeeds, so a fallback arriving for a
+                # rejected draft would finish a chronicle nobody started and
+                # award the scribe the book and the experience for it.
+                # `return False` is the whole contract.
                 return False
             self._pending[request.request_id] = request
             self._pending_keys[request.request_key] = request.request_id
@@ -183,46 +202,65 @@ class AsyncLLMGossipService:
             with self._lock:
                 self._pending.pop(request.request_id, None)
                 self._pending_keys.pop(request.request_key, None)
-            self._completed_queue.put(self._make_result(request, request.fallback_text, used_fallback=True))
+            # Nothing is queued here either, for the reason above.
             return False
         return True
 
     def poll_completed(self, now_ticks: int | None = None) -> list[GossipResult]:
-        results: list[GossipResult] = []
+        """Results whose release tick has come, oldest request first.
+
+        A request submitted on tick T comes back on tick T + response_timeout_ticks
+        whether or not the model answered, carrying the real text if it did and
+        the fallback if it did not. Returning a result the moment its thread
+        finished is what left the tick loop unreproducible: a chronicle landing
+        one tick earlier draws item quality from `random` one tick earlier, and
+        every draw after it shifts. How fast the model replies now changes the
+        words a villager says and nothing else.
+
+        Callers with no game clock (`now_ticks=None`, or a request submitted
+        without a tick) keep the old behaviour and get results as they arrive.
+        """
         now = time.monotonic()
-        expired_results: list[GossipResult] = []
 
         with self._lock:
-            for request_id, request in list(self._pending.items()):
-                if request.submitted_at_tick is not None and now_ticks is not None:
-                    if int(now_ticks) - request.submitted_at_tick < self.response_timeout_ticks:
-                        continue
-                elif now - request.submitted_at < self.response_timeout_seconds:
+            # Take everything the worker has finished, but hold it here.
+            while True:
+                try:
+                    arrived = self._completed_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if arrived.request_id in self._expired_request_ids:
+                    self._expired_request_ids.discard(arrived.request_id)
                     continue
-                expired_results.append(self._make_result(request, request.fallback_text, used_fallback=True))
+                if arrived.request_id not in self._pending:
+                    continue  # already released or cancelled; nothing to hold
+                self._arrived[arrived.request_id] = arrived
+
+            released: list[tuple[int, GossipResult]] = []
+            for request_id, request in list(self._pending.items()):
+                on_the_game_clock = request.submitted_at_tick is not None and now_ticks is not None
+                if on_the_game_clock:
+                    due = int(now_ticks) - request.submitted_at_tick >= self.response_timeout_ticks
+                else:
+                    due = (request_id in self._arrived
+                           or now - request.submitted_at >= self.response_timeout_seconds)
+                if not due:
+                    continue
+
+                result = self._arrived.pop(request_id, None)
+                if result is None:
+                    result = self._make_result(request, request.fallback_text, used_fallback=True)
+                    # The model may still answer after this; that answer is stale.
+                    self._expired_request_ids.add(request_id)
                 self._pending.pop(request_id, None)
                 self._pending_keys.pop(request.request_key, None)
-                self._expired_request_ids.add(request_id)
+                released.append((request_id, result))
 
-        results.extend(expired_results)
-
-        while True:
-            try:
-                result = self._completed_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            with self._lock:
-                if result.request_id in self._expired_request_ids:
-                    self._expired_request_ids.discard(result.request_id)
-                    continue
-                request = self._pending.pop(result.request_id, None)
-                if request is None:
-                    continue
-                self._pending_keys.pop(request.request_key, None)
-            results.append(result)
-
-        return results
+        # Request ids come from a counter, so this is submission order. Draining
+        # the queue instead would order by which thread finished first, which is
+        # not the same order twice.
+        released.sort(key=lambda pair: pair[0])
+        return [result for _, result in released]
 
     def shutdown(self) -> None:
         try:

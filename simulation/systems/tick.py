@@ -7,6 +7,7 @@ from presentation.ambient_speech import cleanup_ambient_speech
 from simulation.activity import advance_activity
 from simulation.systems import survival
 from simulation.systems import illness
+from simulation.validation import trim_interaction_traces, trim_visual_effects
 
 
 def advance_player_auto_movement(world) -> None:
@@ -290,6 +291,8 @@ def run_world_tick(world) -> None:
     if callable(advance_reserves):
         advance_reserves()
     emit_environmental_sensory_cues(world)
+    trim_interaction_traces(world)
+    trim_visual_effects(world)
 
 
 def emit_environmental_sensory_cues(world) -> None:

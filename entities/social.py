@@ -199,6 +199,61 @@ def claim_from_record(record: Any) -> Claim:
     )
 
 
+# What a belief about somebody is worth to their standing, by how it was come
+# by. This is the evidence hierarchy: witnessed and official at the top, plain
+# hearsay well down it, and something half-heard across a room lower still.
+#
+# Only beliefs that were *not* witnessed count here. Witnessing already feeds
+# reputation through known_memories and REPUTATION_EVENT_SCORES; counting the
+# same event twice would make seeing something worth double what it should be.
+# What is new is that being told about a crime now touches somebody's standing
+# at all - previously a village could be certain a man was a thief and think no
+# worse of him for it.
+HEARSAY_REPUTATION_WEIGHT = {
+    "official_record": 0.9,
+    "public_record": 0.9,
+    "family": 0.6,
+    "told": 0.35,
+    "overheard": 0.2,
+}
+_DEFAULT_HEARSAY_WEIGHT = 0.25
+
+# Until a second, independent person says the same thing, hearsay counts for
+# half of even that. This is the damping, and it is the whole reason the
+# feedback loop does not run away: distortion picks its scapegoat from people
+# the listener already dislikes, and if a single rumour could freely lower
+# somebody's standing then being disliked would make you more likely to be
+# blamed, which would make you more disliked. Requiring corroboration means one
+# person's grudge cannot compound on its own.
+UNCORROBORATED_HEARSAY_FACTOR = 0.5
+
+# ...and only for the bottom tiers. An official record does not need a second
+# person to say the same thing before it counts; being written down is what it
+# has instead of a witness.
+CORROBORATION_REQUIRED_FOR = {"told", "overheard"}
+
+# Record types where the subject is the one at fault. Deaths and births are
+# deliberately absent: the subject of a death record is usually its victim.
+RECORD_REPUTATION_SCORES = {
+    "crime_recorded": -25,
+    "murder": -50,
+    "assault": -25,
+    "theft": -25,
+}
+
+
+def hearsay_reputation_weight(fact: Any) -> float:
+    """How much a second-hand belief is allowed to move somebody's standing."""
+    source_type = str(getattr(fact, "source_type", "") or "")
+    if source_type in {"witnessed", "personal", "traumatic"}:
+        return 0.0  # already counted as a memory; see the note above
+    weight = HEARSAY_REPUTATION_WEIGHT.get(source_type, _DEFAULT_HEARSAY_WEIGHT)
+    weight *= max(0.0, min(1.0, float(getattr(fact, "confidence", 0.0) or 0.0)))
+    if source_type in CORROBORATION_REQUIRED_FOR and             len(tuple(getattr(fact, "heard_from_ids", ()) or ())) < 2:
+        weight *= UNCORROBORATED_HEARSAY_FACTOR
+    return weight
+
+
 def _record_id(record: Any) -> str:
     return str(
         getattr(record, "id", None)
@@ -904,6 +959,26 @@ class KnowledgeComponent:
             if current_tick is not None:
                 base_score *= self._reputation_decay_multiplier(current_tick, memory.timestamp)
             total_score += base_score
+
+        # What they have been told counts too, at a discount. Note this reads
+        # the *believed* subject: somebody who thinks the miller did it thinks
+        # less of the miller, which is the point, and is why an innocent man can
+        # acquire a reputation he did not earn. Recovering from that means
+        # somebody witnessing the truth - a claim with better evidence behind it
+        # replaces this one, and the weight goes with it.
+        for fact in getattr(self, "known_history_facts", {}).values():
+            if target_id not in tuple(getattr(fact, "subject_entity_ids", ()) or ()):
+                continue
+            base_score = RECORD_REPUTATION_SCORES.get(str(getattr(fact, "record_type", "")), 0)
+            if not base_score:
+                continue
+            weight = hearsay_reputation_weight(fact)
+            if weight <= 0.0:
+                continue
+            if current_tick is not None:
+                weight *= self._reputation_decay_multiplier(
+                    current_tick, int(getattr(fact, "known_at_tick", 0) or 0))
+            total_score += base_score * weight
         return int(round(total_score))
 
     def _trim_memory_events(self) -> None:

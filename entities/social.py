@@ -234,11 +234,16 @@ CORROBORATION_REQUIRED_FOR = {"told", "overheard"}
 
 # Record types where the subject is the one at fault. Deaths and births are
 # deliberately absent: the subject of a death record is usually its victim.
+# Keyed on what the engine actually logs, checked against a running world rather
+# than assumed. The first version of this table guessed at "assault" and "theft";
+# the type the engine emits is combat_attack, so a village that produced six
+# violent acts in a game day registered none of them and nobody's standing moved
+# at all. Worth re-checking against a real run whenever a type is added here.
 RECORD_REPUTATION_SCORES = {
-    "crime_recorded": -25,
     "murder": -50,
-    "assault": -25,
-    "theft": -25,
+    "combat_attack": -25,
+    "crime_recorded": -25,
+    "unpaid_wages": -20,
 }
 
 

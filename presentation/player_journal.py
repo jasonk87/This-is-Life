@@ -32,6 +32,7 @@ from typing import Any
 # being told about it takes the past tense.
 _ACTION_PHRASES = {
     "crime_recorded": ("attacked", "attack"),
+    "combat_attack": ("attacked", "attack"),
     "entity_death": ("killed", "kill"),
     "npc_death": ("killed", "kill"),
     "murder": ("killed", "kill"),

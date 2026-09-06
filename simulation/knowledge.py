@@ -3,7 +3,7 @@ from __future__ import annotations
 from config import DAY_LENGTH_TICKS
 from entities.social import Claim, claim_from_record, reset_transient_knowledge
 from presentation.message_log import append_knowledge_message
-from presentation.player_journal import journal_line
+from presentation.player_journal import is_journal_worthy, journal_line
 from simulation.distortion import distort_on_telling
 from simulation.records import ChronicleArchive
 
@@ -105,6 +105,8 @@ class KnowledgeSystem:
         """
         world = getattr(self, "world", None)
         if world is None or holder is not getattr(world, "player", None):
+            return
+        if not is_journal_worthy(getattr(claim, "believed_record_type", "")):
             return
         entries = getattr(world, "chat_log_entries", None)
         if not isinstance(entries, list):

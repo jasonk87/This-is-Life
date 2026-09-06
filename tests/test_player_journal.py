@@ -28,7 +28,7 @@ import unittest
 
 from entities.social import Claim, claim_from_record
 from presentation.message_log import LogEntry, append_knowledge_message
-from presentation.player_journal import describe_claim, journal_line
+from presentation.player_journal import describe_claim, is_journal_worthy, journal_line
 from tests.world_cache import fresh_world
 
 BAKER, CLARA, MILLER = 101, 103, 102
@@ -161,6 +161,35 @@ class TestOrdinaryMessagesAreUntouched(unittest.TestCase):
         restored = pickle.loads(pickle.dumps(entry))
         self.assertEqual(restored.claim_id, "c1")
         self.assertEqual(restored.confidence_at_entry, 0.8)
+
+
+class TestWhatIsWorthWritingDown(unittest.TestCase):
+    """A journal of everything is a journal of nothing.
+
+    Trade deals are the most common thing the world records - fourteen in a
+    single evening against one birth - and none of them have a sensible verb, so
+    every one would land as "You saw Elara Rowan was involved with Theo Hale".
+    A log reading like that is what "the system looks broken" means.
+
+    Births and hirings are excluded for the opposite reason: they already push
+    their own curated line to the player, so journalling them says the same
+    thing twice in worse words. That duplication is what the birth-announcement
+    test caught when witnesses first started learning things.
+    """
+
+    def test_violence_and_death_are_worth_it(self):
+        for record_type in ("crime_recorded", "entity_death", "murder", "theft"):
+            self.assertTrue(is_journal_worthy(record_type), record_type)
+
+    def test_trade_deals_are_not(self):
+        self.assertFalse(is_journal_worthy("trade_deal"))
+
+    def test_events_that_announce_themselves_are_not(self):
+        self.assertFalse(is_journal_worthy("npc_birth"))
+        self.assertFalse(is_journal_worthy("npc_hired"))
+
+    def test_an_unknown_record_type_is_not(self):
+        self.assertFalse(is_journal_worthy("some_future_record"))
 
 
 class TestTheWorldWritesTheJournal(unittest.TestCase):

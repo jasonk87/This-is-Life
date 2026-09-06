@@ -11834,6 +11834,26 @@ class World:
             if valid_witnesses or player_saw:
                 new_event.public_knowledge = True
 
+            # And they actually learn it. The witnesses were being computed,
+            # used to set the flag above, and then dropped - so "public
+            # knowledge" meant a boolean on the record and nothing in anybody's
+            # head. Measured before this: 28 records in the world and 90 of 91
+            # villagers knowing none of them, which left nothing to talk about
+            # and no news that could travel.
+            knowledge_system = getattr(self, "knowledge_system", None)
+            if knowledge_system is not None:
+                learners = list(valid_witnesses)
+                if player_saw:
+                    learners.append(self.player)
+                for learner in learners:
+                    knowledge_system.learn_history_record(
+                        learner,
+                        new_event,
+                        source_type="witnessed",
+                        confidence=1.0,
+                        tick=self.game_time,
+                    )
+
         return new_event
 
     def create_memory_event(
@@ -19965,6 +19985,55 @@ class World:
                 return chunk.village
         return None
 
+    def _can_witness(self, npc, action_x: int, action_y: int) -> bool:
+        """Whether this villager could see something happening at these coordinates.
+
+        Deliberately independent of npc_fov_maps. Those are a rendering and
+        close-range perception optimisation: _update_npc_fov only computes one
+        for an NPC near the player or otherwise interesting, and deletes it
+        again for everybody else. Witnessing used to read that map, so an NPC
+        without one could not see anything at all.
+
+        The effect was that a village only had a memory where the player was
+        standing. Measured on a normal world: 11 of 91 living villagers had an
+        FOV map, all of them within 39 tiles of the player, and 27 of 28 history
+        records were consequently marked as witnessed by nobody. Nothing entered
+        anyone's knowledge, so there was nothing to gossip about, so no news ever
+        travelled - which quietly made the whole history and knowledge layer
+        ornamental. It also contradicted two rules of the simulation doctrine
+        outright: the player is not special, and offscreen simulation is honest.
+
+        Radius and line of sight, computed the same way for everyone, rather
+        than an accurate check near the player and a cheap one far away - a
+        split like that disagrees with itself at the boundary, and an NPC would
+        gain or lose the ability to have witnessed something purely by the
+        player walking towards them.
+        """
+        if getattr(npc, "x", None) is None or getattr(npc, "y", None) is None:
+            return False
+        if not (0 <= action_x < WORLD_WIDTH and 0 <= action_y < WORLD_HEIGHT):
+            return False
+
+        radius = int(getattr(self, "current_fov_radius", FOV_RADIUS_DAY) or FOV_RADIUS_DAY)
+        dx, dy = action_x - npc.x, action_y - npc.y
+        if abs(dx) > radius or abs(dy) > radius:
+            return False
+        if dx == 0 and dy == 0:
+            return True
+
+        transparency = getattr(self, "transparency_map", None)
+        if transparency is None:
+            return True  # headless worlds with no terrain: proximity is all there is
+
+        # Endpoints excluded: an observer is not blocked by their own tile, and
+        # whatever is happening on the action's tile is the thing being seen.
+        for px, py in list(tcod.los.bresenham((npc.x, npc.y), (action_x, action_y)))[1:-1]:
+            if not (0 <= px < WORLD_WIDTH and 0 <= py < WORLD_HEIGHT):
+                return False
+            if not transparency[py, px]:
+                return False
+        return True
+
     def _get_witnesses_to_action(self, action_x: int, action_y: int, action_type: str) -> list[NPC]:
         """
         Finds NPCs who witness an act.
@@ -19978,13 +20047,7 @@ class World:
             if npc.is_dead or isinstance(npc, Animal):
                 continue
 
-            # Check visibility
-            can_see_action = False
-            if npc.id in self.npc_fov_maps:
-                fov_map = self.npc_fov_maps[npc.id]
-                if 0 <= action_x < WORLD_WIDTH and 0 <= action_y < WORLD_HEIGHT:
-                    if fov_map[action_y, action_x]: # Note: FOV map is [y, x]
-                        can_see_action = True
+            can_see_action = self._can_witness(npc, action_x, action_y)
 
             if can_see_action:
                 # If it's a crime, apply logic about who cares/reports

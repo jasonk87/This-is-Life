@@ -43,6 +43,28 @@ _ACTION_PHRASES = {
 }
 _DEFAULT_ACTION = ("was involved with", "get involved with")
 
+# Record types that already push their own curated line to the player - see
+# World.record_birth_event and the hiring notice, both gated on _is_local_news.
+# The journal stays out of their way rather than saying the same thing twice in
+# worse prose. The better end state is folding those two into the journal so
+# there is one message carrying both the authored wording and the provenance;
+# this is the seam until then.
+SELF_ANNOUNCING = {"npc_birth", "npc_hired"}
+
+
+def is_journal_worthy(record_type) -> bool:
+    """Whether learning this is worth a line in the player's journal.
+
+    Deliberately narrow. Trade deals are the most common thing the world
+    records, and a journal reading "You saw Elara Rowan was involved with Theo
+    Hale" fourteen times an evening is noise that makes the whole feature look
+    broken. A journal is for what a person would actually remember and later
+    repeat: violence, death, marriage. Everything else stays in the history
+    ledger, where it is still fully simulated and still available to ask about.
+    """
+    record_type = str(record_type)
+    return record_type in _ACTION_PHRASES and record_type not in SELF_ANNOUNCING
+
 # How sure the player is, in their own words. Mirrors the confidence bands
 # dialogue_surface uses for NPC speech, in second person.
 CERTAIN = 0.75

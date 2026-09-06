@@ -13,6 +13,7 @@ import random
 from pathlib import Path
 from typing import Any, Callable
 
+from config import DAY_LENGTH_TICKS, DAYS_PER_SEASON
 from tools.simulation_snapshot import SnapshotConfig, finalize_snapshot_artifacts, maybe_write_periodic_snapshot
 
 
@@ -248,6 +249,10 @@ def _create_headless_world(seed: int):
     from engine import Chunk, ChunkManager, World
 
     world = World(seed=seed)
+    # Keep the whole trace log. Scenarios assert on traces emitted thousands of
+    # ticks earlier, so the bound the game runs under would silently erase the
+    # evidence they check. See simulation.validation.trim_interaction_traces.
+    world.interaction_trace_log_limit = 0
     world.npcs = []
     world.village_npcs = []
     world.player.x = 1
@@ -266,6 +271,25 @@ def _create_headless_world(seed: int):
     chunk.allow_wildlife_population = True
     world.chunks = [[chunk]]
     return world, chunk
+
+
+def _make_it_winter(world):
+    """Actually make the world cold, rather than asking it to be.
+
+    Setting `world.ambient_temperature` does nothing that survives a tick:
+    update_entity_temperature recomputes it every tick from the season, the
+    biome and the time of day, and writes it back over whatever was there. A
+    scenario that opened with `world.ambient_temperature = -4.0` was running in
+    a 15 degree spring by tick 1, so its actors never got cold, no shelter or
+    warmth behaviour ever triggered, and the assertions about them could not
+    pass. Five scenarios were written that way.
+
+    The season is what drives it, and the season is derived from game_time
+    (see World._update_season), so that is what has to move. Winter is -5 base,
+    which is below cold_threshold, and lands around -15 ambient after the
+    time-of-day term.
+    """
+    world.game_time = 3 * DAYS_PER_SEASON * DAY_LENGTH_TICKS + DAY_LENGTH_TICKS
 
 
 def _create_village(world, chunk, *, region=None, center: tuple[int, int] = (8, 8)):
@@ -2016,7 +2040,7 @@ def run_temperature_warmth_pressure_runtime_soak(seed: int, ticks: int, snapshot
     world, chunk = _create_headless_world(seed)
     village = _create_village(world, chunk, center=(8, 8))
     trace.event(0, "scenario_started", metadata={"scenario": scenario})
-    world.ambient_temperature = -2.0
+    _make_it_winter(world)
     world.create_stockpile(4, 4, accepted_item_types={"raw_log"}, max_item_count=100, village_id=village.id)
     cf = world.create_campfire_runtime(6, 6, fuel_item_type="raw_log", fuel_quantity=3, max_fuel_quantity=6, minimum_fuel_quantity=2, burn_rate_per_tick=1)
     near = NPC(6, 5, name="Near Warm")
@@ -2044,7 +2068,7 @@ def run_shelter_exposure_modifier_runtime_soak(seed: int, ticks: int, snapshot_c
     world, chunk = _create_headless_world(seed)
     _create_village(world, chunk, center=(8, 8))
     trace.event(0, "scenario_started", metadata={"scenario": scenario})
-    world.ambient_temperature = -4.0
+    _make_it_winter(world)
     world.create_shelter_zone([(6, 5), (6, 6)], exposure_reduction_modifier=0.5, recovery_modifier=1.3)
     world.create_campfire_runtime(6, 6, fuel_item_type="raw_log", fuel_quantity=3, max_fuel_quantity=6, minimum_fuel_quantity=2, burn_rate_per_tick=1)
     sheltered = NPC(6, 5, name="Sheltered NPC")
@@ -2072,7 +2096,7 @@ def run_cold_survival_override_runtime_soak(seed: int, ticks: int, snapshot_conf
     world, chunk = _create_headless_world(seed)
     _create_village(world, chunk, center=(8, 8))
     trace.event(0, "scenario_started", metadata={"scenario": scenario})
-    world.ambient_temperature = -5.0
+    _make_it_winter(world)
     world.cold_override_threshold = 0.7
     world.cold_recovery_threshold = 0.35
     warm = world.create_campfire_runtime(6, 6, fuel_item_type="raw_log", fuel_quantity=6, max_fuel_quantity=8, minimum_fuel_quantity=1, burn_rate_per_tick=1)
@@ -2105,7 +2129,11 @@ def run_fatigue_rest_override_runtime_soak(seed: int, ticks: int, snapshot_confi
     scenario = "fatigue_rest_override_runtime_soak"
     trace = SimulationTrace(); artifacts: dict[str, Any] = {}
     world, chunk = _create_headless_world(seed); _create_village(world, chunk, center=(8, 8))
-    world.ambient_temperature = -1.0
+    # Deliberately not winter. This scenario is about fatigue, and in winter the
+    # cold pressure outranks it - measured 1985 cold arbitrations against 8
+    # fatigue. It previously set `world.ambient_temperature = -1.0`, which the
+    # engine overwrote on tick 1, so it was never cold here anyway and the
+    # fatigue behaviour it checks has always worked without it.
     world.create_shelter_zone([(7,7),(7,8)], exposure_reduction_modifier=0.6, recovery_modifier=1.2)
     world.create_campfire_runtime(7,7, fuel_item_type="raw_log", fuel_quantity=5, max_fuel_quantity=8, minimum_fuel_quantity=1, burn_rate_per_tick=1)
     actor = NPC(20,20,name="Tired Worker"); actor.fatigue_modifier=0.95; world.village_npcs.append(actor)
@@ -2113,11 +2141,21 @@ def run_fatigue_rest_override_runtime_soak(seed: int, ticks: int, snapshot_confi
     for _ in range(ticks): run_world_tick(world)
     traces=[e.get("trace_type") for e in getattr(world,"interaction_trace_log",[])]
     snap=world.build_world_debug_snapshot(); a=next((x for x in snap.actor_work_profiles if x.get("actor_id")==actor.id), {})
-    trace.assert_check(ticks, "override_started", "fatigue_override_started" in traces, "fatigue override should start")
-    trace.assert_check(ticks, "target_selected", "fatigue_override_target_selected" in traces, "rest target should be selected")
+    # The overrides were generalised into a pressure-arbitration system and the
+    # per-pressure trace names went with it. Nothing has emitted
+    # fatigue_override_started, _target_selected or _cleared since. Each of these
+    # now asserts on evidence the engine really produces, checked by hand first:
+    # fatigue is arbitrated 8 times, a route to rest starts, the actor rests 7
+    # times, and the override clears.
+    fatigue_arbitrated = any(
+        e.get("metadata", {}).get("selected_pressure") == "fatigue_rest"
+        for e in getattr(world, "interaction_trace_log", [])
+        if e.get("trace_type") == "survival_override_arbitrated")
+    trace.assert_check(ticks, "override_started", fatigue_arbitrated, "fatigue override should start")
+    trace.assert_check(ticks, "target_selected", "fatigue_override_route_started" in traces, "rest target should be selected")
     trace.assert_check(ticks, "route_or_rest", ("fatigue_override_route_started" in traces) or ("actor_resting" in traces), "actor should route or rest")
     trace.assert_check(ticks, "unavailable_traced", "actor_skipped_survival_override" in traces, "override actor should be unavailable to scheduler")
-    trace.assert_check(ticks, "cleared_or_active", ("fatigue_override_cleared" in traces) or a.get("survival_override_active"), "override should clear or remain active deterministically")
+    trace.assert_check(ticks, "cleared_or_active", ("survival_override_cleared" in traces) or a.get("survival_override_active"), "override should clear or remain active deterministically")
     trace.assert_check(ticks, "snapshot_fields", "resting_state" in a and "fatigue_recovery_modifier" in a, "snapshot should expose fatigue rest state")
     trace.assert_check(ticks, "warnings_bounded", len(getattr(world, "validation_warnings", [])) <= 700, "warnings should remain bounded")
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
@@ -2130,7 +2168,7 @@ def run_survival_override_arbitration_runtime_soak(seed: int, ticks: int, snapsh
     scenario = "survival_override_arbitration_runtime_soak"
     trace = SimulationTrace(); artifacts: dict[str, Any] = {}
     world, chunk = _create_headless_world(seed); _create_village(world, chunk, center=(8, 8))
-    world.ambient_temperature = -6.0
+    _make_it_winter(world)
     warm = world.create_campfire_runtime(7,7,fuel_item_type="raw_log",fuel_quantity=8,max_fuel_quantity=10,minimum_fuel_quantity=1,burn_rate_per_tick=1)
     world.create_shelter_zone([(7,7),(7,8)], exposure_reduction_modifier=0.5, recovery_modifier=1.3)
     actor = NPC(20,20,name="Arbiter Actor"); actor.cold_exposure=0.9; actor.fatigue_modifier=0.95; world.village_npcs.append(actor)

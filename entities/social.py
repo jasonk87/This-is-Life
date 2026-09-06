@@ -127,12 +127,76 @@ class KnownHistoryFact:
     # rumour is a question for later - this records immediate tellers only.)
     source_entity_id: int | None = None
     heard_from_ids: tuple[int, ...] = ()
+    # Which assertion this holder actually believes. Empty on facts written
+    # before claims existed, which are read as believing the truth.
+    claim_id: str = ""
 
     def __setstate__(self, state):
         # Pickle replays a saved __dict__ and never calls __init__, so a fact
         # restored from a save written before these fields existed would be
         # missing them entirely. Frozen only blocks __setattr__, not this.
         dataclass_setstate(self, state)
+
+
+@dataclass(frozen=True)
+class Claim:
+    """An assertion about what happened. It may or may not be true.
+
+    The three layers this completes:
+
+        record  - what happened.            Owned by the world (HistoryLedger).
+        claim   - an assertion about it.    Shared; many people can hold one.
+        fact    - somebody believing one.   Personal (KnownHistoryFact).
+
+    Before this, a belief pointed straight at a record, so a villager could be
+    uncertain, vague or forgetful but never actually *wrong*. A claim is the
+    room for being wrong: it names a record, and then says what the holder
+    thinks happened, which need not match.
+
+    The id is a hash of the assertion and nothing else - not who said it, not
+    how sure they are, not how well they remember it. That is deliberate. Two
+    people who arrive at the same wrong story independently land on the same
+    claim id, so a rumour converges instead of fragmenting into one variant per
+    teller, and "how many people believe this" is a question with an answer.
+    (Same trick MemoryEvent already uses for its own id.)
+    """
+
+    source_record_id: str
+    believed_record_type: str
+    believed_subject_ids: tuple[int, ...] = ()
+    believed_target_id: int | None = None
+    believed_location_id: str | None = None
+    believed_quantity: int | None = None
+    id: str = ""
+
+    def __post_init__(self):
+        if self.id:
+            return
+        seed = "|".join(
+            [
+                str(self.source_record_id),
+                str(self.believed_record_type),
+                ",".join(str(i) for i in self.believed_subject_ids),
+                str(self.believed_target_id),
+                str(self.believed_location_id),
+                str(self.believed_quantity),
+            ]
+        )
+        object.__setattr__(self, "id", hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16])
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
+
+def claim_from_record(record: Any) -> Claim:
+    """The true claim: what a perfect witness would assert about this record."""
+    return Claim(
+        source_record_id=_record_id(record),
+        believed_record_type=_record_type(record),
+        believed_subject_ids=_record_subject_entity_ids(record),
+        believed_target_id=getattr(record, "target_id", None),
+        believed_location_id=_record_scope_value(record, "settlement_id"),
+    )
 
 
 def _record_id(record: Any) -> str:
@@ -566,6 +630,7 @@ class KnowledgeComponent:
         confidence: float,
         tick: int,
         source_entity_id: int | None = None,
+        claim: "Claim | None" = None,
     ) -> bool:
         if record is None:
             return False
@@ -573,6 +638,7 @@ class KnowledgeComponent:
         if not source_record_id:
             return False
         confidence = max(0.0, min(1.0, float(confidence)))
+        believed = claim if claim is not None else claim_from_record(record)
         tags = tuple(getattr(record, "tags", ()) or ())
         profile = compute_memory_profile(
             record,
@@ -613,7 +679,12 @@ class KnowledgeComponent:
         fact = KnownHistoryFact(
             source_record_id=source_record_id,
             record_type=_record_type(record),
-            subject_entity_ids=_record_subject_entity_ids(record),
+            # From the claim, not the record. Every consumer of this field -
+            # get_known_records_about_entity, dialogue_surface, ambient_info,
+            # social_reaction - already reads it off the fact, so a belief about
+            # the wrong person flows through all of them without their knowing
+            # anything about claims.
+            subject_entity_ids=believed.believed_subject_ids,
             known_at_tick=int(tick),
             source_type=str(source_type),
             confidence=confidence,
@@ -623,6 +694,7 @@ class KnowledgeComponent:
             record_class_name=type(record).__name__,
             source_entity_id=None if source_entity_id is None else int(source_entity_id),
             heard_from_ids=() if source_entity_id is None else (int(source_entity_id),),
+            claim_id=believed.id,
         )
         self.known_history_facts[source_record_id] = fact_with_memory_profile(fact, profile, tick=int(tick))
         return True

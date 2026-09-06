@@ -115,6 +115,24 @@ class KnownHistoryFact:
     reinforcement_count: int = 0
     last_recalled_tick: int = 0
     last_reinforced_tick: int = 0
+    # Who this was most recently heard from, and everyone it has been heard
+    # from. `source_type` says *how* a holder came to know something; neither
+    # said *who* told them, which is the question an investigation actually
+    # turns on - and which telling a lie apart from repeating one will need.
+    #
+    # The set exists because repetition and corroboration are not the same
+    # thing. Thomas saying it three times is one source; Mara, Owen and Thomas
+    # each saying it once is three. Only the second should make a belief
+    # sturdier. (Whether those three ultimately trace back to one original
+    # rumour is a question for later - this records immediate tellers only.)
+    source_entity_id: int | None = None
+    heard_from_ids: tuple[int, ...] = ()
+
+    def __setstate__(self, state):
+        # Pickle replays a saved __dict__ and never calls __init__, so a fact
+        # restored from a save written before these fields existed would be
+        # missing them entirely. Frozen only blocks __setattr__, not this.
+        dataclass_setstate(self, state)
 
 
 def _record_id(record: Any) -> str:
@@ -547,6 +565,7 @@ class KnowledgeComponent:
         source_type: str,
         confidence: float,
         tick: int,
+        source_entity_id: int | None = None,
     ) -> bool:
         if record is None:
             return False
@@ -565,14 +584,30 @@ class KnowledgeComponent:
         )
         existing = self.known_history_facts.get(source_record_id)
         if existing is not None:
-            reinforced = reinforce_known_fact(
-                existing,
-                tick=int(tick),
-                source_type=str(source_type),
-                emotional_weight=profile.emotional_weight,
-            )
+            heard_from = tuple(getattr(existing, "heard_from_ids", ()) or ())
+            teller_is_new = source_entity_id is not None and int(source_entity_id) not in heard_from
+            # Hearing it again from someone already counted is repetition, not
+            # corroboration, and must not make the memory sturdier. Callers that
+            # do not say who told them keep the old unconditional behaviour -
+            # most of them are witnessing or reading a record, where there is no
+            # teller to be repetitive.
+            if source_entity_id is None or teller_is_new:
+                reinforced = reinforce_known_fact(
+                    existing,
+                    tick=int(tick),
+                    source_type=str(source_type),
+                    emotional_weight=profile.emotional_weight,
+                )
+            else:
+                reinforced = existing
             if confidence > float(getattr(reinforced, "confidence", 0.0)):
                 reinforced = replace(reinforced, confidence=confidence, source_type=str(source_type))
+            if source_entity_id is not None:
+                reinforced = replace(
+                    reinforced,
+                    source_entity_id=int(source_entity_id),
+                    heard_from_ids=heard_from if not teller_is_new else heard_from + (int(source_entity_id),),
+                )
             self.known_history_facts[source_record_id] = reinforced
             return confidence > float(getattr(existing, "confidence", 0.0))
         fact = KnownHistoryFact(
@@ -586,6 +621,8 @@ class KnowledgeComponent:
             region_id=_record_scope_value(record, "region_id"),
             tags=tags,
             record_class_name=type(record).__name__,
+            source_entity_id=None if source_entity_id is None else int(source_entity_id),
+            heard_from_ids=() if source_entity_id is None else (int(source_entity_id),),
         )
         self.known_history_facts[source_record_id] = fact_with_memory_profile(fact, profile, tick=int(tick))
         return True

@@ -22,6 +22,7 @@ class KnowledgeSystem:
         source_type: str = "witnessed",
         confidence: float = 1.0,
         tick: int | None = None,
+        source_entity_id: int | None = None,
     ) -> bool:
         knowledge = getattr(holder, "knowledge", None)
         if knowledge is None or record is None:
@@ -32,7 +33,9 @@ class KnowledgeSystem:
         learned_fact = False
         learn_history_record = getattr(knowledge, "learn_history_record", None)
         if callable(learn_history_record):
-            learned_fact = learn_history_record(record, source_type, confidence, tick)
+            learned_fact = learn_history_record(
+                record, source_type, confidence, tick, source_entity_id=source_entity_id
+            )
 
         known_events = getattr(knowledge, "known_events", None)
         learned_event = False
@@ -50,6 +53,7 @@ class KnowledgeSystem:
         source_type: str = "witnessed",
         confidence: float = 1.0,
         tick: int | None = None,
+        source_entity_id: int | None = None,
     ) -> bool:
         return self.learn_history_record(
             holder,
@@ -57,6 +61,7 @@ class KnowledgeSystem:
             source_type=source_type,
             confidence=confidence,
             tick=tick,
+            source_entity_id=source_entity_id,
         )
 
     def learn_events(self, holder, events) -> int:
@@ -84,6 +89,9 @@ class KnowledgeSystem:
             source_type="told",
             confidence=0.8,
             tick=self._event_tick(event),
+            # The one place a belief passes between two people, and the only
+            # place that knows who the teller was.
+            source_entity_id=getattr(source, "id", None),
         )
 
     def share_remote_events(

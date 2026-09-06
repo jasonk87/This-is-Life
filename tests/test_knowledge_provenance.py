@@ -27,6 +27,7 @@ import unittest
 from dataclasses import replace
 
 from entities.social import KnownHistoryFact
+from simulation.systems.ambient_info import share_known_fact
 from tests.world_cache import fresh_world
 
 
@@ -119,6 +120,79 @@ class TestSharingRecordsTheSource(unittest.TestCase):
         self.assertEqual(fact.source_entity_id, speaker.id)
         self.assertEqual(fact.heard_from_ids, (speaker.id,))
         self.assertEqual(fact.source_type, "told")
+
+
+class TestTheOtherTellingRoute(unittest.TestCase):
+    """Conversation and overheard scenes do not go through share_event.
+
+    ambient_info.share_known_fact builds a KnownHistoryFact by hand instead of
+    going through KnowledgeComponent.learn_history_record, so everything that
+    route was given for free had to be given to it again. It dropped the speaker
+    entirely - a listener ended up knowing something with no idea where it came
+    from, which is exactly the question an interrogation asks - and it dropped
+    the claim id, so two people holding the same assertion were not recognisable
+    as holding the same assertion.
+
+    Measured before the fix: 6 beliefs acquired as "told" and 2 as "overheard"
+    across a village, none of them with a teller recorded.
+    """
+
+    def setUp(self):
+        self.world = fresh_world(seed=23, pre_simulate=False)
+        self.speaker, self.listener = self.world.village_npcs[0], self.world.village_npcs[1]
+        for npc in (self.speaker, self.listener):
+            npc.knowledge.known_history_facts.clear()
+        self.record = _Record(record_id="rec-convo")
+        self.speaker.knowledge.learn_history_record(self.record, "witnessed", 1.0, 100)
+
+    def _speakers_fact(self):
+        return self.speaker.knowledge.known_history_facts["rec-convo"]
+
+    def test_conversation_records_who_spoke(self):
+        share_known_fact(self.speaker, self.listener, self._speakers_fact(),
+                         source_type="told", current_tick=120)
+        fact = self.listener.knowledge.known_history_facts["rec-convo"]
+        self.assertEqual(fact.source_entity_id, self.speaker.id)
+        self.assertEqual(fact.heard_from_ids, (self.speaker.id,))
+
+    def test_overhearing_records_who_was_speaking(self):
+        share_known_fact(self.speaker, self.listener, self._speakers_fact(),
+                         source_type="overheard", current_tick=120)
+        fact = self.listener.knowledge.known_history_facts["rec-convo"]
+        self.assertEqual(fact.source_entity_id, self.speaker.id)
+        self.assertEqual(fact.source_type, "overheard")
+
+    def test_the_claim_travels_too(self):
+        share_known_fact(self.speaker, self.listener, self._speakers_fact(),
+                         source_type="told", current_tick=120)
+        self.assertEqual(self.listener.knowledge.known_history_facts["rec-convo"].claim_id,
+                         self._speakers_fact().claim_id)
+        self.assertNotEqual(self._speakers_fact().claim_id, "")
+
+    def test_one_speaker_repeating_themselves_is_not_corroboration(self):
+        share_known_fact(self.speaker, self.listener, self._speakers_fact(),
+                         source_type="told", current_tick=120)
+        before = self.listener.knowledge.known_history_facts["rec-convo"].memory_strength
+        for tick in (140, 160, 180):
+            share_known_fact(self.speaker, self.listener, self._speakers_fact(),
+                             source_type="told", current_tick=tick)
+        after = self.listener.knowledge.known_history_facts["rec-convo"].memory_strength
+        self.assertEqual(after, before, "the same speaker repeating themselves strengthened it")
+
+    def test_a_second_speaker_does_corroborate(self):
+        other = self.world.village_npcs[2]
+        other.knowledge.known_history_facts.clear()
+        other.knowledge.learn_history_record(self.record, "witnessed", 1.0, 100)
+
+        share_known_fact(self.speaker, self.listener, self._speakers_fact(),
+                         source_type="told", current_tick=120)
+        before = self.listener.knowledge.known_history_facts["rec-convo"].memory_strength
+        share_known_fact(other, self.listener,
+                         other.knowledge.known_history_facts["rec-convo"],
+                         source_type="told", current_tick=140)
+        fact = self.listener.knowledge.known_history_facts["rec-convo"]
+        self.assertGreater(fact.memory_strength, before)
+        self.assertEqual(fact.heard_from_ids, (self.speaker.id, other.id))
 
 
 class TestOldSavesStillLoad(unittest.TestCase):

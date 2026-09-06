@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 from typing import Any
 
@@ -84,7 +85,18 @@ def share_known_fact(speaker, listener, fact, source_type: str = "told", current
     if not fact_id:
         return False
     current_tick = int(getattr(fact, "known_at_tick", 0) if current_tick is None else current_tick)
-    if fact_id in getattr(listener_knowledge, "known_history_facts", {}):
+    speaker_id = getattr(speaker, "id", None)
+    existing = getattr(listener_knowledge, "known_history_facts", {}).get(fact_id)
+    if existing is not None:
+        # Repetition from somebody already counted is not corroboration, and
+        # must not make the memory sturdier - the same rule
+        # KnowledgeComponent.learn_history_record applies. This path builds its
+        # facts by hand rather than going through that, so it has to say so
+        # itself.
+        heard_from = tuple(getattr(existing, "heard_from_ids", ()) or ())
+        teller_is_new = speaker_id is not None and int(speaker_id) not in heard_from
+        if speaker_id is not None and not teller_is_new:
+            return False
         reinforced = reinforce_known_fact(
             listener_knowledge,
             fact_id,
@@ -92,6 +104,13 @@ def share_known_fact(speaker, listener, fact, source_type: str = "told", current
             source_type=source_type,
             emotional_weight=float(getattr(fact, "emotional_weight", 0.0) or 0.0),
         )
+        if reinforced and speaker_id is not None:
+            updated = listener_knowledge.known_history_facts[fact_id]
+            listener_knowledge.known_history_facts[fact_id] = replace(
+                updated,
+                source_entity_id=int(speaker_id),
+                heard_from_ids=heard_from + (int(speaker_id),),
+            )
         return bool(reinforced)
 
     confidence = _decayed_confidence(float(getattr(fact, "confidence", 0.0)), source_type=source_type)
@@ -106,6 +125,18 @@ def share_known_fact(speaker, listener, fact, source_type: str = "told", current
         region_id=getattr(fact, "region_id", None),
         tags=tuple(getattr(fact, "tags", ()) or ()),
         record_class_name=str(getattr(fact, "record_class_name", "") or ""),
+        # Who said it, so "who did you hear that from?" has an answer on this
+        # route too. Conversation and overheard scenes come through here rather
+        # than through KnowledgeSystem.share_event, and used to drop the speaker
+        # entirely - the listener ended up knowing something with no idea where
+        # it came from.
+        source_entity_id=None if speaker_id is None else int(speaker_id),
+        heard_from_ids=() if speaker_id is None else (int(speaker_id),),
+        # And the speaker's claim, not a fresh one. subject_entity_ids is copied
+        # above so the belief's content already carries across, but without the
+        # claim id the listener's belief was not recognisably the same assertion
+        # as the speaker's - believers_of would not have counted them together.
+        claim_id=str(getattr(fact, "claim_id", "") or ""),
     )
     profile = compute_memory_profile(
         source_type=str(source_type),

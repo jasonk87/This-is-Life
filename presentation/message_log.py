@@ -63,9 +63,33 @@ class LogEntry:
     category: str = DEFAULT_CATEGORY
     tick: int = 0
     count: int = 1
+    # Where this came from, when the line records something the player learned
+    # rather than something that simply happened to them. Empty on ordinary
+    # messages and on entries restored from saves written before this existed.
+    #
+    # `confidence_at_entry` is frozen on purpose. The line's wording was chosen
+    # from it at the moment of writing, and a journal that re-renders old
+    # entries against present-day confidence would reach back and change what
+    # the player is recorded as having believed last week. What they believe
+    # *now* is a different question, answered from their knowledge rather than
+    # from here.
+    claim_id: str = ""
+    knowledge_source: str = ""
+    source_entity_id: int | None = None
+    confidence_at_entry: float | None = None
 
     def display_text(self) -> str:
         return self.text if self.count <= 1 else f"{self.text} (x{self.count})"
+
+    def __setstate__(self, state):
+        # Pickle replays the saved __dict__ without calling __init__, so entries
+        # written before these fields existed come back without them.
+        self.__dict__.update(state)
+        for field_name, default in (
+            ("claim_id", ""), ("knowledge_source", ""),
+            ("source_entity_id", None), ("confidence_at_entry", None),
+        ):
+            self.__dict__.setdefault(field_name, default)
 
 
 def append_message(entries, text, *, category=None, tick=0, max_entries=MAX_LOG_ENTRIES):
@@ -84,6 +108,41 @@ def append_message(entries, text, *, category=None, tick=0, max_entries=MAX_LOG_
         return entries[-1]
 
     entry = LogEntry(text=text, category=resolved, tick=int(tick))
+    entries.append(entry)
+    while len(entries) > max_entries:
+        entries.pop(0)
+    return entry
+
+
+def append_knowledge_message(
+    entries,
+    text,
+    *,
+    claim_id="",
+    knowledge_source="",
+    source_entity_id=None,
+    confidence_at_entry=None,
+    category="social",
+    tick=0,
+    max_entries=MAX_LOG_ENTRIES,
+):
+    """Record something the player *learned*, with how they learned it.
+
+    The text is composed by the caller (presentation.player_journal) and stored
+    as written. Two tellings of the same event are separate entries even when
+    the wording matches, because "Mara told you" on Monday and "Owen told you"
+    on Friday are two different things happening - so this deliberately does not
+    collapse repeats the way append_message does.
+    """
+    entry = LogEntry(
+        text=str(text),
+        category=str(category) if category else DEFAULT_CATEGORY,
+        tick=int(tick),
+        claim_id=str(claim_id or ""),
+        knowledge_source=str(knowledge_source or ""),
+        source_entity_id=source_entity_id,
+        confidence_at_entry=None if confidence_at_entry is None else float(confidence_at_entry),
+    )
     entries.append(entry)
     while len(entries) > max_entries:
         entries.pop(0)

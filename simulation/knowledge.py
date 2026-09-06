@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from config import DAY_LENGTH_TICKS
 from entities.social import Claim, claim_from_record, reset_transient_knowledge
+from presentation.message_log import append_knowledge_message
+from presentation.player_journal import journal_line
 from simulation.distortion import distort_on_telling
 from simulation.records import ChronicleArchive
 
@@ -87,7 +89,63 @@ class KnowledgeSystem:
         if record_id and isinstance(known_events, dict) and record_id not in known_events:
             known_events[record_id] = record
             learned_event = True
+        if learned_fact or learned_event:
+            self._note_in_player_journal(
+                holder, claim, source_type=source_type,
+                source_entity_id=source_entity_id, confidence=confidence, tick=tick,
+            )
         return learned_fact or learned_event
+
+    def _note_in_player_journal(self, holder, claim, *, source_type,
+                                source_entity_id, confidence, tick) -> None:
+        """Write the player's log line, if this was the player learning it.
+
+        The player holds the same KnowledgeComponent as everyone else, so this
+        is the one place that has to care which entity it is.
+        """
+        world = getattr(self, "world", None)
+        if world is None or holder is not getattr(world, "player", None):
+            return
+        entries = getattr(world, "chat_log_entries", None)
+        if not isinstance(entries, list):
+            return
+
+        names = {}
+        lookup = getattr(world, "get_entity_by_id", None)
+        # Plain names, not display names. get_entity_display_name appends a
+        # profession - "Nora Mercer (Scribe)" - which is useful in a status
+        # panel and awful inside a sentence: "Nora Mercer (Scribe) attacked
+        # Mara Wilder (Miner)". These lines are prose.
+        display = None
+        if callable(lookup):
+            wanted = list(getattr(claim, "believed_subject_ids", ()) or ())
+            if getattr(claim, "believed_target_id", None) is not None:
+                wanted.append(claim.believed_target_id)
+            if source_entity_id is not None:
+                wanted.append(source_entity_id)
+            for entity_id in wanted:
+                entity = lookup(entity_id)
+                if entity is not None:
+                    names[entity_id] = display(entity) if callable(display) else getattr(entity, "name", "")
+
+        text = journal_line(
+            claim,
+            source_type=source_type,
+            teller_name=names.get(source_entity_id, ""),
+            confidence=float(confidence),
+            names=names,
+        )
+        append_knowledge_message(
+            entries, text,
+            claim_id=getattr(claim, "id", ""),
+            knowledge_source=str(source_type),
+            source_entity_id=source_entity_id,
+            confidence_at_entry=float(confidence),
+            tick=int(tick or 0),
+        )
+        plain_log = getattr(world, "chat_log", None)
+        if isinstance(plain_log, list):
+            plain_log.append(text)
 
     def learn_event(
         self,

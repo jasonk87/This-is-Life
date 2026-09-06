@@ -31,7 +31,11 @@ class TestHuntToTable(unittest.TestCase):
                         chunk.biome = "plains"
                         chunk.tiles = [[MagicMock(passable=True, properties={}, name="Plains") for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
                 mock_init_chunks.return_value = mock_chunks
-                self.world = fresh_world(seed=1, pre_simulate=False)
+                # built here rather than through fresh_world: the cache is
+                # keyed by seed, and a world made under these patches must
+                # not be handed to a test that did not ask for them (nor the
+                # other way round)
+                self.world = World(seed=1)
 
         self.world.transparency_map = np.full((WORLD_HEIGHT, WORLD_WIDTH), True, order="C")
         self.world.current_fov_radius = 50

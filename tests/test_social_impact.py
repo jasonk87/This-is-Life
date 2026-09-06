@@ -23,7 +23,11 @@ class TestSocialImpact(unittest.TestCase):
             # We need to mock the chunk grid to match the dimensions calculated by World.__init__
             # If WORLD_WIDTH == CHUNK_SIZE, then chunk_width = 1
             mock_init_chunks.return_value = [[MagicMock()]] # 1x1 chunk grid
-            self.world = fresh_world(seed=42, pre_simulate=False)
+            # built here rather than through fresh_world: the cache is keyed
+            # by seed, and a world made under these patches must not be
+            # handed to a test that did not ask for them (nor the other way
+            # round)
+            self.world = World(seed=42)
 
         # Mock Ollama to avoid network calls
         self.world._call_llm = MagicMock(return_value="{}")

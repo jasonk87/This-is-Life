@@ -6,6 +6,25 @@ from simulation.systems.architecture import (
     FURNITURE_ROLES
 )
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_building_archetypes():
+    """Several tests below register archetypes of their own.
+
+    BUILDING_ARCHETYPES is a module-level dict shared by every test in the
+    process, and the entries were being left behind. Nothing enumerates the
+    table today - it is only ever looked up by key - so the leftovers were
+    inert, but that is a property of the current engine rather than of these
+    tests, and the same shape of leak in the world cache did bite. Put it back.
+    """
+    original = dict(BUILDING_ARCHETYPES)
+    yield
+    BUILDING_ARCHETYPES.clear()
+    BUILDING_ARCHETYPES.update(original)
+
+
 def test_building_generates_valid_structure():
     gen_building = generate_building("house", 0, 0, 7, 7)
 

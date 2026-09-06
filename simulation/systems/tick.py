@@ -290,6 +290,24 @@ def run_world_tick(world) -> None:
     advance_reserves = getattr(world, "advance_reserve_targets", None)
     if callable(advance_reserves):
         advance_reserves()
+    # These seven ran at the end of run_world_tick until commit d55f68d moved
+    # them, by indentation, into emit_environmental_sensory_cues - a flavour
+    # function that returns unless game_time % 80 == 0 and returns early again
+    # if the player happens to be stood near an oven, forge, mill or lit hearth.
+    # So production, conversation, titles, reputation and corpse cleanup were
+    # advancing on one tick in eighty, and not at all while the player warmed
+    # their hands. Measured: 25 ambient conversations in 2000 ticks, which is
+    # exactly 2000/80.
+    advance_tasks = getattr(world, "advance_production_tasks", None)
+    if callable(advance_tasks):
+        advance_tasks()
+    advance_active_interactions(world)
+    if hasattr(world, "_handle_ambient_activity_interactions"):
+        world._handle_ambient_activity_interactions()
+    world._update_entity_titles()
+    world._update_npc_reputations()
+    world._handle_reputation_based_reactions()
+    world._cleanup_dead_entities()
     emit_environmental_sensory_cues(world)
     trim_interaction_traces(world)
     trim_visual_effects(world)
@@ -325,13 +343,3 @@ def emit_environmental_sensory_cues(world) -> None:
                 if phys and getattr(phys, "body_temperature", 37.0) < 36.5:
                     world.add_message_to_chat_log("The glowing warmth of the hearth eases the chill in the air.")
                     return
-    advance_tasks = getattr(world, "advance_production_tasks", None)
-    if callable(advance_tasks):
-        advance_tasks()
-    advance_active_interactions(world)
-    if hasattr(world, "_handle_ambient_activity_interactions"):
-        world._handle_ambient_activity_interactions()
-    world._update_entity_titles()
-    world._update_npc_reputations()
-    world._handle_reputation_based_reactions()
-    world._cleanup_dead_entities()

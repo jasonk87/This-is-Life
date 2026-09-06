@@ -1779,7 +1779,14 @@ def run_labor_identity_runtime_soak(seed: int, ticks: int, snapshot_config: Snap
     warning_count = len(getattr(world, "validation_warnings", []))
     trace.assert_check(ticks, "suitability_scored", "actor_task_suitability_scored" in trace_types, "actor suitability should be traced")
     trace.assert_check(ticks, "task_selected", "production_task_selected" in trace_types, "production task selection should occur")
-    trace.assert_check(ticks, "warnings_bounded", warning_count <= 220, "warning volume should remain bounded", warning_count=warning_count)
+    # 220 was calibrated while run_world_tick's tail was trapped inside
+    # emit_environmental_sensory_cues, so production advanced on one tick in
+    # eighty and retry warnings accrued at a eightieth of their real rate.
+    # With the loop restored the same warning kinds arrive at full speed:
+    # measured 231, of which production_task_excessive_retries 101,
+    # hunger_no_edible_food 51, production_task_starvation 48. Raised to 300,
+    # which still sits well under the 500 cap so genuine saturation fails.
+    trace.assert_check(ticks, "warnings_bounded", warning_count <= 300, "warning volume should remain bounded", warning_count=warning_count)
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)
 

@@ -1,6 +1,6 @@
 """Which sandbox scenarios pass, held still so it cannot drift quietly.
 
-Thirty-three of the thirty-nine pass at 2000 ticks. The other six are recorded
+Thirty-four of the thirty-nine pass at 2000 ticks. The other five are recorded
 below with what is actually wrong with each, because "eight are broken" decays
 into "some are broken" and then into nobody looking.
 
@@ -51,15 +51,6 @@ KNOWN_FAILING = {
         "stale expectations: wants survival_override_started/_target_selected/"
         "_target_lost/_recovered; engine emits survival_override_selected/_cleared/"
         "_arbitrated",
-    "fatigue_rest_override_runtime_soak":
-        "one assertion left: unavailable_traced wants actor_skipped_survival_override, "
-        "which needs an override that lasts long enough for the scheduler to score "
-        "against it. The sandbox replaces calculate_path with a two-step teleport, so a "
-        "tired actor reaches rest and recovers almost immediately and the fatigue "
-        "override is never sustained. Winter would supply the trace - measured 23 skips "
-        "- but from the *cold* override, which would be the assertion passing for a "
-        "reason other than its name, the same trap survival_override_arbitration was "
-        "already caught in. The other three assertions were stale names and are fixed.",
     "production_task_arbitration_soak":
         "behaviour gap: blocked tasks never recover and stockpile reservations are "
         "never created in this setup",

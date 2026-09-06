@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from config import DAY_LENGTH_TICKS
 from entities.social import Claim, claim_from_record, reset_transient_knowledge
+from simulation.distortion import distort_on_telling
 from simulation.records import ChronicleArchive
 
 
 class KnowledgeSystem:
     """Owns structured learning and sharing of event/book knowledge."""
 
-    def __init__(self, records: ChronicleArchive):
+    def __init__(self, records: ChronicleArchive, world=None):
         self.records = records
         self.claims: dict[str, Claim] = {}
+        # Back-reference, because distortion needs to know who else lives here
+        # to pick a plausible wrong name. World.__setstate__ re-attaches it for
+        # saves written before this existed, so distortion does not silently
+        # switch itself off on an old game.
+        self.world = world
 
     def _claim_registry(self) -> dict:
         """Claims by id, created on demand.
@@ -134,8 +141,30 @@ class KnowledgeSystem:
             # person telling them actually thought - so a mistaken villager
             # corrected everyone they spoke to, and no wrong belief could
             # outlive the person who formed it.
-            claim=self._claim_held_by(source, event_id),
+            #
+            # And then as the listener hears it, which is not always as it was
+            # said. See simulation.distortion.
+            claim=self._heard_claim(source, recipient, event, event_id),
         )
+
+    def _heard_claim(self, source, recipient, event, event_id) -> Claim | None:
+        """The speaker's claim, as it arrives in the listener's head."""
+        spoken = self._claim_held_by(source, event_id)
+        if spoken is None:
+            spoken = claim_from_record(event)
+        world = getattr(self, "world", None)
+        villagers = list(getattr(world, "village_npcs", ()) or ()) if world is not None else []
+        if not villagers:
+            return spoken
+        heard = distort_on_telling(
+            spoken,
+            speaker=source,
+            listener=recipient,
+            villagers=villagers,
+            confidence=0.8,
+            day=int(self._event_tick(event)) // DAY_LENGTH_TICKS,
+        )
+        return self.register_claim(heard) if heard is not spoken else spoken
 
     def _claim_held_by(self, holder, record_id) -> Claim | None:
         """The assertion this holder believes about a record, if any.

@@ -667,7 +667,21 @@ class KnowledgeComponent:
             else:
                 reinforced = existing
             if confidence > float(getattr(reinforced, "confidence", 0.0)):
-                reinforced = replace(reinforced, confidence=confidence, source_type=str(source_type))
+                # Better evidence replaces what is believed, not just how
+                # strongly. Somebody who heard the miller did it and then sees
+                # the baker do it should end up believing the baker - and the
+                # reverse must not happen, which is why this is gated on
+                # confidence rising rather than on merely being told again.
+                # That ordering is the whole evidence hierarchy: witnessed and
+                # official beat hearsay, hearsay never overturns them.
+                reinforced = replace(
+                    reinforced,
+                    confidence=confidence,
+                    source_type=str(source_type),
+                    claim_id=believed.id,
+                    subject_entity_ids=believed.believed_subject_ids,
+                    record_type=believed.believed_record_type,
+                )
             if source_entity_id is not None:
                 reinforced = replace(
                     reinforced,

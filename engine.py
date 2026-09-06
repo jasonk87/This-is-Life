@@ -1149,7 +1149,7 @@ class World:
         self._periodic_gate_ticks: dict[str, int] = {}
         self.history = HistoryLedger(event_limit=200)
         self.records = ChronicleArchive(self.history)
-        self.knowledge_system = KnowledgeSystem(self.records)
+        self.knowledge_system = KnowledgeSystem(self.records, world=self)
         self.politics = PoliticsTracker()
         self.ecology = EcologySystem()
         self.chunks = self._initialize_chunks()
@@ -1456,6 +1456,12 @@ class World:
         self.warmth_decay_radius = getattr(self, "warmth_decay_radius", 6)
         self.last_temperature_tick = getattr(self, "last_temperature_tick", 0)
         self.shelter_zones_by_id = getattr(self, "shelter_zones_by_id", {})
+        # A KnowledgeSystem pickled before it carried a world back-reference
+        # comes back without one, and distortion would quietly stop happening on
+        # that save rather than failing loudly. Re-attach it.
+        knowledge_system = getattr(self, "knowledge_system", None)
+        if knowledge_system is not None and getattr(knowledge_system, "world", None) is None:
+            knowledge_system.world = self
         self.cold_override_threshold = float(getattr(self, "cold_override_threshold", 0.7))
         self.cold_recovery_threshold = float(getattr(self, "cold_recovery_threshold", 0.35))
         self.cold_override_cooldown_ticks = int(getattr(self, "cold_override_cooldown_ticks", 40) or 40)

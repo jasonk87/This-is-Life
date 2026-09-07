@@ -7287,35 +7287,58 @@ class World:
         if stockpile.release_reservation(reservation_id):
             self._record_stockpile_trace("stockpile_reservation_released", stockpile, actor=actor, metadata={"reservation_id": reservation_id, "reason": reason})
 
+    # How far a villager will walk to fetch something. A village occupies
+    # roughly one CHUNK_SIZE square, so this is a little over a village across -
+    # enough for one that straddles a chunk boundary, and far short of the next
+    # settlement.
+    #
+    # Without a bound, "nearest" meant nearest in the whole world. The tiers
+    # below are searched in order, so when nothing local held the item the
+    # search fell through to every building on the map and cheerfully picked a
+    # lumber mill in another village 190 tiles away. The worker was then handed
+    # a destination outside the loaded chunks, get_tile_at returned None for it,
+    # _update_npc_movement cleared the path as impassable, and the haul sat at
+    # zero progress until the production task expired. That is the
+    # "no_available_source_or_actor" stall: there was a source, it was just on
+    # the other side of the world.
+    MAX_HAUL_SOURCE_DISTANCE = CHUNK_SIZE + CHUNK_SIZE // 2
+
     def _find_nearest_haul_source(self, npc: NPC, item_key: str) -> dict | None:
         candidates: list[tuple[int, int, dict]] = []
+        limit = self.MAX_HAUL_SOURCE_DISTANCE
         for stockpile in getattr(self, "stockpiles_by_id", {}).values():
             if stockpile.available_quantity(item_key) > 0:
-                candidates.append((
-                    0,
-                    abs(npc.x - stockpile.x) + abs(npc.y - stockpile.y),
-                    {"source_type": "stockpile", "coords": stockpile.position, "stockpile_id": stockpile.stockpile_id, "item_key": item_key},
-                ))
+                distance = abs(npc.x - stockpile.x) + abs(npc.y - stockpile.y)
+                if distance <= limit:
+                    candidates.append((
+                        0,
+                        distance,
+                        {"source_type": "stockpile", "coords": stockpile.position, "stockpile_id": stockpile.stockpile_id, "item_key": item_key},
+                    ))
         for (item_x, item_y), inventory in self.items_on_map.items():
             if inventory.get(item_key, 0) > 0:
-                candidates.append((
-                    1,
-                    abs(npc.x - item_x) + abs(npc.y - item_y),
-                    {"source_type": "ground", "coords": (item_x, item_y), "item_key": item_key},
-                ))
+                distance = abs(npc.x - item_x) + abs(npc.y - item_y)
+                if distance <= limit:
+                    candidates.append((
+                        1,
+                        distance,
+                        {"source_type": "ground", "coords": (item_x, item_y), "item_key": item_key},
+                    ))
         for building in self.buildings_by_id.values():
             inventory = getattr(building, "building_inventory", None)
             if inventory and inventory.get(item_key, 0) > 0:
-                candidates.append((
-                    2,
-                    abs(npc.x - building.global_center_x) + abs(npc.y - building.global_center_y),
-                    {
-                        "source_type": "building",
-                        "coords": (building.global_center_x, building.global_center_y),
-                        "building_id": building.id,
-                        "item_key": item_key,
-                    },
-                ))
+                distance = abs(npc.x - building.global_center_x) + abs(npc.y - building.global_center_y)
+                if distance <= limit:
+                    candidates.append((
+                        2,
+                        distance,
+                        {
+                            "source_type": "building",
+                            "coords": (building.global_center_x, building.global_center_y),
+                            "building_id": building.id,
+                            "item_key": item_key,
+                        },
+                    ))
         if not candidates:
             return None
         candidates.sort(key=lambda entry: (entry[0], entry[1]))
@@ -13195,11 +13218,18 @@ class World:
             self._record_production_task_trace("produce_logs_source_candidate_skipped", ProductionTask(task_type="produce_logs", id=str(getattr(npc, "id", 0))), actor=npc, metadata={"item_key": item_key, "reason": "stockpile_source_incompatible"})
             self._record_decision_explanation(explanation_type="source_candidate_skipped", decision="source_skipped", primary_reason="incompatible_stockpile_source_for_source_to_stockpile_flow", actor=npc, contributing_factors={"item_key": item_key})
             # fallback to nearest compatible non-stockpile source (ground or building inventory)
+            # Same distance bound as _find_nearest_haul_source. This fallback
+            # runs when the nearest source was an incompatible stockpile, and
+            # without the cap it reached across the whole map exactly as the
+            # primary search did.
+            limit = self.MAX_HAUL_SOURCE_DISTANCE
             compatible_candidates: list[tuple[int, tuple, dict]] = []
             for coords, inv in getattr(self, "items_on_map", {}).items():
                 if inv is None or getattr(inv, "get", lambda *_: 0)(item_key, 0) <= 0:
                     continue
                 dist = abs(npc.x - coords[0]) + abs(npc.y - coords[1])
+                if dist > limit:
+                    continue
                 compatible_candidates.append((dist, ("ground", coords), {"source_type": "ground", "coords": coords, "item_key": item_key}))
             for bid, building in sorted(getattr(self, "buildings_by_id", {}).items(), key=lambda x: x[0]):
                 inv = getattr(building, "building_inventory", None)
@@ -13207,6 +13237,8 @@ class World:
                     continue
                 coords = (int(getattr(building, "global_center_x", getattr(building, "x", 0))), int(getattr(building, "global_center_y", getattr(building, "y", 0))))
                 dist = abs(npc.x - coords[0]) + abs(npc.y - coords[1])
+                if dist > limit:
+                    continue
                 compatible_candidates.append((dist, ("building", coords, str(bid)), {"source_type": "building", "coords": coords, "item_key": item_key, "building_id": bid}))
             if not compatible_candidates:
                 return False
@@ -13258,6 +13290,38 @@ class World:
             self._warn_simulation_validation("invalid_stockpile", (stockpile_id, "stockpile_haul"), "Stockpile haul destination is missing.", actor=npc)
             self._clear_npc_haul_task(npc, release_claim=True)
             return False
+        # Recover a haul whose schedule task was reset out from under it.
+        #
+        # The two branches below are the only states this handler acts in. A
+        # villager keeps task_context "stockpile_hauling" until the haul ends,
+        # but current_task belongs to the scheduling system, which resets it to
+        # idle for its own reasons - finishing a leisure timer, being pulled
+        # into a social gathering, ending a work shift. Once that happened the
+        # haul was wedged permanently: the context said hauling, the task said
+        # idle, and this function returned False every time it was called.
+        #
+        # _advance_produce_logs_task treats an actor in hauling context as busy
+        # and skips past them, so with one worker the task then reported
+        # "no_available_source_or_actor" every thirty ticks until it expired.
+        # Traced with a worker stood directly on top of the log they were
+        # supposed to be carrying, retry_count climbing to 18.
+        if npc.schedule.current_task not in ("hauling_to_source", "hauling_to_stockpile"):
+            item_key = data.get("item_key")
+            # get_item_reference, not has_item_reference: the latter takes a
+            # concrete ItemReference and reads item.key off it, so handing it
+            # the string key raises AttributeError. This is the same pairing
+            # the deposit branch below uses with pop_item_reference.
+            inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
+            carrying = bool(
+                inventory is not None
+                and inventory.get_item_reference(item_key) is not None
+            )
+            npc.schedule.current_task = "hauling_to_stockpile" if carrying else "hauling_to_source"
+            npc.schedule.current_path = []
+            self._record_stockpile_trace(
+                "haul_task_resumed", stockpile, actor=npc,
+                metadata={"item_key": item_key, "carrying": carrying})
+
         if npc.schedule.current_task == "hauling_to_source":
             if (npc.x, npc.y) != tuple(source.get("coords", ())):
                 if not npc.schedule.current_path:

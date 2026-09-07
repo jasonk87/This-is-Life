@@ -260,7 +260,22 @@ def _create_headless_world(seed: int):
     world.chunk_width = 1
     world.chunk_height = 1
     world.chunk_manager = ChunkManager(engine.CHUNK_SIZE, 1, 1)
-    world.calculate_path = lambda sx, sy, ex, ey: [(sx, sy), (ex, ey)] if (sx, sy) != (ex, ey) else []
+    # Pathfinding is deliberately NOT stubbed. It used to be:
+    #
+    #     world.calculate_path = lambda sx, sy, ex, ey: [(sx, sy), (ex, ey)]
+    #
+    # which is not a path, it is a teleport. Every consumer treats index 1 as
+    # the next tile to step onto, and _update_npc_movement rejects a step that
+    # is not adjacent and passable - so for any destination more than one tile
+    # away the walker cleared its path and stood still. Every scenario that
+    # depends on somebody walking somewhere was therefore measuring nothing, and
+    # produced two separate false leads before anyone checked the harness
+    # itself.
+    #
+    # The real A* works fine here: it is a single generated chunk of plain
+    # tiles, so a path across it costs a millisecond or two and comes back as
+    # proper adjacent steps. It also returns [] for a destination outside the
+    # loaded chunk, which is the correct answer rather than a fake one.
     world._is_chunk_active = lambda coords: True
     world._is_building_active = lambda building: True
 

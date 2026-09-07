@@ -1,8 +1,16 @@
 """Which sandbox scenarios pass, held still so it cannot drift quietly.
 
-Thirty-four of the thirty-nine pass at 2000 ticks. The other five are recorded
+Thirty-five of the thirty-nine pass at 2000 ticks. The other four are recorded
 below with what is actually wrong with each, because "eight are broken" decays
 into "some are broken" and then into nobody looking.
+
+Until recently these results could not be trusted at all: `_create_headless_world`
+replaced `calculate_path` with `lambda sx, sy, ex, ey: [(sx, sy), (ex, ey)]`,
+which is a teleport rather than a path. `_update_npc_movement` rejects a step
+that is not adjacent, so anybody asked to walk further than one tile cleared
+their path and stood still, and every movement-dependent assertion here was
+measuring nothing. Removing the stub fixed `selection_inspection_runtime_smoke`
+and regressed none of the thirty-four that were already passing.
 
 The list is meant to shrink. This test fails in both directions on purpose: a
 scenario that starts failing is a regression, and a scenario that starts passing
@@ -56,11 +64,17 @@ KNOWN_FAILING = {
         "never created in this setup",
     "routing_recovery_and_source_fallback_runtime_soak":
         "behaviour gap: the building-inventory fallback source is never selected",
-    "selection_inspection_runtime_smoke":
-        "behaviour gap: actor inspection payload is missing expected runtime state",
     "workshop_transformation_runtime_soak":
         "behaviour gap: no raw_log is ever produced and hauled, so the workshop "
-        "transform has no inputs, never completes, and emits no output trace",
+        "transform has no inputs, never completes, and emits no output trace. "
+        "Traced: the scenario starts a ChopTreeInteraction directly without "
+        "setting the worker's task state, so the scheduler moves them off, and "
+        "ChopTreeInteraction.can_continue fails the moment they are more than "
+        "one tile from the tree. Nothing in the engine pins an actor to an "
+        "in-progress interaction - only the construction path guards this. Note "
+        "the whole stockpile/production subsystem is unreachable in normal play "
+        "(nothing outside tests and tools calls create_stockpile), so this is an "
+        "unfinished feature rather than a live-world regression",
 }
 
 

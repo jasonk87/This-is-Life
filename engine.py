@@ -14077,18 +14077,53 @@ class World:
         on_use = item_def.get("on_use", {}) or {}
         return float(on_use.get("reduces_hunger", 15)) / 100.0
 
+    def _eat_from_own_inventory(self, actor) -> bool:
+        """A hungry villager eats what they are already carrying.
+
+        EatingInteraction reads world.items_on_map[food_pos] and nothing else,
+        so the only way to satisfy hunger was to walk to food lying loose on the
+        ground. In a generated world nothing is ever lying on the ground - food
+        lives in bakeries, taverns, general stores and people's pockets - so
+        actor.hunger only ever went up. Measured on seed 2024: all ninety
+        villagers pinned at the 2.0 cap, every one of them carrying bread or
+        apples, one of them standing inside a bakery holding 23 loaves.
+
+        Eating out of your own pack needs no pathfinding, no reservation and no
+        decision about who owns what, which is why it is done here directly
+        rather than through an interaction.
+        """
+        inventory = getattr(getattr(actor, "economic", None), "npc_inventory", None)
+        if inventory is None:
+            return False
+        edible = [(self.get_entity_nutrition_value(key), key)
+                  for key, quantity in self._iter_inventory_item_counts(inventory)
+                  if quantity > 0 and self.is_entity_edible(key)]
+        if not edible:
+            return False
+        # Most filling first, so one meal does the most good; the key breaks
+        # ties so the choice does not depend on dict ordering.
+        edible.sort(key=lambda entry: (-entry[0], entry[1]))
+        nutrition, item_key = edible[0]
+        if not inventory.remove_item(item_key, 1):
+            return False
+        actor.hunger = max(0.0, float(getattr(actor, "hunger", 0.0) or 0.0) - float(nutrition))
+        actor.hunger_last_eat_tick = int(getattr(self, "game_time", 0) or 0)
+        self._record_production_task_trace(
+            "hunger_ate_carried_food", ProductionTask(task_type="survival", id=str(getattr(actor, "id", 0))),
+            actor=actor, metadata={"item_key": item_key, "nutrition": nutrition, "hunger": actor.hunger})
+        return True
+
     def _find_nearest_edible_food_target(self, actor):
         c=[]
         for coords, inv in sorted(getattr(self, "items_on_map", {}).items(), key=lambda x:x[0]):
-            for k in ["simple_food", "cooked_meat", "food_ration", "rotten_food", "processed_meat"]:
-                has_item = False
-                if hasattr(inv, "has_item") and inv.has_item(k, 1):
-                    has_item = True
-                elif hasattr(inv, "iter_item_references") and any(ref.key == k for ref in inv.iter_item_references()):
-                    has_item = True
-                elif hasattr(inv, "get") and inv.get(k, 0) > 0:
-                    has_item = True
-                if has_item and self.is_entity_edible(k):
+            # Whatever edible thing is actually here, rather than a fixed list.
+            # The list this replaced was ["simple_food", "cooked_meat",
+            # "food_ration", "rotten_food", "processed_meat"], of which only
+            # cooked_meat and processed_meat pass is_entity_edible at all - so
+            # bread, apples, fish, smoked_meat and every other real food in the
+            # game were invisible to a starving villager.
+            for k, quantity in sorted(self._iter_inventory_item_counts(inv)):
+                if quantity > 0 and self.is_entity_edible(k):
                     fid=f"ground:{coords[0]}:{coords[1]}:{k}"
                     rec = self.food_reservations_by_id.get(fid)
                     if rec and rec.get("reserved_by_actor_id") not in {None, getattr(actor, "id", None)}: continue
@@ -14260,6 +14295,11 @@ class World:
                     actor.survival_override_active=False; actor.survival_override_reason=None; actor.survival_override_cooldown_until_tick=now+30; actor.hunger_target_food_id=None
                     self._record_production_task_trace("hunger_pressure_recovered", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"hunger": records[selected]["pressure_score"]})
                     self._record_production_task_trace("survival_pressure_recovered", ProductionTask(task_type="survival", id=str(actor.id)), actor=actor, metadata={"pressure_type": selected})
+                elif self._eat_from_own_inventory(actor):
+                    # Carrying food beats walking to it. Checked before the
+                    # ground search because otherwise a villager with bread in
+                    # their pack reports "no edible food" and stands down.
+                    self._record_decision_explanation(explanation_type="hunger_ate_carried_food", decision="ate", primary_reason="food_already_carried", actor=actor)
                 else:
                     target = self._find_nearest_edible_food_target(actor)
                     if target is None:

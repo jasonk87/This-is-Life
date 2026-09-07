@@ -14303,7 +14303,18 @@ class World:
                 else:
                     target = self._find_nearest_edible_food_target(actor)
                     if target is None:
-                        self._warn_simulation_validation("hunger_no_edible_food", (actor.id, "no_food"), "No edible food found for hungry actor.", actor=actor, metadata={"tick": now}, cooldown_ticks=120)
+                        # Once per villager per game day, not once per 120 ticks.
+                        #
+                        # validation_warnings keeps the newest 500 and drops the
+                        # rest. Ninety villagers warning every 120 ticks is about
+                        # 22,500 warnings over a two-day run, so this one message
+                        # evicted every other warning within a couple of hundred
+                        # ticks - a 30,000 tick soak came back 497/500 hunger and
+                        # nothing else, which makes the warning log useless for
+                        # noticing anything else going wrong. The underlying
+                        # condition is systemic and identical for every actor, so
+                        # a daily sample says as much as a continuous stream.
+                        self._warn_simulation_validation("hunger_no_edible_food", (actor.id, "no_food"), "No edible food found for hungry actor.", actor=actor, metadata={"tick": now}, cooldown_ticks=DAY_LENGTH_TICKS)
                         self._record_decision_explanation(explanation_type="hunger_no_food_available", decision="blocked", primary_reason="no_edible_food_found", actor=actor)
                         self._stand_down_survival_override(actor, now, "hunger", "no_edible_food_found")
                     else:

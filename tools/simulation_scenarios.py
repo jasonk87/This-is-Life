@@ -1801,6 +1801,11 @@ def run_labor_identity_runtime_soak(seed: int, ticks: int, snapshot_config: Snap
     # measured 231, of which production_task_excessive_retries 101,
     # hunger_no_edible_food 51, production_task_starvation 48. Raised to 300,
     # which still sits well under the 500 cap so genuine saturation fails.
+    #
+    # The hunger share of that is now much smaller: its cooldown went from 120
+    # ticks to a game day, because ninety villagers warning every 120 ticks was
+    # evicting every other warning from the 500-entry log. The budget is left at
+    # 300 rather than retightened - it is a saturation guard, not a target.
     trace.assert_check(ticks, "warnings_bounded", warning_count <= 300, "warning volume should remain bounded", warning_count=warning_count)
     finalize_snapshot_artifacts(world, trace, snapshot_config, scenario, ticks, artifacts)
     return ScenarioResult(scenario, seed, ticks, trace, artifacts)

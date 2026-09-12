@@ -75,6 +75,9 @@ def evaluate_conversation_foundation(world, speaker, listener, *, max_distance: 
         return ConversationFoundationProfile(False, "missing_participant", "neutral", "neutral", 0.0, {"end_conversation": 1.0})
     if getattr(getattr(speaker, "physical", None), "is_dead", False) or getattr(getattr(listener, "physical", None), "is_dead", False):
         return ConversationFoundationProfile(False, "participant_unavailable", "neutral", "neutral", 0.0, {"end_conversation": 1.0})
+    from simulation.systems.body_combat import can_act
+    if not can_act(speaker) or not can_act(listener):
+        return ConversationFoundationProfile(False, "participant_incapacitated", "neutral", "neutral", 0.0, {"end_conversation": 1.0})
     distance = abs(getattr(speaker, "x", 0) - getattr(listener, "x", 0)) + abs(getattr(speaker, "y", 0) - getattr(listener, "y", 0))
     if distance > max_distance:
         return ConversationFoundationProfile(False, "too_far", "neutral", "neutral", 0.0, {"end_conversation": 1.0})

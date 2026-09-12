@@ -160,14 +160,28 @@ def _ensure_player_contrast(bg_color):
         return (255, 255, 220)
     return (96, 54, 20)
 
+_tile_key_cache = {}
+
+
 def _get_tile_key(tile):
     if tile is None:
         return None
+
+    identity = (tile.name, tile.char)
+    cached = _tile_key_cache.get(identity)
+    if cached is not None:
+        definition = TILE_DEFINITIONS.get(cached, {})
+        char = definition.get("char", " ")
+        if definition.get("name") == tile.name and (ord(char) if isinstance(char, str) else char) == tile.char:
+            return cached
 
     for key, definition in TILE_DEFINITIONS.items():
         char_val = definition.get("char", " ")
         char_int = ord(char_val) if isinstance(char_val, str) else char_val
         if definition.get("name") == tile.name and char_int == tile.char:
+            if len(_tile_key_cache) > 512:
+                _tile_key_cache.clear()
+            _tile_key_cache[identity] = key
             return key
     return None
 
@@ -274,6 +288,39 @@ def _draw_world_tile(console, world, camera_x, camera_y, world_x, world_y, tile,
         return
     tile_key = _get_tile_key(tile)
     glyph = _get_tile_char(tile)
+    from rendering import village_art, interior_art
+    if interior_art.draw_floor(
+        console, world, camera_x, camera_y, world_x, world_y, tile, tile_key
+    ):
+        return
+    art_key = tile_key
+    if getattr(tile,"properties",{}).get("is_door"):
+        art_key = "open_door" if tile.properties.get("is_open") else "door"
+    if village_art.draw_wall(console,world,camera_x,camera_y,world_x,world_y,art_key):
+        return
+    if village_art.draw_road(console,world,camera_x,camera_y,world_x,world_y,tile_key):
+        return
+    from rendering.terrain_art import terrain_codepoint, GROUND_UNDER_OBJECT
+    from rendering import pixel_scene
+    if pixel_scene.enabled(world) and getattr(tile,"tree_type",None):
+        tile_key = "plains"
+    surface = terrain_codepoint(tile_key, world_x, world_y)
+    if surface is not None:
+        tint = (255, 255, 255) if is_visible(world, world_x, world_y) else (104, 115, 110)
+        if _get_zoom_factor(world) == 1:
+            console.print(x=rect[0], y=rect[1], string=chr(surface), fg=tint, bg=bg_color)
+        else:
+            _draw_zoomed_sprite(console, world, rect, surface, fg=tint, bg=bg_color)
+        from rendering import street_ground
+        street_ground.draw(console, world, camera_x, camera_y, world_x, world_y, tile_key)
+        if village_art.draw_understory(console,world,camera_x,camera_y,world_x,world_y,tile_key):
+            return
+        if tile_key in GROUND_UNDER_OBJECT and not (pixel_scene.enabled(world) and tile_key == "forest"):
+            if _get_zoom_factor(world) == 1:
+                console.print(x=rect[0], y=rect[1], string=glyph, fg=tint)
+            else:
+                _draw_zoomed_sprite(console, world, rect, int(tile.char), fg=tint)
+        return
     if _is_terrain_fill_tile(tile, tile_key):
         _draw_terrain_fill(console, rect, tile_key, glyph, fg=fg_color, bg=bg_color, world_x=world_x, world_y=world_y)
         return
@@ -361,7 +408,7 @@ def _integer_zoom_for_rect(world, rect):
     if abs(zoom - integer_zoom) > 0.01 or integer_zoom not in ZOOMED_DAWNLIKE_LEVELS:
         return None
     x0, y0, x1, y1 = rect
-    if (x1 - x0 + 1) != integer_zoom or (y1 - y0 + 1) != integer_zoom:
+    if not (1 <= x1-x0+1 <= integer_zoom and 1 <= y1-y0+1 <= integer_zoom):
         return None
     return integer_zoom
 
@@ -370,10 +417,10 @@ def _draw_zoomed_sprite(console, world, rect, base_codepoint, *, fg, bg=None):
     zoom = _integer_zoom_for_rect(world, rect)
     if zoom is None:
         return False
-    x0, y0, _, _ = rect
+    x0, y0, x1, y1 = rect
     draw_calls = []
-    for offset_y in range(zoom):
-        for offset_x in range(zoom):
+    for offset_y in range(y1-y0+1):
+        for offset_x in range(x1-x0+1):
             codepoint = zoomed_sprite_codepoint(base_codepoint, zoom, offset_x, offset_y)
             if codepoint is None:
                 return False
@@ -437,18 +484,29 @@ def _screen_point_for_world(world, camera_x, camera_y, world_x, world_y):
 
 
 def _iter_render_entities(world):
-    all_entities = itertools.chain(world.npcs, world.village_npcs, [world.player])
+    all_entities = itertools.chain(getattr(world,"npcs",[]), getattr(world,"village_npcs",[]), [world.player])
+    from rendering import pixel_scene
+    if pixel_scene.enabled(world):
+        return sorted(all_entities, key=lambda e: (
+            e.render_order.value if hasattr(e, "render_order") else 0,
+            e.y, e.x, e is world.player,
+        ))
     return sorted(all_entities, key=lambda e: e.render_order.value if hasattr(e, "render_order") else 0)
 
 
-def _draw_items(console, world, camera_x, camera_y):
-    for (item_x, item_y), items in world.items_on_map.items():
+def _draw_items(console, world, camera_x, camera_y, piles=None):
+    for (item_x, item_y), items in (world.items_on_map.items() if piles is None else piles):
         if not items or not is_visible(world, item_x, item_y):
             continue
 
         item_key = next(iter(items))
         item_def = ITEM_DEFINITIONS.get(item_key)
         if not item_def:
+            continue
+        from rendering import interior_art
+        if interior_art.draw_surface_item(
+            console, world, camera_x, camera_y, item_x, item_y, item_key
+        ):
             continue
 
         char_val = item_def.get("char", "*")
@@ -497,6 +555,11 @@ def _draw_item_icon(console, x, y, item_key, *, fg=(255, 255, 255)):
     """
     codepoint = _get_item_icon_codepoint(item_key)
     if codepoint is None:
+        from rendering import character_layers
+        icon = character_layers.item_icon(item_key)
+        if icon is not None:
+            return character_layers.pixels.stamp(console, icon, x*16, y*16,
+                                                  token=("wearable-icon", item_key), tint=fg)
         return False
     console.print(x=x, y=y, string=chr(codepoint), fg=fg)
     return True
@@ -545,19 +608,17 @@ def _get_trade_row_item_reference(world, item_key, *, selling):
     return None
 
 
-def _draw_entities(console, world, camera_x, camera_y):
-    for entity in _iter_render_entities(world):
-        if isinstance(entity, Player) and entity.state.is_riding:
+def _draw_entities(console, world, camera_x, camera_y, entities=None):
+    from rendering import people_art, furniture_occupancy
+    for entity in (_iter_render_entities(world) if entities is None else entities):
+        if not furniture_occupancy.present(world, entity):
             continue
-        if entity is not world.player and getattr(entity, "is_sleeping", False):
-            continue
-
-        r_x = getattr(entity, "render_x", entity.x)
-        r_y = getattr(entity, "render_y", entity.y)
-        draw_x = int(round(r_x))
-        draw_y = int(round(r_y))
+        draw_x, draw_y = furniture_occupancy.render_anchor(world, entity)
 
         if not is_visible(world, entity.x, entity.y):
+            continue
+
+        if people_art.draw_person(console,world,entity,camera_x,camera_y,draw_x,draw_y):
             continue
 
         screen_point = _screen_point_for_world(world, camera_x, camera_y, draw_x, draw_y)
@@ -617,9 +678,10 @@ def _get_entity_marker(entity, world=None):
     return None
 
 def _get_visible_nearby_entities(world, limit=5):
+    from rendering.furniture_occupancy import present
     nearby = []
     for entity in itertools.chain(world.npcs, world.village_npcs):
-        if getattr(getattr(entity, "physical", None), "is_dead", False) or getattr(entity, "is_sleeping", False):
+        if getattr(getattr(entity, "physical", None), "is_dead", False) or not present(world, entity):
             continue
         if not is_visible(world, entity.x, entity.y):
             continue
@@ -638,6 +700,13 @@ def _is_entity_hovered(world, camera_x, camera_y, entity):
     mouse_x, mouse_y = world.mouse_x, world.mouse_y
     if not (0 <= mouse_x < MAP_WIDTH and 0 <= mouse_y < MAP_HEIGHT):
         return False
+    from rendering import people_art
+    hit = people_art.hit_test(world,camera_x,camera_y,mouse_x,mouse_y)
+    if hit is not None:
+        return hit is entity
+    from rendering import pixel_scene
+    if pixel_scene.enabled(world) and people_art.is_person(world, entity):
+        return False  # Hidden pixels are not an alternate ground-tile hitbox.
     return _screen_to_world(world, camera_x, camera_y, mouse_x, mouse_y) == (entity.x, entity.y)
 
 
@@ -693,7 +762,26 @@ def _is_overlay_cell_visible(world, overlay_x, overlay_y):
 
 
 def _is_entity_overlay_visible(world, entity, overlay_y):
-    return is_visible(world, entity.x, entity.y) and _is_overlay_cell_visible(world, entity.x, overlay_y)
+    from rendering.furniture_occupancy import overlay_anchor, present
+    x, _ = overlay_anchor(world, entity)
+    return present(world, entity) and is_visible(world, entity.x, entity.y) and _is_overlay_cell_visible(world, x, overlay_y)
+
+
+def _attached_overlay_point(world, entity, camera_x, camera_y, fallback, extra_rows=0):
+    """Keep occupied-furniture labels just above the actual head, not two tiles away."""
+    from rendering import people_art
+    from rendering.furniture_occupancy import attachment_for
+    if not people_art._people or not attachment_for(world, entity):
+        return fallback
+    zoom = int(_get_zoom_factor(world))
+    image, _, _, px, py = people_art.placement(world, entity, zoom, camera_x, camera_y)
+    x = (px + image.shape[1] // 2) // 16
+    y = py // 16 - 1 - extra_rows
+    if not (0 <= x < MAP_WIDTH and 3 <= y < MAP_HEIGHT):
+        return None
+    if not _is_overlay_cell_visible(world, camera_x + x // zoom, camera_y + y // zoom):
+        return None
+    return x, y
 
 
 def _is_sheltered_from_weather(world, world_x, world_y):
@@ -749,6 +837,20 @@ def _get_hover_inspect(world, camera_x, camera_y):
         return None
 
     world_x, world_y = _screen_to_world(world, camera_x, camera_y, mouse_x, mouse_y)
+    from rendering import people_art
+    hit = people_art.hit_test(world,camera_x,camera_y,mouse_x,mouse_y)
+    if hit is not None:
+        world_x,world_y = hit.x,hit.y
+    else:
+        from rendering.interior_art import hit_test as furniture_hit_test
+        furniture = furniture_hit_test(world, camera_x, camera_y, mouse_x, mouse_y)
+        if furniture is not None:
+            world_x, world_y = furniture
+        else:
+            from rendering.building_frontage import hit_test as sign_hit_test
+            sign = sign_hit_test(world, camera_x, camera_y, mouse_x, mouse_y)
+            if sign is not None:
+                world_x, world_y = sign
     if not (0 <= world_x < WORLD_WIDTH and 0 <= world_y < WORLD_HEIGHT):
         return None
     if not is_visible(world, world_x, world_y):
@@ -774,6 +876,10 @@ def _get_hover_inspect(world, camera_x, camera_y):
             inspect["object"] = interactable.get("name")
 
     building = getattr(world, "get_building_at", lambda _x, _y: None)(world_x, world_y)
+    if building is not None:
+        from rendering.building_frontage import is_players_property
+        if is_players_property(world, building):
+            inspect["property"] = "Your property"
     if inspect["object"] is None:
         inspect["object"] = _format_hover_building_name(building)
     if inspect["object"] is None and _is_feature_tile_name(tile.name):
@@ -787,7 +893,8 @@ def _get_hover_inspect(world, camera_x, camera_y):
 
     if getattr(world, "show_autonomy_overlay", False):
         for npc in world.all_npcs:
-            if npc.x == world_x and npc.y == world_y and not getattr(npc, "is_sleeping", False) and not npc.physical.is_dead:
+            from rendering.furniture_occupancy import present
+            if npc.x == world_x and npc.y == world_y and present(world, npc) and not npc.physical.is_dead:
                 debug_data = getattr(npc, "debug_autonomy", {})
                 task = str(debug_data.get("last_task", "unknown") or "unknown")
                 path_status = debug_data.get("path_status", "none")
@@ -922,6 +1029,20 @@ def _get_focus_target(world, camera_x, camera_y):
 
     candidates = []
     mouse_world_x, mouse_world_y = _screen_to_world(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
+    from rendering import people_art
+    hit = people_art.hit_test(world,camera_x,camera_y,world.mouse_x,world.mouse_y)
+    if hit is not None:
+        mouse_world_x,mouse_world_y = hit.x,hit.y
+    else:
+        from rendering.interior_art import hit_test as furniture_hit_test
+        furniture = furniture_hit_test(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
+        if furniture is not None:
+            mouse_world_x, mouse_world_y = furniture
+        else:
+            from rendering.building_frontage import hit_test as sign_hit_test
+            sign = sign_hit_test(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
+            if sign is not None:
+                mouse_world_x, mouse_world_y = sign
     if 0 <= world.mouse_x < MAP_WIDTH and 0 <= world.mouse_y < MAP_HEIGHT and is_visible(world, mouse_world_x, mouse_world_y):
         candidates.append((mouse_world_x, mouse_world_y, "mouse"))
     candidates.append((world.player.x + world.player.state.last_dx, world.player.y + world.player.state.last_dy, "facing"))
@@ -984,7 +1105,7 @@ def _draw_log_panel(console, world):
     for index, entry in enumerate(visible):
         color = _dim_color(
             theme.log_color(entry.category),
-            message_log.fade_ratio(entry, current_tick),
+            1.0 if scroll else max(0.78, message_log.fade_ratio(entry, current_tick)),
         )
         console.print(
             x=1, y=y + 1 + index,
@@ -1034,7 +1155,7 @@ def _draw_focus_badge(console, world, focus, camera_x, camera_y):
     console.print(x=badge_x, y=badge_y, string=info, fg=(235, 232, 210))
 
 def _draw_minimap_panel(console, world, panel_x, start_y, width, height):
-    console.draw_frame(x=panel_x, y=start_y, width=width, height=height, title="Minimap", clear=True, fg=(220, 220, 220), bg=(10, 12, 18))
+    widgets.panel(console, panel_x, start_y, width, height, title="Atlas", bg=theme.PANEL_BG_DEEP)
     inner_w = max(1, width - 2)
     inner_h = max(1, height - 2)
     chunk_cols = len(world.chunks[0]) if world.chunks else 0
@@ -1127,6 +1248,15 @@ def _draw_ambient_speech(console, world, camera_x, camera_y, max_world_lines=3):
         if not text:
             continue
         world_x, world_y = getattr(line, "position", (0, 0))
+        from rendering.furniture_occupancy import attachment_for, present
+        speaker = next((actor for actor in _iter_render_entities(world)
+                        if getattr(actor, "id", None) == getattr(line, "speaker_id", None)), None)
+        if speaker is not None:
+            if not present(world, speaker):
+                continue
+            attachment = attachment_for(world, speaker)
+            if attachment:
+                world_x, world_y = attachment.x, attachment.y
         stack_count = drawn_at.get((world_x, world_y), 0)
         marker_y = int(world_y) - 2 - stack_count
         if not _is_overlay_cell_visible(world, int(world_x), marker_y):
@@ -1352,6 +1482,12 @@ def _apply_lighting_and_depth(console, world, camera_x, camera_y):
     ).astype(np.float32)
     tint = (level_tint[np.newaxis, np.newaxis, :] * (1.0 - blend)) + (warm_normalized * blend)
 
+    from rendering import pixel_scene
+    if pixel_scene.enabled(world):
+        pixel_scene.set_lightfield(
+            np.clip(255 * fg_scale[..., np.newaxis] * tint, 0, 255).astype(np.uint8), visible,
+        )
+
     fg = console.fg[:console_height, :console_width].astype(np.float32)
     bg = console.bg[:console_height, :console_width].astype(np.float32)
     lit_fg = np.clip(fg * fg_scale[..., np.newaxis] * tint, 0, 255)
@@ -1409,12 +1545,15 @@ def _draw_entity_markers(console, world, camera_x, camera_y, focus=None):
         if focused_entity is not entity:
             continue
         marker = _get_entity_marker(entity, world)
-        marker_world_y = entity.y - 1
+        from rendering.furniture_occupancy import overlay_anchor
+        overlay_x, overlay_y = overlay_anchor(world, entity)
+        marker_world_y = overlay_y - 1
         if marker is None or not _is_entity_overlay_visible(world, entity, marker_world_y):
             continue
 
         marker_char, marker_color = marker
-        screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, marker_world_y)
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, overlay_x, marker_world_y)
+        screen_point = _attached_overlay_point(world, entity, camera_x, camera_y, screen_point)
         if screen_point is not None:
             screen_x, screen_y = screen_point
             # This entity also gets a health bar drawn on this same row
@@ -1446,10 +1585,13 @@ def _draw_entity_health_bars(console, world, camera_x, camera_y, focus=None):
         if not _entity_shows_health_bar(entity, focused_entity):
             continue
 
-        bar_world_y = entity.y - 1
+        from rendering.furniture_occupancy import overlay_anchor
+        overlay_x, overlay_y = overlay_anchor(world, entity)
+        bar_world_y = overlay_y - 1
         if not _is_entity_overlay_visible(world, entity, bar_world_y):
             continue
-        screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, bar_world_y)
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, overlay_x, bar_world_y)
+        screen_point = _attached_overlay_point(world, entity, camera_x, camera_y, screen_point)
         if screen_point is None:
             continue
         screen_x, screen_y = screen_point
@@ -1692,104 +1834,8 @@ def _draw_status_quest_section(cursor, world):
 
 
 def draw_status_panel(console, world, camera_x, camera_y):
-    """Draws the status panel on the right side of the screen."""
-    panel_x = MAP_WIDTH
-    panel_width = STATUS_PANEL_WIDTH
-    focus = _get_focus_target(world, camera_x, camera_y)
-    widgets.panel(
-        console, panel_x, 0, panel_width, SCREEN_HEIGHT,
-        title="Field Guide", bg=theme.PANEL_BG_DEEP,
-    )
-
-    legend_top = _draw_status_legend(console, panel_x, panel_width)
-    cursor = _PanelCursor(console, panel_x + 1, 2, panel_width - 3, legend_top - 1)
-
-    standing_on, focus_target = _get_focus_summary(world)
-
-    # Who the player is. Nothing on the main screen named the character, and
-    # the character sheet did not either, so a player had no way to learn their
-    # own name short of reading a save file.
-    cursor.heading("You")
-    cursor.line(str(getattr(world.player, "name", "You")), color=theme.HEADING)
-    cursor.line(
-        f"{world.player.economic.profession} - {world.player.economic.money}c",
-        color=theme.TEXT_DIM,
-    )
-    cursor.blank()
-
-    cursor.heading("Scene")
-    clock_str = _format_world_clock(world.game_time)
-    if getattr(world, "is_paused", False):
-        speed_badge = " [PAUSED]"
-    else:
-        speed = getattr(world, "simulation_speed", 1.0)
-        if speed >= 4.0:
-            speed_badge = " [>>> 4x]"
-        elif speed >= 2.0:
-            speed_badge = " [>> 2x]"
-        else:
-            speed_badge = " [> 1x]"
-    cursor.line(f"{clock_str}{speed_badge}", color=theme.TEXT_DIM)
-    cursor.line(
-        f"{world.seasons[world.current_season_index]} / {world.weather.replace('_', ' ').title()}",
-        color=theme.INFO,
-    )
-    cursor.line(f"Standing: {standing_on}", color=theme.SUCCESS)
-    cursor.line(f"Focus: {focus['label'] or focus_target}", color=theme.WARNING)
-
-    hover_y = _draw_hover_inspect(console, world, camera_x, camera_y, panel_x, cursor.y, panel_width)
-    cursor.y = (hover_y + 1) if hover_y > cursor.y else (cursor.y + 1)
-
-    if cursor.fits(13):
-        cursor.y = _draw_minimap_panel(console, world, panel_x, cursor.y, panel_width, 12) + 1
-
-    if getattr(world, "show_autonomy_overlay", False) and cursor.fits(5):
-        counters = getattr(world, "autonomy_counters", {})
-        cursor.heading("Autonomy Audit")
-        cursor.line(f"Vis/Act: {counters.get('visible', 0)}/{counters.get('active', 0)}", indent=1, color=theme.TEXT_DIM)
-        cursor.line(f"Path/Mov: {counters.get('with_path', 0)}/{counters.get('moved', 0)}", indent=1, color=theme.TEXT_DIM)
-        cursor.line(f"Idle/Wrk: {counters.get('idle', 0)}/{counters.get('at_work_home', 0)}", indent=1, color=theme.TEXT_DIM)
-        cursor.line(f"Wait/Fail: {counters.get('in_timed_activity', 0)}/{counters.get('blocked_path_failed', 0)}", indent=1, color=theme.TEXT_DIM)
-
-    physical = world.player.physical
-    if cursor.fits(4):
-        cursor.heading("Vitals")
-        cursor.meter("HP", world.player.combat.hp, world.player.combat.max_hp, theme.METER_HP)
-        hunger_ratio = min(1.0, physical.hunger / max(1, physical.max_hunger))
-        cursor.meter("HU", int(physical.hunger), int(physical.max_hunger), _hunger_meter_colors(hunger_ratio))
-        thirst_ratio = min(1.0, physical.thirst / max(1, physical.max_thirst))
-        cursor.meter("TH", int(physical.thirst), int(physical.max_thirst), _thirst_meter_colors(thirst_ratio))
-        cursor.blank()
-
-    if physical.status_effects and cursor.fits(1 + len(physical.status_effects)):
-        cursor.heading("Alerts")
-        for effect in physical.status_effects:
-            cursor.line(f"! {effect}", color=_status_effect_color(effect), indent=1)
-        cursor.blank()
-
-    if _draw_status_quest_section(cursor, world):
-        cursor.blank()
-
-    nearby_entities = _get_visible_nearby_entities(world, limit=4)
-    if cursor.fits(2):
-        cursor.heading("Nearby")
-        if not nearby_entities:
-            cursor.line("None visible", color=theme.TEXT_MUTED, indent=1)
-        else:
-            for distance, entity in nearby_entities:
-                label = "Animal" if isinstance(entity, Animal) else "NPC"
-                entity_name = world.get_entity_display_name(entity, include_relationship=True)
-                cursor.line(f"{distance}t {label}: {entity_name}", color=theme.TEXT_DIM, indent=1)
-        cursor.blank()
-
-    reputations = [(faction, rep) for faction, rep in world.player.social.reputation.items() if rep != 0]
-    if cursor.fits(2):
-        cursor.heading("Reputation")
-        if not reputations:
-            cursor.line("Neutral", color=theme.TEXT_MUTED, indent=1)
-        else:
-            for faction, rep in reputations:
-                cursor.line(f"{faction[:3].upper()}: {rep}", color=theme.TEXT_DIM, indent=1)
+    from rendering.field_guide import draw_field_guide
+    draw_field_guide(console, world, camera_x, camera_y)
 
 def is_visible(world, x, y):
     """Checks if a world coordinate is within the player's local FOV map."""
@@ -1844,6 +1890,9 @@ def _draw_active_game_state_menu(console, world):
 
     if world.game_state == "INFO_MENU":
         draw_info_menu(console, world)
+    elif world.game_state == "BODY_MENU":
+        from rendering.body_panel import draw_body_menu
+        draw_body_menu(console, world)
 
     if world.game_state == "INVENTORY_MENU":
         draw_inventory_menu(console, world)
@@ -1985,6 +2034,8 @@ def _draw_active_game_state_menu_with_fade(console, world, fade_ratio):
 def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
     """Draws the main game screen."""
     console.clear()
+    from rendering import pixel_scene, village_art, interior_art
+    pixel_scene.begin_frame()
 
     # Draw the map
     fov_map = getattr(world, 'player_fov_map', None)
@@ -2036,8 +2087,16 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
                     )
 
     _apply_lighting_and_depth(console, world, camera_x, camera_y)
-    _draw_items(console, world, camera_x, camera_y)
-    _draw_entities(console, world, camera_x, camera_y)
+    village_art.draw_buildings(console,world,camera_x,camera_y)
+    village_art.draw_trees(console,world,camera_x,camera_y)
+    # Precipitation is behind actors, labels and controls, never over them.
+    draw_weather_overlay(console, world, camera_x, camera_y)
+    if interior_art.enabled(world):
+        from rendering import room_scene
+        room_scene.draw(console, world, camera_x, camera_y)
+    else:
+        _draw_items(console, world, camera_x, camera_y)
+        _draw_entities(console, world, camera_x, camera_y)
     # Draw path visualizer
     if hasattr(world.player.state, 'current_path') and world.player.state.current_path:
         for px, py in world.player.state.current_path:
@@ -2058,12 +2117,18 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
     for distance, entity in _get_visible_nearby_entities(world, limit=3):
         if not _should_draw_entity_label(distance, focus, entity):
             continue
-        label_world_y = entity.y - 2
+        from rendering.furniture_occupancy import overlay_anchor
+        overlay_x, overlay_y = overlay_anchor(world, entity)
+        label_world_y = overlay_y - 2
         if label_world_y < 0 or not _is_entity_overlay_visible(world, entity, label_world_y):
-            label_world_y = entity.y - 1
+            label_world_y = overlay_y - 1
         if not _is_entity_overlay_visible(world, entity, label_world_y):
             continue
-        screen_point = _screen_point_for_world(world, camera_x, camera_y, entity.x, label_world_y)
+        screen_point = _screen_point_for_world(world, camera_x, camera_y, overlay_x, label_world_y)
+        screen_point = _attached_overlay_point(
+            world, entity, camera_x, camera_y, screen_point,
+            extra_rows=1 if _entity_shows_health_bar(entity, focus.get("entity")) else 0,
+        )
         if screen_point is not None:
             screen_x, screen_y = screen_point
             label = _get_entity_overhead_label(
@@ -2077,30 +2142,14 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
 
     draw_look_cursor(console, world, camera_x, camera_y)
 
-    current_tile = world.get_tile_at(world.player.x, world.player.y)
-    area_label = current_tile.name if current_tile else "Unknown"
-    player_name = getattr(world.player, "name", "You")
-    hud_text = (
-        f"{player_name}  @ {area_label}  [{world.player.x},{world.player.y}]  "
-        f"{world.weather.replace('_', ' ').title()}"
-    )
-    console.print(x=1, y=1, string=hud_text[:MAP_WIDTH - 2], fg=(255, 255, 255), bg=(0, 0, 0))
-
     _draw_focus_badge(console, world, focus, camera_x, camera_y)
-
+    from rendering.hud import draw_toolbar
+    draw_toolbar(console, world)
     draw_status_panel(console, world, camera_x, camera_y)
-
-    # Draw chat/interaction UI if active
+    _draw_log_panel(console, world)
     if world.interaction_context["active"]:
         draw_interaction_menu(console, world)
-
     _draw_active_game_state_menu_with_fade(console, world, menu_fade_ratio)
-
-    # Draw weather overlay
-    draw_weather_overlay(console, world, camera_x, camera_y)
-
-    # Draw chat log at the bottom
-    _draw_log_panel(console, world)
 
 def draw_weather_overlay(console, world, camera_x, camera_y):
     """Draws a simple screen overlay based on the current weather."""
@@ -2136,7 +2185,10 @@ def draw_weather_overlay(console, world, camera_x, camera_y):
             if h < density * 1000:
                 if is_visible(world, world_x, world_y):
                     rect = _world_to_screen_rect(world, camera_x, camera_y, world_x, world_y)
-                    _draw_zoomed_glyph(console, rect, char, fg=color)
+                    if rect:
+                        # One small mark, not a repeated grid across a whole
+                        # zoomed sprite. Preserve most of the material art.
+                        console.print(x=rect[0], y=rect[1], string=char, fg=color)
 
 class MenuHitRegion(NamedTuple):
     """Where a menu drew its selectable rows, and what was in them.
@@ -2202,31 +2254,49 @@ def draw_interaction_menu(console, world):
     actions = ctx["available_actions"]
     # Find longest action to determine menu width
     longest_action = max((len(action) for action in actions), default=0)
-    width = max(15, longest_action + 5)
-    height = len(actions) + 2
+    width = min(MAP_WIDTH,max(24, longest_action + 5))
+    height = min(MAP_HEIGHT-3,len(actions) + 2)
+    combat_picker = ctx.get("combat_picker", False)
+    if combat_picker:
+        width = min(MAP_WIDTH, 48)
+        height = min(MAP_HEIGHT-3, len(actions)+7)
+        x, y = (MAP_WIDTH-width)//2, 5
 
     # Adjust position to keep menu on screen
     if x + width > MAP_WIDTH:
         x = MAP_WIDTH - width
     if y + height > MAP_HEIGHT:
         y = MAP_HEIGHT - height
+    x = max(0,x)
+    y = max(3,y)
 
     target_name = ctx['target_entities'][ctx['selected_entity_index']]['name']
     widgets.panel(
         console, x, y, width, height,
-        title=f"Interact: {target_name}", focused=True, bg=theme.PANEL_BG_RAISED,
+        title=f"{'Combat' if combat_picker else 'Interact'}: {target_name}", focused=True, bg=theme.PANEL_BG_RAISED,
     )
 
-    region = widgets.ListRegion(x=x + 1, y=y + 1, width=width - 2, height=len(actions))
-    _, hovered = _prepare_list(world, "INTERACTION_MENU", region, total=len(actions),
+    if combat_picker:
+        target = ctx['target_entities'][ctx['selected_entity_index']]['data']
+        distance = max(abs(target.x-world.player.x), abs(target.y-world.player.y))
+        ready = max(0, world.player.combat.anatomy.attack_ready_tick-world.game_time)
+        weapon = world.player.equipment.weapon.item_reference
+        widgets.text_line(console, x+1, y+1, f"Distance {distance} | Recovery {ready} ticks", width=width-2)
+        widgets.text_line(console, x+1, y+2, f"Held: {weapon.definition['name'] if weapon else 'bare hands'}", color=theme.HEADING, width=width-2)
+        warning = "Civilian: attacking has legal consequences." if not getattr(target, "animal_type", None) and not target.combat.is_hostile_to_player else "Attacks affect real body regions."
+        widgets.text_line(console, x+1, y+3, warning, color=theme.WARNING, width=width-2)
+        widgets.text_line(console, x+1, y+height-2, "Tab target | Up/Down action | Enter / F act", color=theme.TEXT_MUTED, width=width-2)
+    region = widgets.ListRegion(x=x + 1, y=y + (4 if combat_picker else 1), width=width - 2, height=height-(7 if combat_picker else 2))
+    scroll, hovered = _prepare_list(world, "INTERACTION_MENU", region, total=len(actions),
                                selected_index=ctx["selected_action_index"])
     widgets.list_view(
         console,
         region,
         [widgets.Row(text=action) for action in actions],
         selected_index=ctx["selected_action_index"],
+        scroll_offset=scroll,
         hovered_index=hovered,
-        show_scrollbar=False,
+        show_scrollbar=True,
     )
 
 def _draw_recipe_detail_panel(console, x, y, width, height, title, *, requirement_label, requirements, footer=None):
@@ -2261,10 +2331,10 @@ def draw_crafting_menu(console, world):
     """Draws the crafting menu UI."""
     all_recipes = world.crafting_menu_context.get("all_recipes", [])
     num_recipes = len(all_recipes)
-    geometry = widgets.centered_menu(50, min(30, max(6, num_recipes + 4)))
+    geometry = widgets.centered_menu(74, 36)
     widgets.panel(console, *geometry, title="Crafting", focused=True)
 
-    region = geometry.list_region(top_offset=0, bottom_margin=2)
+    region = geometry.list_region(top_offset=0, bottom_margin=3, width=35)
     scroll_offset, hovered = _prepare_list(
         world, "CRAFTING_MENU", region, total=num_recipes,
         selected_index=world.crafting_menu_context.get("selected_recipe_index", 0),
@@ -2280,7 +2350,7 @@ def draw_crafting_menu(console, world):
     selected_index = world.crafting_menu_context.get("selected_recipe_index", 0)
     rows = []
     for recipe_key in all_recipes:
-        item_def = TILE_DEFINITIONS.get(recipe_key, {})
+        item_def = ITEM_DEFINITIONS.get(recipe_key, TILE_DEFINITIONS.get(recipe_key, {}))
         rows.append(widgets.Row(
             text=item_def.get("name", recipe_key),
             enabled=world.player_can_craft(recipe_key),
@@ -2302,14 +2372,13 @@ def draw_crafting_menu(console, world):
     # Display selected recipe details
     if 0 <= selected_index < num_recipes:
         selected_key = all_recipes[selected_index]
-        item_def = TILE_DEFINITIONS.get(selected_key, {})
+        item_def = ITEM_DEFINITIONS.get(selected_key, TILE_DEFINITIONS.get(selected_key, {}))
         recipe = item_def.get("crafting_recipe", {})
 
         requirements = []
         for res_key, qty in recipe.items():
-            res_def = TILE_DEFINITIONS.get(res_key, {})
             requirements.append((
-                res_def.get("name", res_key),
+                _construction_material_name(res_key),
                 qty,
                 world.player.has_item(res_key, qty),
             ))
@@ -2317,13 +2386,15 @@ def draw_crafting_menu(console, world):
         req_station = item_def.get("required_workstation")
         footer = None
         if req_station:
-            footer = (f"Needs: {req_station}", world._is_player_near_workstation(req_station))
+            footer = (f"Needs: {_construction_material_name(req_station)}", world._is_player_near_workstation(req_station))
 
-        _draw_recipe_detail_panel(
-            console, geometry.x + geometry.width, geometry.y, 40, 20,
-            "Recipe Details", requirement_label="Requires:",
+        detail_y = _draw_recipe_detail_panel(
+            console, geometry.x + 39, geometry.y + 1, 33, geometry.height - 4,
+            item_def.get("name", selected_key), requirement_label="Requires:",
             requirements=requirements, footer=footer,
         )
+        console.print_box(x=geometry.x+41, y=detail_y+3, width=29, height=8,
+                          string=item_def.get("description", ""), fg=theme.TEXT_DIM)
 
 def _construction_material_name(material_key):
     """Display name for a build material, which may be defined as an item or
@@ -2341,10 +2412,10 @@ def draw_building_menu(console, world):
     """Draws the building menu UI."""
     all_recipes = world.building_menu_context.get("all_recipes", [])
     num_recipes = len(all_recipes)
-    geometry = widgets.centered_menu(50, min(30, max(6, num_recipes + 4)))
+    geometry = widgets.centered_menu(74, 36)
     widgets.panel(console, *geometry, title="Construction", focused=True)
 
-    region = geometry.list_region(top_offset=0, bottom_margin=2)
+    region = geometry.list_region(top_offset=0, bottom_margin=3, width=35)
     scroll_offset, hovered = _prepare_list(
         world, "BUILDING_MENU", region, total=num_recipes,
         selected_index=world.building_menu_context.get("selected_recipe_index", 0),
@@ -2381,14 +2452,14 @@ def draw_building_menu(console, world):
     # Display details
     if 0 <= selected_index < num_recipes:
         recipe = CONSTRUCTION_RECIPES.get(all_recipes[selected_index], {})
-        details_x = geometry.x + geometry.width
-        details_width = 40
+        details_x = geometry.x + 39
+        details_width = 33
         requirements = [
             (_construction_material_name(mat_key), mat_qty, world.player.has_item(mat_key, mat_qty))
             for mat_key, mat_qty in recipe.get("materials", {}).items()
         ]
         detail_y = _draw_recipe_detail_panel(
-            console, details_x, geometry.y, details_width, 20,
+            console, details_x, geometry.y + 1, details_width, geometry.height - 4,
             "Build Details", requirement_label="Materials:", requirements=requirements,
         )
 
@@ -2849,7 +2920,8 @@ def draw_info_menu(console, world):
         f"- Light Source: {_equipped_item_name(world.player.equipment.equipped_light_item_key)}",
         width=inner_width - 1,
     )
-    for slot in ["head", "body", "hands", "feet"]:
+    y = widgets.text_line(console, inner_x+1, y, f"- Weapon: {_equipped_item_name(str(world.player.equipment.weapon))}", width=inner_width-1)
+    for slot in ["head", "body", "legs", "hands", "feet"]:
         item_name = _equipped_item_name(world.player.equipment.equipped_armor.get(slot))
         y = widgets.text_line(
             console, inner_x + 1, y, f"- {slot.capitalize()}: {item_name}",
@@ -2887,11 +2959,11 @@ def draw_info_menu(console, world):
         widgets.text_line(console, inner_x + 1, y, "- The realm is at peace.", color=theme.SUCCESS)
 
     widgets.hint_bar(console, inner_x, geometry.hint_row, inner_width,
-                     [("U", "inventory"), ("Q", "quests"), ("Esc", "close")])
+                     [("B", "body / wounds"), ("U", "inventory"), ("Esc", "close")])
 
 def draw_inventory_menu(console, world):
     """Draws the dedicated scrollable inventory menu, grouping items by category."""
-    menu_width = 60
+    menu_width = 72
     menu_height = 40
     x = (MAP_WIDTH - menu_width) // 2
     y = (SCREEN_HEIGHT - menu_height) // 2
@@ -2899,7 +2971,7 @@ def draw_inventory_menu(console, world):
     widgets.panel(console, x, y, menu_width, menu_height, title="Inventory", focused=True)
 
     widgets.hint_bar(console, x + theme.PAD_X, y + menu_height - 2, menu_width - (theme.PAD_X * 2),
-                     [("Up/Down", "select"), ("Enter", "use"), ("Esc", "close")])
+                     [("Up/Down", "select"), ("Enter", "use"), ("S/T", "shave/trim"), ("Esc", "close")])
 
     # Aggregate and categorize inventory
     categories = {
@@ -2975,6 +3047,7 @@ def draw_inventory_menu(console, world):
         rows.append(widgets.Row(text=""))
 
     world.interaction_context["inventory_selectable"] = selectable_keys
+    world.interaction_context["inventory_selectable_rows"] = selectable_rows
     selected = world.interaction_context.get("inventory_selected_index", 0)
     if selectable_keys:
         selected = max(0, min(int(selected), len(selectable_keys) - 1))
@@ -2986,28 +3059,62 @@ def draw_inventory_menu(console, world):
     region = widgets.ListRegion(
         x=x + theme.PAD_X,
         y=y + theme.PAD_TOP,
-        width=menu_width - (theme.PAD_X * 2),
+        width=40,
         height=menu_height - 4,
     )
-    _register_hit_region(
-        world, "INVENTORY_MENU", region,
-        scroll_offset=world.interaction_context.get("inventory_scroll_offset", 0),
-        total=len(rows),
-    )
-
     if len(rows) <= 2:
         widgets.empty_state(console, region, "Your inventory is empty.")
+        _register_hit_region(world,"INVENTORY_MENU",region,total=0)
         return
 
+    scroll = widgets.clamp_scroll(selected_row or 0,
+        world.interaction_context.get("inventory_scroll_offset",0),region.height)
+    hovered = region.index_at(getattr(world,"mouse_x",None),getattr(world,"mouse_y",None),scroll,len(rows))
     world.interaction_context["inventory_scroll_offset"] = widgets.list_view(
         console,
         region,
         rows,
-        selected_index=None,
-        scroll_offset=world.interaction_context.get("inventory_scroll_offset", 0),
+        selected_index=selected_row,
+        hovered_index=hovered if hovered in selectable_rows else None,
+        scroll_offset=scroll,
         icon_drawer=_draw_item_icon,
-        show_cursor=False,
+        show_cursor=True,
+        preserve_row_colors=True,
     )
+    _register_hit_region(world,"INVENTORY_MENU",region,
+        scroll_offset=world.interaction_context["inventory_scroll_offset"],total=len(rows))
+    detail_x = x+46
+    widgets.panel(console,detail_x,y+2,24,menu_height-5,title="Selected item",bg=theme.PANEL_BG_DEEP)
+    key = selectable_keys[selected]
+    definition = ITEM_DEFINITIONS.get(key, TILE_DEFINITIONS.get(key,{}))
+    detail_y = y+4
+    _draw_item_icon(console,detail_x+2,detail_y,key)
+    for part in textwrap.wrap(definition.get("name",key),20):
+        detail_y += 1
+        widgets.text_line(console,detail_x+2,detail_y,part,color=theme.HEADING)
+    detail_y += 2
+    for part in textwrap.wrap(definition.get("description",""),20)[:10]:
+        detail_y = widgets.text_line(console,detail_x+2,detail_y,part,color=theme.TEXT_DIM)
+    detail_y += 1
+    widgets.text_line(console,detail_x+2,detail_y,f"Carried: {inventory.get(key,0)}",width=20,color=theme.SUCCESS)
+    widgets.text_line(console,detail_x+2,detail_y+2,f"Weight: {definition.get('weight',0)}",width=20,color=theme.TEXT_MUTED)
+    from rendering import character_layers
+    if character_layers.enabled(world):
+        # The same rig/state as the world sprite, not an independently dressed portrait.
+        state = character_layers.signature(world.player)
+        preview = character_layers.rig(state, "south")
+        pixels = character_layers.pixels
+        portrait = pixels.resize(preview, 64, round(preview.shape[0] * 64 / preview.shape[1]))
+        widgets.text_line(console,detail_x+2,y+23,"Currently wearing",width=20,color=theme.HEADING)
+        pixels.stamp(console, portrait, (detail_x+2)*16, (y+25)*16,
+                     token=("wardrobe-preview",state), clip=lambda cx, cy: True)
+        for offset, slot in enumerate(("head", "body", "legs", "feet")):
+            worn = character_layers.equipped(world.player,slot)
+            label = ITEM_DEFINITIONS.get(worn,{}).get("name","Underlayer" if slot in {"body","legs"} else "None")
+            widgets.text_line(console,detail_x+8,y+25+offset,label,width=14,color=theme.TEXT_DIM)
+        widgets.text_line(console,detail_x+8,y+30,"Needs a knife",width=14,color=theme.TEXT_MUTED)
+    widgets.text_line(console,detail_x+2,y+menu_height-8,"Enter: use / equip",width=20)
+    widgets.text_line(console,detail_x+2,y+menu_height-6,"Right click: select",width=20,color=theme.TEXT_MUTED)
 
 
 TRADE_NAME_WIDTH = 26
@@ -3109,7 +3216,7 @@ def draw_knowledge_menu(console, world):
 
 def draw_dialogue_menu(console, world):
     """Draws the interactive Dialogue UI."""
-    geometry = widgets.centered_menu(60, 20)
+    geometry = widgets.centered_menu(68, 26)
 
     target_npc = getattr(world, 'chat_ui_target_npc', None)
     npc_name = world.get_entity_display_name(target_npc, include_relationship=True) if target_npc else "Unknown"
@@ -3131,28 +3238,35 @@ def draw_dialogue_menu(console, world):
         header_rows = PORTRAIT_ZOOM + 1
 
     history_start_y = geometry.inner_y + header_rows
-    max_history_lines = max(1, geometry.height - 4 - header_rows)
+    max_history_lines = max(1, geometry.height - 7 - header_rows)
     wrapped_lines = []
 
     for speaker, text in getattr(world, 'chat_ui_history', []):
         if raw_target_name and speaker == raw_target_name:
             speaker = display_target_name
-        color = theme.INFO if speaker == "Player" else theme.HEADING
+        color = theme.INFO if speaker in ("Player", getattr(getattr(world,"player",None),"name",None)) else theme.TEXT
         lines = textwrap.wrap(f"{speaker}: {text}", width=geometry.inner_width)
         for line in lines:
             wrapped_lines.append((line, color))
 
-    # Show the tail of the conversation; older lines scroll off the top.
+    world.dialogue_max_scroll = max(0,len(wrapped_lines)-max_history_lines)
+    scroll = max(0,min(getattr(world,"dialogue_scroll",0),world.dialogue_max_scroll))
+    world.dialogue_scroll = scroll
+    end = len(wrapped_lines)-scroll
     cur_y = history_start_y
-    for line_text, color in wrapped_lines[max(0, len(wrapped_lines) - max_history_lines):]:
+    for line_text, color in wrapped_lines[max(0,end-max_history_lines):end]:
         console.print(x=geometry.inner_x, y=cur_y, string=line_text, fg=color)
         cur_y += 1
 
-    console.print(
-        x=geometry.inner_x, y=geometry.y + geometry.height - 2,
-        string="> " + getattr(world, 'chat_ui_input_line', '') + "_",
-        fg=theme.TEXT,
-    )
+    input_y = geometry.y+geometry.height-4
+    widgets.rule(console,geometry.inner_x,input_y-1,geometry.inner_width)
+    # Keep the caret and latest typing inside the panel, even for long text.
+    typed = str(getattr(world,'chat_ui_input_line',''))
+    visible_input = typed[-(geometry.inner_width-4):]
+    console.print(x=geometry.inner_x,y=input_y,string=("> "+visible_input+"_").ljust(geometry.inner_width),
+                  fg=theme.TEXT,bg=theme.PANEL_BG_RAISED)
+    widgets.hint_bar(console,geometry.inner_x,geometry.hint_row,geometry.inner_width,
+                     [("Enter","speak"),("Wheel","history"),("Esc","leave")])
 
 def _quest_objective_line(quest, world):
     """The objective row for a quest, as (text, satisfied), or None if the
@@ -3272,13 +3386,13 @@ def draw_help_menu(console):
     # Two rows per entry, plus the frame, the top padding and a blank row above
     # the hint footer - so the panel grows with the list instead of the last
     # entry creeping onto the footer as controls are added.
-    geometry = widgets.centered_menu(50, len(HELP_CONTROLS) * 2 + 5)
+    geometry = widgets.centered_menu(60, len(HELP_CONTROLS) * 2 + 5)
     widgets.panel(console, *geometry, title="Help / Controls", focused=True)
 
     y = geometry.inner_y + 1
     for action, key in HELP_CONTROLS:
-        console.print(x=geometry.inner_x + 2, y=y, string=f"{action:<16}", fg=theme.TEXT_DIM)
-        console.print(x=geometry.inner_x + 18, y=y, string=key, fg=theme.HEADING)
+        console.print(x=geometry.inner_x + 2, y=y, string=action, fg=theme.TEXT_DIM)
+        console.print(x=geometry.inner_x + 26, y=y, string=key, fg=theme.HEADING)
         y += 2
 
     widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,

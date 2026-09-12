@@ -24,6 +24,11 @@ class BodyPart:
     hp: int
     max_hp: int
     status_effects: list[str] = field(default_factory=list)
+    parent: str | None = None
+    coverage: str | None = None
+    hit_weight: float = 1.0
+    function: str | None = None
+    tissues: tuple[str, ...] = ("skin", "muscle", "bone")
 
     def ensure_status(self, effect: str) -> None:
         if effect not in self.status_effects:
@@ -41,9 +46,14 @@ class BodyPartValueProxy(MutableMapping):
         self.attribute = attribute
 
     def __getitem__(self, key: str) -> int:
+        if self.anatomy.body_plan and self.attribute == "hp":
+            from entities.body_model import part_function
+            return round(self.anatomy.get_part(key).max_hp * part_function(self.anatomy,key))
         return getattr(self.anatomy.get_part(key), self.attribute)
 
     def __setitem__(self, key: str, value: int) -> None:
+        if self.anatomy.body_plan and self.attribute == "hp":
+            raise TypeError("Body HP is derived; use wound treatment/healing, not a limb-HP assignment")
         setattr(self.anatomy.get_part(key), self.attribute, int(value))
 
     def __delitem__(self, key: str) -> None:
@@ -56,12 +66,30 @@ class BodyPartValueProxy(MutableMapping):
         return len(self.anatomy.parts)
 
     def copy(self) -> dict[str, int]:
-        return {name: getattr(part, self.attribute) for name, part in self.anatomy.parts.items()}
+        return {name: self[name] for name in self.anatomy.parts}
 
 
 @dataclass
 class Anatomy:
     parts: dict[str, BodyPart] = field(default_factory=dict)
+    body_plan: str | None = None
+    wounds: list = field(default_factory=list)
+    blood: float = 1.0
+    systemic_loss: float = 0.0
+    display_max_hp: int = 35
+    last_body_tick: int | None = None
+    next_wound_id: int = 1
+    death_cause: str | None = None
+    death_processed: bool = False
+    death_event_processed: bool = False
+    weapon_hand: str = "right_hand"
+    attack_ready_tick: int = 0
+    last_attack_target: tuple | None = None
+    movement_credit: float = 0.0
+    movement_tick: int | None = None
+    last_attacker_id: int | str | None = None
+    last_attacked_tick: int = -1000000
+    treatment_ready_tick: int = 0
 
     def __post_init__(self):
         self._hp_proxy = BodyPartValueProxy(self, "hp")
@@ -94,12 +122,26 @@ class Anatomy:
         return self.parts[name]
 
     def get_total_hp(self) -> int:
+        if self.body_plan:
+            from entities.body_model import health_fraction
+            fraction = health_fraction(self)
+            return max(1, round(self.display_max_hp * fraction)) if fraction > 0 else 0
         return sum(part.hp for part in self.parts.values())
 
     def get_total_max_hp(self) -> int:
+        if self.body_plan:
+            return self.display_max_hp
         return sum(part.max_hp for part in self.parts.values())
 
     def set_total_hp(self, value: int) -> None:
+        if self.body_plan:
+            # Legacy disease/environment/healing callers can affect systemic
+            # reserve, but cannot heal fractures, close wounds or refill blood.
+            delta = (self.get_total_hp()-int(value))/max(1,self.display_max_hp)
+            self.systemic_loss = min(1,max(0,self.systemic_loss+delta))
+            if value <= 0:
+                self.systemic_loss = 1.0
+            return
         current_hp = self.get_total_hp()
         if value <= 0:
             for part in self.parts.values():
@@ -118,6 +160,9 @@ class Anatomy:
             self.parts["torso"].hp += diff
 
     def scale_total_max_hp(self, value: int) -> None:
+        if self.body_plan:
+            self.display_max_hp = max(1,int(value))
+            return
         current_max = self.get_total_max_hp()
         if current_max == 0:
             return
@@ -129,6 +174,10 @@ class Anatomy:
             self.parts["torso"].max_hp += diff
 
     def apply_damage(self, hit_part_name: str, damage: int, spillover_order: list[str] | None = None) -> int:
+        if self.body_plan:
+            from entities.body_model import inflict
+            inflict(self,hit_part_name,"crush",damage,self.last_body_tick or 0)
+            return 0
         remaining_damage = damage
         hit_part = self.get_part(hit_part_name)
         if hit_part.hp >= remaining_damage:

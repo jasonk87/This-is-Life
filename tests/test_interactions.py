@@ -29,6 +29,19 @@ from entities.items import Inventory, ItemReference
 from tests.world_cache import fresh_world
 
 class TestWorldInteractionActions(unittest.TestCase):
+    def _land_body_attack(self, target, *, fatal=False):
+        """Stage a local reachable hit; model prose can no longer force damage."""
+        from simulation.systems.body_combat import ensure_body
+        from entities.body_model import inflict
+        self.world.player.x, self.world.player.y = target.x-1, target.y
+        if fatal:
+            from entities.anatomy import Anatomy
+            target.combat.anatomy = Anatomy.humanoid()
+            body = ensure_body(target, self.world.game_time)
+            inflict(body, "head", "crush", 28, self.world.game_time)
+        with patch("engine.random.randint", side_effect=lambda lo, hi: hi):
+            return self.world.player_attempt_attack(target, target_part="head" if fatal else "left_arm")
+
     def setUp(self):
         self.mock_ollama_patcher = patch('engine.World._call_llm')
         self.mock_call_llm = self.mock_ollama_patcher.start()
@@ -670,7 +683,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 2, "narrative_feedback": "A harsh blow lands."}))
         self.world._get_witnesses_to_action = MagicMock(return_value=[victim, witness])
 
-        self.world.player_attempt_attack(victim)
+        self._land_body_attack(victim)
 
         self.assertEqual(len(self.world.harmful_incidents), 1)
         incident = next(iter(self.world.harmful_incidents.values()))
@@ -698,7 +711,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 25, "narrative_feedback": "A fatal hit."}))
         self.world._get_witnesses_to_action = MagicMock(return_value=[])
 
-        self.world.player_attempt_attack(victim)
+        self._land_body_attack(victim, fatal=True)
 
         self.assertEqual(len(self.world.harmful_incidents), 1)
         incident = next(iter(self.world.harmful_incidents.values()))
@@ -715,7 +728,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 2, "narrative_feedback": "A harsh blow lands."}))
         self.world._get_witnesses_to_action = MagicMock(return_value=[victim, witness])
 
-        self.world.player_attempt_attack(victim)
+        self._land_body_attack(victim)
         incident = next(iter(self.world.harmful_incidents.values()))
         witness_view = witness.knowledge.known_harmful_incidents[incident.id]
 
@@ -736,7 +749,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.world._call_llm = MagicMock(return_value=json.dumps({"hit": True, "damage_dealt": 25, "narrative_feedback": "A fatal hit."}))
         self.world._get_witnesses_to_action = MagicMock(return_value=[])
 
-        self.world.player_attempt_attack(victim)
+        self._land_body_attack(victim, fatal=True)
         incident = next(iter(self.world.harmful_incidents.values()))
         self.assertNotIn(incident.id, listener.knowledge.known_harmful_incidents)
 
@@ -1807,7 +1820,8 @@ class TestWorldInteractionActions(unittest.TestCase):
         mock_response.json.return_value = {"response": "\"Too many words in this sentence for the strict gossip limit indeed right now\""}
         mock_response.raise_for_status.return_value = None
 
-        with patch("services.llm_gossip.requests.post", return_value=mock_response) as mock_post:
+        # Explicit opt-in transport unit test; HTTP is mocked, no model runs.
+        with patch("config.ENABLE_LLM_CONNECTION", True), patch("services.llm_gossip.requests.post", return_value=mock_response) as mock_post:
             service.submit(speaker=speaker, memory_event=memory, subject_name=speaker.name, target_name="")
             for _ in range(20):
                 results = service.poll_completed()
@@ -1842,7 +1856,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         mock_response.json.return_value = {"response": "The town remembers blood, debt, and uneasy reckonings. Scribes set it down faithfully."}
         mock_response.raise_for_status.return_value = None
 
-        with patch("services.llm_gossip.requests.post", return_value=mock_response) as mock_post:
+        with patch("config.ENABLE_LLM_CONNECTION", True), patch("services.llm_gossip.requests.post", return_value=mock_response) as mock_post:
             submitted = service.submit_chronicle(scribe=scribe, memory_events=memories, building_id="library_1", title_hint="Year 0 Chronicle")
             for _ in range(20):
                 results = service.poll_completed()
@@ -2299,7 +2313,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         target.combat.is_hostile_to_player = False
 
         with patch.object(self.world, "_call_llm", return_value=None):
-            self.world.player_attempt_attack(target)
+            self._land_body_attack(target)
 
         self.assertTrue(target.combat.is_hostile_to_player)
 
@@ -2312,7 +2326,7 @@ class TestWorldInteractionActions(unittest.TestCase):
             "damage_dealt": 3,
             "narrative_feedback": "You land a solid blow.",
         })):
-            self.world.player_attempt_attack(target)
+            self._land_body_attack(target)
 
         self.assertGreater(self.world.player.skills.experience["melee"], starting_xp)
 

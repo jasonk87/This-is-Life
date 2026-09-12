@@ -5,8 +5,19 @@ from __future__ import annotations
 import math
 
 
+def expire_sounds(world):
+    """Sound lifetime belongs to simulation time, not the player's footsteps."""
+    now = world.game_time
+    events = getattr(world, "sound_events", None)
+    if events is not None:
+        events[:] = [sound for sound in events if now-sound.setdefault("created_tick", now) <= 2]
+
+
 def update_npc_sound_perception(world, npc) -> None:
     """Process immediate sound reactions and investigation pathing for one NPC."""
+    if npc.schedule.current_task in {"treating_patient", "seeking_healer", "waiting_for_treatment",
+                                     "recovering_from_injury", "collecting_medical_supplies"}:
+        return  # Immediate witnessed threats have their own higher-priority response.
     heard_compelling_sound = False
     if world.sound_events:
         for sound in world.sound_events:

@@ -227,6 +227,9 @@ class NPCBrain:
         "seeking_healer",
         "waiting_for_treatment",
         "resting_in_bed",
+        "recovering_from_injury",
+        "protecting_from_wildlife",
+        "escaping_wildlife",
         "treating_patient",
         "approaching_player_for_help",
     }
@@ -254,6 +257,8 @@ class NPCBrain:
         self.work_behavior.set_search_radius(value)
 
     def take_turn(self, entity, world) -> bool:
+        if entity.schedule.current_task in {"recovering_from_injury", "protecting_from_wildlife", "escaping_wildlife"}:
+            return True
         self._evaluate_owned_gear(entity, world)
         if self._handle_survival_overrides(entity, world):
             return True

@@ -5,12 +5,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import uuid
 
+from entities.pickle_compat import dataclass_setstate
 from simulation.ids import new_id
 
 from config import DAY_LENGTH_TICKS
 
 @dataclass
 class HarmfulIncident:
+    """One person did something to another that the village might talk about.
+
+    Originally this only ever meant a fight: the fields are named `attacker_id`,
+    `severity` and `target_survived` because the single thing that could create
+    one was the player punching somebody. The names are kept - they are on disk
+    in every save - but the meaning is now wider. `kind` says what actually
+    happened, and most kinds are not violent: an unpaid wage, a broken promise,
+    a stolen sack of grain, a job taken out from under someone.
+
+    That matters because everything downstream of this type - attribution,
+    confidence, gossip, town criers, grudges, local opinion - is what turns an
+    event into a story the village tells. Reusing it for grievances means a
+    dispute over money spreads through exactly the same machinery as a stabbing,
+    and can be misremembered and misattributed in exactly the same ways.
+
+    `kind` defaults to "assault" so that incidents already pickled into saves,
+    which predate this field, keep the meaning they were written with.
+    """
+
     id: str
     attacker_id: int | None
     target_id: int | None
@@ -20,6 +40,11 @@ class HarmfulIncident:
     severity: int
     target_survived: bool
     witness_ids: list[int] = field(default_factory=list)
+    kind: str = "assault"
+    context: dict = field(default_factory=dict)
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
 
 
 @dataclass
@@ -41,6 +66,8 @@ def create_harmful_incident(
     severity: int,
     target_survived: bool,
     witness_ids: list[int] | None = None,
+    kind: str = "assault",
+    context: dict | None = None,
 ) -> HarmfulIncident:
     incident = HarmfulIncident(
         id=f"harm_{new_id()}",
@@ -52,6 +79,8 @@ def create_harmful_incident(
         severity=max(1, int(severity)),
         target_survived=bool(target_survived),
         witness_ids=list(witness_ids or []),
+        kind=str(kind or "assault"),
+        context=dict(context or {}),
     )
     world.harmful_incidents[incident.id] = incident
     return incident

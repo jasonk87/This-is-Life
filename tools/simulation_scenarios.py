@@ -1908,11 +1908,17 @@ def run_decision_explanation_runtime_soak(seed: int, ticks: int, snapshot_config
     world.create_reserve_target(target_type="stockpile_item", target_entity_id=stockpile.stockpile_id, linked_item_type="raw_log", desired_quantity=2, minimum_quantity=1, priority=4)
     world.create_production_task("produce_logs", metadata={"stockpile_id": stockpile.stockpile_id, "target_quantity": 2, "item_key": "raw_log", "priority": 4, "urgency": 4}, expiration_ticks=900)
 
+    # This is a whole-run observability assertion, not a claim that a bounded
+    # recent-message window will retain tick-one decisions after 2000 ticks.
+    # Observe the public reader during the run; do not force or rename events.
+    first_explanation_tick = {}
     for _ in range(ticks):
         run_world_tick(world)
+        for item in world.get_recent_decision_explanations(limit=60):
+            first_explanation_tick.setdefault(item.get("type"), item.get("tick"))
 
-    explanations = world.get_recent_decision_explanations(limit=60)
-    explanation_types = {item.get("type") for item in explanations}
+    explanation_types = set(first_explanation_tick)
+    artifacts["first_explanation_tick"] = first_explanation_tick
     warnings = len(getattr(world, "validation_warnings", []))
     trace.assert_check(ticks, "has_task_selection", "task_selected" in explanation_types, "task selection explanations should exist")
     trace.assert_check(ticks, "has_actor_assignment", ("actor_assigned" in explanation_types) or ("actor_scored" in explanation_types), "actor assignment/suitability explanations should exist")

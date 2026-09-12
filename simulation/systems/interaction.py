@@ -9,6 +9,7 @@ from simulation.ids import new_id
 from typing import Any
 
 from config import CHUNK_SIZE
+from simulation.systems.body_combat import work_progress
 
 
 @dataclasses.dataclass
@@ -112,7 +113,7 @@ class ChopTreeInteraction(ActiveInteraction):
         efficiency_meta = {"work_tag": "woodcutting"}
         if callable(efficiency_fn):
             multiplier, efficiency_meta = efficiency_fn(actor, "woodcutting")
-        progress = max(1, int(round(1 * multiplier)))
+        progress = work_progress(self, multiplier)
         self.remaining_work = max(0, self.remaining_work - progress)
         apply_xp = getattr(world, "_apply_actor_skill_experience", None)
         if callable(apply_xp):
@@ -254,7 +255,7 @@ class BuildInteraction(ActiveInteraction):
         efficiency_meta = {"work_tag": "construction"}
         if callable(efficiency_fn):
             multiplier, efficiency_meta = efficiency_fn(actor, "construction")
-        amount = max(1, int(round(10 * multiplier)))
+        amount = work_progress(self, multiplier, base=10)
         self.remaining_work = max(0, self.remaining_work - amount)
         apply_xp = getattr(world, "_apply_actor_skill_experience", None)
         if callable(apply_xp):
@@ -378,7 +379,7 @@ class WorkshopInteraction(ActiveInteraction):
         efficiency_meta = {"work_tag": "crafting"}
         if callable(efficiency_fn):
             multiplier, efficiency_meta = efficiency_fn(actor, "crafting")
-        progress = max(1, int(round(1 * multiplier)))
+        progress = work_progress(self, multiplier)
         self.remaining_work = max(0, self.remaining_work - progress)
         apply_xp = getattr(world, "_apply_actor_skill_experience", None)
         if callable(apply_xp):
@@ -489,6 +490,11 @@ class InteractionResolver:
         actor = world.get_entity_by_id(intent.actor_id)
         if not actor:
             return ActionResult(success=False, intent=intent, reason="actor_not_found")
+        from simulation.systems.body_combat import can_act, functions_for
+        if not can_act(actor):
+            return ActionResult(success=False, intent=intent, reason="incapacitated")
+        if intent.action_type in ("chop_tree", "build", "workshop_transform") and functions_for(actor)["grip"] < .1:
+            return ActionResult(success=False, intent=intent, reason="unable_to_work")
 
         if intent.action_type == "open_door":
             return self._resolve_open_door(intent, world, actor)
@@ -713,6 +719,11 @@ class InteractionResolver:
         interaction = self.active_interactions.get(interaction_id)
         if not interaction:
             return None
+        from simulation.systems.body_combat import can_act, functions_for
+        actor = world.get_entity_by_id(interaction.actor_id)
+        if actor is None or not can_act(actor) or (interaction.action_type in ("chop_tree", "build", "workshop_transform") and functions_for(actor)["grip"] < .1):
+            del self.active_interactions[interaction_id]
+            return interaction.cancel(world, reason="incapacitated")
 
         if not interaction.can_continue(world):
             del self.active_interactions[interaction_id]

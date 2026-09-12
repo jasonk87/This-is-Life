@@ -835,16 +835,19 @@ class TestFearSystem(unittest.TestCase):
                 self.world.game_time += NPC_SCHEDULE_UPDATE_INTERVAL
                 self.world._update_npc_schedules()
 
-        # 3. Assertion (Guard 1 starts alerting)
-        self.assertEqual(guard1.schedule.current_task, "alerting_guards")
-        self.assertIsNotNone(guard1.schedule.current_path, "Guard1 should have a path to the alarm spot")
+        # The alarm now names the animal and goes directly to nearby guards.
+        # It must never turn either guard against the innocent player.
+        self.assertEqual(guard1.schedule.current_task, "protecting_from_wildlife")
+        self.assertTrue(guard1.schedule.current_path)
+        self.assertEqual(guard1.wildlife_emergency["threat_id"], wolf1.id)
+        self.assertEqual(guard2.wildlife_emergency["threat_id"], wolf1.id)
 
         destination = guard1.schedule.current_destination_coords
         self.assertIsNotNone(destination)
-        distance_to_alarm = abs(destination[0] - alarm_spot[0]) + abs(destination[1] - alarm_spot[1])
-        self.assertEqual(distance_to_alarm, 1, "Guard should be pathing to a tile adjacent to the alarm spot.")
+        distance_to_threat = max(abs(destination[0] - wolf1.x), abs(destination[1] - wolf1.y))
+        self.assertEqual(distance_to_threat, 1, "Guard should approach the animal, not occupy its tile.")
 
-        self.assertFalse(guard2.combat.is_hostile_to_player, "Guard 2 should not be alerted yet.")
+        self.assertFalse(guard2.combat.is_hostile_to_player)
 
         # 4. Manually move guard1 to their destination
         guard1.x, guard1.y = destination
@@ -855,9 +858,9 @@ class TestFearSystem(unittest.TestCase):
         with patch.object(self.world, "_update_npc_fov"), patch("simulation.systems.survival.update_npc_survival"):
             self.world._update_npc_schedules()
 
-        # 6. Assertion (Guards become hostile)
-        self.assertTrue(guard1.combat.is_hostile_to_player, "Alerting guard should become hostile.")
-        self.assertTrue(guard2.combat.is_hostile_to_player, "Nearby guard should become hostile after alarm.")
+        self.assertFalse(guard1.combat.is_hostile_to_player)
+        self.assertFalse(guard2.combat.is_hostile_to_player)
+        self.assertEqual(guard2.schedule.current_task, "protecting_from_wildlife")
 
     def test_npc_calms_down_when_threat_is_gone(self):
         from entities.base import NPC

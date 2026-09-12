@@ -9,6 +9,7 @@ import threading
 import time
 
 from runtime_compat import requests
+import config
 
 DEFAULT_GOSSIP_OLLAMA_ENDPOINT = os.environ.get("OLLAMA_GOSSIP_ENDPOINT", "http://localhost:11434")
 DEFAULT_GOSSIP_OLLAMA_MODEL = os.environ.get("OLLAMA_GOSSIP_MODEL", "llama3.2:latest")
@@ -279,6 +280,8 @@ class AsyncLLMGossipService:
             self._completed_queue.put(self._make_result(request, response_text, used_fallback=used_fallback))
 
     def _generate_text(self, request: GossipRequest) -> str:
+        if not config.ENABLE_LLM_CONNECTION:
+            return ""
         try:
             response = requests.post(
                 self.endpoint + "/api/generate",

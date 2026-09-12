@@ -1,5 +1,6 @@
 tcod
 requests
 numpy
+Pillow
 google-genai
 pygame

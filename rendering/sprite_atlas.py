@@ -20,6 +20,24 @@ def zoomed_sprite_codepoint(base_codepoint: int, zoom: int, offset_x: int, offse
     return _zoomed_sprite_codepoints.get((int(base_codepoint), int(zoom), int(offset_x), int(offset_y)))
 
 
+def register_pixel_sprite(tileset, base_codepoint, pixels, first_split_codepoint):
+    """Register a native 16px RGBA sprite and all integer zoom quadrants.
+
+    Returns the next unused split codepoint. Callers reserve separate ranges
+    so generated materials cannot overwrite the DawnLike catalog.
+    """
+    tileset[base_codepoint] = pixels
+    next_codepoint = first_split_codepoint
+    for zoom in ZOOMED_DAWNLIKE_LEVELS:
+        expanded = pixels.repeat(zoom, axis=0).repeat(zoom, axis=1)
+        for y in range(zoom):
+            for x in range(zoom):
+                tileset[next_codepoint] = expanded[y*16:(y+1)*16, x*16:(x+1)*16]
+                _zoomed_sprite_codepoints[(base_codepoint, zoom, x, y)] = next_codepoint
+                next_codepoint += 1
+    return next_codepoint
+
+
 def register_zoomed_dawnlike_tiles(
     tileset,
     image_path: str | Path,

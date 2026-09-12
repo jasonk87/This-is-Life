@@ -219,7 +219,7 @@ class ItemReference:
             base_score = average_damage_from_dice(item_properties.get("damage_dice"))
             base_score += max(0, item_properties.get("damage_bonus", 0))
             base_score += max(0, item_properties.get("attack_range", 1) - 1) * 0.25
-        elif self.equip_slot in {"body", "head"}:
+        elif self.equip_slot in {"body", "head", "hands", "feet", "legs"}:
             base_score = max(0, item_properties.get("defense_bonus", 0)) * 3.0
             base_score += max(0.0, item_properties.get("insulation", 0.0)) * 0.5
 

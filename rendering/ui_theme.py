@@ -7,10 +7,8 @@ depending on which menu you opened. Draw code should name a color from here
 instead of writing a tuple inline, so a palette change is one edit rather
 than fourteen.
 
-Glyphs are restricted to the CP437/CHARMAP_TCOD range that the bundled
-`dejavu16x16_gs_tc.png` tilesheet actually contains. Unicode block-eighths
-(U+2588 partials like the left-seven-eighths bar) are *not* in that charmap
-and render as blanks, so bars here are whole cells only.
+Geometry glyphs are registered explicitly by ui_glyphs.py, independent of
+font coverage. Meters use whole cells to stay legible at every window size.
 """
 
 # --- Surfaces -------------------------------------------------------------
@@ -19,25 +17,27 @@ and render as blanks, so bars here are whole cells only.
 # as part of the window chrome rather than as a popup. Tuned toward a warm,
 # muted pixel-art tone so the UI reads as one canvas with the DawnLike world
 # instead of a floating dark-theme overlay.
-PANEL_BG = (140, 122, 95)         # warm parchment tan
-PANEL_BG_DEEP = (118, 101, 78)    # deeper parchment (status chrome)
-PANEL_BG_RAISED = (160, 140, 111) # lighter parchment (focused popup)
-LOG_BG = (104, 89, 69)            # parchment message log
+PANEL_BG = (26, 33, 31)          # charcoal green, beneath the world's colors
+PANEL_BG_DEEP = (18, 25, 24)
+PANEL_BG_RAISED = (37, 46, 41)
+LOG_BG = (20, 27, 26)
+SELECTION_BG = (61, 69, 49)
+HOVER_BG = (40, 51, 43)
 
 # --- Frames ---------------------------------------------------------------
-FRAME = (96, 80, 61)          # dark bronze, defines panel edge on parchment
-FRAME_FOCUSED = (236, 196, 108)  # warm parchment highlight
+FRAME = (76, 92, 78)
+FRAME_FOCUSED = (211, 176, 112)
 
 # --- Text -----------------------------------------------------------------
-TEXT = (240, 232, 218)        # warm off-white (bright, high contrast on parchment)
-TEXT_DIM = (96, 78, 58)       # dim brown (clearly darker than panel for legibility)
-TEXT_MUTED = (112, 96, 76)    # muted brown (darker than panel for legibility)
-TEXT_DISABLED = (84, 72, 58)  # disabled brown (darkest, dimmed)
+TEXT = (233, 230, 212)
+TEXT_DIM = (194, 204, 188)
+TEXT_MUTED = (159, 178, 163)
+TEXT_DISABLED = (126, 142, 130)
 
 # --- Semantic accents -----------------------------------------------------
-HEADING = (176, 128, 48)      # section headings, menu titles, field labels (dark gold)
-SELECTION = (150, 104, 40)    # the row/action the cursor is on (dark amber)
-HOVER = (120, 96, 66)         # the row the mouse is over but not selected
+HEADING = (222, 189, 129)
+SELECTION = (255, 232, 174)
+HOVER = (223, 231, 207)
 SUCCESS = (142, 206, 130)
 WARNING = (240, 176, 84)
 DANGER = (230, 96, 96)

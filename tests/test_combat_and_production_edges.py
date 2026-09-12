@@ -39,6 +39,7 @@ class TestPlayerCanFightWithoutAModel(unittest.TestCase):
         start = target.combat.hp
         for _ in range(40):
             self.world.player_attempt_attack(target)
+            self.world.game_time += 4  # Attacks now have a simulation-time recovery.
             if target.physical.is_dead:
                 break
         self.assertTrue(

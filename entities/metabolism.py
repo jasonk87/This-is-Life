@@ -29,10 +29,18 @@ AMBIENT_COUPLING = 0.10
 
 
 def body_equilibrium_temperature(ambient_temperature: float, insulation: float) -> float:
-    """The body temperature someone settles at in this air, with this clothing."""
-    return NORMAL_BODY_TEMPERATURE + (
-        (ambient_temperature + insulation - COMFORTABLE_AMBIENT) * AMBIENT_COUPLING
-    )
+    """Game-unit thermal load: insulation conserves heat, it does not create it.
+
+    Clothing offsets cold up to comfort. In warm air the body can still shed
+    heat; clothing adds a retention burden only above the 30C warm-room band.
+    This keeps a clothed worker safe beside a hearth without capping genuine
+    environmental heat or making a winter night harmless.
+    """
+    insulation = max(0.0, insulation)
+    cold_load = min(0.0, ambient_temperature + insulation - COMFORTABLE_AMBIENT)
+    warm_load = max(0.0, ambient_temperature - COMFORTABLE_AMBIENT)
+    retained_heat = max(0.0, ambient_temperature - 30.0) * min(1.0, insulation / 20.0)
+    return NORMAL_BODY_TEMPERATURE + (cold_load + warm_load + retained_heat) * AMBIENT_COUPLING
 
 
 @dataclass

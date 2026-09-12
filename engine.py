@@ -32,6 +32,7 @@ from entities.base import (
     next_entity_id,
     reserve_entity_ids_above,
     reset_entity_ids,
+    roll_innate_traits,
     roll_appearance,
 ) # Added DireWolf
 from entities.animal import Animal
@@ -506,7 +507,7 @@ VILLAGE_BUILDING_PROJECTS = {
 
 import json
 
-if GOOGLE_API_KEY and hasattr(genai, "configure"):
+if ENABLE_LLM_CONNECTION and GOOGLE_API_KEY and hasattr(genai, "configure"):
     genai.configure(api_key=GOOGLE_API_KEY)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -692,6 +693,13 @@ NPC_WORK_TOOL_TYPES = {
     "harvest_crops": "hoe",
 }
 
+# Professions that run a workplace rather than merely working in one. Used when
+# deciding who owns a building; matches the leadership list _find_boss_for_npc
+# already uses to decide who a worker answers to.
+EMPLOYER_PROFESSIONS = {
+    "Sheriff", "Lumber Mill Foreman", "Tavern Keeper", "Town Official", "Merchant",
+}
+
 @dataclass
 class PlayerState:
     is_sitting: bool = False
@@ -707,6 +715,7 @@ class PlayerState:
     original_char: int = 0xE000
     current_path: list[tuple[int, int]] = field(default_factory=list)
     move_cooldown: int = 0
+    move_ready_tick: int = 0
 
 
 class Player:
@@ -809,6 +818,9 @@ class Player:
         both the player and NPCs through the same entity.take_damage(...)
         call) can pass it uniformly without needing an is_player branch.
         """
+        if self.combat.anatomy.body_plan:
+            from simulation.systems.body_combat import environmental_damage
+            return environmental_damage(self, amount, world)
         effective_damage = max(0, amount - self.combat.defense_bonus)
 
         # Wear down whatever armor actually blocked the hit, mirroring
@@ -1394,6 +1406,11 @@ class World:
         self.ensure_player_surroundings_generated()
         self._refresh_chunk_activity(force=True)
         self._initialize_politics()
+
+        from simulation.starting_wardrobe import seed_starting_wardrobes
+        from simulation.systems.appearance import advance_appearance
+        seed_starting_wardrobes(self)
+        advance_appearance(self)
 
         self._update_light_level_and_fov() # Initialize based on game time 0
         self._update_player_fov() # Initial FOV calculation for player
@@ -2774,6 +2791,23 @@ class World:
         """Let one NPC tell another about one incident, with nearby NPC overhearing."""
         return propagate_harmful_incident_gossip(self, speaker, listener, overhear_radius=overhear_radius)
 
+    def raise_grievance_incident(self, *, kind_key: str, wrongdoer_id, victim, context: dict | None = None):
+        """Turn something the engine already detected into a public grievance.
+
+        The entry point for grievances the rest of the engine notices for its
+        own reasons - a payroll run that cannot cover a wage, a dismissal - as
+        opposed to the ones simulation.systems.grievances goes looking for. Both
+        end up in the same place, so a missed wage spreads exactly like any
+        other incident.
+        """
+        from simulation.systems.grievances import GRIEVANCE_KINDS, apply_grievance_act
+
+        kind = GRIEVANCE_KINDS.get(kind_key)
+        wrongdoer = self._find_npc_by_id(wrongdoer_id)
+        if kind is None or wrongdoer is None or victim is None or wrongdoer is victim:
+            return None
+        return apply_grievance_act(self, kind, wrongdoer, victim, dict(context or {}))
+
     def refresh_local_incident_opinion(self, observer, target_id: int | None) -> float:
         """Recompute one observer's belief-driven local standing for a target."""
         return update_local_incident_opinion(self, observer, target_id)
@@ -3676,6 +3710,9 @@ class World:
         for npc in self.all_npcs:
             if npc.physical.is_dead or getattr(npc, "is_sleeping", False):
                 continue
+            from simulation.systems.body_combat import can_act, movement_budget
+            if not can_act(npc):
+                continue
 
             # --- Handle task-based path recalculation before movement ---
             # If hostile and needs to decide on a combat action that involves movement
@@ -3832,7 +3869,7 @@ class World:
             # --- Unified Path-Based Movement ---
             if npc.schedule.current_path:
                 moves_made = 0
-                max_moves = getattr(npc, 'speed', 1)
+                max_moves = movement_budget(npc, getattr(self, "game_time", 0), getattr(npc, 'speed', 1))
                 while moves_made < max_moves and npc.schedule.current_path and len(npc.schedule.current_path) > 1:
                     next_x, next_y = npc.schedule.current_path[1] # Path index 0 is current pos
 
@@ -4098,6 +4135,9 @@ class World:
                         continue # Stop processing this NPC
                     elif npc.schedule.current_task in [TaskType.GOING_HOME, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
                         npc.schedule.current_task = TaskType.AT_HOME
+                    elif npc.schedule.current_task in {"wolf_combat", "fleeing_injury", "protecting_from_wildlife",
+                                                        "escaping_wildlife", "recovering_from_injury"}:
+                        pass  # Arrival finishes a path, not the combat/care decision.
                     else:
                         npc.schedule.current_task = TaskType.IDLE # Default state post-movement
 
@@ -4486,6 +4526,12 @@ class World:
         for npc in self.all_npcs:
             if npc.physical.is_dead or getattr(npc, "is_sleeping", False):
                 continue
+            from simulation.systems.body_combat import can_act
+            from simulation.systems.combat_response import update_wolf_combat, respond_to_wildlife
+            if not can_act(npc):
+                continue
+            if update_wolf_combat(self, npc) or respond_to_wildlife(self, npc):
+                continue
 
             npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
             if hasattr(npc_inventory, "process_tick"):
@@ -4501,6 +4547,11 @@ class World:
                 continue
 
             update_npc_medical_state(self, npc)
+            if npc.combat.anatomy.body_plan and npc.schedule.current_task in {
+                    "seeking_healer", "waiting_for_treatment", "treating_patient", "resting_in_bed",
+                    "recovering_from_injury", "collecting_medical_supplies", "foraging_for_herbs",
+                    "crafting_medical_supplies", "waiting_for_safe_treatment"}:
+                continue
 
             self._decay_incidental_npc_hostility(npc)
 
@@ -4724,28 +4775,15 @@ class World:
                                 npc.schedule.current_task = TaskType.IDLE
 
                     elif entity_has_any_profession(npc, ["Guard", "Sheriff"]):
-                        if npc.schedule.current_task == "alerting_guards" and (not npc.schedule.current_path or len(npc.schedule.current_path) <= 1):
-                            self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} raises the alarm about the threat!")
-                            npc.combat.is_hostile_to_player = True
-                            for other_npc in self.village_npcs:
-                                if other_npc.id != npc.id and entity_has_any_profession(other_npc, ["Guard", "Sheriff"]):
-                                    if abs(npc.x - other_npc.x) + abs(npc.y - other_npc.y) <= 15:
-                                        other_npc.combat.is_hostile_to_player = True
-                                        self.add_message_to_chat_log(f"{self.get_entity_display_name(other_npc)} hears the alarm and prepares for battle!")
-                        elif npc.schedule.current_task != "alerting_guards":
-                            npc.schedule.current_task = "alerting_guards"
-                            npc_village = self._get_village_for_npc(npc)
-                            # interaction_points values are lists of coords, so
-                            # take the first rather than indexing the list as
-                            # if it were an (x, y) pair.
-                            alarm_spot = self._get_village_anchor_coords(npc_village) if npc_village else None
-                            if alarm_spot:
-                                dest_x, dest_y = self._find_best_adjacent_tile(alarm_spot[0], alarm_spot[1], npc)
-                                if dest_x is not None:
-                                    path = self.calculate_path(npc.x, npc.y, dest_x, dest_y)
-                                    if path:
-                                        npc.schedule.current_path = path
-                                        npc.schedule.current_destination_coords = (dest_x, dest_y)
+                        # A wildlife alarm names the animal, never the player.
+                        from simulation.systems.combat_response import raise_wildlife_alarm, respond_to_wildlife, sees
+                        known_wolves = [t for t in self.npcs if t.id in npc.threat_source_ids
+                                        and getattr(t, "animal_type", None) in ("wolf", "dire_wolf")
+                                        and not t.physical.is_dead and sees(self, npc, t)]
+                        if known_wolves:
+                            threat = min(known_wolves, key=lambda t: abs(t.x-npc.x)+abs(t.y-npc.y))
+                            raise_wildlife_alarm(self, npc, threat)
+                            respond_to_wildlife(self, npc)
                     else:
                         if npc.schedule.current_task != "fleeing_from_threat":
                             npc.schedule.current_task = "fleeing_from_threat"
@@ -4777,6 +4815,8 @@ class World:
 
     def _run_humanoid_schedule_logic(self, npc: NPC) -> bool:
         """Delegate humanoid daily scheduling to the NPC brain and job strategies."""
+        if npc.schedule.current_task == "recovering_from_injury":
+            return True
         if npc.economic.profession != "Creature" and not npc.combat.is_hostile_to_player and \
            npc.schedule.current_task not in ["attacking_player", "moving_to_attack_player", "fleeing_from_player",
                                              "holding_position_combat", "combat_action_use_healing_item",
@@ -4790,7 +4830,7 @@ class World:
                                              # made it materially worse since a working, untreated NPC also
                                              # never isolates and keeps spreading contagion at their job.
                                              "seeking_healer", "waiting_for_treatment", "resting_in_bed",
-                                             "treating_patient",
+                                             "treating_patient", "collecting_medical_supplies",
                                              # The healer's own supply loop belongs here too, and was the
                                              # one medical task left out. medical.py sends them out for
                                              # herbs; the work-hours check overwrote that with
@@ -6230,6 +6270,10 @@ class World:
             npc.schedule.current_path = []
             return
 
+        from simulation.systems.body_combat import attack, supported
+        if supported(npc) and supported(player):
+            return attack(self, npc, player)
+
         # 1. Determine Stats
         
         # Attacker Skill
@@ -6328,6 +6372,10 @@ class World:
             attacker.schedule.current_task = TaskType.IDLE
             attacker.schedule.current_path = []
             return
+
+        from simulation.systems.body_combat import attack, supported
+        if supported(attacker) and supported(target):
+            return attack(self, attacker, target)
 
         # --- CRIME RECORDING for genuine civilian-on-civilian violence ---
         # Excludes: animals (predation, e.g. a desperate wolf, isn't "crime"),
@@ -8441,6 +8489,10 @@ class World:
                 if village and village.at_war_with and entity_has_any_profession(entity_data, ["Mayor", "Sheriff", "Guard"]):
                     actions.append("Offer Mercenary Services")
 
+            from simulation.systems.body_combat import supported
+            if supported(entity_data):
+                actions.extend(["Punch", "Kick", "Examine Wounds", "Treat Wounds"])
+
         elif entity_type == "item":
             actions.append("Pick up")
             item_ref = entity_data.get("item_reference")
@@ -9922,6 +9974,13 @@ class World:
                 time_to_advance = DAY_LENGTH_TICKS // 3 # Sleep for 1/3 of a day (e.g., 8 hours)
                 self.game_time += time_to_advance
                 self.add_message_to_chat_log(f"Several hours pass...")
+                if self.player.combat.anatomy.body_plan:
+                    from simulation.systems.body_combat import advance_bodies
+                    advance_bodies(self)
+                    self.player.state.is_sleeping = False
+                    if not self.player.physical.is_dead:
+                        self.add_message_to_chat_log("You wake. Your body has had time to recover, but wounds and fractures remain.")
+                    return True
 
                 # Optional: Player benefits
                 heal_amount = self.player.combat.max_hp // 4 # Heal 25% of max HP
@@ -10315,7 +10374,21 @@ class World:
             "narrative_feedback": narrative,
         })
 
-    def player_attempt_attack(self, target_npc: NPC):
+    def examine_body(self, actor=None):
+        from simulation.systems.body_combat import examine
+        return examine(self, actor or self.player)
+
+    def treat_body(self, actor=None):
+        from simulation.systems.body_combat import treat
+        treated = treat(self, self.player, actor or self.player)
+        if not treated:
+            self.add_message_to_chat_log("Get beside the patient with a bandage, salve or splint for an untreated wound.")
+        return treated
+
+    def player_attempt_attack(self, target_npc: NPC, attack_type="attack", target_part=None):
+        from simulation.systems.body_combat import attack, supported
+        if supported(target_npc):
+            return attack(self, self.player, target_npc, attack_type, target_part)
         if not target_npc:
             self.add_message_to_chat_log("No target selected for attack.")
             return
@@ -10328,9 +10401,10 @@ class World:
         player_weapon_name = "Fists"
         weapon_dice_str = self.player.combat.base_attack_damage_dice
         weapon_damage_bonus = 0
-        if self.player.has_item("axe_stone"):
-            player_weapon_name = ITEM_DEFINITIONS["axe_stone"]["name"]
-            weapon_props = ITEM_DEFINITIONS["axe_stone"].get("properties", {})
+        equipped_weapon_key = str(self.player.equipment.weapon)
+        if equipped_weapon_key in ITEM_DEFINITIONS:
+            player_weapon_name = ITEM_DEFINITIONS[equipped_weapon_key]["name"]
+            weapon_props = ITEM_DEFINITIONS[equipped_weapon_key].get("properties", {})
             weapon_dice_str = weapon_props.get("damage_dice", weapon_dice_str)
             weapon_damage_bonus = weapon_props.get("damage_bonus", 0)
 
@@ -10369,7 +10443,7 @@ class World:
             npc_toughness=npc_toughness_desc
         )
 
-        response_str = self._call_llm(prompt)
+        response_str = ""  # Combat mechanics never use model adjudication.
         inflicted_damage = 0
         attack_landed = False
 
@@ -10560,6 +10634,14 @@ class World:
             )
 
     def handle_npc_death(self, dead_npc: NPC, killer_id: int | None = None, description: str | None = None, cause_of_death: str | None = None):
+        body = dead_npc.combat.anatomy
+        if body.body_plan:
+            if body.death_event_processed:
+                return
+            body.death_event_processed = True
+            body.death_processed = True
+            body.death_cause = body.death_cause or cause_of_death or "fatal injury"
+            dead_npc.physical.is_dead = True
         if isinstance(dead_npc, Animal) and hasattr(self, "ecology"):
             self.ecology.note_animal_death(dead_npc)
         dead_npc_name = self.get_entity_display_name(dead_npc)
@@ -10731,6 +10813,9 @@ class World:
                 ("weapon", dead_npc.get_equipped_item_reference("weapon")),
                 ("body", dead_npc.get_equipped_item_reference("body")),
                 ("head", dead_npc.get_equipped_item_reference("head")),
+                ("hands", dead_npc.get_equipped_item_reference("hands")),
+                ("legs", dead_npc.get_equipped_item_reference("legs")),
+                ("feet", dead_npc.get_equipped_item_reference("feet")),
             ]
             for slot_name, equipped_item in equipped_to_check:
                 if equipped_item:
@@ -11132,6 +11217,10 @@ class World:
     def start_npc_dialogue(self, npc_target: NPC):
         """Initiates dialogue with an NPC, getting their first line."""
         if not npc_target:
+            return
+        from simulation.systems.body_combat import can_act
+        if not can_act(npc_target) or not can_act(self.player):
+            self.add_message_to_chat_log("They cannot hold a conversation right now.")
             return
         profile = evaluate_conversation_foundation(self, self.player, npc_target, max_distance=9999)
         if not profile.can_start:
@@ -11713,6 +11802,8 @@ class World:
         return ""
 
     def _submit_background_llm_task(self, task_key, prompt: str) -> None:
+        if not ENABLE_LLM_CONNECTION:
+            return
         if task_key in self._background_llm_tasks:
             return
         if len(self._background_llm_tasks) >= 4:
@@ -11725,6 +11816,10 @@ class World:
             future.cancel()
 
     def _poll_background_llm_task(self, task_key):
+        if not ENABLE_LLM_CONNECTION:
+            # An empty completed result selects local dialogue fallbacks;
+            # None would leave conversations waiting on a task never queued.
+            return ""
         future = self._background_llm_tasks.get(task_key)
         if future is None:
             return None
@@ -11737,6 +11832,8 @@ class World:
             return ""
 
     def _call_gemini(self, prompt: str) -> str:
+        if not ENABLE_LLM_CONNECTION:
+            return ""
         if not GOOGLE_API_KEY:
             self._warn_missing_llm_once()
             return ""
@@ -11754,6 +11851,8 @@ class World:
 
     def _call_ollama_backend(self, prompt: str) -> str:
         """Makes a request to the Ollama API and returns the response."""
+        if not ENABLE_LLM_CONNECTION:
+            return ""
         try:
             response = requests.post(
                 OLLAMA_ENDPOINT + "/api/generate",
@@ -12869,6 +12968,27 @@ class World:
             num_npcs,
         )
 
+        # Temperament is drawn from its own generator, not the shared one.
+        #
+        # Taking it from `random` advanced the world-generation stream by a draw
+        # or two per villager, so every name, position and layout decision made
+        # afterwards came out different and the same seed no longer produced the
+        # same world. Three tests calibrated against specific generated worlds
+        # failed for that reason alone, having nothing to do with temperament.
+        #
+        # Seeded from the world seed, so it stays reproducible while leaving the
+        # main stream exactly where it was.
+        # Created once for the world, not once per village. Rebuilding it here
+        # gave every village the same short sequence of temperaments, and with
+        # four villages drawing the same two dozen values the quirks of that one
+        # sequence were multiplied instead of averaged out: seed 2024 came back
+        # with seventeen aggressive villagers and four lawful ones, the reverse
+        # of the weighting.
+        trait_rng = getattr(self, "_trait_rng", None)
+        if trait_rng is None:
+            trait_rng = random.Random((int(getattr(self, "world_seed", 0) or 0)) ^ 0x5EED)
+            self._trait_rng = trait_rng
+
         for i in range(num_npcs):
             # npc_data = {
             #     "name": f"Villager {i+1}",
@@ -12981,12 +13101,50 @@ class World:
 
                 npc.combat.attack_range = 1 # Default melee
 
+                # Temperament. The personality string above is "commoner" for
+                # everybody whenever world generation runs without an LLM, which
+                # is the ordinary case, so without this every has_trait() check
+                # in the engine is False for every villager and ninety identical
+                # people have no reason to treat each other differently.
+                npc.social.innate_traits = roll_innate_traits(trait_rng)
+
                 # Assign profession based on work building
                 if work_building:
                     npc.schedule.work_building_id = work_building.id
                     work_building.occupants.append(npc) # Store NPC object for now
                     resolved_profession = self._resolve_profession_for_work_building(work_building, exclude_entity=npc)
                     self._set_entity_profession(npc, resolved_profession, reason="initial_job_assignment")
+                    # Deliberately NOT assigning work_building.owner_id here.
+                    #
+                    # It is tempting, because no generated building has an owner
+                    # and that leaves the payroll system unreachable: the daily
+                    # wage run only checks whether a workplace can cover its
+                    # wages when `owner_id is not None`, so wages are never
+                    # paid, never missed, and nobody ever quits over money.
+                    # Waking that up gives grievances a lovely cause.
+                    #
+                    # It also breaks the labour market, and the damage is
+                    # one-way. `owner_id` does not mean "somebody is the boss";
+                    # it means "privately run, and not part of the public
+                    # vacancy system" - _sync_building_employment_tasks returns
+                    # immediately for an owned building, which is why an
+                    # NPC-built business is staffed by its owner rather than
+                    # advertised on the noticeboard.
+                    #
+                    # So assigning owners to buildings that already had staff
+                    # produced: businesses that cannot cover payroll (68 missed
+                    # wages in under three game days), workers quitting over it,
+                    # and vacancies that could never be re-posted because the
+                    # building was now "private". Employment fell 81 -> 58 in
+                    # three days and unemployment kept climbing over a month.
+                    # That is a structural leak wearing the costume of an
+                    # interesting economy.
+                    #
+                    # Unpaid wages remain a real grievance and the hook in the
+                    # payroll run is live; it fires for genuinely owner-built
+                    # businesses, which is where it belongs. Wiring it to the
+                    # rest of the village needs workplaces that actually earn
+                    # enough to make payroll, which is economic work, not this.
                 else:
                     self._set_entity_profession(npc, "Unemployed", reason="initial_unemployed")
 
@@ -13077,6 +13235,8 @@ class World:
                 # General chance for any NPC to have a healing salve
                 if random.random() < 0.25:
                     npc.economic.npc_inventory["healing_salve"] = npc.economic.npc_inventory.get("healing_salve", 0) + 1
+                    npc.economic.npc_inventory["bandage"] = npc.economic.npc_inventory.get("bandage", 0) + 4
+                    npc.economic.npc_inventory["splint"] = npc.economic.npc_inventory.get("splint", 0) + 2
 
 
                 self.village_npcs.append(npc)
@@ -14520,6 +14680,8 @@ class World:
         self._apply_actor_skill_experience(actor, work_tag=work_tag, progress_amount=1, task=task)
 
     def _apply_actor_skill_experience(self, actor, *, work_tag: str, progress_amount: int, task: ProductionTask | None = None) -> None:
+        if progress_amount <= 0:
+            return
         if actor is None or not work_tag:
             return
         now = int(getattr(self, "game_time", 0) or 0)
@@ -14633,6 +14795,9 @@ class World:
         multiplier = max(0.5, min(1.5, base_multiplier * explicit_modifier))
         if multiplier <= 0.5 or multiplier >= 1.5:
             self._warn_simulation_validation("actor_efficiency_out_of_bounds", (getattr(actor, "id", None), work_tag), "Actor work efficiency hit bounding limits.", actor=actor, metadata={"work_tag": work_tag, "computed_multiplier": multiplier})
+        from simulation.systems.body_combat import functions_for
+        body_function = functions_for(actor)
+        multiplier *= min(body_function["grip"], body_function["consciousness"])
         meta = {"actor_id": getattr(actor, "id", None), "work_tag": work_tag, "skill_level": skill_level, "fatigue": fatigue, "preferred_bonus": preferred, "repetition_penalty": repetition_penalty, "explicit_modifier": explicit_modifier, "efficiency_multiplier": multiplier, "cold_exposure": float(getattr(actor, "cold_exposure", 0.0) or 0.0)}
         trace_log = getattr(self, "interaction_trace_log", None)
         if isinstance(trace_log, list):
@@ -16388,6 +16553,8 @@ class World:
         if clinic:
             clinic.building_inventory["money"] = random.randint(80, 200)
             clinic.building_inventory["healing_salve"] = random.randint(5, 15)
+            clinic.building_inventory["bandage"] = 12
+            clinic.building_inventory["splint"] = 6
             clinic.building_inventory["medicinal_herb"] = random.randint(8, 20)
             clinic.work_zone_tiles["medical_bed"] = [(clinic.global_origin_x + 1, clinic.global_origin_y + 1)]
             # Derived from the footprint rather than written as +5. The clinic
@@ -16861,6 +17028,10 @@ class World:
         return 1.0
 
     def handle_player_movement(self, dx, dy) -> int:
+        from simulation.systems.body_combat import can_act, functions_for
+        if not can_act(self.player) or functions_for(self.player)["movement"] < .1:
+            self.add_message_to_chat_log("Your injuries prevent you from moving.")
+            return 0
         if self.player.state.is_jailed:
             self.add_message_to_chat_log("You are in jail and cannot move freely.")
             return 1 # Default action cost
@@ -16902,7 +17073,8 @@ class World:
                 self.visual_effects.append(ParticleBurstEffect(origin_x, origin_y, kind="dust", count=2, duration=0.25))
 
             base_movement_cost = destination_tile.properties.get("movement_cost", 1)
-            movement_cost = max(1, int(round(base_movement_cost * self._get_weather_movement_cost_multiplier())))
+            movement_cost = max(1, int(math.ceil(base_movement_cost * self._get_weather_movement_cost_multiplier()
+                                               / max(.1, functions_for(self.player)["movement"]))))
 
             # Check if player entered a building
             building = self.get_building_at(new_x, new_y)
@@ -16926,9 +17098,8 @@ class World:
 
             self._update_player_fov() # Player moved, so update FOV
 
-            # Clear sound events after player move (and subsequent NPC updates for that turn)
-            # This means sounds last for one full game tick cycle.
-            self.sound_events.clear()
+            # Sound expiry is owned by simulation ticks, including while the
+            # player stands still, sleeps, or is incapacitated.
 
 
             # Check for pass-through yields (e.g., from tall grass)
@@ -16960,7 +17131,8 @@ class World:
         self.sound_events.append({
             "x": origin_x, "y": origin_y,
             "type": sound_type, "volume": volume,
-            "source_id": source_entity_id # Optional: ID of player/NPC that made the sound
+            "source_id": source_entity_id, # Optional: ID of player/NPC that made the sound
+            "created_tick": self.game_time,
         })
         # self.add_message_to_chat_log(f"Debug: Sound '{sound_type}' emitted at ({origin_x},{origin_y}) vol {volume}")
 
@@ -18113,6 +18285,17 @@ class World:
                         },
                     )
                     self.record_memory_event(npc, unpaid_wage_memory)
+                    # Being stiffed for a day's pay is a grievance, so it goes
+                    # into the incident layer too - that is what carries it to
+                    # witnesses, into gossip, and onto the owner's reputation.
+                    # The memory above only ever reached the worker themselves.
+                    self.raise_grievance_incident(
+                        kind_key="unpaid_wages",
+                        wrongdoer_id=getattr(work_building, "owner_id", None),
+                        victim=npc,
+                        context={"wage": wage, "building_id": work_building.id,
+                                 "profession": npc.economic.profession},
+                    )
                     self._clear_npc_job(
                         npc,
                         reason="unpaid_wages",
@@ -20412,9 +20595,20 @@ class World:
         if not item_def:
             self.add_message_to_chat_log(f"You don't know how to use '{item_key}'.")
             return
+        from simulation.systems.body_combat import equip_player_weapon, treat
+        if item_def.get("equip_slot") == "main_hand":
+            return equip_player_weapon(self, item_key)
+        if item_key in ("bandage", "splint") or (item_key == "healing_salve" and self.player.combat.anatomy.body_plan):
+            result = treat(self, self.player, self.player, item_key)
+            if not result:
+                self.add_message_to_chat_log("No wound you can treat with that supply right now.")
+            return result
 
         # Handle equipping armor
         if "armor" in item_def.get("item_type_tags", []):
+            if not self.player.has_item(item_key):
+                self.add_message_to_chat_log(f"You don't have any {item_def.get('name', item_key)} to equip.")
+                return
             self.player.equip_armor(item_key)
             return
 

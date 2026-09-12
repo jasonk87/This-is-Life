@@ -108,40 +108,7 @@ def prompt_for_new_player_name(console, context) -> str | None:
     try:
         while True:
             console.clear()
-            console.print(
-                console.width // 2,
-                console.height // 3,
-                "NEW CHARACTER",
-                alignment=libtcodpy.CENTER,
-                fg=(255, 255, 0),
-            )
-            console.print(
-                console.width // 2,
-                console.height // 2 - 1,
-                "Enter your first name",
-                alignment=libtcodpy.CENTER,
-            )
-            console.print(
-                console.width // 2,
-                console.height // 2 + 1,
-                normalize_player_first_name(input_value) if input_value.strip() else "_",
-                alignment=libtcodpy.CENTER,
-                fg=(255, 255, 255),
-            )
-            console.print(
-                console.width // 2,
-                console.height // 2 + 4,
-                "Last name is chosen by your in-game family.",
-                alignment=libtcodpy.CENTER,
-                fg=(160, 160, 160),
-            )
-            console.print(
-                console.width // 2,
-                console.height - 4,
-                "Enter = start   Esc = cancel",
-                alignment=libtcodpy.CENTER,
-                fg=(160, 160, 160),
-            )
+            draw_character_create(console,input_value)
             context.present(console)
 
             for event in tcod.event.wait():
@@ -175,6 +142,18 @@ def prompt_for_new_player_name(console, context) -> str | None:
     finally:
         if hasattr(context, "stop_text_input"):
             context.stop_text_input()
+
+
+def draw_character_create(console, input_value=""):
+    _draw_menu_backdrop(console)
+    center = console.width//2
+    widgets.panel(console,center-28,17,56,21,title="A New Life",focused=True)
+    console.print(center,21,"Enter your first name",alignment=libtcodpy.CENTER,fg=theme.TEXT)
+    console.print(center-20,25," "*40,bg=theme.PANEL_BG_RAISED)
+    console.print(center,25,(input_value[-20:] if input_value else "")+"_",
+                  alignment=libtcodpy.CENTER,fg=theme.SELECTION,bg=theme.PANEL_BG_RAISED)
+    console.print(center,29,"Your family gives you your last name.",alignment=libtcodpy.CENTER,fg=theme.TEXT_MUTED)
+    console.print(center,35,"Enter  begin     Esc  return",alignment=libtcodpy.CENTER,fg=theme.HEADING)
 
 def _get_player_facing_position(world: World) -> tuple[int, int]:
     """Return the coordinates directly in front of the player."""
@@ -286,6 +265,14 @@ def _menu_mouse_binding(world):
                 world.trade_ui_merchant_item_index = index
         return "TRADE_MENU", select, handle_trade_menu_input
 
+    if state == "INVENTORY_MENU":
+        def select(index):
+            rows = world.interaction_context.get("inventory_selectable_rows", [])
+            if index not in rows:
+                return False
+            world.interaction_context["inventory_selected_index"] = rows.index(index)
+        return "INVENTORY_MENU", select, handle_inventory_menu_input
+
     return None
 
 
@@ -310,7 +297,8 @@ def handle_menu_mouse_click(event, world, context) -> bool:
     if index is None:
         return False
 
-    select(index)
+    if select(index) is False:
+        return True
     if event.button == tcod.event.MouseButton.LEFT and confirm_handler is not None:
         confirm_event = SimpleNamespace(sym=tcod.event.KeySym.RETURN)
         if confirm_handler is handle_interaction_input:
@@ -326,7 +314,7 @@ def _scroll_message_log(world, lines):
     messages push the view back to, so scrolling back to read something and
     then walking on doesn't leave the player stuck in the past.
     """
-    entries = getattr(world, "chat_log_entries", None) or []
+    entries = console_renderer._get_log_entries(world)
     max_scroll = max(0, len(entries) - console_renderer.LOG_VISIBLE_LINES)
     current = int(getattr(world, "chat_log_scroll", 0))
     world.chat_log_scroll = max(0, min(max_scroll, current + int(lines)))
@@ -542,11 +530,18 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
     }
 
     if event.sym in move_keys:
+        if world.game_time < getattr(world.player.state, "move_ready_tick", 0):
+            return False
         dx, dy = move_keys[event.sym]
         action_cost = world.handle_player_movement(dx, dy)
         if action_cost > 0:
-            world.game_time += action_cost - 1
+            world.player.state.move_ready_tick = world.game_time + action_cost
+            if getattr(world, "is_paused", False):
+                advance_committed_action(world, action_cost)
             return True
+    elif event.sym == tcod.event.KeySym.F:
+        open_combat_menu(world)
+        return False
     elif event.sym == tcod.event.KeySym.C:
         world.game_state = "CRAFTING_MENU"
         world.crafting_menu_context["all_recipes"] = [
@@ -785,6 +780,52 @@ def handle_governance_menu_input(event: tcod.event.KeyDown, world: World):
         ctx["selected_target_index"] = 0
         ctx["scroll_offset"] = 0
 
+def open_combat_menu(world):
+    """Explicit visible target selection, reusing the existing action menu."""
+    from simulation.systems.body_combat import supported
+    fov = world.player_fov_map
+    targets = [actor for actor in world.all_npcs if supported(actor) and not actor.physical.is_dead
+               and max(abs(actor.x-world.player.x), abs(actor.y-world.player.y)) <= 10
+               and 0 <= actor.y < fov.shape[0] and 0 <= actor.x < fov.shape[1]
+               and fov[actor.y, actor.x]]
+    targets.sort(key=lambda actor: (not actor.combat.is_hostile_to_player,
+                                    max(abs(actor.x-world.player.x), abs(actor.y-world.player.y))))
+    if not targets:
+        world.add_message_to_chat_log("No visible combat target nearby.")
+        return
+    remembered = getattr(world, "player_combat_target_id", None)
+    index = next((i for i, actor in enumerate(targets) if actor.id == remembered), 0)
+    target = targets[index]
+    world.player.state.current_path = []
+    world.interaction_context.update(active=True, combat_picker=True, x=target.x, y=target.y,
+        target_entities=[dict(type="npc", data=actor, name=actor.name) for actor in targets],
+        selected_entity_index=index, selected_action_index=0,
+        available_actions=["Attack", "Punch", "Kick", "Examine Wounds"])
+
+
+def advance_committed_action(world, ticks):
+    """Spend time through the real world loop: opponents and bleeding act too."""
+    for _ in range(max(0, int(ticks))):
+        if world.player.physical.is_dead:
+            break
+        world.update()
+
+
+def commit_player_attack(world, target, attack_type="attack"):
+    result = world.player_attempt_attack(target, attack_type=attack_type)
+    world.player_combat_target_id = target.id
+    attempted = getattr(result, "attempted", result is None)
+    if attempted:
+        world.interaction_context["active"] = False
+        world.player.state.current_path = []
+        # Real-time already pays recovery as ticks pass. Paused combat spends
+        # the same interval explicitly; a miss still gives the wolf its turn.
+        if getattr(world, "is_paused", False):
+            ready = world.player.combat.anatomy.attack_ready_tick
+            advance_committed_action(world, max(1, ready-world.game_time))
+    return attempted
+
+
 def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_handler) -> bool:
     """Handles input when the interaction menu is active. Returns True if action taken."""
     ctx = world.interaction_context
@@ -797,12 +838,15 @@ def handle_interaction_input(event: tcod.event.KeyDown, world: World, context_ha
         ctx["selected_action_index"] = (ctx["selected_action_index"] - 1) % len(ctx["available_actions"])
     elif event.sym == tcod.event.KeySym.DOWN:
         ctx["selected_action_index"] = (ctx["selected_action_index"] + 1) % len(ctx["available_actions"])
-    elif event.sym in (tcod.event.KeySym.LCTRL, tcod.event.KeySym.RCTRL):
+    elif event.sym in (tcod.event.KeySym.LCTRL, tcod.event.KeySym.RCTRL, tcod.event.KeySym.TAB):
         ctx["selected_entity_index"] = (ctx["selected_entity_index"] + 1) % len(ctx["target_entities"])
         selected_entity = ctx["target_entities"][ctx["selected_entity_index"]]
-        ctx["available_actions"] = world._get_actions_for_entity(selected_entity)
+        ctx["available_actions"] = (["Attack", "Punch", "Kick", "Examine Wounds"] if ctx.get("combat_picker")
+                                    else world._get_actions_for_entity(selected_entity))
+        if ctx.get("combat_picker"):
+            ctx["x"], ctx["y"] = selected_entity["data"].x, selected_entity["data"].y
         ctx["selected_action_index"] = 0
-    elif event.sym in (tcod.event.KeySym.RETURN, tcod.event.KeySym.E):
+    elif event.sym in (tcod.event.KeySym.RETURN, tcod.event.KeySym.E) or (event.sym == tcod.event.KeySym.F and ctx.get("combat_picker")):
         return execute_interaction(world, context_handler)
     elif event.sym == tcod.event.KeySym.ESCAPE:
         ctx["active"] = False
@@ -822,6 +866,7 @@ def open_interaction_menu(world: World, x: int, y: int):
 
     selected_entity, available_actions = actionable_entities[0]
     world.interaction_context["active"] = True
+    world.interaction_context["combat_picker"] = False
     world.interaction_context["x"], world.interaction_context["y"] = x, y
     world.interaction_context["target_entities"] = [entity for entity, _ in actionable_entities]
     world.interaction_context["selected_entity_index"] = 0
@@ -844,7 +889,11 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Butcher": lambda: world.player_attempt_butcher(target_x, target_y),
         "Toggle Door": lambda: world.player_attempt_toggle_door(target_x, target_y),
         "Talk": lambda: start_social_menu(world, entity_data),
-        "Attack": lambda: world.player_attempt_attack(entity_data),
+        "Attack": lambda: commit_player_attack(world, entity_data),
+        "Punch": lambda: commit_player_attack(world, entity_data, "punch"),
+        "Kick": lambda: commit_player_attack(world, entity_data, "kick"),
+        "Examine Wounds": lambda: world.examine_body(entity_data),
+        "Treat Wounds": lambda: world.treat_body(entity_data),
         "Feed": lambda: world.player_attempt_feed_animal(entity_data),
         "Ride": lambda: world.player_attempt_ride_animal(entity_data),
         "Till Soil": lambda: world.player_attempt_till_soil(target_x, target_y),
@@ -879,8 +928,11 @@ def execute_interaction(world: World, context_handler) -> bool:
 
     }
 
-    if selected_action in action_map:
-        action_map[selected_action]()
+    result = action_map[selected_action]() if selected_action in action_map else None
+    if selected_action in ("Attack", "Punch", "Kick") and result is False:
+        return False
+    if selected_action == "Treat Wounds" and result:
+        advance_committed_action(world, 10)
 
     if selected_action in ["Talk", "Trade", "Read", "Offer Mercenary Services", "Repair", "Read Notices", "Company Ledger", "Govern", "Post Job"]:
         ctx["active"] = False
@@ -891,7 +943,7 @@ def execute_interaction(world: World, context_handler) -> bool:
         ctx["active"] = False
 
     # Return True for actions that consume time
-    return selected_action not in ["Examine", "Talk", "Trade", "Read", "Company Ledger", "Govern", "Post Job"]
+    return selected_action not in ["Examine", "Examine Wounds", "Talk", "Trade", "Read", "Company Ledger", "Govern", "Post Job"]
 
 def handle_help_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is in the 'HELP_MENU' state."""
@@ -902,10 +954,25 @@ def handle_info_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input for the info menu."""
     if event.sym in (tcod.event.KeySym.ESCAPE, tcod.event.KeySym.I):
         world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.B:
+        world.examine_body()
     elif hasattr(tcod.event.KeySym, 'u') and event.sym == tcod.event.KeySym.u:
         world.game_state = "INVENTORY_MENU"
     elif hasattr(tcod.event.KeySym, 'U') and event.sym == tcod.event.KeySym.U:
         world.game_state = "INVENTORY_MENU"
+
+def handle_body_menu_input(event: tcod.event.KeyDown, world: World):
+    if event.sym == tcod.event.KeySym.ESCAPE:
+        world.game_state = "PLAYING"
+    elif event.sym == tcod.event.KeySym.DOWN:
+        world.body_menu_scroll = min(getattr(world, "body_menu_max_scroll", 0), getattr(world, "body_menu_scroll", 0)+1)
+    elif event.sym == tcod.event.KeySym.UP:
+        world.body_menu_scroll = max(0, getattr(world, "body_menu_scroll", 0)-1)
+    elif event.sym == tcod.event.KeySym.T:
+        target = world.get_entity_by_id(getattr(world, "body_menu_target_id", world.player.id))
+        if target and world.treat_body(target):
+            advance_committed_action(world, 10)
+
 
 def handle_inventory_menu_input(event: tcod.event.KeyDown, world: World):
     """Handles input for the dedicated inventory menu.
@@ -931,12 +998,22 @@ def handle_inventory_menu_input(event: tcod.event.KeyDown, world: World):
         if selectable:
             context["inventory_selected_index"] = (context["inventory_selected_index"] + 1) % len(selectable)
         context["inventory_scroll_offset"] += 1
+    elif event.sym in (getattr(tcod.event.KeySym, "s", ord("s")), getattr(tcod.event.KeySym, "S", ord("S")),
+                       getattr(tcod.event.KeySym, "t", ord("t")), getattr(tcod.event.KeySym, "T", ord("T"))):
+        from simulation.systems.appearance import groom
+
+        shave = event.sym in (getattr(tcod.event.KeySym, "s", ord("s")), getattr(tcod.event.KeySym, "S", ord("S")))
+        _, message = groom(world.player, world, "none" if shave else "short_beard")
+        world.add_message_to_chat_log(message)
     elif event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, "KP_ENTER", tcod.event.KeySym.RETURN)):
         if not selectable:
             world.add_message_to_chat_log("You are carrying nothing to use.")
             return
         index = max(0, min(context["inventory_selected_index"], len(selectable) - 1))
-        world.use_item(selectable[index])
+        key = selectable[index]
+        used = world.use_item(key)
+        if used and key in ("bandage", "splint", "healing_salve"):
+            advance_committed_action(world, 10)
 
 def handle_book_reading_input(event: tcod.event.KeyDown, world: World):
     """Handles input when the player is reading a book."""
@@ -1043,6 +1120,7 @@ def handle_dialogue_input(event: tcod.event.KeyDown, world: World, context_handl
         apply_ui_requests(world, context_handler)
     elif event.sym in (tcod.event.KeySym.RETURN, getattr(tcod.event.KeySym, 'KP_ENTER', 1073741912)):
         if getattr(world, 'chat_ui_input_line', '').strip():
+            world.dialogue_scroll = 0
             world.chat_ui_history.append(("Player", world.chat_ui_input_line))
             world.continue_npc_dialogue(world.chat_ui_target_npc, world.chat_ui_input_line)
             world.chat_ui_input_line = "" # Clear input line
@@ -1234,6 +1312,9 @@ def load_custom_tileset():
     else:
         _backfill_ui_glyphs(tileset)
 
+    from rendering.ui_glyphs import register_ui_glyphs
+    register_ui_glyphs(tileset)
+
     # Load combined DawnLike tiles
     try:
         from PIL import Image
@@ -1255,6 +1336,13 @@ def load_custom_tileset():
                 tile_arr = arr[r * tile_height:(r + 1) * tile_height, c * tile_width:(c + 1) * tile_width, :]
                 tileset[base_code + (r * cols) + c] = tile_arr
         register_zoomed_dawnlike_tiles(tileset, TILESET_PATH)
+        from rendering.terrain_art import register_terrain_tiles
+        register_terrain_tiles(tileset)
+        from rendering import pixel_scene, village_art, people_art, interior_art
+        pixel_scene.install(tileset)
+        village_art.install()
+        people_art.install()
+        interior_art.install()
 
     except Exception as e:
         print(f"Warning: Could not load DawnLike tileset: {e}")
@@ -1317,9 +1405,9 @@ def _draw_menu_backdrop(console):
         # Darkest at the top, lifting slightly toward the bottom.
         depth = y / max(1, height - 1)
         row_color = (
-            int(6 + 10 * depth),
-            int(8 + 12 * depth),
-            int(16 + 18 * depth),
+            int(13 + 9 * depth),
+            int(21 + 13 * depth),
+            int(22 + 7 * depth),
         )
         for x in range(width):
             console.bg[y, x] = row_color
@@ -1330,7 +1418,7 @@ def draw_main_menu(console, options, selected_index):
     _draw_menu_backdrop(console)
 
     center_x = console.width // 2
-    title_y = max(2, console.height // 4 - title_art.GLYPH_HEIGHT // 2)
+    title_y = max(2, console.height // 4 - title_art.GLYPH_HEIGHT // 2 - 3)
     title_art.draw(
         console, center_x, title_y, "THIS IS LIFE",
         fg=theme.HEADING, shadow_fg=(60, 42, 16),
@@ -1339,7 +1427,7 @@ def draw_main_menu(console, options, selected_index):
     tagline_y = title_y + title_art.GLYPH_HEIGHT + 2
     console.print(center_x, tagline_y, MENU_TAGLINE, alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED)
 
-    panel_width = 30
+    panel_width = 36
     panel_height = len(options) * 2 + 3
     panel_x = center_x - (panel_width // 2)
     panel_y = tagline_y + 3
@@ -1350,12 +1438,15 @@ def draw_main_menu(console, options, selected_index):
         color = theme.SELECTION if selected else theme.TEXT_DIM
         row_y = panel_y + 2 + index * 2
         if selected:
+            console.print(panel_x + 2, row_y, " " * (panel_width-4), bg=theme.SELECTION_BG)
             console.print(panel_x + 3, row_y, theme.SELECT_CURSOR, fg=color)
         console.print(center_x, row_y, option, alignment=libtcodpy.CENTER, fg=color)
 
+    from rendering.menu_scene import draw_village_vignette
+    draw_village_vignette(console)
     console.print(
         center_x, console.height - 3,
-        "Up/Down to choose    Enter to confirm",
+        "Click to choose    Up/Down + Enter    Esc to exit",
         alignment=libtcodpy.CENTER, fg=theme.TEXT_MUTED,
     )
 
@@ -1380,10 +1471,22 @@ def main_menu_loop(console, tileset):
             context.present(console)
 
             for event in tcod.event.wait():
-                context.convert_event(event)
+                event = context.convert_event(event)
                 if isinstance(event, tcod.event.Quit):
                     raise SystemExit()
-                elif isinstance(event, tcod.event.KeyDown):
+                if isinstance(event, (tcod.event.MouseMotion, tcod.event.MouseButtonDown)):
+                    center = console.width//2
+                    title_y = max(2,console.height//4-title_art.GLYPH_HEIGHT//2-3)
+                    first_row = title_y + title_art.GLYPH_HEIGHT + 7
+                    mx,my = event.position
+                    row = int(my-first_row)//2
+                    if center-16 <= mx < center+16 and first_row <= my < first_row+len(options)*2:
+                        selected_index = max(0,min(len(options)-1,row))
+                        if isinstance(event,tcod.event.MouseButtonDown) and event.button == tcod.event.MouseButton.LEFT:
+                            event = tcod.event.KeyDown(scancode=0,sym=tcod.event.KeySym.RETURN,mod=0)
+                if isinstance(event, tcod.event.KeyDown) and event.sym == tcod.event.KeySym.ESCAPE:
+                    raise SystemExit()
+                if isinstance(event, tcod.event.KeyDown):
                     if event.sym == tcod.event.KeySym.UP:
                         selected_index = (selected_index - 1) % len(options)
                     elif event.sym == tcod.event.KeySym.DOWN:
@@ -1558,7 +1661,8 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         player_acted = handle_events(world, context)
 
         # Advance real-time world simulation when active
-        if world.game_state == "PLAYING" and not getattr(world, "is_paused", False):
+        if (world.game_state == "PLAYING" and not getattr(world, "is_paused", False)
+                and not world.interaction_context.get("active")):
             speed = getattr(world, "simulation_speed", 1.0)
             if speed > 0:
                 tick_accumulator += dt * speed
@@ -1631,11 +1735,15 @@ def handle_events(world, context) -> bool:
     """Handles all player input and game events. Returns True if a turn was taken."""
     turn_taken = False
     for event in tcod.event.get():
-        context.convert_event(event)
+        converted = context.convert_event(event)
+        if converted is not None:
+            event = converted
         if isinstance(event, tcod.event.Quit):
             raise SystemExit()
-        if isinstance(event, tcod.event.MouseMotion):
+        if isinstance(event, (tcod.event.MouseMotion, tcod.event.MouseButtonDown)):
             world.mouse_x, world.mouse_y = int(event.position[0]), int(event.position[1])
+        if isinstance(event, tcod.event.MouseWheel) and handle_mouse_wheel(world, event):
+            continue
         if isinstance(event, tcod.event.MouseWheel) and world.game_state == "PLAYING":
             _ensure_zoom_state(world)
             wheel_delta = getattr(event, "y", 0)
@@ -1644,6 +1752,12 @@ def handle_events(world, context) -> bool:
             elif wheel_delta < 0 and world.zoom_index > 0:
                 world.zoom_index -= 1
         if isinstance(event, tcod.event.MouseButtonDown):
+            if world.game_state == "PLAYING" and not world.interaction_context.get("active") and world.mouse_y < 3:
+                from rendering.hud import toolbar_action_at
+                action = toolbar_action_at(world, world.mouse_x, world.mouse_y)
+                if action and event.button == tcod.event.MouseButton.LEFT:
+                    handle_playing_input(SimpleNamespace(sym=getattr(tcod.event.KeySym, action)), world, context)
+                continue
             # A click inside an open menu belongs to that menu. Anything
             # else falls through to the world view underneath.
             if handle_menu_mouse_click(event, world, context):
@@ -1653,6 +1767,24 @@ def handle_events(world, context) -> bool:
                 mouse_world_x, mouse_world_y = _screen_to_world_position(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
 
                 if event.button == tcod.event.MouseButton.RIGHT:
+                    from rendering.people_art import hit_test
+                    hit = hit_test(world,camera_x,camera_y,world.mouse_x,world.mouse_y)
+                    if hit is not None:
+                        mouse_world_x,mouse_world_y = hit.x,hit.y
+                    else:
+                        from rendering.interior_art import hit_test as furniture_hit_test
+                        furniture = furniture_hit_test(
+                            world, camera_x, camera_y, world.mouse_x, world.mouse_y
+                        )
+                        if furniture is not None:
+                            mouse_world_x, mouse_world_y = furniture
+                        else:
+                            from rendering.building_frontage import hit_test as sign_hit_test
+                            sign = sign_hit_test(
+                                world, camera_x, camera_y, world.mouse_x, world.mouse_y
+                            )
+                            if sign is not None:
+                                mouse_world_x, mouse_world_y = sign
                     world.player.state.current_path = [] # Stop moving if interaction menu opens
                     world.add_message_to_chat_log(world.inspect_tile(mouse_world_x, mouse_world_y))
                     open_interaction_menu(world, mouse_world_x, mouse_world_y)
@@ -1692,6 +1824,8 @@ def handle_events(world, context) -> bool:
                 handle_help_menu_input(event, world)
             elif world.game_state == "INFO_MENU":
                 handle_info_menu_input(event, world)
+            elif world.game_state == "BODY_MENU":
+                handle_body_menu_input(event, world)
             elif world.game_state == "INVENTORY_MENU":
                 handle_inventory_menu_input(event, world)
             elif world.interaction_context["active"]:
@@ -1707,6 +1841,63 @@ def handle_events(world, context) -> bool:
 
     apply_ui_requests(world, context)
     return turn_taken
+
+
+def handle_mouse_wheel(world, event):
+    """Route wheel input to the surface under the pointer before map zoom."""
+    delta = int(getattr(event, "y", 0))
+    if not delta:
+        return False
+    mx, my = getattr(world,"mouse_x",-1), getattr(world,"mouse_y",-1)
+    if mx >= MAP_WIDTH:
+        world.field_guide_scroll = max(0, min(getattr(world,"field_guide_max_scroll",0),
+                                            getattr(world,"field_guide_scroll",0)-delta*3))
+        return True
+    if world.game_state == "PLAYING" and my >= MAP_HEIGHT:
+        _scroll_message_log(world, delta*3)
+        return True
+    if world.game_state == "INVENTORY_MENU":
+        count = len(world.interaction_context.get("inventory_selectable", []))
+        if count:
+            world.interaction_context["inventory_selected_index"] = max(0,min(count-1,
+                world.interaction_context.get("inventory_selected_index",0)-delta))
+        return True
+    if world.game_state == "DIALOGUE":
+        world.dialogue_scroll = max(0,min(getattr(world,"dialogue_max_scroll",0),
+                                          getattr(world,"dialogue_scroll",0)+delta*3))
+        return True
+    if world.game_state == "BOOK_READING":
+        ctx = world.book_reading_context
+        ctx["scroll_offset"] = max(0, ctx.get("scroll_offset",0)-delta*3)
+        return True
+    binding = _menu_mouse_binding(world)
+    if binding:
+        key, select, _ = binding
+        record = getattr(world,"menu_hit_regions",{}).get(key)
+        if record and record.total:
+            context_name, field = {
+                "CRAFTING_MENU": ("crafting_menu_context","selected_recipe_index"),
+                "BUILDING_MENU": ("building_menu_context","selected_recipe_index"),
+                "QUEST_MENU": ("quest_menu_context","selected_quest_index"),
+                "NOTICEBOARD_MENU": ("noticeboard_menu_context","selected_task_index"),
+                "NOTICEBOARD_ROLES": ("noticeboard_menu_context","selected_role_index"),
+                "COMPANY_LEDGER_MENU": ("company_ledger_menu_context","selected_action_index"),
+                "INTERACTION_MENU": ("interaction_context","selected_action_index"),
+            }.get(key, (None,None))
+            if key == "SOCIAL_MENU":
+                context_name = "social_menu_context"
+                field = "selected_action_index" if world.social_menu_context.get("mode","root") == "root" else "selected_option_index"
+            elif key == "GOVERNANCE_MENU":
+                context_name = "governance_menu_context"
+                field = "selected_action_index" if world.governance_menu_context.get("mode","root") == "root" else "selected_target_index"
+            elif key == "TRADE_MENU":
+                field = "trade_ui_player_item_index" if world.trade_ui_player_selling else "trade_ui_merchant_item_index"
+                select(max(0,min(record.total-1,getattr(world,field)-delta)))
+            if context_name:
+                current = getattr(world,context_name).get(field,0)
+                select(max(0,min(record.total-1,current-delta)))
+            return True
+    return world.game_state != "PLAYING"
 
 if __name__ == "__main__":
     # main() returns a non-zero code when it cannot start (e.g. no

@@ -162,7 +162,7 @@ TIME_OF_DAY_TEMPERATURE_MODIFIERS = {
 
 # LLM settings
 import json
-ENABLE_LLM_CONNECTION = True # Master switch to enable/disable LLM connection
+ENABLE_LLM_CONNECTION = False # Local simulation only; explicit opt-in to re-enable models.
 ENABLE_OLLAMA_CONNECTION = ENABLE_LLM_CONNECTION # Legacy support
 LLM_BACKEND = "gemini" # Options: "ollama", "gemini"
 

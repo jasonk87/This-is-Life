@@ -52,6 +52,7 @@ def evaluate_needs_utility(world, npc) -> bool:
     """
     protected_tasks = {
         "seeking_healer", "waiting_for_treatment", "resting_in_bed",
+        "recovering_from_injury", "protecting_from_wildlife", "escaping_wildlife",
         "avoiding_social_threat", "fleeing_from_player", "combat_action_flee_from_player",
         "attacking_player", "going_to_report_crime",
     }

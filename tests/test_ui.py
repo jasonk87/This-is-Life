@@ -2009,6 +2009,7 @@ class TestDialogueStateRegression(unittest.TestCase):
     def tearDown(self):
         self.mock_ollama_patcher.stop()
 
+    @patch("engine.ENABLE_LLM_CONNECTION", True)  # Optional-mode unit test; backend is mocked.
     def test_continue_npc_conversation_uses_nested_social_and_knowledge_state(self):
         speaker = engine.NPC(10, 10, name="Speaker")
         listener = engine.NPC(11, 10, name="Listener")
@@ -2024,6 +2025,8 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.world._continue_npc_conversation(speaker, listener)
 
+        for future in list(self.world._background_llm_tasks.values()):
+            future.result(timeout=1)
         prompt = self.mock_call_llm.call_args.args[0]
         self.assertIn("gregarious", prompt)
         self.assertIn("reserved", prompt)
@@ -2149,6 +2152,7 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.assertEqual(self.world.chat_ui_history[-1], ("Ada Graves (Farmer)", "I've been alright."))
 
+    @patch("engine.ENABLE_LLM_CONNECTION", True)  # Consumes a mocked completed future only.
     def test_npc_conversation_publishes_ambient_speech_and_applies_social_goal(self):
         speaker = engine.NPC(10, 10, name="A")
         listener = engine.NPC(11, 10, name="B")
@@ -2203,6 +2207,7 @@ class TestDialogueStateRegression(unittest.TestCase):
 
         self.assertFalse(self.world._background_llm_tasks)
 
+    @patch("engine.ENABLE_LLM_CONNECTION", True)  # No model/network: _call_llm is a mock.
     def test_update_entity_titles_writes_social_title(self):
         npc = engine.NPC(10, 10, name="Legend")
         npc.social.fame = 60
@@ -2211,6 +2216,8 @@ class TestDialogueStateRegression(unittest.TestCase):
         self.mock_call_llm.return_value = json.dumps({"title": "the Bold"})
 
         self.world._update_entity_titles()
+        for future in list(self.world._background_llm_tasks.values()):
+            future.result(timeout=1)
         self.world._update_entity_titles()
 
         self.assertEqual(npc.social.title, "the Bold")
@@ -2298,9 +2305,10 @@ class TestMenuItemIcons(unittest.TestCase):
         from data.dawnlike import ITEM_SPRITES
 
         icon_calls = [c for c in console.print_calls if c["string"] == chr(ITEM_SPRITES["healing_salve"])]
-        self.assertEqual(len(icon_calls), 1)
+        # One icon in the inventory list, one in the selected-item details.
+        self.assertEqual(len(icon_calls), 2)
         text_calls = [c for c in console.print_calls if "Healing Salve" in c.get("string", "")]
-        self.assertEqual(len(text_calls), 1)
+        self.assertEqual(len(text_calls), 2)
         # Icon sits two columns left of the text it labels.
         self.assertEqual(icon_calls[0]["y"], text_calls[0]["y"])
         self.assertEqual(text_calls[0]["x"] - icon_calls[0]["x"], 2)
@@ -2422,9 +2430,12 @@ class TestMenuItemIcons(unittest.TestCase):
         console = self.FakeConsole()
 
         console_renderer.draw_status_panel(console, world, 0, 0)  # must not raise
-
-        matches = [c for c in console.print_calls if "Fetch Raw Log: 3/5" in c.get("string", "")]
-        self.assertEqual(len(matches), 1)
+        # Long field-guide contents scroll beneath the pinned vitals.
+        world.field_guide_scroll = world.field_guide_max_scroll
+        console_renderer.draw_status_panel(console, world, 0, 0)
+        text = " ".join(c.get("string", "") for c in console.print_calls)
+        self.assertIn("Fetch Raw Log", text)
+        self.assertIn("3/5 collected", text)
 
     def test_draw_quest_menu_fetch_progress_does_not_crash_with_real_inventory(self):
         """Same regression as above, for the quest log's fetch progress line."""
@@ -2452,6 +2463,8 @@ class TestMenuItemIcons(unittest.TestCase):
         world = SimpleNamespace(
             crafting_menu_context={"all_recipes": ["healing_salve"], "selected_recipe_index": 0, "scroll_offset": 0},
             player_can_craft=lambda key: True,
+            player=SimpleNamespace(has_item=lambda key, quantity: True),
+            _is_player_near_workstation=lambda key: True,
         )
 
         console_renderer.draw_crafting_menu(console, world)

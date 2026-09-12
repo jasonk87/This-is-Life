@@ -119,20 +119,20 @@ def centered_menu(width, height):
 def panel(console, x, y, width, height, *, title=None, focused=False, bg=None, fg=None):
     """Draw a framed, cleared panel.
 
-    A focused panel gets a double-line border in the accent color. That is
-    drawn by overprinting the single-line border tcod just produced rather
-    than by passing a `decoration` argument, so this works on any console
-    object exposing `draw_frame` and `print` - including the headless shim
-    in tcod_compat and the fakes in the test suite.
+    Focus is an accent-color border; all surfaces share the same thin frame.
+    Print captions explicitly because tcod's deprecated title argument adds
+    color controls that interfere with the shared palette.
     """
     frame_fg = fg if fg is not None else (theme.FRAME_FOCUSED if focused else theme.FRAME)
+    background = bg if bg is not None else theme.PANEL_BG
     console.draw_frame(
         x=x, y=y, width=width, height=height,
-        title=title or "", clear=True,
-        fg=frame_fg, bg=bg if bg is not None else theme.PANEL_BG,
+        clear=True, fg=frame_fg, bg=background,
     )
-    if focused:
-        _overprint_double_border(console, x, y, width, height, frame_fg, bg if bg is not None else theme.PANEL_BG, title)
+    if title and width > 4:
+        caption = " " + str(title).strip()[:width - 4] + " "
+        console.print(x=x + (width - len(caption)) // 2, y=y,
+                      string=caption, fg=theme.HEADING, bg=background)
 
 
 def _overprint_double_border(console, x, y, width, height, fg, bg, title):
@@ -331,6 +331,7 @@ def list_view(
     icon_drawer=None,
     show_cursor=True,
     show_scrollbar=True,
+    preserve_row_colors=False,
 ):
     """Draw a scrolling, selectable list inside `region`.
 
@@ -363,7 +364,15 @@ def list_view(
             enabled=row.enabled,
             base=row.color,
         )
+        if preserve_row_colors and row.color is not None:
+            color = row.color
         row_y = region.y + screen_row
+
+        background = (theme.SELECTION_BG if is_selected else
+                      theme.HOVER_BG if hovered_index == index else None)
+        if background is not None:
+            console.print(x=region.x, y=row_y, string=" " * region.width,
+                          fg=color, bg=background)
 
         if show_cursor and is_selected:
             console.print(x=region.x, y=row_y, string=theme.SELECT_CURSOR, fg=color)

@@ -160,8 +160,13 @@ class TestCombatAndAnimalStateRegression(unittest.TestCase):
         with patch('engine.random.randint', side_effect=[20, 1]):
             self.world.npc_attempt_attack_player(npc, self.world.player)
 
-        self.assertEqual(self.world.player.combat.hp, self.world.player.combat.max_hp - 2)
-        self.assertTrue(any("(HP: 33/35)" in message for message in self.world.chat_log))
+        # Named base attacks are no longer imaginary equipment. This actor
+        # has no club equipped, so the local body resolver produces a punch.
+        wounds = self.world.player.combat.anatomy.wounds
+        self.assertEqual(len(wounds), 1)
+        self.assertEqual(wounds[0].weapon, "punch")
+        self.assertEqual(wounds[0].kind, "crush")
+        self.assertTrue(any("wound" in message for message in self.world.chat_log))
 
     def test_npc_attack_breaks_equipped_tool_weapon_and_clears_slot(self):
         npc = engine.NPC(self.world.player.x + 1, self.world.player.y, name="Raider")
@@ -335,13 +340,8 @@ class TestCombatMemory(unittest.TestCase):
         self.assertIn(memory_str, defender.knowledge.long_term_memory)
 
 
-class TestPlayerAttackDamageClamp(unittest.TestCase):
-    """player_attempt_attack (bug-hunt audit item 2): unlike every other
-    combat path, the player's own attack has no dice roll of its own - it
-    trusts whatever damage_dealt the LLM returns. Confirms that value is now
-    clamped to the same kind of max-possible-damage a real dice roll against
-    the player's weapon could produce, so a bad/unusually generous LLM
-    response can't deal arbitrary damage."""
+class TestPlayerAttackIgnoresModelAdjudication(unittest.TestCase):
+    """The old damage-clamp boundary is now stronger: no model decides hits."""
 
     def setUp(self):
         self.mock_ollama_patcher = patch('engine.World._call_llm')
@@ -353,59 +353,66 @@ class TestPlayerAttackDamageClamp(unittest.TestCase):
     def tearDown(self):
         self.mock_ollama_patcher.stop()
 
-    def test_absurd_llm_damage_is_clamped_for_unarmed_player(self):
-        """Fists (base_attack_damage_dice defaults to '1d3', no bonus):
-        max possible is (1*3 + 0) * 2 = 6."""
+    def test_absurd_llm_damage_is_ignored_for_unarmed_player(self):
         target = engine.NPC(1, 1, name="Target")
+        self.world.player.x, self.world.player.y = 2, 1
         target.combat.hp = 10_000
         target.combat.max_hp = 10_000
         hp_before = target.combat.hp
 
-        with patch.object(self.world, "_call_llm", return_value=json.dumps({
+        with patch.object(self.world, "_get_witnesses_to_action", return_value=[]), patch('engine.random.randint', side_effect=[20, 3]), patch.object(self.world, "_call_llm", return_value=json.dumps({
             "hit": True, "damage_dealt": 999999, "narrative_feedback": "An impossible blow.",
-        })):
-            self.world.player_attempt_attack(target)
+        })) as model:
+            result = self.world.player_attempt_attack(target, target_part="left_arm")
+            model.assert_not_called()
 
         actual_damage = hp_before - target.combat.hp
-        self.assertEqual(actual_damage, 6)
+        self.assertEqual(result.force, 7.5)
+        self.assertLess(actual_damage, hp_before)
+        self.assertEqual(target.combat.anatomy.wounds[-1].weapon, "punch")
 
-    def test_absurd_llm_damage_is_clamped_relative_to_equipped_weapon(self):
-        """With axe_stone equipped, the clamp should use ITS damage_dice/
-        damage_bonus instead of the unarmed default."""
+    def test_absurd_llm_damage_is_ignored_for_equipped_weapon(self):
         target = engine.NPC(1, 1, name="Target")
+        self.world.player.x, self.world.player.y = 2, 1
+        self.world.player.add_item("axe_stone")
+        self.world.use_item("axe_stone")
         target.combat.hp = 10_000
         target.combat.max_hp = 10_000
         hp_before = target.combat.hp
 
         axe_props = ITEM_DEFINITIONS["axe_stone"].get("properties", {})
         num_dice, die_type = map(int, axe_props.get("damage_dice", "1d3").lower().split("d"))
-        expected_max = max(1, num_dice * die_type + axe_props.get("damage_bonus", 0)) * 2
+        expected_max = (num_dice * die_type + axe_props.get("damage_bonus", 0) + 3) * 1.5
 
-        with patch.object(self.world.player, "has_item", return_value=True), \
+        with patch.object(self.world, "_get_witnesses_to_action", return_value=[]), patch('engine.random.randint', side_effect=[20, die_type]), \
              patch.object(self.world, "_call_llm", return_value=json.dumps({
                  "hit": True, "damage_dealt": 999999, "narrative_feedback": "A mighty axe swing.",
              })):
-            self.world.player_attempt_attack(target)
+            result = self.world.player_attempt_attack(target, target_part="left_arm")
 
         actual_damage = hp_before - target.combat.hp
-        self.assertEqual(actual_damage, expected_max)
+        self.assertEqual(result.force, expected_max)
+        self.assertLess(actual_damage, hp_before)
+        self.assertEqual(target.combat.anatomy.wounds[-1].weapon, "Stone Axe")
 
-    def test_normal_llm_damage_within_bounds_is_unaffected(self):
-        """A reasonable damage value shouldn't be touched by the clamp."""
+    def test_even_plausible_model_damage_is_ignored(self):
         target = engine.NPC(1, 1, name="Target")
+        self.world.player.x, self.world.player.y = 2, 1
         target.combat.hp = 10_000
         target.combat.max_hp = 10_000
         hp_before = target.combat.hp
 
-        with patch.object(self.world, "_call_llm", return_value=json.dumps({
+        with patch.object(self.world, "_get_witnesses_to_action", return_value=[]), patch('engine.random.randint', return_value=1), patch.object(self.world, "_call_llm", return_value=json.dumps({
             "hit": True, "damage_dealt": 2, "narrative_feedback": "A glancing blow.",
         })):
-            self.world.player_attempt_attack(target)
+            result = self.world.player_attempt_attack(target)
 
         actual_damage = hp_before - target.combat.hp
-        self.assertEqual(actual_damage, 2)
+        self.assertTrue(result.attempted)
+        self.assertFalse(result.hit)
+        self.assertEqual(actual_damage, 0)
 
-    def test_negative_llm_damage_is_floored_at_zero(self):
+    def test_out_of_range_attacks_do_not_damage_anyone(self):
         target = engine.NPC(1, 1, name="Target")
         hp_before = target.combat.hp
 

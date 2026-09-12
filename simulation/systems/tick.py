@@ -7,6 +7,9 @@ from presentation.ambient_speech import cleanup_ambient_speech
 from simulation.activity import advance_activity
 from simulation.systems import survival
 from simulation.systems import illness
+from simulation.systems.appearance import advance_appearance
+from simulation.systems.body_combat import advance_bodies, functions_for, can_act
+from simulation.systems.grievances import advance_interpersonal_incidents as advance_grievances
 from simulation.validation import trim_interaction_traces, trim_visual_effects
 
 
@@ -14,6 +17,8 @@ def advance_player_auto_movement(world) -> None:
     """Drive input-layer auto movement without embedding it in engine.World.update."""
     player = world.player
     if not player.state.current_path:
+        return
+    if world.game_time < getattr(player.state, "move_ready_tick", 0):
         return
     if player.state.move_cooldown > 0:
         player.state.move_cooldown -= 1
@@ -29,11 +34,12 @@ def advance_player_auto_movement(world) -> None:
         player.state.current_path = []
         return
 
-    player.state.move_cooldown = 5
-    if "broken_leg" in player.physical.status_effects:
+    player.state.move_cooldown = round(5 / max(.1, functions_for(player)["movement"]))
+    player.state.move_ready_tick = world.game_time + max(1, action_cost)
+    if not player.combat.anatomy.body_plan and "broken_leg" in player.physical.status_effects:
         player.state.move_cooldown += 5
-    if action_cost > 1:
-        world.game_time += action_cost - 1
+    # Movement recovery is paid on actual future ticks, not by jumping the
+    # clock while giving every other actor only one movement update.
 
 
 
@@ -230,6 +236,10 @@ def run_world_tick(world) -> None:
     advance_player_auto_movement(world)
 
     world.game_time += 1
+    from simulation.systems.perception import expire_sounds
+    expire_sounds(world)
+    advance_bodies(world)
+    advance_appearance(world)
     cleanup_ambient_speech(world)
     world._update_season()
     world._run_scheduled_events()
@@ -242,7 +252,7 @@ def run_world_tick(world) -> None:
     survival.update_player_needs(world)
     illness.update_entity_illness(world, world.player)
     for actor in [world.player, *world.all_npcs]:
-        if not getattr(getattr(actor, "physical", None), "is_dead", False):
+        if can_act(actor):
             advance_activity(actor, world)
     if world.game_time % max(1, MEMORY_DECAY_INTERVAL_TICKS) == 0:
         for actor in [world.player, *world.all_npcs]:
@@ -290,6 +300,10 @@ def run_world_tick(world) -> None:
     advance_reserves = getattr(world, "advance_reserve_targets", None)
     if callable(advance_reserves):
         advance_reserves()
+    # Interpersonal grievances. Self-gated to EVALUATION_INTERVAL, so calling it
+    # every tick is cheap; it is here rather than inside a periodic block so the
+    # cadence lives with the system that owns it.
+    advance_grievances(world)
     # These seven ran at the end of run_world_tick until commit d55f68d moved
     # them, by indentation, into emit_environmental_sensory_cues - a flavour
     # function that returns unless game_time % 80 == 0 and returns early again

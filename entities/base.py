@@ -87,6 +87,54 @@ NPC_HOSTILITY_GRACE_TICKS = DAY_LENGTH_TICKS // 4
 # or grudges, which are explicitly designed to fade.
 TRAIT_DRIFT_ACTIVATION_THRESHOLD = 3
 TRAIT_DRIFT_MAX_ACTIVE_TRAITS = 3
+
+# Temperaments somebody can be born with, and how common each is.
+#
+# Only words the engine already tests for, so assigning them lights up branches
+# that were written and then never reachable. Vocational-sounding traits
+# (merchant, studious, outdoors, nature) are deliberately excluded: those feed
+# job suitability, and handing them out at random would quietly reassign the
+# village's careers, which is a different change from giving people tempers.
+#
+# The weights matter more than the list. Most people are unremarkable, and the
+# two traits that push toward conflict - aggressive and chaotic - are the
+# rarest, because a village where a third of the population starts fights is a
+# worse simulation than one where almost nobody does.
+INNATE_TRAIT_WEIGHTS = (
+    ("lawful", 22),
+    ("lazy", 16),
+    ("greedy", 14),
+    ("brave", 12),
+    ("aggressive", 8),
+    ("chaotic", 6),
+)
+# Share of people who have no pronounced temperament at all.
+PLAIN_TEMPERAMENT_SHARE = 0.45
+# Nobody starts with more than this many.
+MAX_INNATE_TRAITS = 2
+
+
+def roll_innate_traits(rng) -> list[str]:
+    """Pick a temperament for one person, drawing from `rng`.
+
+    Takes the generator rather than using `random` directly so world generation
+    stays reproducible from its seed: the same seed must always produce the same
+    villagers, and this project has been bitten three times by unseeded
+    randomness leaking into the simulation.
+    """
+    if rng.random() < PLAIN_TEMPERAMENT_SHARE:
+        return []
+    words = [w for w, _ in INNATE_TRAIT_WEIGHTS]
+    weights = [n for _, n in INNATE_TRAIT_WEIGHTS]
+    traits: list[str] = []
+    # A second trait is much less likely than a first.
+    for _ in range(MAX_INNATE_TRAITS):
+        pick = rng.choices(words, weights=weights, k=1)[0]
+        if pick not in traits:
+            traits.append(pick)
+        if rng.random() < 0.7:
+            break
+    return traits
 from data.dawnlike import ANIMAL_SPRITES, get_human_sprite
 from data.items import ITEM_DEFINITIONS
 from entities.anatomy import Anatomy
@@ -280,6 +328,23 @@ class SocialState:
     # LLM-generated base string) is never rewritten by drift.
     trait_pressure: dict[str, int] = field(default_factory=dict)
     activated_traits: list[str] = field(default_factory=list)
+    # Temperament a person was born with, as opposed to activated_traits, which
+    # they earned by living. Kept separate so drift stays meaningful: "he was
+    # always like that" and "he became that way" are different statements, and
+    # only the second should be caused by events.
+    #
+    # This exists because personality itself comes from an LLM at world
+    # generation and falls back to the literal string "commoner" for everybody
+    # when there is no LLM - which is the normal case. That left has_trait()
+    # returning False for every villager and every trait, so the aggressive,
+    # chaotic, lawful, greedy and lazy branches scattered through the engine
+    # were unreachable in an ordinary game. Ninety identical people had no
+    # reason to treat each other differently.
+    #
+    # The personality string is deliberately not touched: several places
+    # compare it exactly (`personality in ["friendly", ... "commoner"]` gates
+    # whether an NPC will greet the player), so widening it would break them.
+    innate_traits: list[str] = field(default_factory=list)
 
     def __setstate__(self, state):
         dataclass_setstate(self, state)
@@ -381,7 +446,10 @@ class Equipment:
     weapon: EquipmentSlot = field(default_factory=EquipmentSlot)
     body: EquipmentSlot = field(default_factory=EquipmentSlot)
     head: EquipmentSlot = field(default_factory=EquipmentSlot)
-    equipped_armor: dict[str, str | None] = field(default_factory=lambda: {"head": None, "body": None, "hands": None, "feet": None})
+    hands: EquipmentSlot = field(default_factory=EquipmentSlot)
+    feet: EquipmentSlot = field(default_factory=EquipmentSlot)
+    legs: EquipmentSlot = field(default_factory=EquipmentSlot)
+    equipped_armor: dict[str, str | None] = field(default_factory=lambda: {"head": None, "body": None, "hands": None, "feet": None, "legs": None})
     # Per-slot remaining durability for the player's equipped_armor items.
     # NPC armor durability lives on the ItemReference instances tracked via
     # equipment.body/equipment.head + degrade_equipped_item; the player's
@@ -401,12 +469,13 @@ class Equipment:
     current_personal_light_radius: int = 0
 
     def __setattr__(self, name, value):
-        if name in {"weapon", "body", "head"} and not isinstance(value, EquipmentSlot):
+        if name in {"weapon", "body", "head", "hands", "feet", "legs"} and not isinstance(value, EquipmentSlot):
             value = EquipmentSlot(value)
         super().__setattr__(name, value)
 
     def __setstate__(self, state):
         dataclass_setstate(self, state)
+        self.equipped_armor.setdefault("legs", None)
 
 # Recognized values for Appearance fields. Kept as plain module-level tuples
 # (not an enum) to match how HUMAN_SPRITES/PROFESSION_SPRITES etc. in
@@ -421,32 +490,23 @@ SKIN_TONES = ("pale", "light", "medium", "tan", "dark")
 
 @dataclass
 class Appearance:
-    """Stores an entity's static physical-appearance traits - hairstyle,
-    hair color, facial hair, skin tone - as opposed to Equipment, which
-    stores what they're currently wearing/wielding. Rolled once at
-    NPC/Player creation by roll_appearance() below and otherwise left
-    mutable for future features (aging into gray hair, a barber/grooming
-    mechanic, etc.).
+    """Persistent individual identity and grooming, separate from worn items.
 
-    IMPORTANT - current status: the DawnLike tile sheet this game renders
-    with (assets/dawnlike_combined.png) does not contain separable hair or
-    facial-hair sprite tiles to stamp as an overlay - it's a library of
-    complete, pre-baked character sprites (see HUMAN_SPRITES in
-    data/dawnlike.py), not a layered paperdoll system. Confirmed by
-    visually surveying the sheet's character block and its GUI/item
-    sections. data/dawnlike.py's HAIR_SPRITES/BEARD_SPRITES tables are
-    therefore empty today, so setting hairstyle/facial_hair on an entity
-    has NO visible effect yet - see _get_appearance_overlays in
-    data/dawnlike.py, which already does the compositing work and will pick
-    these values up automatically once suitable tile art is sourced and
-    catalogued (no further code changes needed at that point). skin_tone is
-    tracked for the same forward-looking reason and isn't wired to any
-    sprite/palette logic yet either.
+    The layered world renderer uses these traits; legacy DawnLike remains a
+    fallback. Uninitialized identity fields resolve deterministically from the
+    saved actor ID, then are persisted by the appearance simulation system.
     """
     hairstyle: str = "none"
     hair_color: str = "brown"
     facial_hair: str = "none"
     skin_tone: str = "medium"
+    face_variant: int = -1
+    eye_color: str = ""
+    body_build: str = ""
+    beard_growth_enabled: bool | None = None
+    beard_days: float | None = None
+    beard_last_tick: int | None = None
+    beard_style_at_last_tick: str | None = None
 
     def __setstate__(self, state):
         dataclass_setstate(self, state)
@@ -938,6 +998,8 @@ class NPC:
         base_personality = (self.social.personality or "").lower()
         if trait_word in base_personality:
             return True
+        if trait_word in getattr(self.social, "innate_traits", ()):
+            return True
         return trait_word in self.social.activated_traits
 
     def record_trait_pressure(
@@ -1091,7 +1153,7 @@ class NPC:
         """Recalculates NPC stats based on equipped items."""
         self.physical.clothing_insulation = 0.0
         self.defense_bonus = 0
-        for slot_name in ("body", "head"):
+        for slot_name in ("body", "head", "hands", "feet", "legs"):
             item = self.get_equipped_item_reference(slot_name)
             if item is None:
                 continue
@@ -1129,7 +1191,7 @@ class NPC:
     def equip_item_reference(self, slot_name: str, item: ItemReference | None) -> bool:
         if item is None:
             return False
-        expected_slot = {"weapon": "main_hand", "body": "body", "head": "head"}.get(slot_name)
+        expected_slot = {"weapon": "main_hand", "body": "body", "head": "head", "hands": "hands", "feet": "feet", "legs": "legs"}.get(slot_name)
         if expected_slot is None or item.equip_slot != expected_slot:
             return False
 
@@ -1153,8 +1215,11 @@ class NPC:
             "weapon": [],
             "body": [],
             "head": [],
+            "hands": [],
+            "feet": [],
+            "legs": [],
         }
-        expected_slots = {"weapon": "main_hand", "body": "body", "head": "head"}
+        expected_slots = {"weapon": "main_hand", "body": "body", "head": "head", "hands": "hands", "feet": "feet", "legs": "legs"}
         for item in self.economic.npc_inventory.iter_item_references():
             for slot_name, equip_slot in expected_slots.items():
                 if item.equip_slot == equip_slot:
@@ -1262,28 +1327,27 @@ class NPC:
         if self.physical.is_dead:
             return False
 
+        if self.combat.anatomy.body_plan:
+            from simulation.systems.body_combat import environmental_damage
+            environmental_damage(self, amount, world)
+            return self.physical.is_dead
+
         total_defense_bonus = 0
-        body_blocks_damage = False
-        head_blocks_damage = False
-        if self.equipment.body and self.equipment.body in ITEM_DEFINITIONS:
-            armor_def = ITEM_DEFINITIONS[self.equipment.body]
-            body_defense = armor_def.get("properties", {}).get("defense_bonus", 0)
-            total_defense_bonus += body_defense
-            body_blocks_damage = body_defense > 0
-        if self.equipment.head and self.equipment.head in ITEM_DEFINITIONS:
-            armor_def = ITEM_DEFINITIONS[self.equipment.head]
-            head_defense = armor_def.get("properties", {}).get("defense_bonus", 0)
-            total_defense_bonus += head_defense
-            head_blocks_damage = head_defense > 0
+        blocking_slots = []
+        for slot_name in ("body", "head", "hands", "legs", "feet"):
+            item = self.get_equipped_item_reference(slot_name)
+            if item is not None:
+                defense = item.definition.get("properties", {}).get("defense_bonus", 0)
+                total_defense_bonus += defense
+                if defense > 0:
+                    blocking_slots.append(slot_name)
 
         effective_damage = max(0, amount - total_defense_bonus)
         blocked_damage = max(0, amount - effective_damage)
 
         if blocked_damage > 0:
-            if body_blocks_damage:
-                self.degrade_equipped_item("body", amount=1, world=world)
-            if head_blocks_damage:
-                self.degrade_equipped_item("head", amount=1, world=world)
+            for slot_name in blocking_slots:
+                self.degrade_equipped_item(slot_name, amount=1, world=world)
 
         remaining_damage = effective_damage
         import random

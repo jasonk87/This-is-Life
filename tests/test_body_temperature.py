@@ -101,6 +101,20 @@ class TestTheEquilibriumIsABodyNotTheAir(unittest.TestCase):
         wrapped = body_equilibrium_temperature(-10, 12.0)
         self.assertGreater(wrapped, bare)
 
+    def test_winter_clothes_do_not_generate_heat_in_a_mild_room(self):
+        for ambient in (5, 15, 20, 25, 30):
+            for insulation in (2, 12, 24, 40):
+                with self.subTest(ambient=ambient, insulation=insulation):
+                    temperature = body_equilibrium_temperature(ambient, insulation)
+                    self.assertLessEqual(temperature, OVERHEATING_ABOVE)
+                    self.assertGreaterEqual(temperature, FREEZING_BELOW)
+
+    def test_real_heat_remains_dangerous_and_heavy_clothes_make_it_worse(self):
+        bare = body_equilibrium_temperature(40, 0)
+        wrapped = body_equilibrium_temperature(40, 20)
+        self.assertGreater(bare, OVERHEATING_ABOVE)
+        self.assertGreater(wrapped, bare)
+
     def test_the_coupling_is_weak_enough_to_be_a_body(self):
         """A guard on the constant itself: at coupling 1.0 this is the old bug
         again, whatever the rest of the arithmetic says."""

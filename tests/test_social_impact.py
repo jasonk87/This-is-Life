@@ -71,6 +71,7 @@ class TestSocialImpact(unittest.TestCase):
 
     def test_attack_creates_structured_grudge_on_victim(self):
         self.world.game_time = DAY_LENGTH_TICKS * 2
+        self.world.player.x, self.world.player.y = self.worker.x-1, self.worker.y
         self.world._call_llm = MagicMock(
             return_value=json.dumps(
                 {"hit": True, "damage_dealt": 1, "narrative_feedback": "You strike the worker."}

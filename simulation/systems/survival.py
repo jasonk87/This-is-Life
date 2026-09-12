@@ -191,6 +191,8 @@ def update_player_needs(world, *, initial_setup: bool = False) -> None:
 def check_emergency_npc_sustenance(world, npc) -> bool:
     """Consume pocket inventory food/drink if hungry/thirsty, preventing starvation during sleep or routine."""
     consumed = False
+    if "unconscious" in getattr(getattr(npc, "physical", None), "status_effects", []):
+        return False
     physical = getattr(npc, "physical", None)
     if physical is None:
         return False

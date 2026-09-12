@@ -35,8 +35,8 @@ class TestWeatherMovementCostMultiplier(unittest.TestCase):
     codebase - confirmed via a full-repo grep before this fix. Wired into
     Player.handle_player_movement's movement_cost calculation, which is the
     real "how many game ticks does this step take" mechanism
-    (simulation/systems/tick.py adds action_cost-1 straight onto
-    world.game_time). Deliberately player-only - see
+    (manual and auto-movement now pay recovery through real world ticks).
+    Deliberately player-only - see
     _get_weather_movement_cost_multiplier's docstring for why NPC movement
     (an integer moves-per-tick "speed" value, not a tick-cost value) isn't
     touched in this pass."""

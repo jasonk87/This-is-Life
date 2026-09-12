@@ -56,6 +56,15 @@ def draw_field_guide(console, world, camera_x, camera_y):
         if body.wounds:
             line("Bag [U]: use bandage / splint", theme.INFO)
     heading("Here & Now")
+    from simulation.systems.settlements import current
+    village = current(world)
+    line(village.name if village else "Countryside", theme.HEADING)
+    destination = getattr(world.player, "known_settlements", {}).get(getattr(world.player, "travel_destination_id", None))
+    if destination and (not village or getattr(world.player, "travel_destination_id", None) != village.id):
+        tx, ty = destination["coords"]
+        line(f"To {destination['name']}: {tx}, {ty}", theme.INFO)
+        dx, dy = tx-world.player.x, ty-world.player.y
+        line(f"{abs(dx)} tiles {'east' if dx >= 0 else 'west'}, {abs(dy)} {'south' if dy >= 0 else 'north'}")
     line(cr._format_world_clock(world.game_time))
     line("PAUSED" if getattr(world, "is_paused", False) else f"Time: {getattr(world,'simulation_speed',1):g}x", theme.WARNING)
     line(f"{cr.current_season_name(world)} / {world.weather.replace('_',' ').title()}", theme.INFO)
@@ -63,6 +72,12 @@ def draw_field_guide(console, world, camera_x, camera_y):
     standing, _ = cr._get_focus_summary(world)
     line(standing or (tile.name if tile else "Unknown terrain"))
     line(f"At {world.player.x}, {world.player.y}", theme.TEXT_MUTED)
+    active_bounties = [c for c in getattr(world, "bounty_contracts", {}).values() if c.status in {"accepted", "escorting"}]
+    if active_bounties:
+        heading("Contracts / Alive Only")
+        for contract in active_bounties:
+            line(f"{contract.target_name}: {contract.status}", theme.WARNING)
+            line(f"Last report: {contract.last_seen}")
     focus = cr._get_focus_target(world, camera_x, camera_y)
     if focus.get("label"):
         line(f"Facing: {focus['label']}", theme.WARNING)

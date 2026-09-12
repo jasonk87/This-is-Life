@@ -685,12 +685,27 @@ def handle_noticeboard_menu_input(event: tcod.event.KeyDown, world: World):
         ctx["selected_task_index"] = min(len(task_ids) - 1, ctx.get("selected_task_index", 0) + 1)
     elif is_post_job_key:
         world.open_job_posting_menu()
+    elif event.sym == tcod.event.KeySym.R:
+        from simulation.systems.settlements import register_citizen
+        register_citizen(world)
     elif event.sym == tcod.event.KeySym.RETURN and 0 <= ctx.get("selected_task_index", 0) < len(task_ids):
         selected_notice = task_ids[ctx["selected_task_index"]]
         if selected_notice.startswith("haul:"):
             world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
         elif selected_notice.startswith("need:"):
             world.claim_noticeboard_task(selected_notice.split(":", 1)[1])
+        elif selected_notice.startswith("job:"):
+            world.accept_player_employment(selected_notice.split(":", 1)[1])
+        elif selected_notice.startswith("civic:"):
+            from simulation.systems.settlements import read_civic_notice
+            read_civic_notice(world)
+        elif selected_notice.startswith("settlement:"):
+            from simulation.systems.settlements import read_destination
+            read_destination(world, selected_notice.split(":", 1)[1])
+        elif selected_notice.startswith("bounty:"):
+            from simulation.systems.bounty_hunting import accept_or_turn_in
+            accept_or_turn_in(world, selected_notice.split(":", 1)[1])
+            world.open_noticeboard_menu()
 
 def handle_company_ledger_menu_input(event: tcod.event.KeyDown, world: World):
     """Handle keyboard input for the company ledger menu."""
@@ -876,6 +891,7 @@ def open_interaction_menu(world: World, x: int, y: int):
 
 def execute_interaction(world: World, context_handler) -> bool:
     """Executes the selected action from the interaction context. Returns True if turn taken."""
+    from simulation.systems import bounty_hunting
     ctx = world.interaction_context
     if not ctx["active"] or not ctx["available_actions"]:
         return False
@@ -916,6 +932,8 @@ def execute_interaction(world: World, context_handler) -> bool:
         "Govern": lambda: world.open_governance_menu(entity_data),
         "Post Job": lambda: world.open_job_posting_menu(entity_data),
         "Read Notices": lambda: world.open_noticeboard_menu(),
+        "Request Surrender": lambda: bounty_hunting.request_surrender(world, entity_data),
+        "Deliver Prisoner": lambda: bounty_hunting.turn_in(world, bounty_hunting.active_for(world, entity_data)),
 
         "Examine": lambda: world.add_message_to_chat_log(world.inspect_tile(target_x, target_y)),
         "Cook": lambda: world.player_attempt_cook(target_x, target_y),

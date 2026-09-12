@@ -1650,6 +1650,13 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.world.player.economic.profession = "Blacksmith"
         self.world.player.economic.money = 100
         self.world.buildings_by_id = {town_hall.id: town_hall, business.id: business}
+        from simulation.systems.settlements import current
+        village = current(self.world)
+        village.buildings = [town_hall, business]
+        for building in village.buildings:
+            building.settlement_id = village.id
+        for resident in (mayor, captain, worker):
+            resident.schedule.home_building_id = town_hall.id
         self.world.politics.town_hall_building_id = town_hall.id
         self.world.village_npcs = [mayor, captain, worker]
         self.world.politics.get_office("Mayor").holder_id = mayor.id
@@ -1686,7 +1693,7 @@ class TestWorldInteractionActions(unittest.TestCase):
         self.assertEqual(town_hall.building_inventory.get("money", 0), 53)
 
     def test_adjust_city_tax_rate_broadcasts_memory_event(self):
-        citizen = engine.NPC(1, 1, name="Citizen")
+        citizen = engine.NPC(self.world.player.x, self.world.player.y, name="Citizen")
         self.world.village_npcs = [citizen]
         self.world.politics.get_office("Mayor").holder_id = self.world.player.id
         self.world.politics.tax_rate = 0.10
@@ -1706,6 +1713,11 @@ class TestWorldInteractionActions(unittest.TestCase):
         guard.economic.profession = "Guard"
         self.world.village_npcs = [guard]
         self.world.buildings_by_id = {town_hall.id: town_hall}
+        from simulation.systems.settlements import current
+        village = current(self.world)
+        village.buildings = [town_hall]
+        town_hall.settlement_id = village.id
+        guard.schedule.home_building_id = town_hall.id
         self.world.politics.town_hall_building_id = town_hall.id
         self.world.politics.get_office("Captain of the Guard").holder_id = self.world.player.id
 

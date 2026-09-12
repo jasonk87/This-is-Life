@@ -182,6 +182,7 @@ class TestDesperatePredationIntegration(unittest.TestCase):
 
         hp_before = villager.combat.hp
         with patch("random.random", return_value=0.0), \
+             patch("random.randint", side_effect=lambda lo, hi: hi), \
              patch.object(self.world, "_find_nearest_corpse", return_value=(None, None)):
             took_turn_2 = wolf.ai_brain.take_turn(wolf, self.world)
 

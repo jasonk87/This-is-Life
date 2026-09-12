@@ -101,10 +101,11 @@ class TestTransparencyMapIndexing(unittest.TestCase):
 
 
 class TestNoticeboardErrandTerminates(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.world = World(player_first_name="Tester")
-        cls.world._pre_simulate_world()
+    def setUp(self):
+        from tests.world_cache import fresh_world
+        # Independent deterministic errands, not an unseeded shared world
+        # whose first job seeker may live in a different town from its board.
+        self.world = fresh_world(seed=451, pre_simulate=False, player_first_name="Tester")
 
     def _village_with_a_board(self):
         for row in self.world.chunks:
@@ -124,7 +125,8 @@ class TestNoticeboardErrandTerminates(unittest.TestCase):
         world = self.world
         seeker = next(
             (npc for npc in world.village_npcs
-             if not npc.physical.is_dead and npc.economic.profession.lower() == "unemployed"),
+             if not npc.physical.is_dead and npc.economic.profession.lower() == "unemployed"
+             and world._get_village_for_npc(npc) is village),
             None,
         )
         if seeker is None:
@@ -151,7 +153,8 @@ class TestNoticeboardErrandTerminates(unittest.TestCase):
         world = self.world
         seeker = next(
             (npc for npc in world.village_npcs
-             if not npc.physical.is_dead and npc.economic.profession.lower() == "unemployed"),
+             if not npc.physical.is_dead and npc.economic.profession.lower() == "unemployed"
+             and world._get_village_for_npc(npc) is village),
             None,
         )
         if seeker is None:

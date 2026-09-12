@@ -169,7 +169,7 @@ class TestEvaluateElectionsIndividualVoting(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def _npc(self, name, age=30):
-        npc = NPC(0, 0, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
+        npc = NPC(self.world.player.x, self.world.player.y, name=name, dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
         npc.age = age
         return npc
 

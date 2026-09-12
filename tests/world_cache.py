@@ -31,10 +31,13 @@ from __future__ import annotations
 
 import pickle
 import random
+import entities.base as entity_ids
+import simulation.ids as object_ids
+import copy
 
 from engine import World
 
-_BLOBS: dict[tuple, tuple[bytes, tuple]] = {}
+_BLOBS: dict[tuple, tuple[bytes, tuple, int, str, object]] = {}
 
 # Keys whose world would not pickle, so we stop trying. A test that builds its
 # world inside `patch(...)` - test_ecosystem and test_knowledge_travel both do -
@@ -49,7 +52,7 @@ def fresh_world(seed: int = 5, *, pre_simulate: bool = True, **world_kwargs):
 
     cached = _BLOBS.get(key)
     if cached is not None:
-        blob, rng_state = cached
+        blob, rng_state, next_id, prefix, counter = cached
         # The global RNG state matters as much as the world does. Generating a
         # world seeds `random` and then draws from it a specific number of
         # times, so a caller that ticks the world afterwards is drawing from a
@@ -69,6 +72,16 @@ def fresh_world(seed: int = 5, *, pre_simulate: bool = True, **world_kwargs):
         # freshly generated world would.
         world = pickle.loads(blob)
         random.setstate(rng_state)
+        # A cache hit substitutes for fresh generation, which resets entity ids.
+        # Restoring only random's state made deterministic newborns inherit the
+        # previous test world's allocator position. This is NOT save loading:
+        # production __setstate__ still reserves ids monotonically.
+        entity_ids._next_entity_id = next_id
+        # Construction and hauling also allocate ids after generation. Save
+        # loading intentionally randomizes that series; a generation cache
+        # must instead resume the original series, just as an uncached call.
+        object_ids._prefix = prefix
+        object_ids._counter = copy.copy(counter)
         return world
 
     world = World(seed=seed, **world_kwargs)
@@ -83,6 +96,9 @@ def fresh_world(seed: int = 5, *, pre_simulate: bool = True, **world_kwargs):
             _BLOBS[key] = (
                 pickle.dumps(world, protocol=pickle.HIGHEST_PROTOCOL),
                 random.getstate(),
+                entity_ids._next_entity_id,
+                object_ids._prefix,
+                copy.copy(object_ids._counter),
             )
         except (pickle.PicklingError, TypeError, AttributeError):
             # Not cacheable, but still a perfectly good world - hand it back and

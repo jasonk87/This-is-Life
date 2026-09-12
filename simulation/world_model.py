@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
+from collections.abc import MutableMapping
 import uuid
 
 from simulation.ids import new_id
@@ -900,6 +901,27 @@ class TownBoard:
         self.employment_tasks = [task for task in self.employment_tasks if task.id != task_id]
 
 
+class LocalOfficeView(MutableMapping):
+    """Compatibility ID view; office holders have one authoritative record."""
+    def __init__(self, village):
+        self.village = village
+
+    def __getitem__(self, name):
+        return self.village.politics.offices[name].holder_id
+
+    def __setitem__(self, name, value):
+        self.village.politics.offices[name].holder_id = value
+
+    def __delitem__(self, name):
+        self[name] = None
+
+    def __iter__(self):
+        return iter(self.village.politics.offices)
+
+    def __len__(self):
+        return len(self.village.politics.offices)
+
+
 class Village:
     def __init__(self, primary_biome: str | None = None, chunk_coords: tuple[int, int] | None = None, region_id: str | None = None):
         self.id = new_id()
@@ -920,11 +942,41 @@ class Village:
         self.history_record_ids: list[str] = []
         self.noticeboard_rumors: dict[str, Any] = {}
         self.territory_claim_ids: list[str] = []
+        self.politics = PoliticsTracker()
+        self.name = ""
         self.tax_rate: float = 0.10
         self.local_offices: dict[str, int | None] = {
             "Mayor": None,
             "Captain of the Guard": None,
         }
+
+    @property
+    def local_offices(self):
+        return LocalOfficeView(self)
+
+    @local_offices.setter
+    def local_offices(self, holders):
+        for name, holder_id in holders.items():
+            if name in self.politics.offices:
+                self.politics.offices[name].holder_id = holder_id
+
+    @property
+    def tax_rate(self):
+        return self.politics.tax_rate
+
+    @tax_rate.setter
+    def tax_rate(self, value):
+        self.politics.tax_rate = value
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "politics" not in state:
+            self.politics = PoliticsTracker()
+            self.tax_rate = state.get("tax_rate", .10)
+            self.local_offices = state.get("local_offices", {})
+        self.__dict__.pop("tax_rate", None)
+        self.__dict__.pop("local_offices", None)
+        self.name = state.get("name", "")
 
     def add_building(self, building: Building):
         building.settlement_id = self.id

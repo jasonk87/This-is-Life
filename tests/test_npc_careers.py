@@ -1,7 +1,8 @@
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-from entities.base import NPC
+from entities.base import NPC, next_entity_id
 from engine import Building, Village, World, Player
 from config import DAY_LENGTH_TICKS
 from simulation.careers import (
@@ -52,7 +53,11 @@ class MockWorld(World):
         self.add_message_to_chat_log = MagicMock()
         self.chunks = [[MagicMock() for _ in range(1)] for _ in range(1)] # Minimal chunk map
         self.player = MagicMock(spec=Player)
-        self.player.id = 1
+        # Use the same allocator as real entities: a fresh worker process may
+        # otherwise also give the first NPC id 1 and misidentify them as You.
+        self.player.id = next_entity_id()
+        self.player.economic = SimpleNamespace(job_building_id=None)
+        self.player.physical = SimpleNamespace(is_dead=False)
         self.town_board = TownBoardStub()
         self.player.world_ref = self
         self.player_fov_map = MagicMock()

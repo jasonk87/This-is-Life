@@ -278,6 +278,8 @@ def run_world_tick(world) -> None:
         world.ecology.process_tick(world)
     world._update_abstract_simulation()
     world._update_political_warrants()
+    from simulation.systems.bounty_hunting import refresh
+    refresh(world)
     world._drain_gossip_flavor_text_queue()
     world._process_npc_witness_events()
     world._process_npc_gossip_reaction()

@@ -115,7 +115,9 @@ ANIMAL_DEFINITIONS = {
         "char": ANIMAL_SPRITES["wolf"],
         "color": (169, 169, 169),
         "max_hp": 15,
-        "hostile": True,
+        # Ordinary wolves hunt prey, defend territory and may attack people
+        # when desperate. Permanent spawn hostility bypassed all those motives.
+        "hostile": False,
         "spawn_biomes": ["plains", "mountain"],
         "spawn_chance": 0.0005,
         "base_attack_name": "bite",

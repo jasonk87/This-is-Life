@@ -2501,6 +2501,16 @@ def _noticeboard_row(world, notice_id):
     Returns None for notices whose backing task/blueprint has since been
     resolved or removed, so stale ids are skipped rather than drawn blank.
     """
+    if notice_id.startswith("civic:"):
+        return widgets.Row(text="CIVIC: offices, election dates and citizenship [R register]", color=theme.HEADING)
+    if notice_id.startswith("settlement:"):
+        from simulation.systems.settlements import villages
+        village = next((v for v in villages(world) if v.id == notice_id.split(":", 1)[1]), None)
+        return widgets.Row(text=f"ROAD: directions to {village.name}", color=theme.INFO) if village else None
+    if notice_id.startswith("bounty:"):
+        from simulation.systems.bounty_hunting import get_contract
+        contract = get_contract(world, notice_id.split(":", 1)[1])
+        return widgets.Row(text=f"WANTED ALIVE: {contract.target_name} - {contract.reward} coins [{contract.status}]", color=theme.WARNING) if contract else None
     if notice_id.startswith("job:"):
         job_task = world.town_board.get_employment_task(notice_id.split(":", 1)[1])
         if job_task is None:
@@ -2580,7 +2590,9 @@ def _draw_noticeboard_post_job(console, world, geometry):
 def draw_noticeboard_menu(console, world):
     """Draw the TownBoard hauling notices and player-claimed tasks."""
     geometry = widgets.centered_menu(66, 20)
-    widgets.panel(console, *geometry, title="Noticeboard", focused=True)
+    from simulation.systems.settlements import current
+    village = current(world)
+    widgets.panel(console, *geometry, title=f"{village.name} / Notices" if village else "Noticeboard", focused=True)
 
     if world.noticeboard_menu_context.get("mode") == "post_job":
         _draw_noticeboard_post_job(console, world, geometry)
@@ -2612,7 +2624,7 @@ def draw_noticeboard_menu(console, world):
         show_cursor=False,
     )
     widgets.hint_bar(console, geometry.inner_x, geometry.hint_row, geometry.inner_width,
-                     [("Enter", "claim"), ("P", "post job"), ("Esc", "close")])
+                     [("Enter", "read/accept"), ("R", "register"), ("P", "post job"), ("Esc", "close")])
 
 def draw_company_ledger_menu(console, world):
     """Draw the ledger for a player-owned building."""

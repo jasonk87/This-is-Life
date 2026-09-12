@@ -222,6 +222,10 @@ def frame(world, actor, zoom, activity, direction, phase, moving, posture):
     state = signature(actor)
     held = equipped(actor, "weapon")
     source = rig(state, direction, activity.kind, phase, posture, moving, activity.item, held)
+    from rendering import body_marks, character_pose
+    marks = body_marks.signature(actor, getattr(world,"game_time",0))
+    pose = character_pose.layout(direction, activity.kind, phase, posture, moving or activity.kind == "walk")
+    source = body_marks.apply(source, pose, state, direction, marks)
     scale = 0.75 if getattr(actor, "age", 25) < 18 else 1.0
     # Seat and standing heads use the SAME scale. Supine bodies are foreshortened.
     density = 0.30 if posture == "reclining" else 0.375
@@ -233,7 +237,7 @@ def frame(world, actor, zoom, activity, direction, phase, moving, posture):
     )
     token = (
         "person32",
-        ("layered-pose-v2", state, activity.item, held),
+        ("layered-pose-v3", state, activity.item, held, marks),
         zoom,
         activity.kind,
         phase,

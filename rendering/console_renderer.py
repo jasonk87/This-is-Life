@@ -1598,6 +1598,24 @@ def _draw_entity_health_bars(console, world, camera_x, camera_y, focus=None):
         bar_x = screen_x - (HEALTH_BAR_WIDTH // 2)
         _draw_mini_health_bar(console, bar_x, screen_y, HEALTH_BAR_WIDTH, entity.combat.hp, entity.combat.max_hp)
 
+def _draw_body_condition_labels(console, world, camera_x, camera_y, focus=None):
+    """Visible symptoms, never an overhead HP meter or an enemy blood readout."""
+    from rendering.body_marks import visible_condition
+    from rendering.furniture_occupancy import overlay_anchor
+    for entity in itertools.chain(world.npcs, world.village_npcs):
+        label = visible_condition(entity, world.game_time)
+        if not label:
+            continue
+        wx, wy = overlay_anchor(world, entity)
+        if not _is_entity_overlay_visible(world, entity, wy-1):
+            continue
+        point = _screen_point_for_world(world, camera_x, camera_y, wx, wy-1)
+        point = _attached_overlay_point(world, entity, camera_x, camera_y, point)
+        if point:
+            x,y = point
+            widgets.text_line(console, max(0,x-len(label)//2), y, label, color=theme.WARNING, width=len(label))
+
+
 def _draw_social_indicators(console, world, camera_x, camera_y, max_markers=8):
     marked = 0
     for indicator in collect_visible_social_indicators(world, visibility_fn=is_visible):
@@ -2110,7 +2128,7 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
         _draw_visual_effect(console, world, effect, camera_x, camera_y)
 
     focus = _get_focus_target(world, camera_x, camera_y)
-    _draw_entity_health_bars(console, world, camera_x, camera_y, focus)
+    _draw_body_condition_labels(console, world, camera_x, camera_y, focus)
     _draw_entity_markers(console, world, camera_x, camera_y, focus)
     _draw_world_markers(console, world, camera_x, camera_y)
     _draw_ambient_speech(console, world, camera_x, camera_y)
@@ -2127,7 +2145,7 @@ def draw(console, world, camera_x, camera_y, menu_fade_ratio=1.0):
         screen_point = _screen_point_for_world(world, camera_x, camera_y, overlay_x, label_world_y)
         screen_point = _attached_overlay_point(
             world, entity, camera_x, camera_y, screen_point,
-            extra_rows=1 if _entity_shows_health_bar(entity, focus.get("entity")) else 0,
+            extra_rows=1,
         )
         if screen_point is not None:
             screen_x, screen_y = screen_point
@@ -2283,6 +2301,10 @@ def draw_interaction_menu(console, world):
         weapon = world.player.equipment.weapon.item_reference
         widgets.text_line(console, x+1, y+1, f"Distance {distance} | Recovery {ready} ticks", width=width-2)
         widgets.text_line(console, x+1, y+2, f"Held: {weapon.definition['name'] if weapon else 'bare hands'}", color=theme.HEADING, width=width-2)
+        if weapon and weapon.definition.get("properties", {}).get("requires_ammo"):
+            ammo = weapon.definition["properties"]["requires_ammo"]
+            count = world.player.economic.inventory.get(ammo, 0)
+            widgets.text_line(console, x+1, y+2, f"{weapon.name} | Arrows {count}", color=theme.HEADING if count else theme.DANGER, width=width-2)
         warning = "Civilian: attacking has legal consequences." if not getattr(target, "animal_type", None) and not target.combat.is_hostile_to_player else "Attacks affect real body regions."
         widgets.text_line(console, x+1, y+3, warning, color=theme.WARNING, width=width-2)
         widgets.text_line(console, x+1, y+height-2, "Tab target | Up/Down action | Enter / F act", color=theme.TEXT_MUTED, width=width-2)
@@ -2395,6 +2417,8 @@ def draw_crafting_menu(console, world):
         )
         console.print_box(x=geometry.x+41, y=detail_y+3, width=29, height=8,
                           string=item_def.get("description", ""), fg=theme.TEXT_DIM)
+        widgets.text_line(console,geometry.x+41,detail_y+1,
+                          f"Batch yield: {item_def.get('crafting_output',1)}",color=theme.SUCCESS,width=29)
 
 def _construction_material_name(material_key):
     """Display name for a build material, which may be defined as an item or
@@ -3102,12 +3126,13 @@ def draw_inventory_menu(console, world):
     if character_layers.enabled(world):
         # The same rig/state as the world sprite, not an independently dressed portrait.
         state = character_layers.signature(world.player)
-        preview = character_layers.rig(state, "south")
+        from rendering.people_art import Activity
+        preview,_,preview_token = character_layers.frame(world,world.player,3,Activity("idle"),"south",0,False,None)
         pixels = character_layers.pixels
         portrait = pixels.resize(preview, 64, round(preview.shape[0] * 64 / preview.shape[1]))
         widgets.text_line(console,detail_x+2,y+23,"Currently wearing",width=20,color=theme.HEADING)
         pixels.stamp(console, portrait, (detail_x+2)*16, (y+25)*16,
-                     token=("wardrobe-preview",state), clip=lambda cx, cy: True)
+                     token=("wardrobe-preview",preview_token), clip=lambda cx, cy: True)
         for offset, slot in enumerate(("head", "body", "legs", "feet")):
             worn = character_layers.equipped(world.player,slot)
             label = ITEM_DEFINITIONS.get(worn,{}).get("name","Underlayer" if slot in {"body","legs"} else "None")

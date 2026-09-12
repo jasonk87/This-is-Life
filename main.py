@@ -782,10 +782,11 @@ def handle_governance_menu_input(event: tcod.event.KeyDown, world: World):
 
 def open_combat_menu(world):
     """Explicit visible target selection, reusing the existing action menu."""
-    from simulation.systems.body_combat import supported
+    from simulation.systems.body_combat import supported, ranged_weapon
     fov = world.player_fov_map
-    targets = [actor for actor in world.all_npcs if supported(actor) and not actor.physical.is_dead
-               and max(abs(actor.x-world.player.x), abs(actor.y-world.player.y)) <= 10
+    reach = max(10, ITEM_DEFINITIONS.get(str(world.player.equipment.weapon), {}).get("properties", {}).get("attack_range", 1))
+    targets = [actor for actor in world.all_npcs if (supported(actor) or ranged_weapon(world.player)) and not actor.physical.is_dead
+               and max(abs(actor.x-world.player.x), abs(actor.y-world.player.y)) <= reach
                and 0 <= actor.y < fov.shape[0] and 0 <= actor.x < fov.shape[1]
                and fov[actor.y, actor.x]]
     targets.sort(key=lambda actor: (not actor.combat.is_hostile_to_player,

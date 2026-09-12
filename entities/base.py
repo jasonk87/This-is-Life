@@ -1245,8 +1245,8 @@ class NPC:
         """Adds an item to the NPC's inventory."""
         self.economic.npc_inventory.add_item(item_key, quantity, quality=quality, crafter_name=crafter_name)
 
-    def craft_item(self, item_key: str, quantity: int = 1):
-        """Add an authored crafted item to the NPC inventory with rolled quality."""
+    def craft_item(self, item_key: str, quantity: int = 1, *, output_inventory=None):
+        """Create authored goods; workplace output must not become personal gear."""
         normalized_profession = normalize_profession(self.economic.profession)
         if hasattr(self, "career") and self.career.current_role != normalized_profession:
             self.career.set_role(normalized_profession)
@@ -1256,8 +1256,11 @@ class NPC:
             self.skills.get_level("crafting"),
         )
         quality = roll_crafted_item_quality(career_level=career_level, work_performance=self.economic.work_performance)
-        self.add_item(item_key, quantity, quality=quality, crafter_name=self.name)
-        self.evaluate_and_upgrade_equipment()
+        if output_inventory is None:
+            self.add_item(item_key, quantity, quality=quality, crafter_name=self.name)
+            self.evaluate_and_upgrade_equipment()
+        else:
+            output_inventory.add_item(item_key, quantity, quality=quality, crafter_name=self.name)
         self.skills.gain_experience("crafting", max(1, int(quantity)) * 4)
         return quality
 

@@ -76,6 +76,9 @@ def layout(direction, kind="idle", phase=0, posture=None, moving=False):
         if side:
             hands = ((32+sign*14, chest[1]+11), (32+sign*15, chest[1]+16))
             elbows = ((29+sign*4, chest[1]+14), (35+sign*5, chest[1]+18))
+    elif kind == "shoot":
+        hands = ((32+sign*20, chest[1]+3), (32+sign*5, chest[1]))
+        elbows = ((32+sign*10, chest[1]+5), (32-sign*12, chest[1]+5))
     elif kind in {"hammer", "chop", "fight"}:
         heights = (chest[1]+9, chest[1]-13, chest[1]+10, chest[1]+17)
         target = (32+sign*18, heights[phase])
@@ -231,6 +234,8 @@ def _carried(image,item,pose,kind,phase,held):
         cy=(pose.hands[0][1]+pose.hands[1][1])/2
         source=pixels.tile_pixels(ITEM_SPRITES[item])
         layers.over(image,pixels.resize(source,20,18),cx-10,cy-13)
+    elif kind == "shoot" and held == "short_bow":
+        _bow(image, pose.hands[0], pose.hands[1])
     elif active_tool(kind,held):
         wrist=pose.hands[1]
         source=pixels.resize(pixels.tile_pixels(ITEM_SPRITES[held]),15,20)
@@ -247,7 +252,29 @@ def _carried(image,item,pose,kind,phase,held):
         if kind=="chop": rect(image,tip[0]+(3 if sign>0 else -6),tip[1]-1,4,8,(197,207,194))
     elif not pose.reclined and kind not in {"eat","prepare"} and held in ITEM_SPRITES:
         wrist=pose.hands[1]
-        layers.over(image,pixels.resize(pixels.tile_pixels(ITEM_SPRITES[held]),15,20),wrist[0]-6,wrist[1]-15)
+        if held == "short_bow":
+            _bow(image, wrist)
+        else:
+            layers.over(image,pixels.resize(pixels.tile_pixels(ITEM_SPRITES[held]),15,20),wrist[0]-6,wrist[1]-15)
+
+
+def _bow(image, wrist, draw_hand=None):
+    """Readable wooden limbs and a real grip socket, even at world zoom."""
+    x, y = wrist
+    sign = 1 if x >= 32 else -1
+    points = [(x-sign*4, y-18), (x+sign*2, y-12), wrist,
+              (x+sign*2, y+12), (x-sign*4, y+18)]
+    wood = np.full((2, 2, 4), (164, 112, 57, 255), dtype=np.uint8)
+    edge = np.full((2, 2, 4), (63, 44, 27, 255), dtype=np.uint8)
+    string = np.full((2, 2, 4), (224, 209, 168, 255), dtype=np.uint8)
+    for start, end in zip(points, points[1:]):
+        segment(image, edge, start, end, 5)
+        segment(image, wood, start, end, 3)
+    if draw_hand is None:
+        segment(image, string, points[0], points[-1], 1)
+    else:
+        segment(image, string, points[0], draw_hand, 1)
+        segment(image, string, draw_hand, points[-1], 1)
 
 
 def clear():

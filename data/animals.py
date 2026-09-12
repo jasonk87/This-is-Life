@@ -99,6 +99,7 @@ ANIMAL_DEFINITIONS = {
         "base_attack_damage_dice": "1d1",
         "combat_behavior": "cowardly",
         "loot_drops": {
+            "feather": {"chance": 1.0, "quantity": [3, 6]},
             "raw_meat": {
                 "chance": 1.0,
                 "quantity": [1, 2]

@@ -127,10 +127,16 @@ def respond_to_wildlife(world, actor):
     if defender:
         actor.is_frightened = False
         actor.schedule.current_task = "protecting_from_wildlife"
-        if visible and distance(actor, threat) <= 1:
-            world.npc_attempt_attack_npc(actor, threat)
+        weapon = combat.held_reference(actor)
+        reach = weapon.definition.get("properties",{}).get("attack_range",1) if weapon else 1
+        if weapon and weapon.definition.get("properties",{}).get("requires_ammo") and actor.economic.npc_inventory.get("arrow",0)<=0:
+            reach = 1
+        if visible and distance(actor, threat) <= reach:
+            result = world.npc_attempt_attack_npc(actor, threat)
             actor.schedule.current_path = []
             actor.schedule.current_destination_coords = None
+            if not getattr(result,"attempted",False) and actor.combat.anatomy.attack_ready_tick <= world.game_time and distance(actor,threat)>1:
+                approach(world,actor,*emergency["last_seen"])
         elif visible or (actor.x, actor.y) != tuple(emergency["last_seen"]):
             approach(world, actor, *emergency["last_seen"])
         else:

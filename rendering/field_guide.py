@@ -23,9 +23,12 @@ def draw_field_guide(console, world, camera_x, camera_y):
     widgets.text_line(console, inner_x, 5, world.player.economic.profession, width=inner_w, color=theme.TEXT_DIM)
     widgets.text_line(console, inner_x, 6, f"{world.player.economic.money} coins", width=inner_w, color=theme.SUCCESS)
     widgets.rule(console, inner_x, 7, inner_w)
-    widgets.heading(console, inner_x, 8, "Health / Needs")
+    widgets.heading(console, inner_x, 8, "Body / Needs")
     p = world.player.physical
-    widgets.meter(console, inner_x, 9, inner_w, "HP", world.player.combat.hp, world.player.combat.max_hp, theme.METER_HP)
+    body = getattr(world.player.combat, "anatomy", None)
+    blood = f"Blood {body.blood:.0%}" if body and body.body_plan else "Body: not examined"
+    widgets.text_line(console, inner_x, 9, blood, width=inner_w,
+                      color=theme.DANGER if body and body.blood < .6 else theme.TEXT)
     widgets.meter(console, inner_x, 10, inner_w, "HU", p.hunger, p.max_hunger, cr._hunger_meter_colors(p.hunger/max(1,p.max_hunger)))
     widgets.meter(console, inner_x, 11, inner_w, "TH", p.thirst, p.max_thirst, cr._thirst_meter_colors(p.thirst/max(1,p.max_thirst)))
     widgets.text_line(console, inner_x, 12, "HU hunger TH thirst", width=width-3, color=theme.TEXT_MUTED)

@@ -50,6 +50,11 @@ def draw_body_menu(console, world):
             row(f"{name.replace('_', ' ')}: {detail}")
         caps = capabilities(body)
         row(f"Sight {caps['sight']:.0%} | Breathing {caps['breathing']:.0%}", theme.TEXT_DIM)
+        if body.scars:
+            row("")
+            row("SCARS / HISTORY", theme.HEADING)
+            for scar in body.scars:
+                row(f"{scar.part.replace('_', ' ')}: healed {scar.kind} scar / {scar.weapon or 'old injury'} / Day {scar.formed_tick//DAY_LENGTH_TICKS}", theme.TEXT_DIM)
         if body.death_cause:
             row(f"Died: {body.death_cause}", theme.DANGER)
         row("")

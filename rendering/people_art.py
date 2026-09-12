@@ -87,7 +87,7 @@ def activity_for(world, actor):
         if "unconscious" in actor.physical.status_effects:
             return Activity("unconscious")
         if body.last_attack_target and world.game_time < body.attack_ready_tick:
-            return Activity("fight", target=body.last_attack_target)
+            return Activity(body.last_attack_kind, target=body.last_attack_target)
     state = getattr(actor, "state", None)
     if getattr(actor, "is_sleeping", False) or getattr(state, "is_sleeping", False):
         return Activity("sleep")

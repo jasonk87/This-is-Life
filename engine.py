@@ -4136,7 +4136,7 @@ class World:
                     elif npc.schedule.current_task in [TaskType.GOING_HOME, TaskType.GOING_HOME_TO_SLEEP, TaskType.GOING_TO_BED]:
                         npc.schedule.current_task = TaskType.AT_HOME
                     elif npc.schedule.current_task in {"wolf_combat", "fleeing_injury", "protecting_from_wildlife",
-                                                        "escaping_wildlife", "recovering_from_injury"}:
+                                                        "escaping_wildlife", "recovering_from_injury", "lingering_in_village"}:
                         pass  # Arrival finishes a path, not the combat/care decision.
                     else:
                         npc.schedule.current_task = TaskType.IDLE # Default state post-movement
@@ -5188,7 +5188,7 @@ class World:
         if not isinstance(npc_inventory, Inventory):
             npc.economic.npc_inventory = Inventory(npc_inventory or {})
             npc_inventory = npc.economic.npc_inventory
-        for item_key in list(self.BUTCHER_RAW_INPUTS | {"processed_meat"}):
+        for item_key in list(self.BUTCHER_RAW_INPUTS | {"processed_meat", "feather", "animal_pelt"}):
             qty = int(npc_inventory.get(item_key, 0))
             if qty <= 0:
                 continue
@@ -5237,6 +5237,10 @@ class World:
         if dropoff is None:
             self._clear_hunting_task(npc)
             return False
+
+        from simulation.systems.archer_hunting import advance as advance_archer_hunt
+        if advance_archer_hunt(self,npc,task_data,dropoff):
+            return True
 
         if state == "pursuing":
             prey = self.get_entity_by_id(task_data.get("prey_id"))
@@ -5636,6 +5640,7 @@ class World:
         *,
         buyer_inventory=None,
         seller_inventory=None,
+        equip_purchase=True,
     ) -> bool:
         """
         Transfer a specific item object from seller to buyer while moving currency in the opposite direction.
@@ -5661,7 +5666,7 @@ class World:
 
         self._set_trade_money_balance(buyer, buyer_balance - final_price)
         self._set_trade_money_balance(seller, seller_balance + final_price)
-        if getattr(item_reference, "equip_slot", None) and hasattr(buyer, "evaluate_and_upgrade_equipment"):
+        if equip_purchase and getattr(item_reference, "equip_slot", None) and hasattr(buyer, "evaluate_and_upgrade_equipment"):
             buyer.evaluate_and_upgrade_equipment()
         return True
 
@@ -5941,10 +5946,13 @@ class World:
             required_workstation = item_def.get("required_workstation")
             if not recipe or not required_workstation or required_workstation not in supported_workstations:
                 continue
+            stock_target = item_def.get("workplace_stock_target")
+            if stock_target and work_building.building_inventory.get(item_key, 0) >= stock_target:
+                continue
             if any(work_building.building_inventory.get(ingredient_key, 0) < required_qty for ingredient_key, required_qty in recipe.items()):
                 continue
             quoted_price = self.quote_item_reference_price(ItemReference(item_key), village=self._get_village_for_npc(npc, by_coords=True))
-            candidates.append((quoted_price, item_key))
+            candidates.append((quoted_price + item_def.get("workplace_priority", 0), item_key))
 
         candidates.sort(reverse=True)
         return [item_key for _, item_key in candidates]
@@ -5966,18 +5974,16 @@ class World:
         recipe = item_def.get("crafting_recipe") or {}
         if not recipe:
             return False
+        station = item_def.get("required_workstation")
+        if station and station not in self._get_supported_workstations_for_building(work_building):
+            return False
         if not self._consume_inventory_recipe_item_objects(work_building.building_inventory, recipe):
             return False
 
-        existing_item_ids = {id(item) for item in npc.economic.npc_inventory.iter_item_references(item_key)}
-        npc.craft_item(item_key, 1)
-        crafted_item = next(
-            (item for item in npc.economic.npc_inventory.iter_item_references(item_key) if id(item) not in existing_item_ids),
-            None,
-        )
-        if crafted_item is None:
-            return False
-        return npc.economic.npc_inventory.transfer_item_reference(work_building.building_inventory, crafted_item)
+        # Workshop output belongs to the workshop, not the worker's equipment.
+        quantity = max(1, int(item_def.get("crafting_output", 1)))
+        npc.craft_item(item_key, quantity, output_inventory=work_building.building_inventory)
+        return True
 
     def _get_workplace_recipe_ingredient_keys(self, work_building: Building) -> set[str]:
         ingredient_keys: set[str] = set()
@@ -6021,7 +6027,8 @@ class World:
                 continue
             item_def = ITEM_DEFINITIONS.get(item_key, {})
             tags = set(item_def.get("item_type_tags", []))
-            if item_key.startswith("raw_") or "resource" in tags or item_key in ingredient_keys:
+            surplus_component = "export_reserve" in item_def and inventory.get(item_key, 0) > item_def["export_reserve"]
+            if not surplus_component and (item_key.startswith("raw_") or "resource" in tags or item_key in ingredient_keys):
                 continue
 
             buyer = self._find_export_buyer_for_item(npc, item_reference, work_building)
@@ -6054,7 +6061,8 @@ class World:
             # Determine what we actually want to craft based on building type defaults to prevent hoarding random junk
             target_products = []
             if work_building.building_type == "lumber_mill": target_products = ["wooden_plank"]
-            elif work_building.building_type == "blacksmith_shop": target_products = ["iron_ingot", "iron_sword"]
+            elif work_building.building_type == "blacksmith_shop": target_products = ["iron_ingot", "iron_sword", "arrowhead", "iron_spear"]
+            elif work_building.building_type == "carpenter_shop": target_products = ["short_bow", "arrow", "arrow_shaft", "bowstring"]
             elif work_building.building_type == "bakery": target_products = ["bread"]
             elif work_building.building_type == "mill": target_products = ["flour"]
             else:
@@ -6069,6 +6077,8 @@ class World:
 
                 if target_products and item_key not in target_products:
                     continue
+                if item_def.get("workplace_stock_target") and work_building.building_inventory.get(item_key,0) >= item_def["workplace_stock_target"]:
+                    continue
 
                 # If we have a recipe we *want* to make but don't have ingredients for
                 for ingredient_key, required_qty in recipe.items():
@@ -6076,7 +6086,11 @@ class World:
                         missing_inputs.append(ingredient_key)
 
             if missing_inputs:
-                missing_item = missing_inputs[0]
+                # Prefer an available input; a missing feather must not prevent
+                # an otherwise supplied carpenter from making bowstrings.
+                village = self._get_village_for_npc(npc, by_coords=True)
+                available = {k for b in getattr(village,"buildings",[]) for k,q in b.building_inventory.items() if q > 0}
+                missing_item = next((k for k in missing_inputs if k in available),missing_inputs[0])
                 # Attempt to procure it from the general store/village storage
                 village = self._get_village_for_npc(npc, by_coords=True)
                 if village:
@@ -6155,6 +6169,9 @@ class World:
         if npc.equipment.weapon and npc.equipment.weapon in ITEM_DEFINITIONS:
             weapon_def = ITEM_DEFINITIONS[npc.equipment.weapon]
             effective_attack_range = weapon_def.get("properties", {}).get("attack_range", npc.combat.attack_range)
+            ammo_key = weapon_def.get("properties", {}).get("requires_ammo")
+            if ammo_key and npc.economic.npc_inventory.get(ammo_key,0) <= 0:
+                effective_attack_range = 1
 
         player_in_attack_range = (manhattan_distance <= effective_attack_range)
 
@@ -6373,8 +6390,8 @@ class World:
             attacker.schedule.current_path = []
             return
 
-        from simulation.systems.body_combat import attack, supported
-        if supported(attacker) and supported(target):
+        from simulation.systems.body_combat import attack, supported, ranged_weapon
+        if supported(attacker) and (supported(target) or ranged_weapon(attacker)):
             return attack(self, attacker, target)
 
         # --- CRIME RECORDING for genuine civilian-on-civilian violence ---
@@ -6852,6 +6869,8 @@ class World:
                     npc.leisure_timer = random.randint(DAY_LENGTH_TICKS // 4, DAY_LENGTH_TICKS)
                     if destination is not None:
                         self.share_abstract_rumors_with_settlement(npc, destination)
+                        from simulation.systems.weapon_economy import market_trade
+                        market_trade(self, npc, destination)
                     arrivals += 1
                 continue
 
@@ -10386,8 +10405,8 @@ class World:
         return treated
 
     def player_attempt_attack(self, target_npc: NPC, attack_type="attack", target_part=None):
-        from simulation.systems.body_combat import attack, supported
-        if supported(target_npc):
+        from simulation.systems.body_combat import attack, supported, ranged_weapon
+        if supported(target_npc) or ranged_weapon(self.player):
             return attack(self, self.player, target_npc, attack_type, target_part)
         if not target_npc:
             self.add_message_to_chat_log("No target selected for attack.")
@@ -13212,6 +13231,7 @@ class World:
                     if "short_bow" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["short_bow"] = npc.economic.npc_inventory.get("short_bow", 0) + 1
                         npc.equipment.weapon = "short_bow"
+                        npc.economic.npc_inventory.add_item("arrow", 12)
                     if "knife_stone" in ITEM_DEFINITIONS:
                         npc.economic.npc_inventory["knife_stone"] = npc.economic.npc_inventory.get("knife_stone", 0) + 1
                     if "smoked_meat" in ITEM_DEFINITIONS:
@@ -16792,6 +16812,7 @@ class World:
             outlaw.economic.npc_inventory["water_flask"] = rng.randint(1, 2)
             outlaw.economic.npc_inventory["short_bow"] = 1
             outlaw.equipment.weapon = "short_bow"
+            outlaw.economic.npc_inventory.add_item("arrow", 8)
             self.npcs.append(outlaw)
 
     def _generate_ruin_layout(self, chunk: Chunk, global_chunk_x: int, global_chunk_y: int):
@@ -17605,6 +17626,7 @@ class World:
             if "short_bow" in ITEM_DEFINITIONS:
                 inv["short_bow"] = max(inv.get("short_bow", 0), 1)
                 eq.weapon = "short_bow"
+                inv["arrow"] = max(inv.get("arrow",0),12)
             if "knife_stone" in ITEM_DEFINITIONS:
                 inv["knife_stone"] = max(inv.get("knife_stone", 0), 1)
             if "smoked_meat" in ITEM_DEFINITIONS:
@@ -20581,12 +20603,13 @@ class World:
                 return
 
         # Add crafted item
-        self.player.add_item(item_key, 1)
+        quantity = max(1, int(item_def.get("crafting_output", 1)))
+        self.player.add_item(item_key, quantity)
         if hasattr(self.player, "gain_skill_experience"):
             self.player.gain_skill_experience("crafting", 5)
         if hasattr(self, "visual_effects"):
             self.visual_effects.append(ParticleBurstEffect(self.player.x, self.player.y, kind="spark"))
-        self.add_message_to_chat_log(f"You crafted a {ITEM_DEFINITIONS[item_key]['name']}!")
+        self.add_message_to_chat_log(f"You crafted {quantity} x {ITEM_DEFINITIONS[item_key]['name']}!")
 
 
     def use_item(self, item_key: str):

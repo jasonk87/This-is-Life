@@ -8,8 +8,10 @@ from simulation.world_model import TownEconomicNeed
 
 def process_traveling_merchant_village_trade(world, npc, village) -> None:
     """Execute one merchant trade pass against the current village market."""
+    from simulation.systems.weapon_economy import GOODS, market_trade
+    market_trade(world, npc, village)
     for item_key, quantity in list(npc.economic.npc_inventory.items()):
-        if item_key == "money":
+        if item_key == "money" or item_key in GOODS:
             continue
         demand = village.demand.get(item_key, 1)
         supply = village.supply.get(item_key, 1)
@@ -29,7 +31,7 @@ def process_traveling_merchant_village_trade(world, npc, village) -> None:
         return
 
     for item_key, quantity in list(village.supply.items()):
-        if item_key == "money":
+        if item_key == "money" or item_key in GOODS:
             continue
         demand = village.demand.get(item_key, 1)
         supply = village.supply.get(item_key, 1)

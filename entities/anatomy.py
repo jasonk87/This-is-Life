@@ -74,6 +74,7 @@ class Anatomy:
     parts: dict[str, BodyPart] = field(default_factory=dict)
     body_plan: str | None = None
     wounds: list = field(default_factory=list)
+    scars: list = field(default_factory=list)
     blood: float = 1.0
     systemic_loss: float = 0.0
     display_max_hp: int = 35
@@ -85,6 +86,7 @@ class Anatomy:
     weapon_hand: str = "right_hand"
     attack_ready_tick: int = 0
     last_attack_target: tuple | None = None
+    last_attack_kind: str = "fight"
     movement_credit: float = 0.0
     movement_tick: int | None = None
     last_attacker_id: int | str | None = None

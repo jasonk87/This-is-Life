@@ -13,6 +13,19 @@ from entities.pickle_compat import dataclass_setstate
 
 
 @dataclass
+class Scar:
+    source_wound_id: int
+    part: str
+    kind: str
+    severity: float
+    formed_tick: int
+    weapon: str | None = None
+
+    def __setstate__(self, state):
+        dataclass_setstate(self, state)
+
+
+@dataclass
 class Wound:
     id: int
     part: str
@@ -260,6 +273,11 @@ def advance(body, now, resting=False, nourishment=1.0):
         elif fracture:
             rate *= .75 + .5*wound.splint_quality
         wound.healing = min(1,wound.healing+dt/(DAY*days)*rate)
+        if (wound.healing >= 1 and wound.kind in {"cut", "puncture", "legacy injury"}
+                and wound.damage.get("skin", 0) >= .2
+                and not any(s.source_wound_id == wound.id for s in body.scars)):
+            body.scars.append(Scar(wound.id, wound.part, wound.kind,
+                                   wound.damage["skin"], now, wound.weapon))
     # Retain a bounded resolved history; active injuries are never discarded.
     resolved = [w for w in body.wounds if w.healing>=1 and not w.permanent]
     discard = {w.id for w in resolved[:-32]}

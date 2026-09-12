@@ -84,6 +84,11 @@ def held_reference(actor):
     return getattr(getattr(actor.equipment, "weapon", None), "item_reference", None)
 
 
+def ranged_weapon(actor):
+    slot = getattr(getattr(actor, "equipment", None), "weapon", None)
+    return bool(ITEM_DEFINITIONS.get(str(slot), {}).get("properties", {}).get("requires_ammo"))
+
+
 def equip_player_weapon(world, key):
     player = world.player
     body = ensure_body(player, world.game_time)
@@ -282,7 +287,8 @@ def _profile(actor, action):
 
 
 def attack(world, attacker, target, action="attack", target_part=None):
-    if not supported(attacker) or not supported(target):
+    ranged = action == "attack" and ranged_weapon(attacker)
+    if not supported(attacker) or target is None or not hasattr(target, "combat") or (not supported(target) and not ranged):
         return AttackResult(reason="unsupported_body")
     if target.physical.is_dead:
         say(world, f"{target.name} is already defeated.", attacker, target)
@@ -290,6 +296,8 @@ def attack(world, attacker, target, action="attack", target_part=None):
     a = ensure_body(attacker, world.game_time)
     b = ensure_body(target, world.game_time)
     for actor in (attacker, target):
+        if not actor.combat.anatomy.body_plan:
+            continue
         body_rules.advance(actor.combat.anatomy, world.game_time)
         sync_body(world, actor)
     reason = None
@@ -301,33 +309,59 @@ def attack(world, attacker, target, action="attack", target_part=None):
         reason = "Move next to your target to attack."
     elif world.game_time < a.attack_ready_tick:
         reason = "Still recovering from the last attack."
-    elif target_part is not None and target_part not in b.parts:
+    elif target_part is not None and (b is None or target_part not in b.parts):
         reason = "That target has no such body part."
     if reason:
         if attacker is world.player:
             say(world, reason, attacker)
         return AttackResult(reason=reason)
     from tcod_compat import tcod
-    for x, y in list(tcod.los.bresenham((attacker.x, attacker.y), (target.x, target.y)))[1:-1]:
+    flight = list(tcod.los.bresenham((attacker.x, attacker.y), (target.x, target.y)))
+    occupied = {(p.x,p.y) for p in [world.player,*world.all_npcs] if p not in (attacker,target) and not p.physical.is_dead} if ranged else set()
+    for x, y in flight[1:-1]:
         tile = world.get_tile_at(int(x), int(y))
         if tile is None or (getattr(tile, "properties", {}) or {}).get("blocks_fov"):
             return AttackResult(reason="The attack is blocked by terrain.")
+        if (x,y) in occupied:
+            return AttackResult(reason="Someone is in the line of fire.")
     name, kind, limb, dice, bonus, recovery = _profile(attacker, action)
     function = body_rules.part_function(a, limb)
+    ammo = None
+    if ranged:
+        # Drawing and holding a bow needs two working arms and actual ammunition.
+        function = min(body_rules.part_function(a, "left_hand"), body_rules.part_function(a, "right_hand"))
+        ammo_key = held_reference(attacker).definition["properties"]["requires_ammo"]
+        ammo = inventory_for(world, attacker).get_item_reference(ammo_key)
+        if ammo is None:
+            if attacker is not world.player and max(abs(attacker.x-target.x),abs(attacker.y-target.y)) <= 1 and b:
+                return attack(world,attacker,target,action="punch")
+            say(world, "No arrows: equip a melee weapon or use Punch/Kick.", attacker)
+            return AttackResult(reason="No arrows.")
+        recovery, kind = 6, "puncture"
     if function < .2:
         return AttackResult(reason="The attacking limb cannot function.")
+    if ranged:
+        inventory_for(world, attacker).extract_item_reference(ammo)
+        from engine import ProjectileEffect
+        world.visual_effects.append(ProjectileEffect(attacker.x, attacker.y, target.x, target.y,
+                                   char=chr(ITEM_DEFINITIONS[ammo.key]["char"]), color=(207,182,132)))
+        attacker.degrade_equipped_item("weapon", world=world) if attacker is not world.player else _wear_player_weapon(world, attacker)
     a.attack_ready_tick = world.game_time + recovery
     a.last_attack_target = (target.x, target.y)
-    b.last_attacker_id = attacker.id
-    b.last_attacked_tick = world.game_time
+    a.last_attack_kind = "shoot" if ranged else "fight"
+    if b:
+        b.last_attacker_id = attacker.id
+        b.last_attacked_tick = world.game_time
     from simulation.systems.combat_response import witness_attack
     witness_attack(world, attacker, target)
     _npc_assault(world, attacker, target)
     attacker.facing = "east" if target.x > attacker.x else "west" if target.x < attacker.x else "south" if target.y > attacker.y else "north"
     world.emit_sound(attacker.x, attacker.y, "combat_attack", volume=10, source_entity_id=attacker.id)
     roll = random.randint(1, 20)
-    skill = attacker.skills.get_level("melee", 5)
-    hit = roll == 20 or (roll != 1 and roll + skill * function * functions_for(attacker)["sight"] >= 8 + functions_for(target)["movement"]*3)
+    skill_name = "archery" if ranged else "melee"
+    skill = attacker.skills.get_level(skill_name, 5)
+    distance_penalty = max(0, max(abs(target.x-attacker.x),abs(target.y-attacker.y))-3)*.6 if ranged else 0
+    hit = roll == 20 or (roll != 1 and roll + skill * function * functions_for(attacker)["sight"] >= 8 + functions_for(target)["movement"]*3 + distance_penalty)
     if attacker is world.player and target is not world.player and not target.physical.is_dead:
         target.combat.is_hostile_to_player = True
         if not getattr(target, "animal_type", None):
@@ -337,14 +371,18 @@ def attack(world, attacker, target, action="attack", target_part=None):
         _player_assault(world, attacker, target, 0)
         return AttackResult(attempted=True, reason="miss")
     if target_part is None:
-        weights = target_weights(a, b)
-        target_part = random.choices(list(b.parts), weights=weights, k=1)[0]
+        if b:
+            weights = target_weights(a, b)
+            target_part = random.choices(list(b.parts), weights=weights, k=1)[0]
+        else:
+            target_part = "body"  # Existing non-human/non-wolf animals keep legacy anatomy.
     count, faces = map(int, dice.split("d"))
     force = (sum(random.randint(1, faces) for _ in range(count)) + bonus) * function
     force *= max(.25, 1-body_rules.pain(a)*.5)
     if roll == 20:
         force *= 1.5
-    slot, armor = armor_at(target, target_part)
+    slot, armor = armor_at(target, target_part) if b else (None, None)
+    struck_garment = getattr(getattr(target.equipment,slot,None),"item_reference",None) if slot else None
     absorbed = 0
     if armor:
         defense = armor.get("properties", {}).get("defense_bonus", 0)
@@ -353,14 +391,21 @@ def attack(world, attacker, target, action="attack", target_part=None):
             target._degrade_equipped_armor_slot(slot, world=world)
         else:
             target.degrade_equipped_item(slot, world=world)
-    wound = body_rules.inflict(b, target_part, kind, force-absorbed, world.game_time, attacker.id, name)
+    wound = body_rules.inflict(b, target_part, kind, force-absorbed, world.game_time, attacker.id, name) if b else None
+    if wound and wound.bleeding and struck_garment:
+        struck_garment.blood_stains[target_part] = min(1,struck_garment.blood_stains.get(target_part,0)+wound.damage.get("skin",0))
+    legacy_death = False
+    if b is None:
+        legacy_death = target.take_damage(
+            max(1, round(force-absorbed)), world, apply_hostility=attacker is world.player
+        )
     target.combat.last_hit_part = target_part
-    if wound:
-        attacker.skills.gain_experience("melee", max(1, round(force-absorbed)), default_level=5)
-        new_status = {"broken_leg"} if wound.fracture and b.parts[target_part].function == "movement" else set()
+    if wound or (b is None and ranged):
+        attacker.skills.gain_experience(skill_name, max(1, round(force-absorbed)), default_level=5)
+        new_status = {"broken_leg"} if wound and wound.fracture and b.parts[target_part].function == "movement" else set()
         world._broadcast_combat_memory(attacker, target, name, max(1, round(force-absorbed)), new_status)
     region = target_part.replace("_", " ")
-    outcome = f"{kind} wound" + (", fracture" if wound and wound.fracture else "") if wound else "no wound"
+    outcome = f"{kind} wound" + (", fracture" if wound and wound.fracture else "") if wound else "hit" if b is None else "no wound"
     armor_text = f"; {armor['name']} absorbs {absorbed:.1f} force" if armor else ""
     say(world, f"{attacker.name} hits {target.name}'s {region} with {name}: {outcome}{armor_text}.", attacker, target)
     # The social record type has meaning: combat_attack carries a negative
@@ -369,7 +414,7 @@ def attack(world, attacker, target, action="attack", target_part=None):
     event_type = "wildlife_combat" if getattr(attacker, "animal_type", None) or getattr(target, "animal_type", None) else "combat_attack"
     world.log_event(event_type=event_type, description="{subject} struck {target}'s " + region + " with " + name + ": " + outcome + ".",
                     subject_id=attacker.id, target_id=target.id, location=(target.x, target.y))
-    if held_reference(attacker) and action == "attack":
+    if held_reference(attacker) and action == "attack" and not ranged:
         if attacker is world.player:
             ref = held_reference(attacker)
             ref.current_durability = max(0, ref.current_durability-1) if ref.current_durability is not None else None
@@ -381,9 +426,23 @@ def attack(world, attacker, target, action="attack", target_part=None):
                 say(world, f"{name} breaks.", attacker)
         else:
             attacker.degrade_equipped_item("weapon", world=world)
-    sync_body(world, target)
+    if legacy_death:
+        # Legacy animals report death to their caller. Finalize the same real
+        # carcass, ecology and history transition as the melee hunting path.
+        world.handle_npc_death(target, killer_id=attacker.id)
+    else:
+        sync_body(world, target)
     _player_assault(world, attacker, target, max(1, round(force-absorbed)) if wound else 0)
     return AttackResult(True, True, target_part, force, absorbed, wound.id if wound else None)
+
+
+def _wear_player_weapon(world, actor):
+    ref = held_reference(actor)
+    if ref and ref.current_durability is not None:
+        ref.current_durability = max(0, ref.current_durability-1)
+        if ref.current_durability == 0:
+            actor.equipment.weapon.clear()
+            say(world, f"{ref.name} breaks.", actor)
 
 
 def _npc_assault(world, attacker, target):

@@ -1,7 +1,7 @@
 """Inventory and equipment compatibility helpers for NPC entities."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import random
 
 from config import DAY_LENGTH_TICKS
@@ -113,6 +113,7 @@ class ItemReference:
     # Cumulative permanent reduction to max_durability from past repairs -
     # see repair(). 0 means "never repaired" / undamaged-ceiling.
     repair_wear: int = 0
+    blood_stains: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.quality = normalize_item_quality(self.quality)

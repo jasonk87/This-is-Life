@@ -781,7 +781,7 @@ ITEM_DEFINITIONS = {
     },
     "short_bow": {
         "name": "Short Bow",
-        "description": "A simple wooden short bow.",
+        "description": "A wooden bow with braided cord. Needs an arrow and two working arms for every shot.",
         "char": ITEM_SPRITES["short_bow"],
         "color": COLORS["dark_sepia"],
         "value": 25,
@@ -789,6 +789,10 @@ ITEM_DEFINITIONS = {
         "stackable": False,
         "item_type_tags": ["weapon", "ranged", "bow"],
         "equip_slot": "main_hand",
+        "crafting_recipe": {"wooden_plank": 2, "bowstring": 1},
+        "required_workstation": "workbench",
+        "workplace_stock_target": 2,
+        "workplace_priority": 70,
         "properties": {
             "damage_dice": "1d6",
             "damage_bonus": 0,
@@ -802,10 +806,49 @@ ITEM_DEFINITIONS = {
         "description": "A standard arrow for a bow.",
         "char": ITEM_SPRITES["arrow"],
         "color": COLORS["light_sepia"],
-        "value": 1,
+        "value": 8,
         "weight": 0.1,
         "stackable": True,
-        "item_type_tags": ["ammunition", "arrow"]
+        "item_type_tags": ["ammunition", "arrow"],
+        "crafting_recipe": {"arrow_shaft": 1, "arrowhead": 1, "feather": 1},
+        "required_workstation": "workbench",
+        "workplace_stock_target": 24,
+        "workplace_priority": 80
+    },
+    "bowstring": {
+        "name": "Braided Bowstring", "description": "Strong cord braided from strips of woven cloth.",
+        "char": ITEM_SPRITES["bowstring"], "color": (188,174,139),
+        "value": 4, "weight": .1, "stackable": True, "item_type_tags": ["component"],
+        "crafting_recipe": {"cloth": 1}, "crafting_output": 8, "required_workstation": "workbench",
+        "workplace_stock_target": 3, "workplace_priority": 35, "export_reserve": 1
+    },
+    "arrow_shaft": {
+        "name": "Arrow Shaft", "description": "A straight worked wooden shaft awaiting a head and fletching.",
+        "char": ITEM_SPRITES["arrow_shaft"], "color": (155,109,64),
+        "value": 2, "weight": .05, "stackable": True, "item_type_tags": ["component"],
+        "crafting_recipe": {"wooden_plank": 1}, "crafting_output": 4, "required_workstation": "workbench",
+        "workplace_stock_target": 12, "workplace_priority": 30, "export_reserve": 4
+    },
+    "arrowhead": {
+        "name": "Iron Arrowhead", "description": "A forged iron point ready to fit to an arrow shaft.",
+        "char": ITEM_SPRITES["arrowhead"], "color": (166,178,180),
+        "value": 3, "weight": .05, "stackable": True, "item_type_tags": ["component"],
+        "crafting_recipe": {"iron_ingot": 1}, "crafting_output": 8, "required_workstation": "anvil",
+        "workplace_stock_target": 12, "workplace_priority": 60, "export_reserve": 4
+    },
+    "feather": {
+        "name": "Flight Feather", "description": "A bird feather suitable for fletching arrows.",
+        "char": ITEM_SPRITES["feather"], "color": (200,190,168),
+        "value": 1, "weight": .01, "stackable": True, "item_type_tags": ["component"]
+    },
+    "iron_spear": {
+        "name": "Iron-tipped Spear", "description": "A wooden haft fitted with a forged iron spearhead.",
+        "char": ITEM_SPRITES["iron_spear"], "color": (163,172,169),
+        "value": 32, "weight": 3, "stackable": False, "equip_slot": "main_hand",
+        "item_type_tags": ["weapon","melee","spear"],
+        "properties": {"damage_dice":"1d6","damage_bonus":2,"attack_range":2,"attack_type":"puncture","max_durability":45},
+        "crafting_recipe": {"raw_log":1,"iron_ingot":1}, "required_workstation":"anvil",
+        "workplace_stock_target":2, "workplace_priority":65
     },
     "wooden_shield": {
         "name": "Wooden Shield",

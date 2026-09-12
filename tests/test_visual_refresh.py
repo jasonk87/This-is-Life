@@ -263,7 +263,7 @@ def test_weather_layer_precedes_actors_and_menus():
                             visual_effects=[],interaction_context={"active":False})
     order = []
     names = ["_apply_lighting_and_depth","draw_weather_overlay","_draw_items","_draw_entities",
-             "_draw_entity_health_bars","_draw_entity_markers","_draw_world_markers",
+             "_draw_body_condition_labels","_draw_entity_markers","_draw_world_markers",
              "_draw_ambient_speech","draw_look_cursor","_draw_focus_badge","draw_status_panel",
              "_draw_log_panel","_draw_active_game_state_menu_with_fade"]
     with ExitStack() as stack:

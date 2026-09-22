@@ -334,6 +334,8 @@ def test_remote_service_building_is_staffed_and_produces(world, private_owner):
     # Controlled initial shortage/resources; no forced site, hire, or output.
     for building in village.buildings:
         building.residents.clear()
+        if building.category == "residential":
+            building.housing_capacity = 100  # Isolate industry, not housing pressure.
         building.max_workers = world._count_active_workers_for_building(building)
     village.supply.clear()
     world.town_board.economic_needs.append(TownEconomicNeed(type="service", target_key="Carpenter", settlement_id=village.id))

@@ -1,5 +1,4 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import engine
@@ -38,8 +37,14 @@ class TestNPCOwnedBusinessWiring(unittest.TestCase):
         # Create genuine housing pressure (residents >= capacity), the same
         # need the pre-existing village-expansion logic already requires.
         house = Building(0, 0, 5, 5, building_type="house", category="residential")
-        house.residents = [SimpleNamespace(), SimpleNamespace()]
         self.village.add_building(house)
+        self.world.buildings_by_id[house.id] = house
+        for index in range(house.housing_capacity):
+            resident = NPC(1+index, 1, name=f"Resident {index}")
+            resident.economic.money = 0  # Only the candidate can finance a project.
+            resident.schedule.home_building_id = house.id
+            house.residents.append(resident)
+            self.world.village_npcs.append(resident)
 
     def _make_candidate(self, money=400, aspiration_type=AspirationType.WEALTH, profession="Merchant", dead=False):
         npc = NPC(5, 5, name="Candidate", dialogue=["Hi"], personality="villager", player_id=self.world.player.id)
@@ -104,7 +109,7 @@ class TestNPCOwnedBusinessWiring(unittest.TestCase):
         self.assertIsNone(self.world.get_blueprint_at(14, 14))
 
     def test_no_village_need_means_no_construction_even_with_eligible_npc(self):
-        self.village.buildings[0].residents = []  # relieve housing pressure
+        self.village.buildings[0].housing_capacity = 100  # Genuine spare housing, not missing census records.
         self._make_candidate()
 
         self._run(random_value=0.0)

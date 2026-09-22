@@ -1026,6 +1026,16 @@ class TravelComponent:
     group_leader_id: int | None = None
     group_member_ids: list[int] = field(default_factory=list)
     target_employment_task_id: str | None = None
+    reserved_home_id: str | None = None
+    reserved_work_id: str | None = None
+    original_home_id: str | None = None
+    original_work_id: str | None = None
+    route: list[tuple[int, int]] = field(default_factory=list)
+    last_progress_tick: int = 0
+    departed_tick: int = 0
+    status: str = "idle"
+    failure_reason: str | None = None
+    movement_credit: float = 0.0
 
     def __setstate__(self, state):
         dataclass_setstate(self, state)

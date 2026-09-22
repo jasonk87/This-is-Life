@@ -22,6 +22,7 @@ from config import (
     ZOOM_LEVELS,
     DEFAULT_ZOOM_INDEX,
     SECONDS_PER_GAME_TICK,
+    MAX_RENDER_FPS,
 )
 from data.items import ITEM_DEFINITIONS
 from data.construction import CONSTRUCTION_RECIPES
@@ -38,9 +39,41 @@ from presentation.sensory_observation import (
 )
 from save_manager import save_game, load_game, load_save_metadata
 from ui_requests import apply_ui_requests
+from presentation.realtime import RealtimeClock, MovementInput
 
 TRADE_CAPABLE_PROFESSIONS = {"Merchant", "Miller", "Scribe", "Traveling Merchant"}
 DEFAULT_PLAYER_FIRST_NAME = "Player"
+MOVEMENT_KEYS = {tcod.event.KeySym.UP, tcod.event.KeySym.DOWN, tcod.event.KeySym.LEFT, tcod.event.KeySym.RIGHT}
+
+
+def movement_input(world):
+    if not hasattr(world, "_movement_input"):
+        world._movement_input = MovementInput()
+    return world._movement_input
+
+
+def service_movement_input(world, context):
+    """Continue a held direction or one early tap when real recovery expires."""
+    controls = movement_input(world)
+    if world.game_state != "PLAYING" or world.interaction_context.get("active"):
+        controls.clear()
+        return False
+    if getattr(world, "is_paused", False):
+        controls.clear()  # Paused play advances only on explicit presses.
+        return False
+    key = controls.next_key()
+    if key is None and world.player.state.current_path:
+        from simulation.systems.tick import advance_player_auto_movement
+        before = (world.player.x, world.player.y)
+        advance_player_auto_movement(world)
+        return (world.player.x, world.player.y) != before
+    if key is None or controls.last_attempt_tick == world.game_time:
+        return False
+    if world.game_time < getattr(world.player.state, "move_ready_tick", 0):
+        return False
+    controls.pending = None
+    controls.last_attempt_tick = world.game_time
+    return handle_playing_input(SimpleNamespace(sym=key), world, context)
 
 
 def normalize_player_first_name(raw_name: str | None) -> str:
@@ -571,15 +604,15 @@ def handle_playing_input(event: tcod.event.KeyDown, world: World, context_handle
     elif event.sym in (getattr(tcod.event.KeySym, 'N1', None), getattr(tcod.event.KeySym, 'KP_1', None), getattr(tcod.event.KeySym, '_1', None)) or event.sym == 49:
         world.simulation_speed = 1.0
         world.is_paused = False
-        world.add_message_to_chat_log("Simulation speed: 1x (Normal)", category="system")
+        world.add_message_to_chat_log("Simulation speed: 1x (Calm)", category="system")
     elif event.sym in (getattr(tcod.event.KeySym, 'N2', None), getattr(tcod.event.KeySym, 'KP_2', None), getattr(tcod.event.KeySym, '_2', None)) or event.sym == 50:
         world.simulation_speed = 2.0
         world.is_paused = False
-        world.add_message_to_chat_log("Simulation speed: 2x (Fast)", category="system")
+        world.add_message_to_chat_log("Simulation speed: 2x (Brisk)", category="system")
     elif event.sym in (getattr(tcod.event.KeySym, 'N3', None), getattr(tcod.event.KeySym, 'KP_3', None), getattr(tcod.event.KeySym, '_3', None)) or event.sym == 51:
         world.simulation_speed = 4.0
         world.is_paused = False
-        world.add_message_to_chat_log("Simulation speed: 4x (Ultra)", category="system")
+        world.add_message_to_chat_log("Simulation speed: 4x (Fast-forward)", category="system")
     elif event.sym in (getattr(tcod.event.KeySym, 'N0', None), getattr(tcod.event.KeySym, 'KP_0', None), getattr(tcod.event.KeySym, '_0', None)) or event.sym == 48:
         world.is_paused = True
         world.add_message_to_chat_log("Simulation Paused.", category="system")
@@ -1641,9 +1674,11 @@ def start_game(context, console, world_state=None, player_first_name: str | None
 
     _ensure_zoom_state(world)
 
+    # Opening a game should never restore a forgotten fast-forward setting.
+    world.simulation_speed = 1.0
+    movement_input(world).clear()
     last_time = time.perf_counter()
-    tick_accumulator = 0.0
-    MAX_ACCUMULATOR_TICKS = 5
+    realtime_clock = RealtimeClock()
 
     # Menu fade-in: tracks how long the current game_state has been active
     # so draw() can ramp a just-opened menu in from the world view over a
@@ -1660,12 +1695,15 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         dt = current_time - last_time
         last_time = current_time
 
-        # Update Animations
-        world.update_animations(dt)
-
         if world.game_state == "PLAYER_DEAD":
             render_game_over(console, context, world)
             break # Break to return to main menu
+
+        # Read controls before drawing or doing any potentially expensive tick.
+        # A successful first step is visible in this frame, not after catch-up.
+        handle_events(world, context)
+        service_movement_input(world, context)
+        world.update_animations(dt)
 
         if world.game_state != menu_fade_state:
             menu_fade_state = world.game_state
@@ -1676,29 +1714,20 @@ def start_game(context, console, world_state=None, player_first_name: str | None
         draw(console, world, camera_x, camera_y, menu_fade_ratio=menu_fade_ratio)
         context.present(console)
 
-        # Handle Input
-        player_acted = handle_events(world, context)
-
-        # Advance real-time world simulation when active
-        if (world.game_state == "PLAYING" and not getattr(world, "is_paused", False)
-                and not world.interaction_context.get("active")):
-            speed = getattr(world, "simulation_speed", 1.0)
-            if speed > 0:
-                tick_accumulator += dt * speed
-                # Clamp accumulator to prevent catch-up lag
-                tick_accumulator = min(tick_accumulator, SECONDS_PER_GAME_TICK * MAX_ACCUMULATOR_TICKS)
-
-                while tick_accumulator >= SECONDS_PER_GAME_TICK:
-                    world.update()
-                    apply_ui_requests(world, context)
-                    tick_accumulator -= SECONDS_PER_GAME_TICK
-        else:
-            tick_accumulator = 0.0
+        active = (world.game_state == "PLAYING" and not getattr(world, "is_paused", False)
+                  and not world.interaction_context.get("active"))
+        if realtime_clock.tick_due(dt, speed=world.simulation_speed, active=active):
+            world.update()
+            apply_ui_requests(world, context)
 
         if world.needs_text_input:
             if hasattr(context, "start_text_input"):
                 context.start_text_input()
             world.needs_text_input = False
+
+        remaining = 1 / MAX_RENDER_FPS - (time.perf_counter() - current_time)
+        if remaining > 0:
+            time.sleep(remaining)
 
 def run_headless(world, num_ticks):
     """Runs the game for a fixed number of ticks in headless mode."""
@@ -1759,6 +1788,14 @@ def handle_events(world, context) -> bool:
             event = converted
         if isinstance(event, tcod.event.Quit):
             raise SystemExit()
+        if (isinstance(event, getattr(tcod.event, "WindowEvent", ()))
+                and event.type.upper() in {"WINDOWFOCUSLOST", "WINDOWMINIMIZED"}):
+            movement_input(world).clear()
+            world.player.state.current_path = []
+            continue
+        if isinstance(event, getattr(tcod.event, "KeyUp", ())):
+            movement_input(world).release(event.sym)
+            continue
         if isinstance(event, (tcod.event.MouseMotion, tcod.event.MouseButtonDown)):
             world.mouse_x, world.mouse_y = int(event.position[0]), int(event.position[1])
         if isinstance(event, tcod.event.MouseWheel) and handle_mouse_wheel(world, event):
@@ -1771,6 +1808,7 @@ def handle_events(world, context) -> bool:
             elif wheel_delta < 0 and world.zoom_index > 0:
                 world.zoom_index -= 1
         if isinstance(event, tcod.event.MouseButtonDown):
+            movement_input(world).clear()
             if world.game_state == "PLAYING" and not world.interaction_context.get("active") and world.mouse_y < 3:
                 from rendering.hud import toolbar_action_at
                 action = toolbar_action_at(world, world.mouse_x, world.mouse_y)
@@ -1781,7 +1819,8 @@ def handle_events(world, context) -> bool:
             # else falls through to the world view underneath.
             if handle_menu_mouse_click(event, world, context):
                 turn_taken = True
-            elif world.game_state == "PLAYING" and _is_inside_map_view(world):
+            elif (world.game_state == "PLAYING" and not world.interaction_context.get("active")
+                  and _is_inside_map_view(world)):
                 camera_x, camera_y = _get_camera_origin(world)
                 mouse_world_x, mouse_world_y = _screen_to_world_position(world, camera_x, camera_y, world.mouse_x, world.mouse_y)
 
@@ -1815,12 +1854,15 @@ def handle_events(world, context) -> bool:
                         if path and path[0] == (world.player.x, world.player.y):
                             path.pop(0)
                         world.player.state.current_path = path
+                        if not getattr(world, "is_paused", False):
+                            from simulation.systems.tick import advance_player_auto_movement
+                            advance_player_auto_movement(world)
 
         if isinstance(event, tcod.event.TextInput) and world.chat_ui_active:
             world.chat_ui_input_line += event.text
         elif isinstance(event, tcod.event.KeyDown):
             # Stop auto-movement on manual input
-            if event.sym in [tcod.event.KeySym.UP, tcod.event.KeySym.DOWN, tcod.event.KeySym.LEFT, tcod.event.KeySym.RIGHT]:
+            if event.sym in MOVEMENT_KEYS:
                 world.player.state.current_path = []
 
             if world.game_state == "DIALOGUE":
@@ -1856,8 +1898,26 @@ def handle_events(world, context) -> bool:
             elif world.game_state == "LOOK_MODE":
                 handle_look_mode_input(event, world)
             elif world.game_state == "PLAYING":
-                if handle_playing_input(event, world, context): turn_taken = True
+                if event.sym in MOVEMENT_KEYS:
+                    # OS key-repeat has a startup delay and can queue hundreds
+                    # of events during a hitch. Hold state owns repetition.
+                    if getattr(event, "repeat", False):
+                        continue
+                    controls = movement_input(world)
+                    controls.press(event.sym)
+                    ready = world.game_time >= getattr(world.player.state, "move_ready_tick", 0)
+                    acted = handle_playing_input(event, world, context)
+                    if ready:
+                        controls.pending = None
+                        controls.last_attempt_tick = world.game_time
+                    if acted:
+                        turn_taken = True
+                else:
+                    movement_input(world).clear()
+                    if handle_playing_input(event, world, context): turn_taken = True
 
+    if world.game_state != "PLAYING" or world.interaction_context.get("active"):
+        movement_input(world).clear()
     apply_ui_requests(world, context)
     return turn_taken
 

@@ -63,7 +63,8 @@ Available scenarios include `construction_basic`, `delivery_basic`, `hunting_foo
 *   **I**, then **B**: Inspect your body and wounds; **T** treats using owned supplies.
 *   **C**: Crafting menu. **B** while playing: building menu.
 *   **Q**: Journal. **L**: Look mode. **T** while playing: talk.
-*   **Space**: Pause/resume. **1/2/3**: simulation speed. **.**: step.
+*   **Space**: Pause/resume. **1/2/3**: Calm / Brisk / Fast-forward (4 / 8 / 16 ticks per second). Games open at Calm pace, including loaded saves. **.**: step.
+*   Hold an **arrow key** to walk; release to stop. Quick taps buffer at most one additional step. **Left click** walks at the same terrain/injury-adjusted pace as the keyboard.
 *   **Esc** while playing: save. **?**: help.
 
 See [the body model](docs/body-combat-slice.md) and [combat gameplay/stabilization](docs/combat-gameplay-stabilization.md) for controls, measured behavior, verification and current limitations.

@@ -88,6 +88,12 @@ class TestTownEconomicNeeds(unittest.TestCase):
         need = TownEconomicNeed(type="service", target_key="Blacksmith", settlement_id=village.id)
         self.world.town_board.economic_needs = [need]
         self.world.town_board.employment_tasks = []
+        # A service request is not itself a job. Supply an actual employer.
+        from simulation.world_model import Building
+        shop = Building(2, 2, 5, 5, building_type="blacksmith_shop", category="commercial_workplace")
+        village.add_building(shop)
+        self.world.buildings_by_id[shop.id] = shop
+        shop.building_inventory["money"] = 100
 
         # Need to ensure the village is properly associated with the chunks where the noticeboard is
         cx, cy = npc.x // CHUNK_SIZE, npc.y // CHUNK_SIZE
@@ -106,6 +112,7 @@ class TestTownEconomicNeeds(unittest.TestCase):
         res = self.world.handle_npc_job_seeking(npc)
         self.assertTrue(res, "NPC should have picked up a job")
         self.assertEqual(npc.economic.profession, "Blacksmith")
+        self.assertEqual(npc.schedule.work_building_id, shop.id)
         self.assertEqual(len(self.world.town_board.economic_needs), 0)
 
 

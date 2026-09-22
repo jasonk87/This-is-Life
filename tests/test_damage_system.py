@@ -32,18 +32,21 @@ class TestLocalizedDamage(unittest.TestCase):
         random.choice = original_choice
 
     def test_player_broken_leg_movement_cooldown(self):
+        from simulation.systems.body_combat import ensure_body
+        from tests.test_weather_movement import stand_on_open_ground
         world = fresh_world(seed=13, pre_simulate=False)
         player = world.player
+        stand_on_open_ground(world)
+        world.weather = "clear"
+        healthy_cost = world.handle_player_movement(1, 0)
+        world.handle_player_movement(-1, 0)
         player.physical.status_effects.append("broken_leg")
-
-        initial_cooldown = player.state.move_cooldown
-        world.handle_player_movement = MagicMock(return_value=1)
-
-        # Manually trigger movement logic from update
+        ensure_body(player, world.game_time)  # Upgrade the legacy injury, not a UI throttle.
         player.state.current_path = [(player.x+1, player.y)]
+        start = world.game_time
         world.update()
-
-        self.assertEqual(player.state.move_cooldown, 10)
+        self.assertGreater(player.state.move_ready_tick - start, healthy_cost)
+        self.assertEqual(player.state.move_cooldown, 0)
 
 if __name__ == '__main__':
     unittest.main()

@@ -321,7 +321,9 @@ class TestWorldInteractionActions(unittest.TestCase):
         npc.economic.profession = "Unemployed"
         npc.ai_brain.assign_profession("Unemployed")
         self.world.village_npcs = [npc]
-        village = SimpleNamespace(interaction_points={"noticeboard": [(5, 5)]})
+        village = engine.Village()
+        village.interaction_points = {"noticeboard": [(5, 5)]}
+        village.add_building(building)
 
         with patch.object(self.world, "_get_village_for_npc", return_value=village):
             accepted = self.world.handle_npc_job_seeking(npc)
@@ -358,7 +360,12 @@ class TestWorldInteractionActions(unittest.TestCase):
         village = engine.Village()
         village.interaction_points = {"town_square_center": [(12, 12)]}
         house = engine.Building(0, 0, 5, 5, building_type="house", category="residential")
-        house.residents = [SimpleNamespace(), SimpleNamespace()]
+        residents = [engine.NPC(1, 1, name="Resident A"), engine.NPC(2, 1, name="Resident B")]
+        house.residents = residents
+        for resident in residents:
+            resident.schedule.home_building_id = house.id
+        self.world.village_npcs = residents
+        self.world.buildings_by_id[house.id] = house
         village.add_building(house)
         village.supply["raw_log"] = 50
         self.world.chunks[0][0].village = village

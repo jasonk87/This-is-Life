@@ -5,7 +5,7 @@ from simulation.systems.task_types import TaskType
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from config import DAY_LENGTH_TICKS
+from config import DAY_LENGTH_TICKS, WORK_START_TIME_RATIO, WORK_END_TIME_RATIO
 from data.professions import get_profession_data
 from simulation.systems.work import update_npc_work_sub_tasks
 
@@ -109,18 +109,24 @@ class HaulingBehavior(JobBehavior):
                     return True
             return False
 
-        profession = str(getattr(getattr(entity, "economic", None), "profession", "") or "").strip().lower()
-        is_unemployed = profession == "unemployed"
-        is_laborer = profession in {"laborer", "helper", "porter"}
-
-        # We allow laborers/unemployed to haul during any free time,
-        # and skilled workers to haul only if they are not actively doing something else,
-        # BUT we prioritize laborers.
-
-        if not is_unemployed and current_task not in self.FREE_TIME_TASKS:
+        # Even an unemployed person may be escorting, fighting or traveling.
+        # A free-time job must not replace another system's active commitment.
+        if current_task not in self.FREE_TIME_TASKS:
             return False
 
         if getattr(getattr(entity, "schedule", None), "current_path", None):
+            return False
+
+        # Movement briefly reports idle on arrival. During working hours a
+        # worker beside their sub-task station is still on their employer's
+        # errand; the daily policy restores AT_WORK later in this same turn.
+        # Do not replace fetch_ore with a construction haul in that handoff.
+        station = getattr(entity, "sub_task_target_coords", None)
+        time_in_day = int(getattr(world, "game_time", 0)) % DAY_LENGTH_TICKS
+        if (getattr(entity.schedule, "work_building_id", None)
+                and getattr(entity, "current_sub_task", None) and station
+                and WORK_START_TIME_RATIO * DAY_LENGTH_TICKS <= time_in_day < WORK_END_TIME_RATIO * DAY_LENGTH_TICKS
+                and abs(entity.x - station[0]) <= 1 and abs(entity.y - station[1]) <= 1):
             return False
 
         # Try delivery tasks first

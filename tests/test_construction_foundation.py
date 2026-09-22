@@ -25,6 +25,15 @@ class TestConstructionFoundation(unittest.TestCase):
         from simulation.systems.interaction import InteractionResolver
         self.world.interaction_resolver = InteractionResolver()
 
+    def _fill_house(self, house):
+        # Housing pressure comes from actual residents, not anonymous counters.
+        self.world.buildings_by_id[house.id] = house
+        house.residents = [NPC(1, 1, name="Resident A"), NPC(2, 1, name="Resident B")]
+        for resident in house.residents:
+            resident.schedule.home_building_id = house.id
+        self.world.village_npcs.extend(house.residents)
+        self.world._mark_entity_positions_dirty()
+
     def test_construction_site_tracks_lifecycle_fields_and_does_not_complete_on_placement(self):
         blueprint = self.world.place_construction_blueprint("house", 8, 8, owner_id=7, requester_id=8)
 
@@ -93,7 +102,7 @@ class TestConstructionFoundation(unittest.TestCase):
 
     def test_stalled_construction_due_to_material_shortage_is_visible(self):
         house = Building(0, 0, 5, 5, building_type="house", category="residential")
-        house.residents = [SimpleNamespace(), SimpleNamespace()]
+        self._fill_house(house)
         self.village.add_building(house)
 
         with patch.object(self.world, "_find_valid_building_spot", return_value=(10, 10)):
@@ -125,7 +134,7 @@ class TestConstructionFoundation(unittest.TestCase):
 
     def test_autonomous_npc_can_start_pressure_driven_home_project(self):
         house = Building(0, 0, 5, 5, building_type="house", category="residential")
-        house.residents = [SimpleNamespace(), SimpleNamespace()]
+        self._fill_house(house)
         self.village.add_building(house)
         foreman = NPC(5, 5, name="Foreman")
         foreman.economic.profession = "Foreman"
@@ -467,7 +476,7 @@ class TestConstructionFoundation(unittest.TestCase):
 
     def test_offscreen_fallback_obeys_materials_and_work_before_completion(self):
         house = Building(0, 0, 5, 5, building_type="house", category="residential")
-        house.residents = [SimpleNamespace(), SimpleNamespace()]
+        self._fill_house(house)
         self.village.add_building(house)
         self.village.supply["raw_log"] = 50
         self.world._is_blueprint_active = lambda blueprint: False

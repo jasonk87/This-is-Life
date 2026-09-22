@@ -1006,7 +1006,7 @@ def run_hunting_food_chain(seed: int, ticks: int, snapshot_config: SnapshotConfi
 
 
 def run_settlement_growth(seed: int, ticks: int, snapshot_config: SnapshotConfig | None = None) -> ScenarioResult:
-    from types import SimpleNamespace
+    from engine import NPC
 
     scenario = "settlement_growth"
     trace = SimulationTrace()
@@ -1016,7 +1016,11 @@ def run_settlement_growth(seed: int, ticks: int, snapshot_config: SnapshotConfig
     trace.event(0, "scenario_started", metadata={"scenario": scenario})
 
     house = _add_building(world, village, 10, 10, 7, 7, "house", "residential")
-    house.residents = [SimpleNamespace(id="resident_a"), SimpleNamespace(id="resident_b")]
+    for index in range(house.housing_capacity):
+        resident = NPC(11+index, 11, name=f"Resident {index}")
+        resident.schedule.home_building_id = house.id
+        house.residents.append(resident)
+        world.village_npcs.append(resident)
     before_claim_ids = set(world.land_claims_by_id.keys())
     before_blueprints = set(world.blueprints_by_id.keys())
 

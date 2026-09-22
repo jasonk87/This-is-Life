@@ -33,6 +33,8 @@ def draw_toolbar(console, world):
     for x, width, text, action in toolbar_buttons(world):
         hovered = getattr(world, "mouse_y", -1) == 1 and x <= getattr(world, "mouse_x", -1) < x+width
         active = action == "SPACE" and getattr(world, "is_paused", False)
+        if not getattr(world, "is_paused", False):
+            active |= {"N1": 1.0, "N2": 2.0, "N3": 4.0}.get(action) == getattr(world, "simulation_speed", 1.0)
         console.print(x=x, y=1, string=text.ljust(width),
                       fg=theme.SELECTION if active else theme.TEXT_DIM,
                       bg=theme.SELECTION_BG if active else theme.HOVER_BG if hovered else theme.PANEL_BG_DEEP)

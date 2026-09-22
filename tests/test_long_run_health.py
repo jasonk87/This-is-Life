@@ -1,4 +1,4 @@
-"""A month in the life of a village, checked for signs of collapse.
+"""A month of reduced macro dispatch, checked for continuity and conservation.
 
 Every one of the worst bugs found in this codebase was invisible to unit tests
 and obvious after a few simulated weeks:
@@ -11,18 +11,20 @@ and obvious after a few simulated weeks:
 * taxes never collected, because governance wanted one exact tick of the day;
 * survival needs that stopped accruing, so sleeping through the night was free.
 
-None of those break a unit test. They break a village, slowly. This runs one and
-looks for the shapes of collapse: a population that empties, an economy that
-stops moving, money that goes negative, a town that never collects a penny.
+This is NOT a normal-play survival soak: nearby NPC movement, production and
+per-tick survival/spoilage are omitted. Check real hiring, production and tax
+receipts rather than assuming unemployment, stock and treasury balances must
+improve monotonically. Consumption spends goods, payroll spends employer funds,
+and construction/civic salaries spend taxes. Adding coins to item quantities
+was neither a conservation check nor evidence that production had run.
 
-Deliberately loose. It is a smoke alarm, not a golden file - the numbers here
-have wide margins so that ordinary balance changes do not trip it, and only a
-system that has actually stopped working will. The seed is fixed and the
-simulation is reproducible (see test_simulation_determinism), so a failure here
-can be replayed exactly.
+The population/age/debt/birth alarms remain. Long-term economic balance needs
+a full dispatcher soak; these checks do not certify that towns are prosperous.
 """
 
 import unittest
+from collections import Counter
+from unittest.mock import patch
 
 from config import DAY_LENGTH_TICKS
 from engine import World
@@ -35,22 +37,54 @@ DAYS = 30
 SEED = 8675309
 
 
-class TestAVillageSurvivesAMonth(unittest.TestCase):
+class TestVillageMacroContinuity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         world = fresh_world(seed=SEED)
         cls.start = cls._snapshot(world)
+        cls.receipts = Counter()
 
-        for day in range(1, DAYS + 1):
-            for _ in range(24):
-                world.game_time += DAY_LENGTH_TICKS // 24
-                world.process_abstract_simulation()
-                world.process_macro_daily_tick()
-            world._update_economy()
-            world._run_daily_governance()
-            world._update_npc_ages()
-            world._update_npc_careers()
-            world._update_abstract_simulation()
+        assign = world._assign_job
+        produce = world._apply_abstract_production_for_worker
+        collect = world._collect_daily_city_taxes
+
+        def track_hire(npc, building, **kwargs):
+            result = assign(npc, building, **kwargs)
+            if result:
+                assert npc.schedule.work_building_id == building.id
+                cls.receipts["hires"] += 1
+            return result
+
+        def track_production(npc, building):
+            before = Counter(dict(building.building_inventory))
+            result = produce(npc, building)
+            output = Counter(dict(building.building_inventory)) - before
+            cls.receipts["produced_units"] += sum(q for k, q in output.items() if k != "money")
+            return result
+
+        def track_taxes(hall):
+            holders = [*world.buildings_by_id.values(), *world.village_npcs, world.player]
+            before_money = sum(world._get_trade_money_balance(h) for h in holders)
+            before_treasury = world._get_trade_money_balance(hall)
+            result = collect(hall)
+            assert world._get_trade_money_balance(hall) - before_treasury == result
+            assert sum(world._get_trade_money_balance(h) for h in holders) == before_money
+            cls.receipts["taxes"] += result
+            return result
+
+        with patch.object(world, "_assign_job", side_effect=track_hire), \
+             patch.object(world, "_apply_abstract_production_for_worker", side_effect=track_production), \
+             patch.object(world, "_collect_daily_city_taxes", side_effect=track_taxes):
+            for day in range(1, DAYS + 1):
+                for _ in range(24):
+                    world.game_time += DAY_LENGTH_TICKS // 24
+                    world.process_abstract_simulation()
+                    world.process_macro_daily_tick()
+                world._update_economy()
+                world._run_daily_governance()
+                world._update_npc_ages()
+                world._update_npc_careers()
+                world._update_abstract_simulation()
 
         cls.world = world
         cls.end = cls._snapshot(world)
@@ -94,30 +128,17 @@ class TestAVillageSurvivesAMonth(unittest.TestCase):
         )
 
     def test_people_found_work(self):
-        self.assertLessEqual(
-            self.end["unemployed"], self.start["unemployed"],
-            f"unemployment rose from {self.start['unemployed']} to "
-            f"{self.end['unemployed']}",
-        )
+        self.assertGreater(self.receipts["hires"], 0, "no actual job assignment succeeded in a month")
 
     def test_the_economy_moved(self):
-        """Villagers earn and villages accumulate stock. If both are flat, the
-        work chains or the abstract economy have stopped running."""
-        self.assertGreater(
-            self.end["money"] + self.end["supply"],
-            self.start["money"] + self.start["supply"],
-            "a month passed and the village neither earned nor produced anything",
-        )
+        self.assertGreater(self.receipts["produced_units"], 0, "workers produced no physical goods in a month")
 
     def test_the_town_collected_taxes(self):
         """The shape of the governance bug: it wanted one exact tick of the day
         and a jumping clock never landed on it."""
         if self.world.get_town_hall_building() is None:
             self.skipTest("this world generated no town hall")
-        self.assertGreater(
-            self.end["treasury"], self.start["treasury"],
-            "the treasury did not grow in a month, so governance never ran",
-        )
+        self.assertGreater(self.receipts["taxes"], 0, "governance transferred no taxes in a month")
 
     def test_nobody_is_in_debt(self):
         debtors = [

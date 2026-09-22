@@ -73,18 +73,15 @@ class TestRealtimeSimulation(unittest.TestCase):
     def test_realtime_accumulator_ticks_in_playing_state(self):
         """Simulate time passage and verify ticks occur at proper rate."""
         initial_time = self.world.game_time
-        dt = 0.5  # Half a second at 10 ticks/s = 5 ticks
-        speed = 1.0
-        tick_accumulator = dt * speed
+        from presentation.realtime import RealtimeClock
+        clock = RealtimeClock()
         ticks_executed = 0
-
-        while tick_accumulator >= SECONDS_PER_GAME_TICK:
-            self.world.update()
-            tick_accumulator -= SECONDS_PER_GAME_TICK
-            ticks_executed += 1
-
-        self.assertEqual(ticks_executed, 5)
-        self.assertEqual(self.world.game_time, initial_time + 5)
+        for _ in range(30):  # Half a second of real rendered frames at calm pace.
+            if clock.tick_due(1/60):
+                self.world.update()
+                ticks_executed += 1
+        self.assertEqual(ticks_executed, 2)
+        self.assertEqual(self.world.game_time, initial_time + 2)
 
 
 if __name__ == "__main__":

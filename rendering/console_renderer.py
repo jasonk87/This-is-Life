@@ -3403,7 +3403,7 @@ HELP_CONTROLS = [
     ("Move", "Arrows / Left Click"),
     ("Interact", "E / Right Click"),
     ("Pause / Resume", "Space / P"),
-    ("Sim Speed (1-4x)", "1 / 2 / 3"),
+    ("Pace (Calm to Fast)", "1 / 2 / 3"),
     ("Single Step", "."),
     ("Look Around", "L"),
     ("Talk", "T"),

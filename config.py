@@ -84,9 +84,12 @@ BASE_TAMING_CHANCE = 0.2
 HOURS_PER_DAY = 24
 MINUTES_PER_HOUR = 60
 SECONDS_PER_MINUTE = 60
-GAME_TICKS_PER_SECOND = 10
+# Presentation pace only. A tick still runs every simulation system; game-day
+# lengths, work, combat and healing continue to use the same simulation ticks.
+GAME_TICKS_PER_SECOND = 4
 SECONDS_PER_GAME_TICK = 1 / GAME_TICKS_PER_SECOND
-TIME_PER_TICK = (HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE) / (GAME_TICKS_PER_SECOND * 60 * 24) # Placeholder for more complex time system
+MAX_RENDER_FPS = 30
+TIME_PER_TICK = (HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE) / DAY_LENGTH_TICKS  # Simulated seconds, independent of playback speed.
 INITIAL_TIME_OF_DAY = int(DAY_LENGTH_TICKS * (8 / HOURS_PER_DAY)) # 8:00 AM
 
 # FOV and Light Level

@@ -405,9 +405,23 @@ def choose_ambient_conversation_pair(world):
     """Choose the highest-scoring ambient speaker/listener pair, if any."""
     candidates = []
     npcs = list(getattr(world, "village_npcs", []) or [])
+    # Only pairs within the existing Manhattan-distance limit can score.
+    # Spatial buckets avoid rescoring every cross-world pair each tick; all
+    # eligible directed pairs retain the original scoring and tie-break rules.
+    buckets = {}
+    for npc in npcs:
+        cell = (int(getattr(npc, "x", 0)) // MAX_INITIATION_DISTANCE,
+                int(getattr(npc, "y", 0)) // MAX_INITIATION_DISTANCE)
+        buckets.setdefault(cell, []).append(npc)
     for speaker in npcs:
-        for listener in npcs:
+        sx, sy = int(getattr(speaker, "x", 0)), int(getattr(speaker, "y", 0))
+        cx, cy = sx // MAX_INITIATION_DISTANCE, sy // MAX_INITIATION_DISTANCE
+        neighbors = (listener for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                     for listener in buckets.get((cx+dx, cy+dy), ()))
+        for listener in neighbors:
             if getattr(speaker, "id", None) == getattr(listener, "id", None):
+                continue
+            if _distance(speaker, listener) > MAX_INITIATION_DISTANCE:
                 continue
             score = score_ambient_conversation_pair(speaker, listener, world)
             if score < MIN_INITIATION_SCORE:

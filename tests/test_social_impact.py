@@ -35,6 +35,8 @@ class TestSocialImpact(unittest.TestCase):
 
         # Create a workplace
         self.mill = Building(10, 10, 5, 5, "lumber_mill", global_chunk_x_start=0, global_chunk_y_start=0)
+        self.mill.max_workers = 3  # Foreman, existing worker, and the tested hire.
+        self.mill.building_inventory["money"] = 200  # Keep the boss employed while testing dismissal.
         self.world.buildings_by_id[self.mill.id] = self.mill
 
         # Create Boss

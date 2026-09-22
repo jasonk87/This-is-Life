@@ -25,6 +25,7 @@ class Building:
         self.interior_decorated = False
         self.occupants = []
         self.residents = []
+        self.housing_capacity = max(2, (width-2)*(height-2)//8)
         self.building_inventory = Inventory()
         self.interaction_points = {}
         self.work_zone_tiles: dict[str, list[tuple[int, int]]] = {}

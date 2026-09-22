@@ -20,9 +20,6 @@ def advance_player_auto_movement(world) -> None:
         return
     if world.game_time < getattr(player.state, "move_ready_tick", 0):
         return
-    if player.state.move_cooldown > 0:
-        player.state.move_cooldown -= 1
-        return
 
     next_x, next_y = player.state.current_path[0]
     dx = next_x - player.x
@@ -34,10 +31,11 @@ def advance_player_auto_movement(world) -> None:
         player.state.current_path = []
         return
 
-    player.state.move_cooldown = round(5 / max(.1, functions_for(player)["movement"]))
+    # Click-to-walk pays the same terrain/body recovery as a keyboard step.
+    # The old extra five-tick cooldown stacked after that recovery and made
+    # healthy players several times slower than the villagers around them.
+    player.state.move_cooldown = 0  # Retired field retained for old saves.
     player.state.move_ready_tick = world.game_time + max(1, action_cost)
-    if not player.combat.anatomy.body_plan and "broken_leg" in player.physical.status_effects:
-        player.state.move_cooldown += 5
     # Movement recovery is paid on actual future ticks, not by jumping the
     # clock while giving every other actor only one movement update.
 

@@ -1817,9 +1817,14 @@ class World:
         need = next((n for n in self.town_board.economic_needs if n.id == task_id), None)
         if need is not None:
             if need.type == "service":
-                self._set_entity_profession(self.player, need.target_key, reason="town_need")
-                self.town_board.economic_needs.remove(need)
-                self.add_message_to_chat_log(f"You have stepped up to become the town's {need.target_key}.")
+                task = next((t for t in self.town_board.get_open_employment_tasks()
+                             if normalize_profession(t.profession_role) == normalize_profession(need.target_key)
+                             and (b := self.buildings_by_id.get(t.target_building_id))
+                             and b.settlement_id == need.settlement_id), None)
+                if task is not None:
+                    return self.accept_player_employment(task.id)
+                self.add_message_to_chat_log("This town needs a workplace or an employer before it can offer that job.")
+                return False
             elif need.type == "shortage":
                 self.player.knowledge.active_quests[need.id] = {
                     "title": f"Supply {need.target_key.replace('_', ' ').title()}",
@@ -3064,6 +3069,8 @@ class World:
         for npc in sleeping_npcs:
             if npc not in self.village_npcs:
                 continue
+            if npc.travel.is_traveling:
+                continue
             if str(getattr(npc.economic, "profession", "")).lower() != "unemployed":
                 continue
             if random.random() >= self.ABSTRACT_HIRE_CHANCE_PER_HOUR:
@@ -3125,7 +3132,10 @@ class World:
         building = self.buildings_by_id.get(employment_task.target_building_id)
         if building is None:
             return False
-        if not self.town_board.claim_employment_task(employment_task, npc.id):
+        if self._count_active_workers_for_building(building) >= building.max_workers:
+            return False
+        reserved_for_self = employment_task.status == "claimed" and employment_task.assigned_entity_id == npc.id
+        if not reserved_for_self and not self.town_board.claim_employment_task(employment_task, npc.id):
             return False
         hired = self._assign_job(
             npc,
@@ -3142,7 +3152,7 @@ class World:
         return True
 
     def handle_npc_job_seeking(self, npc: NPC) -> bool:
-        if npc is None or npc.physical.is_dead or normalize_profession(npc.economic.profession) != "Unemployed":
+        if npc is None or npc.physical.is_dead or npc.travel.is_traveling or normalize_profession(npc.economic.profession) != "Unemployed":
             return False
         # A visitor reads this town's board, not a board back at their home.
         # Outside a settlement, a job seeker may still be en route home.
@@ -3157,15 +3167,7 @@ class World:
             and (village is None or getattr(building, "settlement_id", None) in {None, village_id})
         ]
 
-        # Check for economic needs they can fulfill
-        open_service_needs = []
-        if village_id:
-            open_service_needs = [
-                need for need in self.town_board.economic_needs
-                if need.settlement_id == village_id and need.type == "service"
-            ]
-
-        if not noticeboard_points or (not available_jobs and not open_service_needs):
+        if not noticeboard_points or not available_jobs:
             if npc.schedule.current_task == "reviewing_noticeboard_jobs":
                 npc.schedule.current_task = TaskType.IDLE
                 npc.schedule.current_destination_coords = None
@@ -3179,20 +3181,11 @@ class World:
         # the path of anyone blocked by an occupant, and nothing here ever
         # cleared the task, so they froze on the errand permanently.
         if max(abs(npc.x - board_x), abs(npc.y - board_y)) <= 1:
-            # First, check if they can just take an open service role to fulfill a town need
-            if open_service_needs:
-                for need in open_service_needs:
-                    # Very simple evaluation: take the job if we're unemployed
-                    self._set_entity_profession(npc, need.target_key, reason="town_need")
-                    self.town_board.economic_needs.remove(need)
-                    npc.schedule.current_task = TaskType.IDLE
-                    npc.schedule.current_path = []
-                    npc.schedule.current_destination_coords = None
-                    self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} stepped up to become a {need.target_key} for the town.")
-                    return True
-
             task = self._find_best_employment_task_for_npc(npc, village=village)
             if task and self._hire_npc_from_employment_task(npc, task):
+                from simulation.systems.economy import _update_village_economic_needs
+                if village is not None:
+                    _update_village_economic_needs(self, village)
                 npc.schedule.current_task = TaskType.IDLE
                 npc.schedule.current_path = []
                 npc.schedule.current_destination_coords = None
@@ -3331,7 +3324,10 @@ class World:
         """Updates animation states for all entities and visual effects."""
         # Update Entity Interpolation
         # Movement speed in tiles per second for animation
-        ANIMATION_SPEED = 20.0
+        from config import GAME_TICKS_PER_SECOND
+        # Reach the next tile over most of a calm tick, rather than darting
+        # there in 50ms and standing still until the next simulation step.
+        ANIMATION_SPEED = GAME_TICKS_PER_SECOND * max(1.0, getattr(self, "simulation_speed", 1.0)) * 1.2
         ANIMATION_SNAP_DISTANCE = 2.0
 
         for entity in itertools.chain([self.player], self.all_npcs):
@@ -4040,6 +4036,8 @@ class World:
                         arrival_village = self._get_village_for_npc(npc, by_coords=True)
                         if arrival_village:
                             shared_memories = self.share_abstract_rumors_with_settlement(npc, arrival_village)
+                            from simulation.systems.migration import learn_local_opportunities
+                            learn_local_opportunities(self, npc, arrival_village)
                             if shared_memories:
                                     self.add_message_to_chat_log(
                                         f"{self.get_entity_display_name(npc)} passed along {len(shared_memories)} rumor(s) from the road."
@@ -4618,6 +4616,9 @@ class World:
             if not can_act(npc):
                 continue
             if update_wolf_combat(self, npc) or respond_to_wildlife(self, npc):
+                continue
+            from simulation.systems.migration import prepare_active
+            if prepare_active(self, npc):
                 continue
 
             npc_inventory = getattr(getattr(npc, "economic", None), "npc_inventory", None)
@@ -5400,8 +5401,15 @@ class World:
             population.population_count = max(0, population.population_count - 1)
             population.refresh_pressure()
             meat_key = "raw_venison" if population.species_key == "deer" else "raw_meat"
-            village.supply[meat_key] = village.supply.get(meat_key, 0) + 1
+            storage = self.buildings_by_id.get(hunter.schedule.work_building_id)
+            if storage is None or storage.settlement_id != village.id:
+                from simulation.systems.economy import _find_storage_building
+                storage = _find_storage_building(village)
+            inventory = storage.building_inventory if storage else hunter.economic.npc_inventory
+            inventory.add_item(meat_key, 1)
             output += 1
+        from simulation.systems.economy import refresh_supply
+        refresh_supply(village)
         self._refresh_village_food_pressure(village)
         return output
 
@@ -6188,7 +6196,7 @@ class World:
                                 from entities.items import ItemReference
                                 price = self.quote_item_reference_price(ItemReference(missing_item), village=village)
                                 # Transfer money and item
-                                if work_building.building_inventory.get("money", 0) >= price or getattr(work_building, "owner_id", None) is None:
+                                if work_building.building_inventory.get("money", 0) >= price:
                                     is_active = self._is_building_active(work_building) or self._is_building_active(b)
 
                                     if is_active:
@@ -6208,14 +6216,8 @@ class World:
                                         return True
                                     else:
                                         # Abstract logistics mode (offscreen fallback)
-                                        if getattr(work_building, "owner_id", None) is not None:
-                                            work_building.building_inventory["money"] -= price
-                                            b.building_inventory["money"] = b.building_inventory.get("money", 0) + price
-
-                                        # physically transfer 1 ref
-                                        ref = b.building_inventory.pop_item_reference(missing_item)
-                                        if ref:
-                                            work_building.building_inventory.add_item_reference(ref)
+                                        ref = b.building_inventory.get_item_reference(missing_item)
+                                        if ref and self.execute_trade(work_building, b, ref, price, equip_purchase=False):
                                             # Show hauling action
                                             if hasattr(self, "visual_effects"):
                                                 # Avoid direct engine import per nitpicks, already in engine anyway
@@ -6691,7 +6693,7 @@ class World:
         return [
             npc
             for npc in self.village_npcs
-            if not npc.physical.is_dead and self._get_village_for_npc(npc) == settlement
+            if not npc.physical.is_dead and not npc.travel.is_traveling and self._get_village_for_npc(npc) == settlement
         ]
 
     def _get_family_migration_unit(self, npc: NPC | None) -> list[NPC]:
@@ -6817,40 +6819,9 @@ class World:
                 self.record_memory_event(resident, memory)
                 settlement.noticeboard_rumors[memory.id] = memory
 
-    def _find_aspiration_destination(self, npc: NPC, current_settlement: Village | None) -> tuple[Village | None, dict | None]:
-        memories = list(getattr(getattr(npc, "knowledge", None), "known_memories", {}).values())
-        current_settlement_id = getattr(current_settlement, "id", None)
-        aspiration_type = getattr(getattr(npc, "aspiration", None), "aspiration_type", None)
-        if aspiration_type == AspirationType.WEALTH:
-            best_memory = None
-            best_wage = max(0, int(getattr(getattr(npc, "economic", None), "daily_wage", 0)))
-            for memory in memories:
-                if memory.event_type != "job_opportunity":
-                    continue
-                destination_id = memory.metadata.get("settlement_id")
-                wage = int(memory.metadata.get("daily_wage", 0))
-                if destination_id == current_settlement_id or wage <= best_wage:
-                    continue
-                best_memory = memory
-                best_wage = wage
-            if best_memory is not None:
-                return self.get_settlement_by_id(best_memory.metadata.get("settlement_id")), best_memory.metadata
-        elif aspiration_type == AspirationType.POWER:
-            office_memories = [memory for memory in memories if memory.event_type == "office_opening"]
-            office_memories.sort(key=lambda memory: (-memory.importance_score, memory.timestamp, memory.id))
-            if office_memories:
-                return self.get_settlement_by_id(office_memories[0].metadata.get("settlement_id")), office_memories[0].metadata
-        elif aspiration_type == AspirationType.PEACE:
-            tax_memories = [
-                memory
-                for memory in memories
-                if memory.event_type == "tax_climate"
-                and float(memory.metadata.get("tax_rate", 1.0)) < float(getattr(current_settlement, "tax_rate", 1.0))
-            ]
-            tax_memories.sort(key=lambda memory: (float(memory.metadata.get("tax_rate", 1.0)), -memory.importance_score))
-            if tax_memories:
-                return self.get_settlement_by_id(tax_memories[0].metadata.get("settlement_id")), tax_memories[0].metadata
-        return None, None
+    def _find_aspiration_destination(self, npc, current_settlement):
+        from simulation.systems.migration import find_destination
+        return find_destination(self, npc, current_settlement)
 
     def _remove_npc_from_settlement_membership(self, npc: NPC | None, settlement: Village | None) -> None:
         if npc is None or settlement is None:
@@ -6867,39 +6838,9 @@ class World:
             if holder_id == npc.id:
                 settlement.local_offices[office_name] = None
 
-    def _start_family_migration(self, leader: NPC, destination: Village, metadata: dict | None = None) -> bool:
-        if leader is None or destination is None:
-            return False
-        origin_settlement = self._get_village_for_npc(leader)
-        family_unit = self._get_family_migration_unit(leader)
-        if not family_unit:
-            return False
-        destination_coords = destination.interaction_points.get("town_square_center", [(destination.buildings[0].global_center_x, destination.buildings[0].global_center_y) if destination.buildings else (leader.x, leader.y)])[0]
-        group_ids = [member.id for member in family_unit]
-        distance = math.dist((leader.macro_x, leader.macro_y), destination_coords)
-        eta_days = max(1, int(math.ceil(distance / max(1, CHUNK_SIZE * 2))))
-        for member in family_unit:
-            self._remove_npc_from_settlement_membership(member, origin_settlement)
-            member.travel = TravelComponent(
-                is_traveling=True,
-                origin_settlement_id=getattr(origin_settlement, "id", None),
-                destination_settlement_id=destination.id,
-                destination_coords=destination_coords,
-                eta_days=eta_days,
-                group_leader_id=leader.id,
-                group_member_ids=group_ids,
-                target_employment_task_id=(metadata or {}).get("employment_task_id"),
-            )
-            member.aspiration.target_settlement_id = destination.id
-            member.schedule.current_task = "traveling_between_settlements"
-            member.is_sleeping = True
-        self.record_migration_event(
-            npc=leader,
-            migration_kind="migrated",
-            description=f"{{subject}} set out for another settlement.",
-            location=(leader.x, leader.y),
-        )
-        return True
+    def _start_family_migration(self, leader, destination, metadata=None):
+        from simulation.systems.migration import start
+        return start(self, leader, destination, metadata)
 
     MERCHANT_DEPARTURE_CHANCE_PER_DAY = 0.5
 
@@ -6956,8 +6897,10 @@ class World:
                     npc.leisure_timer = random.randint(DAY_LENGTH_TICKS // 4, DAY_LENGTH_TICKS)
                     if destination is not None:
                         self.share_abstract_rumors_with_settlement(npc, destination)
-                        from simulation.systems.weapon_economy import market_trade
-                        market_trade(self, npc, destination)
+                        from simulation.systems.migration import learn_local_opportunities
+                        from simulation.systems.economy import process_traveling_merchant_village_trade
+                        learn_local_opportunities(self, npc, destination)
+                        process_traveling_merchant_village_trade(self, npc, destination)
                     arrivals += 1
                 continue
 
@@ -6979,36 +6922,9 @@ class World:
             npc.schedule.current_task = "traveling_to_village"
         return arrivals
 
-    def _complete_travel_arrival(self, leader: NPC) -> None:
-        travel = getattr(leader, "travel", None)
-        if travel is None or not travel.is_traveling:
-            return
-        destination = self.get_settlement_by_id(travel.destination_settlement_id)
-        if destination is None:
-            return
-        group_members = [
-            member
-            for member in self.all_npcs
-            if getattr(getattr(member, "travel", None), "group_leader_id", None) == leader.id
-        ]
-        if leader not in group_members:
-            group_members.append(leader)
-        destination_coords = travel.destination_coords or destination.interaction_points.get("town_square_center", [(leader.x, leader.y)])[0]
-        for member in group_members:
-            member.travel.is_traveling = False
-            member.travel.eta_days = 0
-            member.macro_x, member.macro_y = destination_coords
-            member.x, member.y = destination_coords
-            member.schedule.current_task = TaskType.IDLE
-            vacant_home = next((building for building in destination.buildings if building.category == "residential" and len(building.residents) < 2), None)
-            if vacant_home is not None and member not in vacant_home.residents:
-                vacant_home.residents.append(member)
-                member.schedule.home_building_id = vacant_home.id
-            if member.id == leader.id and member.travel.target_employment_task_id:
-                task = self.town_board.get_employment_task(member.travel.target_employment_task_id)
-                if task is not None:
-                    self._hire_npc_from_employment_task(member, task)
-        self.share_abstract_rumors_with_settlement(leader, destination)
+    def _complete_travel_arrival(self, leader):
+        from simulation.systems.migration import arrive
+        return arrive(self, leader)
 
     def periods_elapsed(self, gate_key: str, interval_ticks: int, *, max_catch_up: int = 100) -> int:
         """How many whole `interval_ticks` periods have passed since this last fired.
@@ -7094,52 +7010,23 @@ class World:
         return True
 
     def process_macro_daily_tick(self) -> None:
+        from simulation.systems.migration import advance
+        advance(self)
         current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
-        if not self.begin_new_day("macro_daily"):
-            return
-        if current_day <= self.last_macro_daily_day:
+        if not self.begin_new_day("macro_daily") or current_day <= self.last_macro_daily_day:
             return
         self.last_macro_daily_day = current_day
-
-        settlements = list(getattr(self, "villages", []))
-        for settlement in settlements:
+        for settlement in self.villages:
             self._sync_village_employment_tasks(settlement)
             self._seed_settlement_macro_knowledge(settlement)
             self._maybe_trigger_npc_owned_construction(settlement)
-
-        sleeping_npcs = [
-            npc for npc in self.village_npcs
-            if not npc.physical.is_dead and getattr(npc, "is_sleeping", False)
-        ]
-
         self._advance_abstract_merchant_travel()
-
-        processed_groups: set[int] = set()
-        for npc in sleeping_npcs:
-            travel = getattr(npc, "travel", None)
-            if travel is None or not travel.is_traveling or travel.group_leader_id != npc.id:
+        for npc in list(self.village_npcs):
+            if npc.physical.is_dead or npc.age < 18 or npc.travel.is_traveling:
                 continue
-            if npc.id in processed_groups:
-                continue
-            travel.eta_days = max(0, int(travel.eta_days) - 1)
-            for member in self.all_npcs:
-                member_travel = getattr(member, "travel", None)
-                if member_travel and member_travel.group_leader_id == npc.id:
-                    member_travel.eta_days = travel.eta_days
-            if travel.eta_days <= 0:
-                self._complete_travel_arrival(npc)
-            processed_groups.add(npc.id)
-
-        for npc in sleeping_npcs:
-            if getattr(getattr(npc, "travel", None), "is_traveling", False):
-                continue
-            if getattr(npc, "age", 0) < 18:
-                continue
-            current_settlement = self._get_village_for_npc(npc)
-            destination, metadata = self._find_aspiration_destination(npc, current_settlement)
-            if destination is None or current_settlement is destination:
-                continue
-            self._start_family_migration(npc, destination, metadata)
+            destination, metadata = self._find_aspiration_destination(npc, self._get_village_for_npc(npc))
+            if destination is not None:
+                self._start_family_migration(npc, destination, metadata)
 
     def _find_nearest_building_of_type(self, npc: NPC, building_type: str) -> Building | None:
         """Finds the nearest building of a specific type in the NPC's village."""
@@ -7743,10 +7630,10 @@ class World:
             return False
         return True
 
-    def _assign_haul_task_to_npc(self, npc: NPC) -> bool:
+    def _assign_haul_task_to_npc(self, npc: NPC, *, blueprint_id: str | None = None) -> bool:
         best_choice = None
         best_distance = None
-        for task in self.town_board.get_open_tasks():
+        for task in self.town_board.get_open_tasks(blueprint_id):
             blueprint = self.blueprints_by_id.get(task.blueprint_id)
             if blueprint is None or not blueprint.needs_material(task.item_key):
                 continue
@@ -7893,15 +7780,17 @@ class World:
                 buildable.append(blueprint)
         return buildable
 
-    def _assign_construction_task_to_npc(self, npc: NPC) -> bool:
+    def _assign_construction_task_to_npc(self, npc: NPC, *, blueprint_id: str | None = None) -> bool:
         profession = str(getattr(getattr(npc, "economic", None), "profession", "") or "").strip().lower()
         is_owner_or_manager = profession in {"owner", "manager", "foreman"}
         if not self._is_construction_worker_role(npc) and not is_owner_or_manager:
             return False
 
         npc_id = getattr(npc, "id", None)
+        buildable = [bp for bp in self._get_buildable_blueprints()
+                     if blueprint_id is None or bp.id == blueprint_id]
         # If NPC is already assigned to a buildable blueprint, consider it already assigned.
-        for blueprint in self._get_buildable_blueprints():
+        for blueprint in buildable:
             if npc_id in getattr(blueprint, "assigned_workers", []):
                 npc.schedule.current_task = "constructing_site"
                 npc.task_context = "construction"
@@ -7909,7 +7798,7 @@ class World:
 
         best_blueprint = None
         best_distance = None
-        for blueprint in self._get_buildable_blueprints():
+        for blueprint in buildable:
             if is_owner_or_manager and self._has_available_construction_worker(blueprint, excluding_id=npc_id):
                 continue
             if npc_id in getattr(blueprint, "assigned_workers", []):
@@ -8133,10 +8022,9 @@ class World:
 
             village = self._get_village_for_npc(npc, by_coords=True)
             price = self.quote_item_reference_price(item_reference, village=village)
-            if dest_building.building_inventory.get("money", 0) >= price or getattr(dest_building, "owner_id", None) is None:
-                if getattr(dest_building, "owner_id", None) is not None:
-                    dest_building.building_inventory["money"] -= price
-                    source_building.building_inventory["money"] = source_building.building_inventory.get("money", 0) + price
+            if dest_building.building_inventory.get("money", 0) >= price:
+                dest_building.building_inventory["money"] -= price
+                source_building.building_inventory["money"] = source_building.building_inventory.get("money", 0) + price
                 dest_building.building_inventory.add_item_reference(item_reference)
             else:
                 self.drop_item_reference_on_map(item_reference, npc.x, npc.y)
@@ -9362,9 +9250,11 @@ class World:
         ]
 
     def _count_active_workers_for_building(self, building: Building | None) -> int:
+        """Committed worker slots, including reserved incoming hires."""
         if building is None:
             return 0
-        return int(self.player.economic.job_building_id == building.id and not self.player.physical.is_dead) + sum(
+        from simulation.systems.migration import reserved_workers
+        return reserved_workers(self, building) + int(self.player.economic.job_building_id == building.id and not self.player.physical.is_dead) + sum(
             1
             for villager in self.village_npcs
             if villager.schedule.work_building_id == building.id and not villager.physical.is_dead
@@ -15031,6 +14921,8 @@ class World:
         self._mark_production_task_progress(task, now, actor=actor, trace_type="workshop_interaction_started", metadata={"workshop_id": workshop.workshop_id, "interaction_id": result.started_interaction_id})
 
     def _advance_build_component_task(self, task: ProductionTask) -> None:
+        from simulation.systems.body_combat import can_act
+
         now = int(getattr(self, "game_time", 0) or 0)
         blueprint = self.blueprints_by_id.get(task.metadata.get("blueprint_id"))
         component_id = task.metadata.get("component_id")
@@ -15048,15 +14940,31 @@ class World:
             self._mark_production_task_progress(task, now, trace_type="production_task_completed", metadata={"reason": "component_complete"})
             return
         for actor in self.village_npcs:
+            # Dormant settlements have their own abstract construction pass;
+            # local crews must be available and belong to this jurisdiction.
+            if actor.is_sleeping or actor.travel.is_traveling or actor.schedule.is_jailed or not can_act(actor):
+                continue
+            settlement_id = getattr(blueprint, "settlement_id", None)
+            if settlement_id and getattr(self._get_village_for_npc(actor), "id", None) != settlement_id:
+                continue
+            context = getattr(actor, "task_context", None)
+            if context in {"hauling", "construction"}:
+                if (getattr(actor, "task_context_data", None) or {}).get("blueprint_id") != blueprint.id:
+                    continue
+            else:
+                if context in {"delivery", "stockpile_hauling"} or actor.schedule.current_task not in self.ROUTINE_SETTLE_TASKS:
+                    continue
+                if actor.schedule.work_building_id and not self._is_construction_worker_role(actor):
+                    continue
             if getattr(actor, "task_context", None) == "hauling":
                 self._handle_npc_hauling_task(actor)
             elif getattr(actor, "task_context", None) == "construction":
                 self._handle_npc_construction_task(actor)
             elif component.has_all_materials():
-                if self._assign_construction_task_to_npc(actor):
+                if self._assign_construction_task_to_npc(actor, blueprint_id=blueprint.id):
                     self._mark_production_task_progress(task, now, actor=actor, trace_type="build_started", metadata={"component_id": component.id})
             else:
-                self._assign_haul_task_to_npc(actor)
+                self._assign_haul_task_to_npc(actor, blueprint_id=blueprint.id)
         if not component.has_all_materials():
             self._mark_production_task_blocked(task, "missing_materials", now, cooldown=15)
             task.status = "delivering"
@@ -17710,6 +17618,25 @@ class World:
         if inv is None or eq is None:
             return
 
+        if entity in getattr(self, "village_npcs", []) or entity in getattr(self, "npcs", []):
+            # Starter kits belong to world generation. Changing jobs must not
+            # manufacture new axes, food or arrows in an existing person's bag.
+            required = {
+                "Sheriff": ("rusty_sword", "leather_jerkin"), "Guard": ("rusty_sword", "leather_jerkin"),
+                "Blacksmith": ("axe_stone",), "Woodcutter": ("axe_stone",), "Lumber Mill Foreman": ("axe_stone",),
+                "Farmer": ("knife_stone",), "Cowherd": ("knife_stone",), "Hunter": ("short_bow", "arrow", "knife_stone"),
+                "Miner": ("stone_pickaxe",), "Baker": ("knife_stone",), "Miller": ("knife_stone",),
+                "Merchant": ("knife_stone",), "Tavern Keeper": ("knife_stone",),
+            }.get(prof, ())
+            workplace = self.buildings_by_id.get(entity.schedule.work_building_id)
+            for key in required:
+                if inv.get(key, 0) or workplace is None:
+                    continue
+                ref = workplace.building_inventory.get_item_reference(key)
+                if ref is not None:
+                    self.execute_trade(entity, workplace, ref, max(1, ref.value))
+            return
+
         if prof in ["Sheriff", "Guard"]:
             if "rusty_sword" in ITEM_DEFINITIONS:
                 inv["rusty_sword"] = max(inv.get("rusty_sword", 0), 1)
@@ -18372,7 +18299,7 @@ class World:
     def _pay_daily_company_wages(self) -> None:
         current_day = self.game_time // max(1, DAY_LENGTH_TICKS)
         for npc in list(self.village_npcs):
-            if npc.physical.is_dead or normalize_profession(npc.economic.profession) == "Unemployed":
+            if npc.physical.is_dead or npc.travel.is_traveling or normalize_profession(npc.economic.profession) == "Unemployed":
                 continue
             if npc.schedule.last_paid_day >= current_day:
                 continue
@@ -18394,52 +18321,52 @@ class World:
             if getattr(npc.economic, "work_performance", 50) > 80:
                 wage += int(wage * 0.2) # 20% bonus
 
-            if getattr(work_building, "owner_id", None) is not None:
-                building_balance = self._get_trade_money_balance(work_building)
-                if building_balance < wage:
-                    owner_name = "your business" if getattr(work_building, "owner_id", None) == self.player.id else "the business"
-                    unpaid_wage_memory = self.create_memory_event(
-                        event_type="unpaid_wages",
-                        subject_id=getattr(work_building, "owner_id", None),
-                        target_id=npc.id,
-                        importance_score=70,
-                        headline=f"{npc.name} quit after missing wages at the {work_building.building_type.replace('_', ' ')}.",
-                        location=(work_building.global_center_x, work_building.global_center_y),
-                        metadata={
-                            "building_id": work_building.id,
-                            "profession": npc.economic.profession,
-                            "wage": wage,
-                        },
-                    )
-                    self.record_memory_event(npc, unpaid_wage_memory)
-                    # Being stiffed for a day's pay is a grievance, so it goes
-                    # into the incident layer too - that is what carries it to
-                    # witnesses, into gossip, and onto the owner's reputation.
-                    # The memory above only ever reached the worker themselves.
-                    self.raise_grievance_incident(
-                        kind_key="unpaid_wages",
-                        wrongdoer_id=getattr(work_building, "owner_id", None),
-                        victim=npc,
-                        context={"wage": wage, "building_id": work_building.id,
-                                 "profession": npc.economic.profession},
-                    )
-                    self._clear_npc_job(
-                        npc,
-                        reason="unpaid_wages",
-                        message=f"{npc.name} quit their job as {npc.economic.profession} because {owner_name} could not pay {wage} coins in wages.",
-                        employment_action="quit",
-                        add_owner_grudge=True,
-                    )
-                    npc.schedule.last_paid_day = current_day
-                    continue
+            credit_day, credit_building, paid = getattr(npc, "hourly_wage_credit", (-1, None, 0))
+            if (credit_day, credit_building) == (current_day, work_building.id):
+                wage = max(0, wage-paid)
 
-                self._set_trade_money_balance(work_building, building_balance - wage)
-                self._set_trade_money_balance(npc, self._get_trade_money_balance(npc) + wage)
+            building_balance = self._get_trade_money_balance(work_building)
+            if building_balance < wage:
+                owner_name = "your business" if getattr(work_building, "owner_id", None) == self.player.id else "the business"
+                unpaid_wage_memory = self.create_memory_event(
+                    event_type="unpaid_wages",
+                    subject_id=getattr(work_building, "owner_id", None),
+                    target_id=npc.id,
+                    importance_score=70,
+                    headline=f"{npc.name} quit after missing wages at the {work_building.building_type.replace('_', ' ')}.",
+                    location=(work_building.global_center_x, work_building.global_center_y),
+                    metadata={
+                        "building_id": work_building.id,
+                        "profession": npc.economic.profession,
+                        "wage": wage,
+                    },
+                )
+                self.record_memory_event(npc, unpaid_wage_memory)
+                # Being stiffed for a day's pay is a grievance, so it goes
+                # into the incident layer too - that is what carries it to
+                # witnesses, into gossip, and onto the owner's reputation.
+                # The memory above only ever reached the worker themselves.
+                self.raise_grievance_incident(
+                    kind_key="unpaid_wages",
+                    wrongdoer_id=getattr(work_building, "owner_id", None),
+                    victim=npc,
+                    context={"wage": wage, "building_id": work_building.id,
+                             "profession": npc.economic.profession},
+                )
+                self._clear_npc_job(
+                    npc,
+                    reason="unpaid_wages",
+                    message=f"{npc.name} quit their job as {npc.economic.profession} because {owner_name} could not pay {wage} coins in wages.",
+                    employment_action="quit",
+                    add_owner_grudge=True,
+                )
                 npc.schedule.last_paid_day = current_day
                 continue
 
-            npc.economic.money += wage
+            self._set_trade_money_balance(work_building, building_balance - wage)
+            self._set_trade_money_balance(npc, self._get_trade_money_balance(npc) + wage)
             npc.schedule.last_paid_day = current_day
+            continue
 
     # Tasks the routine settling pass is allowed to overwrite. Anything outside
     # this set - a conversation, a medical detour, combat, a journey between
@@ -18817,23 +18744,12 @@ class World:
             if self.handle_npc_job_seeking(npc):
                 continue
 
-            # --- Emigration Logic ---
-            # If unemployed for too long, leave the village
-            if npc.economic.days_unemployed > 7 and npc.economic.money < 50: # Unemployed for a week and poor
-                npc.schedule.current_task = "leaving_village"
-                # Set target to edge of map
-                edge_x, edge_y = self._find_nearest_map_edge(npc)
-
-                npc.schedule.current_path = self.calculate_path(npc.x, npc.y, edge_x, edge_y)
-                npc.schedule.current_destination_coords = (edge_x, edge_y)
-
-                self.add_message_to_chat_log(f"{self.get_entity_display_name(npc)} has decided to leave the village in search of better opportunities.")
-                self.record_migration_event(
-                    npc=npc,
-                    migration_kind="emigrated",
-                    description=f"{{subject}} left the village.",
-                    location=(npc.x, npc.y),
-                )
+            # Poverty prompts a real opportunity-based relocation attempt.
+            # No map-edge deletion or replacement with a newly spawned person.
+            if npc.economic.days_unemployed > 7 and npc.economic.money < 50:
+                destination, metadata = self._find_aspiration_destination(npc, village)
+                if destination is not None:
+                    self._start_family_migration(npc, destination, metadata)
 
         # --- Job Hopping (for Employed NPCs) ---
         # Check if employed NPCs want to switch jobs
@@ -18957,6 +18873,10 @@ class World:
     ) -> bool:
         """Assigns a job to an NPC at a specific building."""
         if npc is None or work_building is None:
+            return False
+        if npc.travel.is_traveling:
+            return False
+        if npc.schedule.work_building_id != work_building.id and self._count_active_workers_for_building(work_building) >= work_building.max_workers:
             return False
         npc.schedule.work_building_id = work_building.id
 
@@ -19582,10 +19502,17 @@ class World:
         self.player.economic.days_employed += 1
 
     def _select_village_construction_project(self, village: Village) -> str | None:
-        residents = sum(len(getattr(b, "residents", [])) for b in village.buildings if b.category == "residential")
-        capacity = sum(2 for b in village.buildings if b.category == "residential")
-        if residents >= capacity:
+        from simulation.systems.migration import capacity
+        from simulation.systems.economy import SERVICES
+        residents = len(self._get_settlement_residents(village))
+        housing = sum(capacity(b) for b in village.buildings if b.category == "residential")
+        if residents >= housing:
             return "house"
+
+        needs = getattr(self.town_board, "economic_needs", [])
+        if any(n.settlement_id == village.id and n.type == "service" and n.target_key in SERVICES
+               and not any(b.building_type == SERVICES[n.target_key] for b in village.buildings) for n in needs):
+            return "workshop"
 
         total_stored = sum(int(qty) for qty in getattr(village, "supply", {}).values())
         has_warehouse = any(getattr(b, "building_type", "") == "warehouse" for b in village.buildings)
@@ -19633,7 +19560,7 @@ class World:
                 continue
             kind = next((kind for kind, roles in BUILDING_ROLE_RULES.items()
                          if normalize_profession(need.target_key) in roles), None)
-            if kind:
+            if kind and not any(b.building_type == kind for b in village.buildings):
                 blueprint.operational_building_type = kind
                 return
 
@@ -19774,18 +19701,8 @@ class World:
         return max(1, int(round(max(0, int(daily_wage)) / working_hours)))
 
     def _apply_sleeping_npc_needs(self, npc: NPC) -> None:
-        if npc is None or getattr(getattr(npc, "physical", None), "is_dead", False):
-            return
-        if hasattr(npc.physical, "hunger"):
-            npc.physical.hunger = min(npc.physical.max_hunger, npc.physical.hunger + max(1, npc.physical.max_hunger // 24))
-        if hasattr(npc.physical, "thirst"):
-            npc.physical.thirst = min(npc.physical.max_thirst, npc.physical.thirst + max(1, npc.physical.max_thirst // 20))
-        if npc.physical.hunger > int(npc.physical.max_hunger * 0.6) and npc.economic.money > 0:
-            npc.economic.money -= 1
-            npc.physical.hunger = max(0, npc.physical.hunger - 12)
-        if npc.physical.thirst > int(npc.physical.max_thirst * 0.6) and npc.economic.money > 0:
-            npc.economic.money -= 1
-            npc.physical.thirst = max(0, npc.physical.thirst - 16)
+        from simulation.systems.economy import provide_sleeping_sustenance
+        provide_sleeping_sustenance(self, npc)
 
     def _apply_abstract_production_for_worker(self, npc: NPC, building: Building) -> None:
         if npc is None or building is None:
@@ -19870,10 +19787,8 @@ class World:
         for npc in sleeping_npcs:
             self._apply_sleeping_npc_needs(npc)
             work_building_id = getattr(getattr(npc, "schedule", None), "work_building_id", None)
-            if work_building_id:
+            if work_building_id and not npc.travel.is_traveling:
                 building_workers.setdefault(work_building_id, []).append(npc)
-            elif self._is_sleeping_work_hour() and getattr(getattr(npc, "economic", None), "daily_wage", 0) > 0:
-                npc.economic.money += self._get_hourly_wage_amount(npc.economic.daily_wage)
 
         if not self._is_sleeping_work_hour():
             return
@@ -19884,14 +19799,23 @@ class World:
             building = self.buildings_by_id.get(building_id)
             if building is None or self._is_building_active(building):
                 continue
-            building_balance = self._get_trade_money_balance(building)
             for worker in workers:
-                hourly_wage = self._get_hourly_wage_amount(getattr(worker.economic, "daily_wage", 0))
+                day = self.game_time // DAY_LENGTH_TICKS
+                credit_day, credit_building, paid = getattr(worker, "hourly_wage_credit", (-1, None, 0))
+                if (credit_day, credit_building) != (day, building.id):
+                    paid = 0
+                wage = max(0, int(worker.economic.daily_wage))
+                hourly_wage = min(self._get_hourly_wage_amount(wage), max(0, wage-paid))
+                if worker.schedule.last_paid_day >= day:
+                    hourly_wage = 0
+                building_balance = self._get_trade_money_balance(building)
                 if building_balance >= hourly_wage:
-                    building_balance -= hourly_wage
+                    self._set_trade_money_balance(building, building_balance-hourly_wage)
                     worker.economic.money += hourly_wage
+                    worker.hourly_wage_credit = (day, building.id, paid+hourly_wage)
+                    from simulation.systems.economy import procure_worker_inputs
+                    procure_worker_inputs(self, worker, building)
                     self._apply_abstract_production_for_worker(worker, building)
-            self._set_trade_money_balance(building, building_balance)
 
     def _update_abstract_simulation(self):
         """
@@ -19935,130 +19859,26 @@ class World:
                         location=(x_chunk * CHUNK_SIZE, y_chunk * CHUNK_SIZE),
                     )
 
-                self._decay_village_food_supply(village)
+                # Physical ItemReferences already spoil in the inventory tick.
+                from simulation.systems.economy import refresh_supply
+                refresh_supply(village)
 
                 if dist > ABSTRACT_SIMULATION_DISTANCE_CHUNKS:
                     if not village_npcs:
                         continue
 
-                    # --- Economic Simulation ---
-                    # 1. Production
-                    for npc in village_npcs:
-                        profession_data = get_profession_data(npc.economic.profession)
-                        if not profession_data:
-                            continue
-
-                        # Simplified production logic
-                        # Seasonal Farmer Production
-                        if npc.economic.profession == "Farmer":
-                            current_season = self.seasons[self.current_season_index]
-                            production_amount = 0
-                            if current_season == "Spring":
-                                production_amount = 2 # Planting season, low output
-                            elif current_season == "Summer":
-                                production_amount = 5 # Growing/maintenance
-                            elif current_season == "Autumn":
-                                production_amount = 15 # Harvest!
-                            elif current_season == "Winter":
-                                production_amount = 0 # Nothing grows
-
-                            if production_amount > 0:
-                                village.supply["wheat"] = village.supply.get("wheat", 0) + production_amount
-
-                        # General production from sub-tasks
-                        if profession_data and "default_sub_task_sequence" in profession_data:
-                            for sub_task_id in profession_data["default_sub_task_sequence"]:
-                                sub_task_data = get_sub_task_data(npc.economic.profession, sub_task_id)
-                                if not sub_task_data: continue
-
-                                # Consume resources
-                                consumes = sub_task_data.get("consumes_item_from_workplace", {})
-                                can_produce = True
-                                for item_key, qty in consumes.items():
-                                    if village.supply.get(item_key, 0) < qty:
-                                        can_produce = False
-                                        # Production failed, increase demand for the missing resource
-                                        village.demand[item_key] = village.demand.get(item_key, 0) + qty
-                                        break # Stop processing this sub-task
-
-                                if can_produce:
-                                    # Consume the items
-                                    for item_key, qty in consumes.items():
-                                        village.supply[item_key] -= qty
-                                        if village.supply[item_key] <= 0:
-                                            del village.supply[item_key]
-
-                                    # Produce the items
-                                    produces = sub_task_data.get("produces_item_at_workplace", {})
-                                    for prod_item_key, prod_qty in produces.items():
-                                        village.supply[prod_item_key] = village.supply.get(prod_item_key, 0) + prod_qty
-
-
-                    # Wildlife hunting: offscreen abstraction must still consume ecology population.
-                    self._process_offscreen_hunting_for_village(village, [npc for npc in village_npcs if self._is_hunter_role(npc)])
-
-                    # 2. Consumption (basic needs)
-                    num_villagers = len(village_npcs)
-                    # Everyone needs food
-                    food_needed = num_villagers * 1 # 1 food item per person per day
-                    consumed_food = 0
-                    for food_key in ("bread", "processed_meat", "cooked_meat", "cooked_venison", "cooked_mutton", "cooked_fish", "raw_venison", "raw_meat"):
-                        if consumed_food >= food_needed:
-                            break
-                        available_food = village.supply.get(food_key, 0)
-                        if available_food <= 0:
-                            continue
-                        consumed = min(food_needed - consumed_food, available_food)
-                        consumed_food += consumed
-                        village.supply[food_key] = available_food - consumed
-                        if village.supply[food_key] <= 0:
-                            del village.supply[food_key]
-
-                    # If there's a shortfall, demand for food increases
-                    food_shortfall = food_needed - consumed_food
-                    if food_shortfall > 0:
-                        village.demand["food"] = village.demand.get("food", 0) + food_shortfall
-
-                    # --- Construction & Expansion ---
+                    # Only physical production/consumption owns stock. The
+                    # hourly worker pass handles manufacturing and meals.
+                    from simulation.systems.economy import simulate_village_economy, trade_settlement_surplus
+                    self._process_offscreen_hunting_for_village(village, [npc for npc in village_npcs
+                        if self._is_hunter_role(npc) and not npc.travel.is_traveling])
+                    simulate_village_economy(self, village)
                     self._plan_village_expansion(village)
                     self._advance_village_construction(village)
-
-                    # --- Abstract Trade Simulation ---
-                    # Find a partner village to trade with
-                    # For simplicity, pick a random other village. In future, use distance.
+                    refresh_supply(village)
                     if len(self.villages) > 1:
-                        partner_village = random.choice([v for v in self.villages if v != village])
-
-                        # Export Surplus Logic
-                        # If we have too much of something (Supply > Demand * 2 or absolute > 50) and they have low supply
-                        for item_key, qty in list(village.supply.items()):
-                            if qty > 50 or qty > village.demand.get(item_key, 0) * 2:
-                                partner_supply = partner_village.supply.get(item_key, 0)
-                                if partner_supply < 10: # They are low
-                                    # Only export unreserved surplus. Construction
-                                    # materials must not be sold out from under a site.
-                                    reserved = sum(max(0, bp.required_materials.get(item_key, 0) - bp.delivered_materials.get(item_key, 0))
-                                                   for bp in self._get_village_blueprints(village))
-                                    trade_qty = min(10, max(0, qty-reserved), 10-partner_supply)
-                                    if trade_qty <= 0:
-                                        continue
-                                    village.supply[item_key] -= trade_qty
-                                    partner_village.supply[item_key] = partner_supply + trade_qty
-
-                                    # One diplomatic benefit per pair/day, not
-                                    # one per item type in the shipment.
-                                    from simulation.systems.settlements import record_trade_relations
-                                    record_trade_relations(self, village, partner_village)
-
-                                    # Log the trade event
-                                    self.log_event(
-                                        event_type="trade_deal",
-                                        description=f"A caravan from this village sold {trade_qty} {item_key} to a neighboring settlement.",
-                                        subject_id=-1, # System event
-                                        location=self._get_village_anchor_coords(village) or (0, 0)
-                                    )
-                                    # Record local event for history
-                                    village.local_events.append(self.global_events[-1])
+                        partner = random.choice([v for v in self.villages if v is not village])
+                        trade_settlement_surplus(self, village, partner)
 
                     # --- Faction Diplomacy / Warfare ---
                     if len(self.villages) > 1:
@@ -20664,29 +20484,21 @@ class World:
             self.add_message_to_chat_log(f"{self.get_entity_display_name(witness)} seems unsure how to react. (LLM Format Error: {response_str})")
 
     def _update_economy(self):
-        """Periodically updates the supply and demand of all villages."""
-        from simulation.systems.economy import simulate_village_economy
-        for y_chunk in range(self.chunk_height):
-            for x_chunk in range(self.chunk_width):
-                chunk = self.chunks[y_chunk][x_chunk]
-                if chunk.village:
-                    village = chunk.village
-                    # Decay demand over time
-                    for item_key in list(village.demand.keys()):
-                        village.demand[item_key] *= 0.99
-                        if village.demand[item_key] < 1:
-                            del village.demand[item_key]
-
-                    # Recalculate supply from scratch
-                    village.supply = {}
-                    for building in village.buildings:
-                        for item_key, quantity in building.building_inventory.items():
-                            village.supply[item_key] = village.supply.get(item_key, 0) + quantity
-
-                    # Once per elapsed interval, keyed per village so the first
-                    # one does not consume the turn for the rest.
-                    if self.periods_elapsed(f"village_economy:{village.id}", 100):
-                        simulate_village_economy(self, village)
+        """Derive prices and needs from physical goods, on a stable time cadence."""
+        from simulation.systems.economy import refresh_supply, simulate_village_economy
+        from simulation.systems.settlements import villages
+        for village in villages(self):
+            refresh_supply(village)
+            periods = self.periods_elapsed(f"village_economy:{village.id}", 100)
+            if not periods:
+                continue
+            for key, value in list(village.demand.items()):
+                value *= .98 ** periods
+                if value < 1:
+                    village.demand.pop(key, None)
+                else:
+                    village.demand[key] = value
+            simulate_village_economy(self, village)
 
     def get_dynamic_price(self, item_key: str, village: Village, merchant: NPC | None = None) -> int:
         """Calculates the dynamic price of an item based on village supply and demand."""

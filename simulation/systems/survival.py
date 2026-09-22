@@ -202,7 +202,8 @@ def check_emergency_npc_sustenance(world, npc) -> bool:
         return False
 
     if getattr(physical, "hunger", 0) >= 70:
-        for food_item in ["bread", "apple", "cooked_meat", "fish", "raw_fish", "cheese", "stew", "ration"]:
+        from simulation.systems.economy import FOODS
+        for food_item in FOODS:
             qty = inv.get(food_item, 0) if hasattr(inv, "get") else 0
             if qty > 0:
                 if hasattr(inv, "remove_item"):
@@ -231,15 +232,25 @@ def check_emergency_npc_sustenance(world, npc) -> bool:
     return consumed
 
 
+def advance_npc_metabolism(world, npc) -> None:
+    """One clock for local ticks and distant hourly catch-up, saved on the NPC."""
+    now = world.game_time
+    previous = getattr(npc, "metabolism_last_tick", max(0, now-1))
+    if now <= previous:
+        return
+    npc.metabolism_last_tick = now
+    hunger_period = max(1, DAY_LENGTH_TICKS // 10)
+    thirst_period = max(1, DAY_LENGTH_TICKS // 15)
+    npc.physical.process_tick(
+        hunger_delta=5*min(48, now//hunger_period-previous//hunger_period),
+        thirst_delta=7*min(48, now//thirst_period-previous//thirst_period))
+
+
 def update_npc_survival(world, npc) -> None:
     """Advance NPC thermal and metabolism state using shared component logic."""
     update_entity_temperature(world, npc, update_world_ambient=False)
     if npc.economic.profession != "Creature":
-        ticks_for_hunger_increase = max(1, DAY_LENGTH_TICKS // 10)
-        ticks_for_thirst_increase = max(1, DAY_LENGTH_TICKS // 15)
-        h_delta = 5 if world.game_time % ticks_for_hunger_increase == 0 else 0
-        t_delta = 7 if world.game_time % ticks_for_thirst_increase == 0 else 0
-        npc.physical.process_tick(hunger_delta=h_delta, thirst_delta=t_delta)
+        advance_npc_metabolism(world, npc)
         check_emergency_npc_sustenance(world, npc)
     apply_temperature_effects(world, npc, is_player=False)
 

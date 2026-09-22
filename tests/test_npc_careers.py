@@ -86,6 +86,8 @@ class TestNPCProfessionDynamics(unittest.TestCase):
         self.tavern.settlement_id = getattr(self.village, 'id', None)
         self.tavern.max_workers = 2
         self.tavern.occupants = []
+        # These cases isolate satisfaction and hiring, not an unpaid payroll.
+        self.tavern.building_inventory["money"] = 200
 
 
         self.village.interaction_points = {"noticeboard": [(15, 15)]}

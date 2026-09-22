@@ -287,10 +287,13 @@ class TestChunkSleepWakeAndAbstractSimulation(unittest.TestCase):
         npc = engine.NPC(building.global_center_x, building.global_center_y, name="Farm Sleeper")
         npc.economic.profession = "Farmer"
         npc.economic.daily_wage = 24
+        npc.schedule.last_paid_day = -1  # No daily paycheck has been issued.
         npc.schedule.work_building_id = building.id
         npc.is_sleeping = True
         npc.ai_brain = None
         world.village_npcs = [npc]
+        npc.metabolism_last_tick = 0  # This fixture is born at tick zero.
+        world._get_npc_settlement = lambda actor: None  # No external supplier is modeled by this isolated farm.
 
         hourly_tick = max(1, config.DAY_LENGTH_TICKS // 24)
         world.game_time = int(config.DAY_LENGTH_TICKS * config.WORK_START_TIME_RATIO) + hourly_tick
